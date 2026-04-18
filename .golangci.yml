@@ -1,0 +1,25 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - misspell
+    - unconvert
+
+linters-settings:
+  gofmt:
+    simplify: true
+
+issues:
+  # errcheck: deliberately ignored errors are annotated with //nolint:errcheck
+  # at the call site; this keeps that opt-out explicit rather than blanket.
+  max-issues-per-linter: 0
+  max-same-issues: 0
