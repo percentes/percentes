@@ -1,0 +1,141 @@
+# ChaosServe Phase 0 acceptance-criteria reference configuration.
+# SPEC.md §8 reference conditions: lambda = 20 rps, stall D = 10 s where used.
+# Profile "ac" allows scenario-scale phase durations; every normative pin
+# (client timeout, retries, max_tokens, SLO, detector, validity gates) is
+# still enforced at load time.
+schema_version: 1
+profile: ac
+
+run:
+  name: chaosserve-ac-reference
+  seed: 42
+  repetitions: 1
+  phases:
+    warmup_s: 10
+    baseline_s: 60
+    fault_window_timeout_s: 120
+    cooldown_s: 5
+
+load:
+  rate_rps: 20            # §8 AC-suite reference lambda (pinned in ac profile)
+  arrival_process: poisson
+  input_length_tokens: 128
+  max_tokens: 256         # pinned (§6)
+  ignore_eos: true        # pinned (§6)
+  unique_prefixes: true   # pinned (§6)
+  connections: 8          # >= 4 x replicas (§1)
+
+client:
+  http_timeout_s: 30      # pinned (§6)
+  retries: 0              # pinned (§6, §2)
+  placement:
+    dedicated_node: false # experiment-profile pin; recorded honestly for local
+    node_class: local
+    zone: local
+    subnet: local
+    record_rtt: false
+
+slo:
+  ttft_ms: 1000           # pinned (§4)
+  e2e_ms: 14000           # pinned (§4)
+  sweep:
+    ttft_ms: [800, 1000, 1500]
+    e2e_ms: [12000, 14000, 18000]
+
+histogram:
+  unit: us                       # pinned; one configuration for all windows (§3)
+  lowest_discernible_value: 1
+  highest_trackable_value: 600000000  # 600 s in us; >= run timeout (§3)
+  significant_figures: 3
+
+recovery_detector:
+  window_s: 10            # R (§5)
+  entry_pct: 90           # X (§5)
+  exit_pct: 85            # §5
+  hold_s: 30              # H (§5)
+  sensitivity:
+    entry_pct: [85, 90, 95]
+    window_s: [5, 10, 20]
+    hold_s: [15, 30, 60]
+
+client_validity:
+  send_skew_p99_ms: 5     # pinned (§2)
+  send_skew_max_ms: 50    # pinned (§2)
+  max_cpu_pct: 70         # pinned (§2)
+  cpu_window_s: 5         # pinned (§2)
+  go_gc_pause_p99_ms: 1   # pinned (§2)
+
+share_gate:
+  min_pct: 45             # pinned (§1)
+  max_pct: 55             # pinned (§1)
+
+target:
+  base_url: http://127.0.0.1:18000
+  replicas: 2
+
+fault:
+  variant: mock
+  t_inject_offset_s: 60   # >= baseline_s: windows never straddle T_inject (§3)
+  injection_tolerance_ms: 500  # pinned (§8 AC3)
+  endpoint_staleness_min_s: 20 # pinned (§1 black-hole assertion ii / §10 G4)
+
+# Full §6 pin list, carried in Phase 0 with explicit mock placeholders.
+# Kubernetes/probe/cluster fields record the real local kind cluster.
+pins:
+  vllm:
+    version: n/a-phase0-mock
+    image_digest: n/a-phase0-mock
+  model:
+    name: n/a-phase0-mock
+    revision: n/a-phase0-mock
+    quantization: n/a-phase0-mock
+  engine:
+    kv_cache_gb: 0            # n/a for mock; must be > 0 in experiment profile
+    max_num_seqs: 0           # n/a for mock; must be > 0 in experiment profile
+    scheduler_settings: n/a-phase0-mock
+    chunked_prefill: "off"
+    cuda_graphs: "off"
+    prefix_caching: "off"     # pinned off (§6)
+    continuous_batching: "on" # pinned on (§6)
+  gpu:
+    sku: n/a-phase0-mock
+    driver: n/a-phase0-mock
+    cuda: n/a-phase0-mock
+    cudnn: n/a-phase0-mock
+    nccl: n/a-phase0-mock
+    clock_power_policy: n/a-phase0-mock
+  kubernetes:
+    version: v1.30.0            # verified against the live cluster by the smoke suite
+    cni: kindnet
+    dataplane_mode: kube-proxy-iptables
+    kube_proxy_mode: iptables
+    node_monitor_grace_period_s: 40   # kind default; record actual (§1)
+  readiness_probe:
+    path: /health
+    period_s: 2
+    timeout_s: 1
+    failure_threshold: 3
+  storage:
+    weights_medium: n/a-phase0-mock
+
+mock:
+  listen_addr: ":18000"
+  seed: 42
+  ttft:
+    distribution: fixed
+    fixed_ms: 200
+  itl:
+    distribution: fixed
+    fixed_ms: 10
+  slow_reload:
+    enabled: false
+    duration_s: 0
+  # false (the default) blackholes /health during silent_hang — the
+  # faithful full-node-partition behavior.
+  serve_health_during_silent_hang: false
+  # Config-scripted fault plan: offsets on the monotonic clock from server
+  # start; windows must not overlap. AC reference: stall D = 10 s.
+  fault_schedule:
+    - mode: stall
+      start_offset_s: 70
+      duration_s: 10
