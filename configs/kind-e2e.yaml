@@ -1,0 +1,133 @@
+# ChaosServe Phase 0 end-to-end run on kind (AC7). ONE file drives both
+# sides: the mock replicas mount it as a ConfigMap (created from this file
+# by the scripts) and read the `mock` section; the chaosserve runner on
+# the host reads everything else. The Service is a NodePort mapped to
+# host port 18000 by deploy/kind/kind-config.yaml.
+schema_version: 1
+profile: ac
+
+run:
+  name: chaosserve-kind-e2e
+  seed: 42
+  repetitions: 1
+  phases:
+    warmup_s: 5
+    baseline_s: 60
+    fault_window_timeout_s: 60
+    cooldown_s: 5
+
+load:
+  rate_rps: 20
+  arrival_process: poisson
+  input_length_tokens: 128
+  max_tokens: 256
+  ignore_eos: true
+  unique_prefixes: true
+  connections: 8
+
+client:
+  http_timeout_s: 30
+  retries: 0
+  placement:
+    dedicated_node: false
+    node_class: local
+    zone: local
+    subnet: local
+    record_rtt: false
+
+slo:
+  ttft_ms: 1000
+  e2e_ms: 14000
+  sweep:
+    ttft_ms: [800, 1000, 1500]
+    e2e_ms: [12000, 14000, 18000]
+
+histogram:
+  unit: us
+  lowest_discernible_value: 1
+  highest_trackable_value: 600000000
+  significant_figures: 3
+
+recovery_detector:
+  window_s: 10
+  entry_pct: 90
+  exit_pct: 85
+  hold_s: 30
+  sensitivity:
+    entry_pct: [85, 90, 95]
+    window_s: [5, 10, 20]
+    hold_s: [15, 30, 60]
+
+client_validity:
+  send_skew_p99_ms: 5
+  send_skew_max_ms: 50
+  max_cpu_pct: 70
+  cpu_window_s: 5
+  go_gc_pause_p99_ms: 1
+
+share_gate:
+  min_pct: 45
+  max_pct: 55
+
+target:
+  base_url: http://127.0.0.1:18000
+  replicas: 2
+
+fault:
+  variant: mock
+  t_inject_offset_s: 60
+  injection_tolerance_ms: 500
+  endpoint_staleness_min_s: 20
+
+pins:
+  vllm:
+    version: n/a-phase0-mock
+    image_digest: n/a-phase0-mock
+  model:
+    name: n/a-phase0-mock
+    revision: n/a-phase0-mock
+    quantization: n/a-phase0-mock
+  engine:
+    kv_cache_gb: 0
+    max_num_seqs: 0
+    scheduler_settings: n/a-phase0-mock
+    chunked_prefill: "off"
+    cuda_graphs: "off"
+    prefix_caching: "off"
+    continuous_batching: "on"
+  gpu:
+    sku: n/a-phase0-mock
+    driver: n/a-phase0-mock
+    cuda: n/a-phase0-mock
+    cudnn: n/a-phase0-mock
+    nccl: n/a-phase0-mock
+    clock_power_policy: n/a-phase0-mock
+  kubernetes:
+    version: v1.30.0
+    cni: kindnet
+    dataplane_mode: kube-proxy-iptables
+    kube_proxy_mode: iptables
+    node_monitor_grace_period_s: 40
+  readiness_probe:
+    path: /health
+    period_s: 2
+    timeout_s: 1
+    failure_threshold: 3
+  storage:
+    weights_medium: n/a-phase0-mock
+
+mock:
+  listen_addr: ":8000"
+  seed: 42
+  ttft:
+    distribution: fixed
+    fixed_ms: 200
+  itl:
+    distribution: fixed
+    fixed_ms: 10
+  slow_reload:
+    enabled: false
+    duration_s: 0
+  serve_health_during_silent_hang: false
+  # No scheduled faults: the chaos orchestrator arms the victim replica
+  # via its admin API at T_inject (pre-armed, auto-expiring).
