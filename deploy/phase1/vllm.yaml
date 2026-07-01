@@ -1,0 +1,96 @@
+# Phase 1 vLLM deployment (SPEC.md §10 topology): two replicas, one per
+# GPU worker node, behind one Service. NOT RUNNABLE IN PHASE 0 — requires
+# a real GPU cluster. Every PIN-AT-PHASE1 marker must be replaced with the
+# measured value and recorded in the run config's §6 pin list before use;
+# the run-validity gates (internal/validity, G1-G6) are run-failing.
+#
+# No liveness probe (as in Phase 0): the black-hole partition must be able
+# to blackhole the node without the kubelet restarting the pod out from
+# under the experiment. Readiness uses /health but the §5 calibration
+# (internal/detect.CalibrateHealth) documents the /health-vs-first-
+# inference relationship on the pinned vLLM version rather than assuming
+# readiness == serve-ready.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaosserve
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chaosserve-vllm
+  namespace: chaosserve
+spec:
+  replicas: 2                      # §1 pinned topology
+  selector:
+    matchLabels:
+      app: chaosserve-vllm
+  template:
+    metadata:
+      labels:
+        app: chaosserve-vllm
+    spec:
+      # One replica per GPU node (§1): the survivor must be a DIFFERENT
+      # node so a node partition isolates exactly one replica.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: chaosserve-vllm
+              topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        chaosserve.io/gpu: "true"  # PIN-AT-PHASE1: GPU worker label
+      containers:
+        - name: vllm
+          image: PIN-AT-PHASE1     # vLLM image + digest, recorded in §6 pins
+          args:
+            - "--model=PIN-AT-PHASE1"
+            - "--max-num-seqs=PIN-AT-PHASE1"
+            - "--max-model-len=PIN-AT-PHASE1"
+            - "--gpu-memory-utilization=PIN-AT-PHASE1"  # -> KV-cache GB pinned in §6
+            - "--enable-prefix-caching=false"           # §6: verified OFF via metrics
+            # chunked-prefill and CUDA-graph settings PIN-AT-PHASE1, recorded in §6
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chaosserve-vllm
+  namespace: chaosserve
+spec:
+  selector:
+    app: chaosserve-vllm
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+# Prometheus scrape target for the server-side vLLM metrics (§2, §6):
+# per-replica request counters for the G1 share gate, continuous-batching
+# verification, prefix-caching-OFF verification, and KV-cache occupancy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: chaosserve-vllm-metrics
+  namespace: chaosserve
+  labels:
+    chaosserve.io/scrape: "true"
+spec:
+  clusterIP: None                  # headless: per-replica endpoints
+  selector:
+    app: chaosserve-vllm
+  ports:
+    - name: metrics
+      port: 8000
+      targetPort: 8000

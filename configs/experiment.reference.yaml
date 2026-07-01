@@ -1,0 +1,117 @@
+# ChaosServe Phase 1 experiment reference configuration (SHAPE ONLY).
+# NOT RUNNABLE IN PHASE 0: this file documents the experiment profile with
+# every §6 pin present. Placeholder pins marked PIN-AT-PHASE1 must be
+# replaced with measured values during Phase 1 setup; run-validity gates
+# G1-G6 (§10) additionally verify the environment at run time.
+schema_version: 1
+profile: experiment
+
+run:
+  name: chaosserve-experiment-reference
+  seed: 42
+  repetitions: 5           # pinned N=5 (§5)
+  phases:
+    warmup_s: 60           # pinned (§1)
+    baseline_s: 300        # pinned (§1)
+    fault_window_timeout_s: 600  # pinned (§1)
+    cooldown_s: 60         # pinned (§1)
+
+load:
+  rate_rps: 20             # Phase 1: calibrated to the 60-70% utilization band (§1)
+  arrival_process: poisson
+  input_length_tokens: 512
+  max_tokens: 256          # pinned (§6)
+  ignore_eos: true         # pinned (§6)
+  unique_prefixes: true    # pinned (§6)
+  connections: 8           # >= 4 x replicas (§1)
+
+client:
+  http_timeout_s: 30       # pinned (§6)
+  retries: 0               # pinned (§6, §2)
+  placement:
+    dedicated_node: true   # pinned (§6)
+    node_class: non-spot   # pinned (§6)
+    zone: PIN-AT-PHASE1
+    subnet: PIN-AT-PHASE1
+    record_rtt: true       # pinned (§6)
+
+slo:
+  ttft_ms: 1000
+  e2e_ms: 14000
+  sweep:
+    ttft_ms: [800, 1000, 1500]
+    e2e_ms: [12000, 14000, 18000]
+
+histogram:
+  unit: us
+  lowest_discernible_value: 1
+  highest_trackable_value: 600000000
+  significant_figures: 3
+
+recovery_detector:
+  window_s: 10
+  entry_pct: 90
+  exit_pct: 85
+  hold_s: 30
+  sensitivity:
+    entry_pct: [85, 90, 95]
+    window_s: [5, 10, 20]
+    hold_s: [15, 30, 60]
+
+client_validity:
+  send_skew_p99_ms: 5
+  send_skew_max_ms: 50
+  max_cpu_pct: 70
+  cpu_window_s: 5
+  go_gc_pause_p99_ms: 1
+
+share_gate:
+  min_pct: 45
+  max_pct: 55
+
+target:
+  base_url: http://PIN-AT-PHASE1:8000
+  replicas: 2              # pinned topology (§1)
+
+fault:
+  variant: clean_delete    # pre-registered primary endpoint variant (§7)
+  t_inject_offset_s: 300   # == baseline_s: §1 has no gap phase (enforced)
+  injection_tolerance_ms: 500
+  endpoint_staleness_min_s: 20 # pinned (§1 black-hole assertion ii / §10 G4)
+
+pins:
+  vllm:
+    version: PIN-AT-PHASE1
+    image_digest: PIN-AT-PHASE1
+  model:
+    name: PIN-AT-PHASE1
+    revision: PIN-AT-PHASE1
+    quantization: PIN-AT-PHASE1
+  engine:
+    kv_cache_gb: 16        # PIN-AT-PHASE1: absolute gigabytes (§6)
+    max_num_seqs: 256      # PIN-AT-PHASE1
+    scheduler_settings: PIN-AT-PHASE1
+    chunked_prefill: "off" # PIN-AT-PHASE1
+    cuda_graphs: "on"      # PIN-AT-PHASE1
+    prefix_caching: "off"  # pinned off, verified from server metrics (§6)
+    continuous_batching: "on"  # pinned on, verified from server metrics (§6)
+  gpu:
+    sku: PIN-AT-PHASE1
+    driver: PIN-AT-PHASE1
+    cuda: PIN-AT-PHASE1
+    cudnn: PIN-AT-PHASE1
+    nccl: PIN-AT-PHASE1
+    clock_power_policy: PIN-AT-PHASE1
+  kubernetes:
+    version: PIN-AT-PHASE1
+    cni: PIN-AT-PHASE1
+    dataplane_mode: PIN-AT-PHASE1
+    kube_proxy_mode: PIN-AT-PHASE1
+    node_monitor_grace_period_s: 40  # record the cluster's actual value (§1)
+  readiness_probe:
+    path: /health
+    period_s: 2
+    timeout_s: 1
+    failure_threshold: 3
+  storage:
+    weights_medium: PIN-AT-PHASE1
