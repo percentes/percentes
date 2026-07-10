@@ -1,0 +1,40 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21.x"
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { echo "unformatted files:"; gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.59.1
+      - name: unit tests (race)
+        run: go test -race -short ./... -count=1
+
+  ac-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21.x"
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: chaosserve
+          config: deploy/kind/kind-config.yaml
+      - name: AC suite (unit + kind smoke)
+        run: make test
