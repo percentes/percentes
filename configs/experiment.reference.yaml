@@ -1,4 +1,4 @@
-# ChaosServe Phase 1 experiment reference configuration (SHAPE ONLY).
+# Percentes Phase 1 experiment reference configuration (SHAPE ONLY).
 # NOT RUNNABLE IN PHASE 0: this file documents the experiment profile with
 # every §6 pin present. Placeholder pins marked PIN-AT-PHASE1 must be
 # replaced with measured values during Phase 1 setup; run-validity gates
@@ -7,7 +7,7 @@ schema_version: 1
 profile: experiment
 
 run:
-  name: chaosserve-experiment-reference
+  name: percentes-experiment-reference
   seed: 42
   repetitions: 5           # pinned N=5 (§5)
   phases:

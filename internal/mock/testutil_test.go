@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 func fixed(ms float64) config.LatencyDist {
@@ -41,7 +41,7 @@ func startServer(t *testing.T, cfg config.Mock) *Server {
 
 func chatBody(maxTokens int) []byte {
 	raw, _ := json.Marshal(map[string]any{
-		"model":      "chaosserve-mock",
+		"model":      "percentes-mock",
 		"messages":   []map[string]string{{"role": "user", "content": "hello"}},
 		"stream":     true,
 		"max_tokens": maxTokens,

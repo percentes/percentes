@@ -20,9 +20,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/run"
-	"github.com/itsveems/chaosserve/internal/stats"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/stats"
 )
 
 // PrimaryEndpoint is the §7 pre-registered primary endpoint label.

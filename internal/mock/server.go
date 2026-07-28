@@ -19,7 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // Server is one mock replica.
@@ -50,19 +50,19 @@ func New(cfg config.Mock) *Server {
 
 	s.registry = prometheus.NewRegistry()
 	s.requestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "chaosserve_mock_requests_total",
+		Name: "percentes_mock_requests_total",
 		Help: "Inference requests by terminal outcome (200, 400, 500, 503, rst, hung, abandoned). Per-replica counter for the §1 share gate.",
 	}, []string{"outcome"})
 	s.tokensTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "chaosserve_mock_tokens_emitted_total",
+		Name: "percentes_mock_tokens_emitted_total",
 		Help: "SSE content tokens emitted.",
 	})
 	s.activeStreams = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "chaosserve_mock_active_streams",
+		Name: "percentes_mock_active_streams",
 		Help: "Streams currently being served.",
 	})
 	s.faultsFired = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "chaosserve_mock_faults_fired_total",
+		Name: "percentes_mock_faults_fired_total",
 		Help: "Fault windows fired, by mode.",
 	}, []string{"mode"})
 	s.registry.MustRegister(s.requestsTotal, s.tokensTotal, s.activeStreams, s.faultsFired)

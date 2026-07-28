@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // execute runs one scheduled request to its terminal state. The pinned
@@ -26,7 +26,7 @@ func (g *gen) execute(r *Request) {
 	defer cancel()
 
 	body := fmt.Sprintf(
-		`{"model":"chaosserve-mock","messages":[{"role":"user","content":"cs-%d-%d %s"}],"stream":true,"max_tokens":%d,"ignore_eos":true}`,
+		`{"model":"percentes-mock","messages":[{"role":"user","content":"cs-%d-%d %s"}],"stream":true,"max_tokens":%d,"ignore_eos":true}`,
 		g.cfg.Run.Seed, r.Index, g.filler, g.cfg.Load.MaxTokens)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.cfg.Target.BaseURL+"/v1/chat/completions", bytes.NewReader([]byte(body)))
@@ -45,7 +45,7 @@ func (g *gen) execute(r *Request) {
 		return
 	}
 	defer resp.Body.Close()
-	r.Replica = resp.Header.Get("X-Chaosserve-Replica")
+	r.Replica = resp.Header.Get("X-Percentes-Replica")
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096)) //nolint:errcheck

@@ -9,7 +9,7 @@ import (
 
 	"github.com/shirou/gopsutil/v3/cpu"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // GateReport is the §2 client-validity gate outcome — run-failing, with

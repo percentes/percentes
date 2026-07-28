@@ -13,10 +13,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/itsveems/chaosserve/internal/collect"
-	"github.com/itsveems/chaosserve/internal/detect"
-	"github.com/itsveems/chaosserve/internal/histo"
-	"github.com/itsveems/chaosserve/internal/run"
+	"github.com/percentes/percentes/internal/collect"
+	"github.com/percentes/percentes/internal/detect"
+	"github.com/percentes/percentes/internal/histo"
+	"github.com/percentes/percentes/internal/run"
 )
 
 // Caveat is printed in every report and in the AC output itself (§8).
@@ -113,7 +113,7 @@ func human(r *Report) string {
 	art := r.Artifacts
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 
-	w("ChaosServe run report — %s", art.Config.Run.Name)
+	w("Percentes run report — %s", art.Config.Run.Name)
 	w("config sha256: %s", r.ConfigSHA256)
 	w("")
 	w("%s", Caveat)

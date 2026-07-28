@@ -13,22 +13,22 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: chaosserve
+  name: percentes
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: chaosserve-vllm
-  namespace: chaosserve
+  name: percentes-vllm
+  namespace: percentes
 spec:
   replicas: 2                      # §1 pinned topology
   selector:
     matchLabels:
-      app: chaosserve-vllm
+      app: percentes-vllm
   template:
     metadata:
       labels:
-        app: chaosserve-vllm
+        app: percentes-vllm
     spec:
       # One replica per GPU node (§1): the survivor must be a DIFFERENT
       # node so a node partition isolates exactly one replica.
@@ -37,10 +37,10 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  app: chaosserve-vllm
+                  app: percentes-vllm
               topologyKey: kubernetes.io/hostname
       nodeSelector:
-        chaosserve.io/gpu: "true"  # PIN-AT-PHASE1: GPU worker label
+        percentes.io/gpu: "true"  # PIN-AT-PHASE1: GPU worker label
       containers:
         - name: vllm
           image: PIN-AT-PHASE1     # vLLM image + digest, recorded in §6 pins
@@ -67,11 +67,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: chaosserve-vllm
-  namespace: chaosserve
+  name: percentes-vllm
+  namespace: percentes
 spec:
   selector:
-    app: chaosserve-vllm
+    app: percentes-vllm
   ports:
     - port: 8000
       targetPort: 8000
@@ -82,14 +82,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: chaosserve-vllm-metrics
-  namespace: chaosserve
+  name: percentes-vllm-metrics
+  namespace: percentes
   labels:
-    chaosserve.io/scrape: "true"
+    percentes.io/scrape: "true"
 spec:
   clusterIP: None                  # headless: per-replica endpoints
   selector:
-    app: chaosserve-vllm
+    app: percentes-vllm
   ports:
     - name: metrics
       port: 8000

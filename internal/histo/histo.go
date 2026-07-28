@@ -13,7 +13,7 @@ import (
 
 	hdrhistogram "github.com/HdrHistogram/hdrhistogram-go"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // H is a histogram in the pinned configuration. The unit is microseconds.

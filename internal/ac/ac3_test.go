@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/orchestrator"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/orchestrator"
 )
 
 // TestAC3InjectionTiming: the pre-armed fault fires within the pinned

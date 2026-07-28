@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/report"
-	"github.com/itsveems/chaosserve/internal/run"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/report"
+	"github.com/percentes/percentes/internal/run"
 )
 
 // TestAC6Reporting: JSON plus human-readable report from one config,

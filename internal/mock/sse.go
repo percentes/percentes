@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 var hostname = sync.OnceValue(func() string {
@@ -145,7 +145,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	id := fmt.Sprintf("chatcmpl-mock-%d", reqID)
 	model := req.Model
 	if model == "" {
-		model = "chaosserve-mock"
+		model = "percentes-mock"
 	}
 
 	for token := 1; token <= req.MaxTokens; token++ {
@@ -196,10 +196,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			h := w.Header()
 			h.Set("Content-Type", "text/event-stream")
 			h.Set("Cache-Control", "no-cache")
-			h.Set("X-Chaosserve-Request-Id", id)
+			h.Set("X-Percentes-Request-Id", id)
 			// Replica identity for in-flight loss attribution (§3): in
 			// Kubernetes the hostname is the pod name.
-			h.Set("X-Chaosserve-Replica", hostname())
+			h.Set("X-Percentes-Replica", hostname())
 			w.WriteHeader(http.StatusOK)
 		}
 		if err := writeChunk(w, rc, chatChunk{

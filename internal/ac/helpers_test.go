@@ -23,9 +23,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/loadgen"
-	"github.com/itsveems/chaosserve/internal/mock"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/mock"
 )
 
 // mockBin is the mockserver binary, built once per suite run. AC
@@ -37,7 +37,7 @@ var mockBin string
 
 func TestMain(m *testing.M) {
 	fmt.Println("CAVEAT (SPEC.md §8): passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behavior.")
-	dir, err := os.MkdirTemp("", "chaosserve-ac-*")
+	dir, err := os.MkdirTemp("", "percentes-ac-*")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -74,7 +74,7 @@ func startMockProcess(t *testing.T, cfg *config.Config) string {
 // failure once and fail every consumer deterministically, rather than
 // binding a fatal to whichever test first triggered the sync.Once.
 func launchMock(cfg *config.Config) (baseURL string, stop func(), err error) {
-	dir, err := os.MkdirTemp("", "chaosserve-mock-*")
+	dir, err := os.MkdirTemp("", "percentes-mock-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("ac: mock temp dir: %w", err)
 	}

@@ -30,7 +30,7 @@ func (f *fakePodOps) DeletePodGrace0(ctx context.Context, ns, pod string) (time.
 // a point event).
 func TestCleanDeleteThroughExecute(t *testing.T) {
 	ops := &fakePodOps{}
-	inj := NewCleanDeleteInjector(ops, "chaosserve", "victim-pod")
+	inj := NewCleanDeleteInjector(ops, "percentes", "victim-pod")
 
 	epoch := time.Now()
 	ts, err := Execute(context.Background(), inj, epoch, 300*time.Millisecond, 0)
@@ -44,7 +44,7 @@ func TestCleanDeleteThroughExecute(t *testing.T) {
 	if errMs < -500 || errMs > 500 {
 		t.Errorf("clean-delete fire error %.1fms exceeds tolerance", errMs)
 	}
-	if len(ops.deleted) != 1 || ops.deleted[0] != "chaosserve/victim-pod" {
+	if len(ops.deleted) != 1 || ops.deleted[0] != "percentes/victim-pod" {
 		t.Errorf("exactly the victim pod must be deleted grace=0: %v", ops.deleted)
 	}
 	// Point event: expiry coincides with fire (no armed window).
@@ -59,7 +59,7 @@ func TestCleanDeleteThroughExecute(t *testing.T) {
 func TestCleanDeleteSurfacesTerminalFailure(t *testing.T) {
 	wantErr := errors.New(`pods "victim-pod" is forbidden`)
 	ops := &fakePodOps{failWith: wantErr}
-	inj := NewCleanDeleteInjector(ops, "chaosserve", "victim-pod")
+	inj := NewCleanDeleteInjector(ops, "percentes", "victim-pod")
 
 	start := time.Now()
 	ts, err := Execute(context.Background(), inj, start, 200*time.Millisecond, 1.0)

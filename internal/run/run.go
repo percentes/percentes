@@ -1,4 +1,4 @@
-// Package run executes one full ChaosServe run from one config: load
+// Package run executes one full Percentes run from one config: load
 // generation, fault orchestration, collection, recovery detection, and
 // (optionally) the §5 decomposition probes. Its Artifacts feed the report
 // generator unchanged.
@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/collect"
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/detect"
-	"github.com/itsveems/chaosserve/internal/loadgen"
-	"github.com/itsveems/chaosserve/internal/orchestrator"
+	"github.com/percentes/percentes/internal/collect"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/detect"
+	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/orchestrator"
 )
 
 // Options wires the run to its environment.

@@ -9,9 +9,9 @@
 set -euo pipefail
 
 KIND=${KIND:-kind}
-CLUSTER=${CLUSTER:-chaosserve}
-IMAGE=${IMAGE:-chaosserve/mockserver:dev}
-NS=chaosserve
+CLUSTER=${CLUSTER:-percentes}
+IMAGE=${IMAGE:-percentes/mockserver:dev}
+NS=percentes
 ADMIN_PORT=18081
 OUT=results/kind-e2e
 
@@ -40,9 +40,9 @@ docker build -t "$IMAGE" . >/dev/null
 say "deploying two replicas (config from configs/kind-e2e.yaml)"
 kubectl delete namespace "$NS" --ignore-not-found --wait=true
 kubectl apply -f deploy/mock/mock.yaml
-kubectl -n "$NS" create configmap chaosserve-run-config \
+kubectl -n "$NS" create configmap percentes-run-config \
   --from-file=run.yaml=configs/kind-e2e.yaml --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NS" rollout status deploy/chaosserve-mock --timeout=180s
+kubectl -n "$NS" rollout status deploy/percentes-mock --timeout=180s
 
 say "waiting for the NodePort data path"
 for _ in $(seq 60); do
@@ -51,7 +51,7 @@ for _ in $(seq 60); do
 done
 curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health || fail "service not reachable on host port 18000"
 
-VICTIM=$(kubectl -n "$NS" get pods -l app=chaosserve-mock -o jsonpath='{.items[0].metadata.name}')
+VICTIM=$(kubectl -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
 say "victim replica: $VICTIM (admin via port-forward :$ADMIN_PORT)"
 kubectl -n "$NS" port-forward "pod/$VICTIM" "$ADMIN_PORT:8000" >/dev/null 2>&1 &
 PF_PIDS+=($!)
@@ -68,8 +68,8 @@ say "building and running the harness (one config drives the run)"
 # degraded system. CGO_ENABLED=0 keeps Linux CPU-gate sampling fully
 # functional (/proc needs no cgo); on darwin the host-CPU gate reports
 # unmeasured and therefore does not pass — honest, never silent.
-BIN="$(mktemp -d)/chaosserve"
-CGO_ENABLED=0 go build -o "$BIN" ./cmd/chaosserve
+BIN="$(mktemp -d)/percentes"
+CGO_ENABLED=0 go build -o "$BIN" ./cmd/percentes
 mkdir -p results
 rm -rf "$OUT"
 set +e

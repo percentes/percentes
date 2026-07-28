@@ -1,9 +1,9 @@
-# ChaosServe Phase 0 harness. `make test` is the single AC-suite entry
+# Percentes Phase 0 harness. `make test` is the single AC-suite entry
 # point: unit + integration tests, then the kind cluster smoke suite.
 GO      ?= go
 KIND    ?= $(shell command -v kind 2>/dev/null || echo $(HOME)/go/bin/kind)
-CLUSTER ?= chaosserve
-IMAGE   ?= chaosserve/mockserver:dev
+CLUSTER ?= percentes
+IMAGE   ?= percentes/mockserver:dev
 
 .PHONY: all build test test-unit docker-build kind-up kind-down kind-smoke clean
 
@@ -12,11 +12,11 @@ all: build
 build:
 	$(GO) build ./...
 
-# Build the CLIs as static binaries to fresh paths (macOS dyld-wedge
-# safe); see docs/DECISIONS.md module 8 addendum.
+# Build the CLIs as static CGO_ENABLED=0 binaries to fresh output paths:
+# rebuilding over a running binary can wedge macOS dyld with a stale image.
 bins:
-	CGO_ENABLED=0 $(GO) build -o bin/chaosserve ./cmd/chaosserve
-	CGO_ENABLED=0 $(GO) build -o bin/chaoscampaign ./cmd/chaoscampaign
+	CGO_ENABLED=0 $(GO) build -o bin/percentes ./cmd/percentes
+	CGO_ENABLED=0 $(GO) build -o bin/percentes-campaign ./cmd/percentes-campaign
 	CGO_ENABLED=0 $(GO) build -o bin/mockserver ./cmd/mockserver
 
 test-unit:
@@ -37,7 +37,7 @@ test: test-unit test-ac kind-smoke reproduce campaign-e2e
 reproduce:
 	KIND=$(KIND) CLUSTER=$(CLUSTER) IMAGE=$(IMAGE) deploy/kind/reproduce.sh
 
-# The §5 repetition pipeline end to end: an N=2 chaoscampaign against the
+# The §5 repetition pipeline end to end: an N=2 percentes-campaign against the
 # live 2-replica deployment, per-run §10 gates, §7 aggregation.
 campaign-e2e:
 	KIND=$(KIND) CLUSTER=$(CLUSTER) IMAGE=$(IMAGE) deploy/kind/campaign-e2e.sh

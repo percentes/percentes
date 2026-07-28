@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/itsveems/chaosserve/internal/campaign"
-	"github.com/itsveems/chaosserve/internal/validity"
+	"github.com/percentes/percentes/internal/campaign"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 // CampaignReport is the JSON artifact for an N-run campaign: the §5/§7
@@ -33,7 +33,7 @@ func humanCampaign(cr *CampaignReport) string {
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	rep := cr.Campaign
 
-	w("ChaosServe campaign report — %s (variant %s)", rep.ConfigName, rep.Variant)
+	w("Percentes campaign report — %s (variant %s)", rep.ConfigName, rep.Variant)
 	w("")
 	w("%s", Caveat)
 	w("")

@@ -28,7 +28,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // Outcome is the §3 three-state terminal classification.

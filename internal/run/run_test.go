@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/mock"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/mock"
 )
 
 // fakeInjector records that Arm ran and reports a fired/expired window,

@@ -1,4 +1,4 @@
-// chaoscampaign runs an N=5 (variant, config) campaign — the SPEC.md §5
+// percentes-campaign runs an N=5 (variant, config) campaign — the SPEC.md §5
 // repetition unit — and writes the campaign report pair (§5/§7 statistics
 // + §10 validity gates). Phase 0 drives it against the mock; Phase 1
 // swaps in the clean-delete or node-partition injector and supplies the
@@ -16,12 +16,12 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/itsveems/chaosserve/internal/campaign"
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/orchestrator"
-	"github.com/itsveems/chaosserve/internal/report"
-	"github.com/itsveems/chaosserve/internal/run"
-	"github.com/itsveems/chaosserve/internal/validity"
+	"github.com/percentes/percentes/internal/campaign"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/orchestrator"
+	"github.com/percentes/percentes/internal/report"
+	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 func main() {
@@ -31,16 +31,16 @@ func main() {
 	injectMode := flag.String("inject-mode", config.MockFaultError, "mock fault mode to arm")
 	injectDuration := flag.Float64("inject-duration-s", 10, "armed fault window duration")
 	victim := flag.String("victim", "", "victim replica identity (mock: hostname; clean_delete: pod name)")
-	namespace := flag.String("namespace", "chaosserve", "victim pod namespace (clean_delete variant)")
+	namespace := flag.String("namespace", "percentes", "victim pod namespace (clean_delete variant)")
 	victimNode := flag.String("victim-node", "", "victim node name (black_hole variant)")
 	flag.Parse()
 
 	if *configPath == "" {
-		log.Fatal("chaoscampaign: --config is required")
+		log.Fatal("percentes-campaign: --config is required")
 	}
 	cfg, err := config.LoadFile(*configPath)
 	if err != nil {
-		log.Fatalf("chaoscampaign: %v", err)
+		log.Fatalf("percentes-campaign: %v", err)
 	}
 
 	opts := run.Options{
@@ -59,15 +59,15 @@ func main() {
 	switch cfg.Fault.Variant {
 	case config.VariantCleanDelete:
 		if *victim == "" {
-			log.Fatal("chaoscampaign: clean_delete requires --victim (pod name)")
+			log.Fatal("percentes-campaign: clean_delete requires --victim (pod name)")
 		}
 		opts.Injector = orchestrator.NewCleanDeleteInjector(orchestrator.KubectlPodOps{}, *namespace, *victim)
 	case config.VariantBlackHole:
 		if *victimNode == "" {
-			log.Fatal("chaoscampaign: black_hole requires --victim-node")
+			log.Fatal("percentes-campaign: black_hole requires --victim-node")
 		}
-		log.Fatal("chaoscampaign: black_hole needs the pre-armed node-partition NodeOps and a multi-node GPU cluster; " +
-			"see docs/PHASE1-RUNBOOK.md §4 (the injector and manifest exist; wiring the real NodeOps is a Phase-1 bring-up step, not a Phase-0 code path)")
+		log.Fatal("percentes-campaign: black_hole needs the pre-armed node-partition NodeOps and a multi-node GPU cluster; " +
+			"see SPEC.md §10 (the injector and manifest exist; wiring the real NodeOps is a Phase-1 bring-up step, not a Phase-0 code path)")
 	}
 
 	// Evaluate the §10 validity gates per run as the campaign proceeds.
@@ -101,23 +101,23 @@ func main() {
 
 	rep, err := campaign.Run(ctx, cfg, opts, cfg.Fault.Variant, runner)
 	if err != nil {
-		log.Fatalf("chaoscampaign: %v", err)
+		log.Fatalf("percentes-campaign: %v", err)
 	}
 
 	rawJSON, humanText, err := report.GenerateCampaign(rep, gates)
 	if err != nil {
-		log.Fatalf("chaoscampaign: %v", err)
+		log.Fatalf("percentes-campaign: %v", err)
 	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		log.Fatalf("chaoscampaign: %v", err)
+		log.Fatalf("percentes-campaign: %v", err)
 	}
 	jsonPath := filepath.Join(*outDir, "campaign.json")
 	txtPath := filepath.Join(*outDir, "campaign.txt")
 	if err := os.WriteFile(jsonPath, rawJSON, 0o644); err != nil {
-		log.Fatalf("chaoscampaign: %v", err)
+		log.Fatalf("percentes-campaign: %v", err)
 	}
 	if err := os.WriteFile(txtPath, []byte(humanText), 0o644); err != nil {
-		log.Fatalf("chaoscampaign: %v", err)
+		log.Fatalf("percentes-campaign: %v", err)
 	}
 
 	fmt.Println(humanText)

@@ -10,8 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/mock"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/mock"
 )
 
 func main() {

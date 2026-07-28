@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // TestFaultStall (config-scripted): a mid-run stall freezes token
@@ -245,7 +245,7 @@ func TestFaultSilentHang(t *testing.T) {
 	}
 
 	// Out-of-band instrumentation stays reachable; the hang was counted.
-	if !strings.Contains(metricsText(t, base), `chaosserve_mock_requests_total{outcome="hung"}`) {
+	if !strings.Contains(metricsText(t, base), `percentes_mock_requests_total{outcome="hung"}`) {
 		t.Error("hung requests must be counted on /metrics")
 	}
 

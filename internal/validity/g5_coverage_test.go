@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // G5 requires equality ACROSS replicas (§10): a fingerprint set covering

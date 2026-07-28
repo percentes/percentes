@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/run"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/run"
 )
 
 // The §10 pre-registered in_flight_loss_fraction is defined over the

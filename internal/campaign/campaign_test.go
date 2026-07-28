@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/itsveems/chaosserve/internal/collect"
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/detect"
-	"github.com/itsveems/chaosserve/internal/run"
+	"github.com/percentes/percentes/internal/collect"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/detect"
+	"github.com/percentes/percentes/internal/run"
 )
 
 func f64(v float64) *float64 { return &v }

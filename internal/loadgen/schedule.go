@@ -4,7 +4,7 @@ import (
 	"math"
 	"math/rand"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // BuildSchedule fixes every intended dispatch time in advance (§3), as

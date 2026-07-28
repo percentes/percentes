@@ -4,9 +4,9 @@ import (
 	"math"
 	"testing"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/histo"
-	"github.com/itsveems/chaosserve/internal/loadgen"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/histo"
+	"github.com/percentes/percentes/internal/loadgen"
 )
 
 // tol returns the AC1 tolerance: ±2% or ±1ms, whichever is greater (us).

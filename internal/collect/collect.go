@@ -24,9 +24,9 @@ import (
 	"math"
 	"slices"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/histo"
-	"github.com/itsveems/chaosserve/internal/loadgen"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/histo"
+	"github.com/percentes/percentes/internal/loadgen"
 )
 
 // Window is a run-relative interval [StartNs, EndNs).

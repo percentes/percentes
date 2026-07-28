@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // TestStreamTimingFixed: configurable TTFT and per-token latency are the
@@ -90,8 +90,8 @@ func TestRequestValidation(t *testing.T) {
 	if err != nil || status != 400 {
 		t.Errorf("stream=false: want 400, got %d err=%v", status, err)
 	}
-	if !strings.Contains(metricsText(t, base), `chaosserve_mock_requests_total{outcome="400"}`) {
-		t.Error("400 outcomes must be counted in chaosserve_mock_requests_total")
+	if !strings.Contains(metricsText(t, base), `percentes_mock_requests_total{outcome="400"}`) {
+		t.Error("400 outcomes must be counted in percentes_mock_requests_total")
 	}
 }
 
@@ -110,10 +110,10 @@ func TestMetricsCounters(t *testing.T) {
 		}
 	}
 	text := metricsText(t, base)
-	if !strings.Contains(text, `chaosserve_mock_requests_total{outcome="200"} 3`) {
+	if !strings.Contains(text, `percentes_mock_requests_total{outcome="200"} 3`) {
 		t.Errorf("want 3 completed requests counted, metrics:\n%s", grepMetrics(text))
 	}
-	if !strings.Contains(text, "chaosserve_mock_tokens_emitted_total 12") {
+	if !strings.Contains(text, "percentes_mock_tokens_emitted_total 12") {
 		t.Errorf("want 12 tokens counted (3 requests x 4 tokens), metrics:\n%s", grepMetrics(text))
 	}
 }
@@ -121,7 +121,7 @@ func TestMetricsCounters(t *testing.T) {
 func grepMetrics(text string) string {
 	var out []string
 	for _, l := range strings.Split(text, "\n") {
-		if strings.HasPrefix(l, "chaosserve_") {
+		if strings.HasPrefix(l, "percentes_") {
 			out = append(out, l)
 		}
 	}

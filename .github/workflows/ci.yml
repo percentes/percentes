@@ -34,7 +34,7 @@ jobs:
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
-          cluster_name: chaosserve
+          cluster_name: percentes
           config: deploy/kind/kind-config.yaml
       - name: AC suite (unit + kind smoke)
         run: make test

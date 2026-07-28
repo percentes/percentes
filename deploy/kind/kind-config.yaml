@@ -5,14 +5,14 @@
 # so on any multi-node cluster the replicas spread one per node.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-name: chaosserve
+name: percentes
 nodes:
   - role: control-plane
     # Pinned by digest so the recorded pins.kubernetes.version (v1.30.0)
     # matches the cluster everywhere, including CI; the smoke suite
     # verifies the recorded pins against the live cluster.
     image: kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e
-    # Host port 18000 -> NodePort 30800 (chaosserve-mock Service): the
+    # Host port 18000 -> NodePort 30800 (percentes-mock Service): the
     # e2e load path runs through real Service routing, no port-forward.
     extraPortMappings:
       - containerPort: 30800

@@ -1,13 +1,13 @@
-# ChaosServe Phase 0 end-to-end run on kind (AC7). ONE file drives both
+# Percentes Phase 0 end-to-end run on kind (AC7). ONE file drives both
 # sides: the mock replicas mount it as a ConfigMap (created from this file
-# by the scripts) and read the `mock` section; the chaosserve runner on
+# by the scripts) and read the `mock` section; the percentes runner on
 # the host reads everything else. The Service is a NodePort mapped to
 # host port 18000 by deploy/kind/kind-config.yaml.
 schema_version: 1
 profile: ac
 
 run:
-  name: chaosserve-kind-e2e
+  name: percentes-kind-e2e
   seed: 42
   repetitions: 1
   phases:

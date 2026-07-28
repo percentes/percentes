@@ -1,4 +1,4 @@
-# ChaosServe Phase 0 acceptance-criteria reference configuration.
+# Percentes Phase 0 acceptance-criteria reference configuration.
 # SPEC.md §8 reference conditions: lambda = 20 rps, stall D = 10 s where used.
 # Profile "ac" allows scenario-scale phase durations; every normative pin
 # (client timeout, retries, max_tokens, SLO, detector, validity gates) is
@@ -7,7 +7,7 @@ schema_version: 1
 profile: ac
 
 run:
-  name: chaosserve-ac-reference
+  name: percentes-ac-reference
   seed: 42
   repetitions: 1
   phases:

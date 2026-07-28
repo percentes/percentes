@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/mock"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/mock"
 )
 
 // Against the mock (whose /health and inference become ready together at

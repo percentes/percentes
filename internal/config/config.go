@@ -1,4 +1,4 @@
-// Package config defines the single ChaosServe run-configuration schema
+// Package config defines the single Percentes run-configuration schema
 // (SPEC.md is authoritative). One config file drives a run end to end:
 // load generator, chaos orchestrator, mock server, metrics collector,
 // recovery detector, and report generator all read sections of this file.

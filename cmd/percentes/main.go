@@ -1,4 +1,4 @@
-// chaosserve runs one full experiment from one config file and writes the
+// percentes runs one full experiment from one config file and writes the
 // report pair (JSON + human-readable). Exit codes: 0 = run valid, 2 = run
 // completed but a run-failing gate marked it invalid, 1 = execution error.
 package main
@@ -13,9 +13,9 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/report"
-	"github.com/itsveems/chaosserve/internal/run"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/report"
+	"github.com/percentes/percentes/internal/run"
 )
 
 func main() {
@@ -30,11 +30,11 @@ func main() {
 	flag.Parse()
 
 	if *configPath == "" {
-		log.Fatal("chaosserve: --config is required")
+		log.Fatal("percentes: --config is required")
 	}
 	cfg, err := config.LoadFile(*configPath)
 	if err != nil {
-		log.Fatalf("chaosserve: %v", err)
+		log.Fatalf("percentes: %v", err)
 	}
 
 	// Wire an interrupt-aware context so Ctrl-C / SIGTERM cancels the in-flight
@@ -53,23 +53,23 @@ func main() {
 		ProbeServiceURL: *probeService,
 	})
 	if err != nil {
-		log.Fatalf("chaosserve: %v", err)
+		log.Fatalf("percentes: %v", err)
 	}
 
 	rawJSON, humanText, err := report.Generate(art)
 	if err != nil {
-		log.Fatalf("chaosserve: %v", err)
+		log.Fatalf("percentes: %v", err)
 	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		log.Fatalf("chaosserve: %v", err)
+		log.Fatalf("percentes: %v", err)
 	}
 	jsonPath := filepath.Join(*outDir, "report.json")
 	txtPath := filepath.Join(*outDir, "report.txt")
 	if err := os.WriteFile(jsonPath, rawJSON, 0o644); err != nil {
-		log.Fatalf("chaosserve: %v", err)
+		log.Fatalf("percentes: %v", err)
 	}
 	if err := os.WriteFile(txtPath, []byte(humanText), 0o644); err != nil {
-		log.Fatalf("chaosserve: %v", err)
+		log.Fatalf("percentes: %v", err)
 	}
 
 	fmt.Println(humanText)

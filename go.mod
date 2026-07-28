@@ -1,4 +1,4 @@
-module github.com/itsveems/chaosserve
+module github.com/percentes/percentes
 
 go 1.21.6
 

@@ -59,7 +59,7 @@ func probeOnce(ctx context.Context, client *http.Client, baseURL, body string) (
 		return false, ""
 	}
 	defer resp.Body.Close()
-	replica := resp.Header.Get("X-Chaosserve-Replica")
+	replica := resp.Header.Get("X-Percentes-Replica")
 	if resp.StatusCode != http.StatusOK {
 		return false, replica
 	}

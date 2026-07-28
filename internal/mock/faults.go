@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // action is what the fault engine tells a stream handler to do at a gate.

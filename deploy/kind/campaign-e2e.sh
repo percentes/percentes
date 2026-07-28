@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Campaign e2e on kind: the §5 repetition pipeline (chaoscampaign) against
+# Campaign e2e on kind: the §5 repetition pipeline (percentes-campaign) against
 # the live 2-replica mock deployment — N runs, per-run §10 validity gates,
 # §7 aggregation, campaign report pair. This is the last seam the unit
 # suite cannot cover: the campaign engine driving real runs on a real
@@ -10,9 +10,9 @@
 set -euo pipefail
 
 KIND=${KIND:-kind}
-CLUSTER=${CLUSTER:-chaosserve}
-IMAGE=${IMAGE:-chaosserve/mockserver:dev}
-NS=chaosserve
+CLUSTER=${CLUSTER:-percentes}
+IMAGE=${IMAGE:-percentes/mockserver:dev}
+NS=percentes
 ADMIN_PORT=18082
 OUT=results/kind-campaign
 
@@ -31,16 +31,16 @@ docker build -t "$IMAGE" . >/dev/null
 "$KIND" load docker-image "$IMAGE" --name "$CLUSTER"
 kubectl delete namespace "$NS" --ignore-not-found --wait=true
 kubectl apply -f deploy/mock/mock.yaml
-kubectl -n "$NS" create configmap chaosserve-run-config \
+kubectl -n "$NS" create configmap percentes-run-config \
   --from-file=run.yaml=configs/kind-campaign.yaml --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NS" rollout status deploy/chaosserve-mock --timeout=180s
+kubectl -n "$NS" rollout status deploy/percentes-mock --timeout=180s
 for _ in $(seq 60); do
   curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health && break
   sleep 1
 done
 curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health || fail "NodePort data path not reachable"
 
-VICTIM=$(kubectl -n "$NS" get pods -l app=chaosserve-mock -o jsonpath='{.items[0].metadata.name}')
+VICTIM=$(kubectl -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
 say "victim replica: $VICTIM"
 kubectl -n "$NS" port-forward "pod/$VICTIM" "$ADMIN_PORT:8000" >/dev/null 2>&1 &
 PF_PIDS+=($!)
@@ -50,8 +50,8 @@ for _ in $(seq 30); do
 done
 
 say "running the N=2 campaign (fresh-path CGO_ENABLED=0 binary; ~5 min)"
-BIN="$(mktemp -d)/chaoscampaign"
-CGO_ENABLED=0 go build -o "$BIN" ./cmd/chaoscampaign
+BIN="$(mktemp -d)/percentes-campaign"
+CGO_ENABLED=0 go build -o "$BIN" ./cmd/percentes-campaign
 rm -rf "$OUT"
 mkdir -p "$(dirname "$OUT")"
 set +e

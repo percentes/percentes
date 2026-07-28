@@ -3,8 +3,8 @@ package collect
 import (
 	"testing"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/loadgen"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 )
 
 func testCfg(t *testing.T) *config.Config {

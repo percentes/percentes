@@ -19,8 +19,8 @@ package detect
 import (
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/loadgen"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 )
 
 // nsPerSec is the nanoseconds-per-second conversion factor, named once so

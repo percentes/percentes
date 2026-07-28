@@ -3,8 +3,8 @@ package detect
 import (
 	"testing"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/loadgen"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 )
 
 // mkBuckets builds a synthetic 1 Hz series: 20 scheduled per second, with

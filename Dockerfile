@@ -7,4 +7,4 @@ RUN CGO_ENABLED=0 go build -o /mockserver ./cmd/mockserver
 
 FROM scratch
 COPY --from=build /mockserver /mockserver
-ENTRYPOINT ["/mockserver", "--config", "/etc/chaosserve/run.yaml"]
+ENTRYPOINT ["/mockserver", "--config", "/etc/percentes/run.yaml"]

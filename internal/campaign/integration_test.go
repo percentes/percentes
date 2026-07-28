@@ -5,12 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itsveems/chaosserve/internal/campaign"
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/mock"
-	"github.com/itsveems/chaosserve/internal/report"
-	"github.com/itsveems/chaosserve/internal/run"
-	"github.com/itsveems/chaosserve/internal/validity"
+	"github.com/percentes/percentes/internal/campaign"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/mock"
+	"github.com/percentes/percentes/internal/report"
+	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 // A small real campaign through run.Execute against the mock proves the

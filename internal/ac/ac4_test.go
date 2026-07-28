@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/itsveems/chaosserve/internal/collect"
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/loadgen"
+	"github.com/percentes/percentes/internal/collect"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 )
 
 // ac4Scenario runs load through a fault window of the given mode fired at

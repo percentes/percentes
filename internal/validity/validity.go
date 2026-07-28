@@ -19,8 +19,8 @@ package validity
 import (
 	"fmt"
 
-	"github.com/itsveems/chaosserve/internal/config"
-	"github.com/itsveems/chaosserve/internal/run"
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/run"
 )
 
 // Gate is one run-validity gate result.
