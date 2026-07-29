@@ -29,9 +29,8 @@ func TestHostedTargetValidation(t *testing.T) {
 	}
 }
 
-// The new fields are optional for non-hosted targets: the mock and
-// self-hosted vLLM paths are unchanged (model_name alone is legal — a
-// real vLLM deployment needs one too).
+// Non-hosted targets require neither model_name nor api_key_env, and
+// model_name alone is legal: a self-hosted vLLM deployment needs one.
 func TestNonHostedTargetUnchanged(t *testing.T) {
 	c := loadRef(t, acRef)
 	if err := c.Validate(); err != nil {

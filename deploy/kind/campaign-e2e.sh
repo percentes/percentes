@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # Campaign e2e on kind: the §5 repetition pipeline (percentes-campaign) against
 # the live 2-replica mock deployment — N runs, per-run §10 validity gates,
-# §7 aggregation, campaign report pair. This is the last seam the unit
-# suite cannot cover: the campaign engine driving real runs on a real
-# cluster. Expected exit is 2 (runs are honestly invalid pre-hardware:
-# G5 has no GPU fingerprint, and on darwin the client CPU gate is
-# unmeasured); the reproduction PASSES on report completeness; gates
-# doing their job is correct behavior.
+# §7 aggregation, campaign report pair. Exits 2 pre-hardware (G5
+# unobserved; on darwin the client CPU gate is unmeasured); this script
+# asserts report completeness, not run validity.
 set -euo pipefail
 
 KIND=${KIND:-kind}

@@ -36,9 +36,8 @@ func TestLiveHostedSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Post-load overrides for a minimal live probe. This is a smoke test
-	// of the auth/body path, not a measurement: nothing here is published
-	// and no pinned number is weakened in any loadable config.
+	// Overrides for a minimal live probe of the auth/body path; not a
+	// measurement run.
 	cfg.Target = config.Target{
 		BaseURL:   "https://api.groq.com/openai",
 		Replicas:  1,

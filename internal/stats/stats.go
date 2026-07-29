@@ -21,17 +21,13 @@ import (
 	"sort"
 )
 
-// studentTDF4 is the pre-registered two-sided 95% t multiplier at df=4
-// (§7). It is a constant, not computed, so the number in the report is
-// auditable against the spec; studentT95 references it at df=4 so the
-// pinned value has a single source of truth.
+// studentTDF4 is the §7 pre-registered two-sided 95% t multiplier at df=4.
 const studentTDF4 = 2.776
 
 // studentT95 holds two-sided 95% t multipliers by degrees of freedom.
 // §7 pre-registers df=4 (N=5 contributing runs); when dropped runs leave
-// fewer contributors the CORRECT multiplier for df=n-1 must be used —
-// applying 2.776 to n<5 publishes an interval that is too narrow, which
-// is worse than no interval. Auditable table, not a computation.
+// fewer contributors the multiplier for df=n-1 must be used: applying
+// 2.776 at n<5 publishes an interval that is too narrow.
 var studentT95 = map[int]float64{
 	1: 12.706, 2: 4.303, 3: 3.182, 4: studentTDF4, 5: 2.571,
 	6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,

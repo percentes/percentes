@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# In-cluster smoke suite for the mock server on kind. Proves: image runs
-# from the ConfigMap-mounted run config, two replicas behind one Service
+# In-cluster smoke suite for the mock server on kind: the image runs from
+# the ConfigMap-mounted run config, two replicas sit behind one Service
 # (spread one per node whenever the cluster has more than one), SSE
-# streaming works through the Service, the
-# per-replica request counters are exposed, and a fault armed on one pod
-# fires with recorded timestamps and expires on schedule.
+# streaming works through the Service, the per-replica request counters
+# are exposed, and a fault armed on one pod fires with recorded
+# timestamps and expires on schedule.
 set -euo pipefail
 
 KIND=${KIND:-kind}

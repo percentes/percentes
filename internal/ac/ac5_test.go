@@ -31,13 +31,11 @@ func TestAC5ScriptedRecovery(t *testing.T) {
 		t.Skip("AC suite skipped in -short mode")
 	}
 	const outageS = 20.0
-	res, _, _ := func() (*detect.Result, *loadgen.Result, int64) {
-		return runDetector(t, scenario{
-			warmupS: 3, baselineS: 40, windowS: 60, cooldownS: 2, tInjectS: 40,
-			ttft: fixed(100), itl: fixed(5),
-			schedule: []config.MockFault{{Mode: config.MockFaultError, StartOffsetS: 43, DurationS: outageS}},
-		})
-	}()
+	res, _, _ := runDetector(t, scenario{
+		warmupS: 3, baselineS: 40, windowS: 60, cooldownS: 2, tInjectS: 40,
+		ttft: fixed(100), itl: fixed(5),
+		schedule: []config.MockFault{{Mode: config.MockFaultError, StartOffsetS: 43, DurationS: outageS}},
+	})
 
 	d := res.ToPreFault
 	if d.NotRecovered || d.TTRSeconds == nil {

@@ -93,11 +93,8 @@ costs ~3% of one core at 20 rps). The timer covers the bulk cheaply; the
 spin buys the accuracy the timer can't. `spinNs` is sized to comfortably
 exceed timer wakeup jitter while keeping the CPU burn small.
 
-The two constants are two nested guards: `spawnLeadNs` (10 ms) decouples
-the *pacer* from the *worker* so pacer jitter can't cascade; `spinNs`
-(1.5 ms) decouples the *timer's imprecision* from *dispatch* so scheduler
-jitter can't leak into send-skew. The send-skew gate (SPEC §2 client-validity; table in §6 below) is the check
-that the whole mechanism worked: p99 ≤ 5 ms, max ≤ 50 ms, run-failing.
+The send-skew gate (SPEC §2 client-validity; table in §6 below) is
+run-failing: p99 ≤ 5 ms, max ≤ 50 ms.
 
 ## 3. Anatomy of a run (the `percentes` binary, internal/run.Execute)
 
@@ -198,7 +195,7 @@ exits 2 because the CPU gate is unmeasured (CGO-free build; Linux
 measures via /proc). A `percentes-campaign` run additionally evaluates G1–G6
 per run via `validity.Evaluate`, so it exits 2 for the CPU gate *and*
 because G5 has no GPU fingerprint pre-hardware. Either way an
-uncertified gate never silently passes — that is deliberate.
+uncertified gate never passes.
 
 ## 7. Fault modes → measurement signatures
 

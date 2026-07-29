@@ -10,7 +10,7 @@ Further changes: the TTR decomposition gets a measurability table and a two-prob
 
 Framing note: the first publication is a resilience characterization of vLLM under replica loss, published under the Percentes benchmark project. The word benchmark earns itself at v0.2 when a second stack arrives.
 
-Standing caveat, stated as prominently as any strength: acceptance criteria certify the instrument against a mock, not any claim about real GPU behavior. Small N on rented hardware, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are handled by scoping claims and naming limits, not by pretending.
+Standing caveat: the acceptance criteria certify the instrument against a mock, not any claim about real GPU behavior. Small N on rented hardware, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are scoped in the claims and named in the report.
 
 ## 1. The experiment
 
@@ -66,7 +66,7 @@ Reporting per window:
 - **Kaplan-Meier completion curves** over ALL scheduled requests in the window: completions are events at their latency; errored and censored requests are censored observations at their observed times. Report the curve for baseline, fault, and recovery windows. A KM quantile q is reported only where the curve actually crosses q within the timeout horizon; otherwise report "p_q greater than 30 s."
 - **Conditional-percentile rule:** any window with error-plus-censored fraction above 5 percent must present the KM curve alongside any completed-only percentiles, with the caveat explicit.
 
-Other definitions carried from v0.1: intended dispatch times fixed in advance; ITL as pooled per-window histograms (per-request p99 forbidden; per-request max named as such); one pinned HdrHistogram configuration across all runs and windows with highestTrackableValue at least the run timeout, enabling lossless merge; windows aligned to pre-fault, during-fault, post-fault, never straddling T_inject; throughput and goodput as before; loss counts reported as a function of the pinned 30 s timeout.
+Also normative: intended dispatch times fixed in advance; ITL as pooled per-window histograms (per-request p99 forbidden; per-request max named as such); one pinned HdrHistogram configuration across all runs and windows with highestTrackableValue at least the run timeout, enabling lossless merge; windows aligned to pre-fault, during-fault, post-fault, never straddling T_inject; throughput as completions per second per window; goodput as the fraction of a window's scheduled requests that complete within the §4 SLO, also reported as SLO-meeting completions per second; loss counts reported as a function of the pinned 30 s timeout.
 
 ## 4. SLO (pre-registered)
 

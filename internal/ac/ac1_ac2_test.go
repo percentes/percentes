@@ -68,7 +68,7 @@ func TestAC1MeasurementCorrectness(t *testing.T) {
 }
 
 // TestAC2CoordinatedOmissionPlumbing: a known mid-run stall of D is
-// reflected in p99.9 and max within 5%% of D. With latencies re-based to
+// reflected in p99.9 and max within 5% of D. With latencies re-based to
 // intended dispatch time, the request that entered just before the freeze
 // carries the full D; a generator that throttled in sympathy would show
 // neither the tail nor the during-stall samples.
@@ -106,7 +106,7 @@ func TestAC2CoordinatedOmissionPlumbing(t *testing.T) {
 }
 
 // TestAC2bTailSampleCount: recorded samples attributable to the stall
-// within +-10%% of D x lambda. Attributable = completed with excess-over-
+// within +-10% of D x lambda. Attributable = completed with excess-over-
 // nominal >= 250 ms; with intended-time re-basing the expected count is
 // lambda x (D - 0.25) ~= 195 for D=10, lambda=20 — an open-loop schedule
 // keeps arrivals flowing through the freeze, so the stalled period

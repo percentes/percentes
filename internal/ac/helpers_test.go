@@ -279,9 +279,7 @@ func adminFaults(t *testing.T, baseURL string) []mock.FaultRecord {
 	return recs
 }
 
-// fetchFaults queries the mock's /admin/faults endpoint off any *testing.T,
-// returning an error rather than failing a test so the shared stall setup can
-// record the failure deterministically.
+// fetchFaults GETs the mock's /admin/faults and returns any error.
 func fetchFaults(baseURL string) ([]mock.FaultRecord, error) {
 	resp, err := http.Get(baseURL + "/admin/faults")
 	if err != nil {

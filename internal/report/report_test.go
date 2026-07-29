@@ -28,9 +28,7 @@ func minimalArtifacts() *run.Artifacts {
 }
 
 // The caveat is the report's honesty banner. It must appear in the JSON
-// artifact and TWICE in the human report (header and footer) — if a
-// refactor drops it, published output silently loses its scoping
-// statement, which is a publication-integrity bug, not a style choice.
+// artifact and twice in the human report (header and footer).
 func TestGenerateCarriesCaveatAndValidJSON(t *testing.T) {
 	raw, humanText, err := Generate(minimalArtifacts())
 	if err != nil {

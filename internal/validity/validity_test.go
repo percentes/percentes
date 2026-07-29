@@ -37,7 +37,7 @@ func gateByID(rep Report, id string) Gate {
 // A clean clean-delete run passes: G1/G2/G6 derive clean, G3/G4 are not
 // applicable to the variant, G5 needs a fingerprint (absent in Phase 0),
 // so G5 is the only failing gate — and it is applicable, so the run is
-// invalid. This is correct: a real Phase 1 run MUST supply fingerprints.
+// invalid: Phase 1 runs must supply fingerprints.
 func TestCleanDeleteGatesWithoutHardware(t *testing.T) {
 	rep := Evaluate(cleanArt(config.VariantCleanDelete), Observations{})
 	if gateByID(rep, "G1").Pass != true || gateByID(rep, "G2").Pass != true || gateByID(rep, "G6").Pass != true {

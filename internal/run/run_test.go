@@ -79,9 +79,8 @@ func TestExecuteUsesSuppliedInjector(t *testing.T) {
 // TestExecuteEndToEndUnderRace runs the complete pipeline — load
 // generator (pacer, workers, monitors), orchestrator (pre-armed fault),
 // collector, detector, probes — in-process at a small scale, so the
-// safety-critical concurrency runs under the race detector in the unit
-// suite (`make test-unit` uses -race; the AC suite deliberately does not,
-// for timing fidelity, and this test is what makes that split sound).
+// concurrency runs under -race in the unit suite. The AC suite runs
+// without -race, for timing fidelity.
 func TestExecuteEndToEndUnderRace(t *testing.T) {
 	cfg, err := config.LoadFile("../../configs/ac.reference.yaml")
 	if err != nil {

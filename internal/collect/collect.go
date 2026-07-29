@@ -87,9 +87,8 @@ type SweepPoint struct {
 	GoodputFrac float64 `json:"goodput_frac"`
 }
 
-// TailCIs carries §7 order-statistic CIs; Permitted is false when the
-// completed-sample budget does not support the interval (the percentile
-// then publishes with an explicit no-CI caveat, never a fabricated one).
+// TailCIs carries the §7 order-statistic CIs for p95 and p99. A field is
+// nil when the window has no completed samples.
 type TailCIs struct {
 	P95 *OrderStatCI `json:"p95,omitempty"`
 	P99 *OrderStatCI `json:"p99,omitempty"`

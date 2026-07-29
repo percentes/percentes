@@ -23,9 +23,6 @@ import (
 	"github.com/percentes/percentes/internal/loadgen"
 )
 
-// nsPerSec is the nanoseconds-per-second conversion factor, named once so
-// the ns<->1 s bucket arithmetic reads uniformly rather than repeating a
-// bare 1e9 literal.
 const nsPerSec int64 = 1e9
 
 // Bucket is one second of scheduled traffic, assigned by intended time.
@@ -302,11 +299,10 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, tInjectNs, timeoutNs
 
 	res.ToPreFault = detect(buckets, compGoodput, res.PreFaultBaseline, tInjectNs, timeoutNs, p)
 
-	// Single-replica equilibrium: estimated from the DEGRADED plateau —
-	// from R seconds after fire (settle) until recovery-to-pre-fault (or
-	// the timeout when unrecovered). Estimating it from the fault-window
-	// tail would collapse into the post-recovery state in any recovered
-	// run — the §5 conflation this design exists to avoid.
+	// Single-replica equilibrium: estimated over the DEGRADED plateau —
+	// from R seconds after fire (settle) until recovery-to-pre-fault, or
+	// the timeout when unrecovered. The fault-window tail would collapse
+	// into the post-recovery state in any recovered run (§5).
 	plateauStart := tInjectNs + int64(p.WindowS)*nsPerSec
 	plateauEnd := timeoutNs
 	if at := res.ToPreFault.RecoveredAtNs; at != nil && *at < plateauEnd {

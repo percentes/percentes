@@ -1,9 +1,10 @@
-// percentes-campaign runs an N-run (variant, config) campaign (N pinned to
-// 5 by the experiment profile) — the SPEC.md §5 repetition unit — and writes the campaign report pair (§5/§7 statistics
-// + §10 validity gates). Phase 0 drives it against the mock; Phase 1
-// swaps in the clean-delete or node-partition injector and supplies the
-// GPU-cluster observations. Exit codes: 0 = every run valid, 2 = campaign
-// completed but at least one run failed a run-validity gate, 1 = error.
+// percentes-campaign runs an N-run (variant, config) campaign — the
+// SPEC.md §5 repetition unit, N pinned to 5 by the experiment profile —
+// and writes the campaign report pair (§5/§7 statistics + §10 validity
+// gates). Phase 0 drives it against the mock; Phase 1 swaps in the
+// clean-delete or node-partition injector and supplies the GPU-cluster
+// observations. Exit codes: 0 = every run valid, 2 = campaign completed
+// but at least one run failed a run-validity gate, 1 = error.
 package main
 
 import (
@@ -50,12 +51,11 @@ func main() {
 		VictimReplica:   *victim,
 	}
 
-	// Route the fault variant to its injector. mock → the admin injector
-	// via AdminURL (default). clean_delete → grace=0 pod delete through
-	// kubectl (runs on any cluster). black_hole → the pre-armed node
-	// partition, which needs a real NodeOps and a multi-node cluster; it
-	// is refused here with a pointer to SPEC.md §10 rather than
-	// half-armed. The run engine stays agnostic beyond timestamps (§2).
+	// Route fault.variant to an injector: mock uses the admin injector at
+	// AdminURL (default); clean_delete does a grace=0 pod delete via
+	// kubectl; black_hole needs a real NodeOps and a multi-node cluster and
+	// is refused here (SPEC.md §10). The run engine stays agnostic beyond
+	// timestamps (§2).
 	switch cfg.Fault.Variant {
 	case config.VariantCleanDelete:
 		if *victim == "" {
@@ -66,21 +66,14 @@ func main() {
 		if *victimNode == "" {
 			log.Fatal("percentes-campaign: black_hole requires --victim-node")
 		}
-		log.Fatal("percentes-campaign: black_hole needs the pre-armed node-partition NodeOps and a multi-node GPU cluster; " +
-			"see SPEC.md §10 (the injector and the Phase 1 topology manifest deploy/phase1/vllm.yaml exist; wiring the real NodeOps is a Phase-1 bring-up step, not a Phase-0 code path)")
+		log.Fatal("percentes-campaign: black_hole requires a multi-node GPU cluster and a real NodeOps; see SPEC.md §10")
 	}
 
-	// Evaluate the §10 validity gates per run as the campaign proceeds.
-	// Phase 0 supplies no GPU observations, so G5 (and G3/G4 for
-	// black-hole) will fail-unobserved — correct: a real characterization
-	// campaign must run on hardware.
+	// Evaluate the §10 validity gates per run. Phase 0 supplies no GPU
+	// observations, so G5 (and G3/G4 under black_hole) fail unobserved.
 	//
-	// gates is appended to positionally by the runner and consumed by index
-	// below (report.GenerateCampaign, the exit-code scan). This is sound
-	// only because campaign.Run invokes the runner sequentially, once per
-	// run in order; the gate at index i therefore aligns with run i+1. If
-	// campaign.Run were ever parallelized this append would race and the
-	// index alignment would break.
+	// gates[i] pairs with run i+1; campaign.Run calls the runner
+	// sequentially. Parallelizing it would race this append.
 	var gates []validity.Report
 	runner := func(ctx context.Context, c *config.Config, o run.Options) (*run.Artifacts, error) {
 		art, err := run.Execute(ctx, c, o)
