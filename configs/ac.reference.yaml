@@ -105,7 +105,7 @@ pins:
     nccl: n/a-phase0-mock
     clock_power_policy: n/a-phase0-mock
   kubernetes:
-    version: v1.30.0            # verified against the live cluster by the smoke suite
+    version: v1.30.0            # matches the digest-pinned kind node image; the smoke suite verifies the deployed run config, not this file
     cni: kindnet
     dataplane_mode: kube-proxy-iptables
     kube_proxy_mode: iptables

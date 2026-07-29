@@ -1,5 +1,5 @@
-// percentes-campaign runs an N=5 (variant, config) campaign — the SPEC.md §5
-// repetition unit — and writes the campaign report pair (§5/§7 statistics
+// percentes-campaign runs an N-run (variant, config) campaign (N pinned to
+// 5 by the experiment profile) — the SPEC.md §5 repetition unit — and writes the campaign report pair (§5/§7 statistics
 // + §10 validity gates). Phase 0 drives it against the mock; Phase 1
 // swaps in the clean-delete or node-partition injector and supplies the
 // GPU-cluster observations. Exit codes: 0 = every run valid, 2 = campaign
@@ -54,7 +54,7 @@ func main() {
 	// via AdminURL (default). clean_delete → grace=0 pod delete through
 	// kubectl (runs on any cluster). black_hole → the pre-armed node
 	// partition, which needs a real NodeOps and a multi-node cluster; it
-	// is refused here with a pointer to the runbook rather than
+	// is refused here with a pointer to SPEC.md §10 rather than
 	// half-armed. The run engine stays agnostic beyond timestamps (§2).
 	switch cfg.Fault.Variant {
 	case config.VariantCleanDelete:
@@ -67,7 +67,7 @@ func main() {
 			log.Fatal("percentes-campaign: black_hole requires --victim-node")
 		}
 		log.Fatal("percentes-campaign: black_hole needs the pre-armed node-partition NodeOps and a multi-node GPU cluster; " +
-			"see SPEC.md §10 (the injector and manifest exist; wiring the real NodeOps is a Phase-1 bring-up step, not a Phase-0 code path)")
+			"see SPEC.md §10 (the injector and the Phase 1 topology manifest deploy/phase1/vllm.yaml exist; wiring the real NodeOps is a Phase-1 bring-up step, not a Phase-0 code path)")
 	}
 
 	// Evaluate the §10 validity gates per run as the campaign proceeds.

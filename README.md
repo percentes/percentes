@@ -46,7 +46,7 @@ with the same harness and gates.
 Requires Go 1.21+, Docker, and [kind](https://kind.sigs.k8s.io/).
 
 ```
-make test        # the whole gate: unit + AC suite + kind smoke + reproduce
+make test        # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
 make test-unit   # fast path: unit/integration tests only
 make reproduce   # AC7: one-command full harness run against the local cluster
 ```
@@ -59,7 +59,7 @@ cmd/percentes-campaign   N-run campaign runner (SPEC §5 repetition, §10 gates)
 cmd/mockserver           fault-injectable mock inference server
 internal/                loadgen, collect, detect, orchestrator, validity, ...
 configs/                 pinned reference configurations
-deploy/                  kind manifests and reproduce scripts
+deploy/                  kind + mock manifests, reproduce scripts, Phase 1 vLLM manifest
 ```
 
 ## License

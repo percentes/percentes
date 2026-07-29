@@ -62,7 +62,7 @@ done
 
 say "building and running the harness (one config drives the run)"
 # Build static (CGO_ENABLED=0) to a FRESH path every run. Two macOS
-# lessons encoded here: (a) rebuilding onto a reused path can wedge
+# failure modes motivate this: (a) rebuilding onto a reused path can wedge
 # execs in dyld (uninterruptible, unkillable); (b) cgo-linked binaries
 # (gopsutil -> IOKit/CoreFoundation) can hit the same dyld wedge on a
 # degraded system. CGO_ENABLED=0 keeps Linux CPU-gate sampling fully

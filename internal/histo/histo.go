@@ -4,8 +4,8 @@
 // dispatch time upstream, so the library's
 // coordinated-omission correction calls (the corrected-value recorder and
 // its expected-interval variants) are forbidden — they would
-// double-correct, and are invalid under Poisson arrivals. An AC lint test
-// fails the build if a correction API appears anywhere in the tree.
+// double-correct, and are invalid under Poisson arrivals. A lint test
+// fails the suite if a correction API appears anywhere in the tree.
 package histo
 
 import (

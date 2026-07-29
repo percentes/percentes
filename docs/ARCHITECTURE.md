@@ -1,4 +1,4 @@
-# Percentes architecture — how to understand and unravel what's here
+# Percentes architecture — system map and trace index
 
 This document maps the whole system: what each piece does, why it exists
 (with the SPEC.md clause it serves), how data flows from a scheduled
@@ -8,7 +8,7 @@ bottom once; after that, the trace tables in §5 are the working index.
 
 SPEC.md is authoritative everywhere.
 
-## 1. What this is
+## 1. Overview
 
 Percentes measures LLM-inference reliability under load and failure.
 Replica loss is the Phase 0/1 fault class: what happens when a
@@ -28,7 +28,7 @@ decision you'll see:
   run. The generator never slows down because the system did — a stalled
   system must not be allowed to hide its own stall (coordinated
   omission, SPEC §2).
-- **Three-state outcomes** (§3): every scheduled request ends exactly one
+- **Three-state outcomes** (§3): every scheduled request ends in exactly one
   of completed / errored / censored. Only completions enter latency
   histograms; failures are first-class rates; censored requests (no
   terminal event by the pinned 30 s timeout) enter Kaplan-Meier curves,
@@ -78,7 +78,7 @@ The main loop sleeps until `t_i − 10 ms`, then only *spawns* the worker
 goroutine for request `i` and immediately moves on to the next. It never
 does the precise wait itself. Rationale: if one thread did the exact
 wait-and-dispatch inline, a hiccup while handling request `i` (GC,
-scheduler) would delay `i` **and shove every later request back** — the
+scheduler) would delay `i` **and push every later request back** — the
 delays would accumulate down the whole schedule. Spawning early
 decouples the two stages: the 10 ms is slack that absorbs pacer-wakeup
 jitter, and each worker targets its own **absolute** `t_i`, so a late
@@ -96,10 +96,10 @@ exceed timer wakeup jitter while keeping the CPU burn small.
 The two constants are two nested guards: `spawnLeadNs` (10 ms) decouples
 the *pacer* from the *worker* so pacer jitter can't cascade; `spinNs`
 (1.5 ms) decouples the *timer's imprecision* from *dispatch* so scheduler
-jitter can't leak into send-skew. The send-skew gate (§6) is the check
+jitter can't leak into send-skew. The send-skew gate (SPEC §2 client-validity; table in §6 below) is the check
 that the whole mechanism worked: p99 ≤ 5 ms, max ≤ 50 ms, run-failing.
 
-## 3. Anatomy of a run (`percentes run`, internal/run.Execute)
+## 3. Anatomy of a run (the `percentes` binary, internal/run.Execute)
 
 1. `loadgen.Run` anchors the run epoch (monotonic), fires the `OnEpoch`
    hook, and starts the pacer.
@@ -131,24 +131,24 @@ with median+range; drops are named, never imputed).
 |---|---|---|---|---|
 | `internal/config` | One YAML schema drives everything; full §6 pin list; strict decode; every pre-registered number enforced as an equality at load | §1–§6, §8 | `LoadFile`, `Config.Validate` | mutation test per pin |
 | `internal/mock` + `cmd/mockserver` | OpenAI-compatible SSE mock with analytic TTFT/ITL distributions and five scriptable fault modes | §2 "Local-first" | `New`, `Server.Start`, `/admin/faults` | per-mode behavior tests incl. raw-TCP no-RST |
-| `internal/histo` | Pinned HdrHistogram wrapper; `recordValue()` only; lint bans correction APIs | §3 | `New`, `Record`, `Summarize` | lint + oracles |
-| `internal/loadgen` | Open-loop generator: pre-fixed schedule, pacer+spin dispatch, SSE client, three-state classification, client-validity gates | §2, §3 | `BuildSchedule`, `Run` | AC1–AC2d + `-race` via internal/run |
-| `internal/orchestrator` | Pre-armed fault execution with armed/fire/expiry audit; injectors: mock admin, clean pod delete, node partition | §1, §2, AC3 | `Execute`, `NewMockInjector`, `NewCleanDeleteInjector`, `NewNodePartitionInjector` | AC3 + fake-ops tests |
+| `internal/histo` | Pinned HdrHistogram wrapper; `recordValue()` only; lint bans correction APIs | §3 | `New`, `Record`, `Summarize` | lint (repo-wide correction-API ban); AC1 oracles via internal/ac |
+| `internal/loadgen` | Open-loop generator: pre-fixed schedule, pacer+spin dispatch, SSE client, three-state classification, client-validity gates | §2, §3 | `BuildSchedule`, `Run` | in-package body + opt-in live-smoke units; AC1–AC2d + `-race` via internal/run |
+| `internal/orchestrator` | Pre-armed fault execution with armed/fire/expiry audit; injectors: mock admin, clean pod delete, node partition | §1, §2, AC3 | `Execute`, `NewMockInjector`, `NewCleanDeleteInjector`, `newNodePartitionInjector` (unexported pending Phase-1 NodeOps wiring) | AC3 + fake-ops tests |
 | `internal/collect` | Windowed three-state stats, KM estimator, in-flight accounting, §4 sweep + modal/SD, §7 tail CIs | §3, §4, §7 | `Collect`, `EstimateKM`, `AccountInFlight`, `AnalyzeThresholds` | hand-computed KM oracles, AC4/4b |
 | `internal/detect` | Recovery detector (leading windows, hysteresis, two baselines, sensitivity sweep, deficit, components), decomposition scaffolding, recovery probes, /health-vs-inference calibration | §5, AC5 | `BuildSeries`, `Run`, `ProbeRecovery`, `NewPhase0Decomposition` | synthetic-series units + AC5 |
 | `internal/run` | The run engine: composes everything above into one run's Artifacts | §2 | `Execute` | in-process e2e under `-race` |
-| `internal/report` | JSON + human report pair from one run or one campaign; numbers read once from artifacts | §2, §3, §4, §5, §7 | `Generate`, `GenerateCampaign` | AC6 field assertions |
-| `internal/stats` | §7 statistics: verbatim values, median, mean, df-correct t-interval, CoV/noise floor, Holm | §7 | `Summarize`, `Holm` | hand-computed oracles |
+| `internal/report` | JSON + human report pair from one run or one campaign; numbers read once from artifacts | §2, §3, §4, §5, §7 | `Generate`, `GenerateCampaign` | in-package renderer units + AC6 field assertions |
+| `internal/stats` | §7 statistics: verbatim values, median, mean, df-correct t-interval, CoV/noise floor, Holm | §7 | `Summarize`, `holm` | hand-computed oracles |
 | `internal/campaign` | N-run repetition engine; per-run seeds; endpoint aggregation with named drops | §5, §7, §10 | `Run` | fake-runner units |
 | `internal/validity` | §10 run-validity gates G1–G6; applicable-but-unobserved ⇒ FAIL | §10 | `Evaluate` | per-gate units |
 | `cmd/percentes` | One run → report pair; exit 0/2/1 | AC7 | | via reproduce.sh |
-| `cmd/percentes-campaign` | N-run campaign → campaign report pair; routes `fault.variant` to its injector (mock admin / clean-delete kubectl / node-partition) | §5/§7/§10 | | via campaign-e2e.sh |
+| `cmd/percentes-campaign` | N-run campaign → campaign report pair; routes `fault.variant` to its injector (mock admin / clean-delete kubectl; black-hole refused pending the Phase-1 NodeOps wiring) | §5/§7/§10 | | via campaign-e2e.sh |
 
 Deploy/test scaffolding: `deploy/kind/` (cluster config with pinned node
 image + NodePort mapping; `smoke.sh`, `reproduce.sh` = AC7,
 `campaign-e2e.sh`), `deploy/mock/` (2-replica mock Deployment, no
-liveness probe by design), `deploy/phase1/` (vLLM manifests +
-bring-up notes), `configs/` (all runnable configs; one file drives both
+liveness probe by design), `deploy/phase1/` (vLLM topology manifest with
+PIN-AT-PHASE1 pre-registration placeholders; deliberately not deployable as-is), `configs/` (all runnable configs; one file drives both
 cluster ConfigMap and host runner), `internal/ac/` (the §8 acceptance
 suite; mock runs as a separate process per §6 placement pinning).
 
@@ -190,7 +190,7 @@ Campaign report (`campaign.json`): `campaign.per_run[*]` from
 | Injection timing (AC3) | ±500 ms | `run.validity` via orchestrator records |
 | G1–G6 (§10) | per SPEC | `validity.Evaluate` per campaign run; unobserved-but-applicable ⇒ FAIL |
 
-Notable consequence you will see in every local report, but from two
+One consequence shows up in every local report, though from two
 different gates depending on which binary you run. A single `percentes`
 run is judged by `run.validity` (client-validity gate + share gate +
 injection timing only — it does not evaluate G1–G6), so on macOS it
@@ -210,7 +210,7 @@ uncertified gate never silently passes — that is deliberate.
 | `silent_hang` | no bytes, no FIN, no RST, ever (hijacked conns); captured requests stay hung past expiry | censored at exactly 30 s, in KM as censorings, "p_90 > 30s" (AC4b) |
 | `slow_reload` | 503 for a duration after process start | replica-ready probe boundary; recovery decomposition |
 
-## 8. How to unravel or change things safely
+## 8. How to change things safely
 
 - **Change a pinned number**: it lives in `internal/config/config.go`
   constants + `validate.go` + both reference YAMLs + a mutation test.
@@ -223,8 +223,9 @@ uncertified gate never silently passes — that is deliberate.
   (see the raw-TCP silent-hang test as the exemplar).
 - **Swap the target for real vLLM**: nothing in loadgen/collect/detect
   changes; supply Phase 1 pins in the config, and the fault variant
-  selects its injector (`run.Options.Injector`, wired in percentes-campaign —
-  the run engine stays agnostic beyond timestamps, §2). Provide
+  selects its injector (`run.Options.Injector`, wired in percentes-campaign;
+  clean delete today, black-hole refused pending Phase-1 NodeOps — the
+  run engine stays agnostic beyond timestamps, §2). Provide
   `validity.Observations` (packet capture, staleness, fingerprints).
 - **Reproduce anything**: `make test` is the whole gate; each stage also
   runs alone (`test-unit`, `test-ac`, `kind-smoke`, `reproduce`,

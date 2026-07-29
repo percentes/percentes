@@ -1,5 +1,6 @@
-# Percentes Phase 0 harness. `make test` is the single AC-suite entry
-# point: unit + integration tests, then the kind cluster smoke suite.
+# Percentes Phase 0 harness. `make test` is the single gate: unit tests,
+# the SPEC.md §8 AC suite, the kind smoke suite, the AC7 reproduce, and
+# the campaign e2e.
 GO      ?= go
 KIND    ?= $(shell command -v kind 2>/dev/null || echo $(HOME)/go/bin/kind)
 CLUSTER ?= percentes
@@ -30,7 +31,8 @@ test-ac:
 	$(GO) test ./internal/ac/ -count=1 -timeout 45m
 
 # The full gate: unit tests, the SPEC.md §8 AC suite, the in-cluster
-# smoke suite, then the AC7 one-command reproduce, all against kind.
+# smoke suite, the AC7 one-command reproduce, and the campaign e2e,
+# all against kind.
 test: test-unit test-ac kind-smoke reproduce campaign-e2e
 
 # AC7: one-command reproduce from a clean checkout against kind.

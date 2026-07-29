@@ -5,7 +5,7 @@
 # suite cannot cover: the campaign engine driving real runs on a real
 # cluster. Expected exit is 2 (runs are honestly invalid pre-hardware:
 # G5 has no GPU fingerprint, and on darwin the client CPU gate is
-# unmeasured); the reproduction PASSES on report completeness, gates
+# unmeasured); the reproduction PASSES on report completeness; gates
 # doing their job is correct behavior.
 set -euo pipefail
 

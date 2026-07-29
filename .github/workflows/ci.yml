@@ -36,5 +36,5 @@ jobs:
         with:
           cluster_name: percentes
           config: deploy/kind/kind-config.yaml
-      - name: AC suite (unit + kind smoke)
+      - name: Full gate (unit, AC suite, kind smoke, reproduce, campaign e2e)
         run: make test
