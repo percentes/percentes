@@ -25,19 +25,11 @@ func (g *gen) execute(r *Request) {
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 
-	body := fmt.Sprintf(
-		`{"model":"percentes-mock","messages":[{"role":"user","content":"cs-%d-%d %s"}],"stream":true,"max_tokens":%d,"ignore_eos":true}`,
-		g.cfg.Run.Seed, r.Index, g.filler, g.cfg.Load.MaxTokens)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.cfg.Target.BaseURL+"/v1/chat/completions", bytes.NewReader([]byte(body)))
+	req, err := g.newRequest(ctx, g.requestBody(r))
 	if err != nil {
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrConnect, g.now()
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	// POSTs are not replayable by net/http (non-idempotent, no idempotency
-	// key), so the transport never silently retries; belt-and-braces:
-	req.GetBody = nil
 
 	resp, err := g.client.Do(req)
 	if err != nil {
@@ -77,6 +69,37 @@ func (g *gen) execute(r *Request) {
 			return
 		}
 	}
+}
+
+// requestBody builds the OpenAI-compatible chat-completion request.
+// ignore_eos is a vLLM extension forcing the full max_tokens output
+// budget (§6); hosted endpoints reject or ignore it, so a hosted target
+// omits it and accepts natural stops.
+func (g *gen) requestBody(r *Request) string {
+	body := fmt.Sprintf(
+		`{"model":%q,"messages":[{"role":"user","content":"cs-%d-%d %s"}],"stream":true,"max_tokens":%d`,
+		g.model, g.cfg.Run.Seed, r.Index, g.filler, g.cfg.Load.MaxTokens)
+	if !g.cfg.Target.Hosted {
+		body += `,"ignore_eos":true`
+	}
+	return body + "}"
+}
+
+// newRequest attaches the fixed headers. The bearer token is added only
+// when resolved (hosted targets); it exists nowhere but this header.
+func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.cfg.Target.BaseURL+"/v1/chat/completions", bytes.NewReader([]byte(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.apiKey)
+	}
+	// POSTs are not replayable by net/http (non-idempotent, no idempotency
+	// key), so the transport never silently retries; belt-and-braces:
+	req.GetBody = nil
+	return req, nil
 }
 
 func (g *gen) classifyTransportErr(r *Request, err error) {

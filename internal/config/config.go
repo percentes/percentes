@@ -235,6 +235,18 @@ type ShareGate struct {
 type Target struct {
 	BaseURL  string `yaml:"base_url" json:"base_url"`
 	Replicas int    `yaml:"replicas" json:"replicas"`
+	// ModelName is the model requested from the target. Empty selects the
+	// mock's fixed model; real deployments (self-hosted vLLM or hosted
+	// endpoints) set it and it is recorded as a §6 pin in the report.
+	ModelName string `yaml:"model_name" json:"model_name"`
+	// Hosted marks a managed OpenAI-compatible endpoint: the request body
+	// omits vLLM-only extensions (ignore_eos) and a bearer token is
+	// required via APIKeyEnv.
+	Hosted bool `yaml:"hosted" json:"hosted"`
+	// APIKeyEnv names the environment variable holding the bearer token.
+	// Only the variable NAME is configuration — configs stay publishable;
+	// the value is resolved at run start and never recorded.
+	APIKeyEnv string `yaml:"api_key_env" json:"api_key_env"`
 }
 
 // Fault is the orchestrator plan (§1, §2). Timestamps for armed/fire/expiry
@@ -380,7 +392,7 @@ type Mock struct {
 	FaultSchedule []MockFault `yaml:"fault_schedule" json:"fault_schedule"`
 }
 
-// Distribution is the latency-distribution kind for a LatencyDist (§2 AC1).
+// Distribution is the latency-distribution kind for a LatencyDist (§8 AC1).
 // Only distributions with closed-form analytic quantiles are admitted, so
 // the harness can be validated against a known injected latency.
 type Distribution string

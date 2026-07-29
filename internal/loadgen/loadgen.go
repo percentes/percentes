@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -86,7 +87,7 @@ type Result struct {
 	BaselineEndNs int64 `json:"baseline_end_ns"`
 	FaultEndNs    int64 `json:"fault_end_ns"`
 	RunEndNs      int64 `json:"run_end_ns"`
-	// TInjectNs is the planned fault offset in run time (warmup + §
+	// TInjectNs is the planned fault offset in run time (warmup +
 	// fault.t_inject_offset_s).
 	TInjectNs int64 `json:"t_inject_ns"`
 }
@@ -96,6 +97,11 @@ type gen struct {
 	client *http.Client
 	epoch  time.Time
 	filler string
+	// model and apiKey are resolved once at Run start: the requested
+	// model name (mock default when unset) and the bearer token from
+	// cfg.Target.APIKeyEnv ("" = send no Authorization header).
+	model  string
+	apiKey string
 }
 
 // now returns nanoseconds since the run epoch (monotonic).
@@ -129,10 +135,24 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  true,
 	}
+	model := cfg.Target.ModelName
+	if model == "" {
+		model = "percentes-mock"
+	}
+	var apiKey string
+	if cfg.Target.APIKeyEnv != "" {
+		apiKey = os.Getenv(cfg.Target.APIKeyEnv)
+		if apiKey == "" && cfg.Target.Hosted {
+			// Fail before the first dispatch, not 30 s into a run of 401s.
+			return nil, fmt.Errorf("loadgen: hosted target: environment variable %s is empty", cfg.Target.APIKeyEnv)
+		}
+	}
 	g := &gen{
 		cfg:    cfg,
 		client: &http.Client{Transport: transport},
 		filler: buildFiller(cfg.Load.InputLengthTokens),
+		model:  model,
+		apiKey: apiKey,
 	}
 
 	p := cfg.Run.Phases

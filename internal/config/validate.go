@@ -166,6 +166,14 @@ func (c *Config) validateTarget(v *validator) {
 	} else if c.Target.Replicas < 1 {
 		v.errf("target.replicas: must be >= 1, got %d", c.Target.Replicas)
 	}
+	if c.Target.Hosted {
+		if c.Target.ModelName == "" {
+			v.errf("target.model_name: required for a hosted target")
+		}
+		if c.Target.APIKeyEnv == "" {
+			v.errf("target.api_key_env: required for a hosted target (name of the env var holding the bearer token; never the token itself)")
+		}
+	}
 }
 
 func (c *Config) validateFault(v *validator) {
