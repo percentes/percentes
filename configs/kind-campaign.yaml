@@ -24,7 +24,9 @@ load:
   max_tokens: 256
   ignore_eos: true
   unique_prefixes: true
-  connections: 8
+  # 32 rather than the 4x-replicas floor: kube-proxy routes per connection,
+  # so 8 quantizes per-replica share too coarsely for the §1 band.
+  connections: 32
 
 client:
   http_timeout_s: 30
