@@ -86,7 +86,10 @@ for i, g in enumerate(gates):
     ids = {x["id"]: x for x in g["gates"]}
     assert set(ids) == {"G1","G2","G3","G4","G5","G6"}, f"run {i}: gate set incomplete"
     assert ids["G5"]["pass"] is False and ids["G5"]["observed"] is False, "G5 must fail-unobserved without GPU fingerprints"
-    assert ids["G1"]["pass"] is True, f"run {i}: share gate should pass on the 2-replica deployment: {ids['G1']}"
+    # kind runs kube-proxy iptables, a per-connection dataplane, so §1 makes
+    # the share descriptive here: assert it was measured, print the value.
+    assert ids["G1"]["applicable"] and ids["G1"]["observed"], f"run {i}: share must be measured: {ids['G1']}"
+    print(f"   run {i} share: {ids['G1']['detail']}")
 per = camp["per_run"]
 assert all(r["in_flight_loss_fraction"] is not None for r in per), "victim-scoped loss must be present per run"
 print(f"   campaign ok: {camp['valid_runs']}/2 fully-valid runs (expected 0 pre-hardware), "

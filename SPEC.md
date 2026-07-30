@@ -20,10 +20,11 @@ Replica loss is the dominant availability event for hosted LLM inference; this s
 
 **Topology:** 2 GPU worker nodes, one vLLM replica each, behind one Kubernetes Service. One 8B-class dense model. Steady-state load calibrated so each replica sits inside a measured 60 to 70 percent utilization band; loss of one replica then pushes the survivor past capacity, which is the condition under study.
 
-**Load-balancing validity gate (mandatory, run-failing):**
-- Document the CNI and dataplane mode (kube-proxy iptables or ipvs, or an eBPF dataplane such as Cilium, which can load-balance per request rather than per connection; the analysis must state which regime the cluster is in).
-- The client maintains N independent HTTP/1.1 connections (N at least 4 times the replica count), reconnect-on-error, no request retries.
-- Pre-fault assertion, from server-side request counters: each replica received 45 to 55 percent of requests over the baseline window. Outside the band, the run is invalid.
+**Load-balancing validity gate (regime-conditional, run-failing where enforced):**
+- Document the CNI and dataplane mode. Two regimes, and the gate differs between them: an eBPF dataplane such as Cilium distributes individual requests across endpoints (**per-request**), while kube-proxy in iptables or ipvs mode binds a connection to one endpoint for its lifetime (**per-connection**). The recorded `dataplane_mode` pin selects the regime; the analysis states which.
+- The client does not cap connection count: pool capacity is provisioned above lambda times the pinned timeout so dispatch is never throttled by connection availability. Concurrency demand therefore sets the number of open connections. Reconnect-on-error, no request retries.
+- Pre-fault assertion, from server-side request counters: each replica received 45 to 55 percent of requests over the baseline window. **Under per-request balancing this is run-failing.** Under per-connection routing the share is a binomial draw over the open-connection count — at the concurrency this protocol produces its standard deviation exceeds the band's half-width, so the share is recorded and reported but does **not** invalidate the run; a run whose balancing claim matters is executed on a per-request dataplane. Traffic reaching fewer replicas than the topology declares is run-failing in either regime.
+- Phase 1 deploys a per-request (eBPF) dataplane so the band is enforced on every characterization run.
 - Record which pod is killed and its share at T_inject.
 
 **Fault variants:**
@@ -141,7 +142,9 @@ Language: Go or Rust for the load generator; the choice is documented with ratio
 
 Swap the mock for vLLM, two replicas across two GPU nodes, same model and output budget. Calibrate lambda to the 60-70 percent utilization band. Run both variants, N=5 each. Runs are short and deliberately inexpensive to reproduce.
 
-**Run-validity gates, all run-failing:** G1 per-replica share 45-55 percent pre-fault; G2 client-validity gate clean; G3 (black-hole only) zero RSTs from the dead replica in the capture; G4 (black-hole only) observed endpoint-staleness window at least 20 s; G5 GPU clock and power fingerprints equal across replicas and runs; G6 baseline goodput near 100 percent.
+Deploy a per-request (eBPF) dataplane, per §1, so the share gate is enforced rather than descriptive.
+
+**Run-validity gates, all run-failing:** G1 per-replica share 45-55 percent pre-fault (enforced under per-request balancing; descriptive under per-connection routing, §1); G2 client-validity gate clean; G3 (black-hole only) zero RSTs from the dead replica in the capture; G4 (black-hole only) observed endpoint-staleness window at least 20 s; G5 GPU clock and power fingerprints equal across replicas and runs; G6 baseline goodput near 100 percent.
 
 **Proxy validation, honestly framed:** pre-register the equivalence quantities (in-flight loss fraction, TTR, survivor p95) and a tolerance; collect real spot-preemption events opportunistically (running on spot makes them free) and report their distribution against the two injected variants as a third regime. A single real event confirms the code path, nothing more, and the report says so.
 

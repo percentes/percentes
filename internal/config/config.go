@@ -327,6 +327,22 @@ type GPUPins struct {
 	ClockPowerPolicy string `yaml:"clock_power_policy" json:"clock_power_policy"`
 }
 
+// DataplanesBalancingPerRequest are the recorded dataplane modes that
+// distribute individual requests across endpoints. Modes outside this set
+// bind a connection to one endpoint for its lifetime, which makes the §1
+// per-replica share a binomial draw over the connection count rather than
+// a property of the target.
+var DataplanesBalancingPerRequest = map[string]bool{
+	"ebpf-cilium": true,
+}
+
+// BalancesPerRequest reports whether the recorded dataplane distributes
+// per request. An unrecognised or empty mode is treated as per-connection,
+// so the §1 band is enforced only where the topology can satisfy it.
+func BalancesPerRequest(dataplaneMode string) bool {
+	return DataplanesBalancingPerRequest[dataplaneMode]
+}
+
 type KubernetesPins struct {
 	Version       string `yaml:"version" json:"version"`
 	CNI           string `yaml:"cni" json:"cni"`

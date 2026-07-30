@@ -45,11 +45,15 @@ type Options struct {
 // header recorded on every response); Phase 1 must additionally read the
 // server-side Prometheus counters.
 type ShareGateResult struct {
-	Applicable          bool               `json:"applicable"`
-	Shares              map[string]float64 `json:"shares,omitempty"`
-	VictimShareAtInject float64            `json:"victim_share_at_inject,omitempty"`
-	Pass                bool               `json:"pass"`
-	Note                string             `json:"note,omitempty"`
+	Applicable bool               `json:"applicable"`
+	Shares     map[string]float64 `json:"shares,omitempty"`
+	// BandEnforced is false when the dataplane routes per connection: the
+	// share is then a binomial draw over the connection count, not a
+	// property of the target, so it is reported without gating the run.
+	BandEnforced        bool    `json:"band_enforced"`
+	VictimShareAtInject float64 `json:"victim_share_at_inject,omitempty"`
+	Pass                bool    `json:"pass"`
+	Note                string  `json:"note,omitempty"`
 }
 
 // Artifacts is everything one run produces.
@@ -240,12 +244,21 @@ func shareGate(cfg *config.Config, res *loadgen.Result, fireNs int64, victim str
 		return out
 	}
 	out.Pass = true
+	out.BandEnforced = config.BalancesPerRequest(cfg.Pins.Kubernetes.DataplaneMode)
+	outOfBand := false
 	for rep, c := range counts {
 		share := float64(c) / float64(total)
 		out.Shares[rep] = share
 		if share < float64(cfg.ShareGate.MinPct)/100 || share > float64(cfg.ShareGate.MaxPct)/100 {
-			out.Pass = false
+			outOfBand = true
 		}
+	}
+	if outOfBand && out.BandEnforced {
+		out.Pass = false
+	}
+	if !out.BandEnforced {
+		out.Note = fmt.Sprintf("dataplane %q routes per connection: share is descriptive, band %d-%d%% not enforced (§1)",
+			cfg.Pins.Kubernetes.DataplaneMode, cfg.ShareGate.MinPct, cfg.ShareGate.MaxPct)
 	}
 	if len(counts) != cfg.Target.Replicas {
 		out.Pass = false

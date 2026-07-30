@@ -111,7 +111,12 @@ func gateG1(art *run.Artifacts) Gate {
 	}
 	g.Observed = true
 	g.Pass = sg.Pass
-	g.Detail = fmt.Sprintf("shares=%v (band %d-%d%%)", sg.Shares, art.Config.ShareGate.MinPct, art.Config.ShareGate.MaxPct)
+	band := fmt.Sprintf("band %d-%d%%", art.Config.ShareGate.MinPct, art.Config.ShareGate.MaxPct)
+	if !sg.BandEnforced {
+		g.Name = "per-replica share pre-fault (descriptive: per-connection dataplane)"
+		band += ", descriptive"
+	}
+	g.Detail = fmt.Sprintf("shares=%v (%s)", sg.Shares, band)
 	return g
 }
 
