@@ -1,14 +1,27 @@
-# v0.1.1 Harness Spec — Replica-Loss Resilience Characterization for Kubernetes LLM Inference
+# v0.2 Harness Spec — Replica-Loss Resilience Characterization for Kubernetes LLM Inference
 ### Project: Percentes. This document is the authoritative specification for the Percentes harness.
-### Status: build-ready. Supersedes v0.1.
+### Status: Phase 0 implemented and certified against the mock inference server. Phase 1 (real GPU) pending hardware. Changes since first publication: §0 amendment log.
 
-## 0. What changed in v0.1.1 and why
+## 0. Scope and amendment log
 
-v0.1.1 changes, folded into the sections below: the censoring model is built around completed-only distributions, first-class failure rates, and Kaplan-Meier completion curves; the black-hole fault is specified as one implementable mechanism — a pre-armed full-node network partition — with runtime assertions proving it produced staleness and silent drops; and every gate, tolerance, and detector parameter carries a pre-registered number.
+This document specifies one experiment and the instrument that runs it. Every gate, tolerance, and detector parameter below carries a pre-registered number, fixed before data collection; a configuration that weakens one does not load.
 
-Further changes: the TTR decomposition gets a measurability table and a two-probe split (replica-ready vs traffic-restored); the load-balancing gate covers eBPF dataplanes and asserts per-replica request share; config pins extend to client timeout, retries, chunked prefill, scheduler limits, and CUDA-graph settings; the statistics make no MDE claim for the single-stack study; real spot preemption is treated as a third regime rather than claimed as bracketed; and all Triton claims in the deferred v0.2 section are downgraded to unverified-pending-version-pin.
+The commitments that shape the rest of the specification: the outcome model is built around completed-only latency distributions, first-class failure rates, and competing-risks completion-incidence curves, so every scheduled request is accounted for, including the ones that fail and the ones that never finish. The black-hole fault is specified as one implementable mechanism, a pre-armed full-node network partition, with runtime assertions proving it produced both endpoint staleness and silent packet drops. Time-to-recovery is decomposed only into boundaries that are actually measurable, with a two-probe split separating replica-readiness from traffic restoration. The load-balancing gate is conditional on the dataplane's routing regime (§1). The statistics make no minimum-detectable-effect claim for a single-stack study.
 
-Framing note: the first publication is a resilience characterization of vLLM under replica loss, published under the Percentes benchmark project. The word benchmark earns itself at v0.2 when a second stack arrives.
+### Versions
+
+- **v0.1** (2026-07-28): first public version. One normative change predates the amendment log and is recorded here: on 2026-07-30, pre-data, the §1 load-balancing share band was made regime-conditional (run-failing under per-request dataplanes, recorded rather than asserted under per-connection routing), and the §1 client-connection bullet was corrected from a fixed count of dedicated connections to the demand-driven pool the client implements. Early commits label this version "v0.1.1". The labels were simplified on 2026-08-15; earlier text also used "v0.2" provisionally for the deferred cross-stack study, which is now unnumbered (§11).
+- **v0.2** (2026-08-15, this version): amendment A1 below, the estimator correction.
+
+The full change history of this file is its git log.
+
+### Amendment log
+
+Amendments are dated, numbered, and adopted before any data they could affect is collected. The sections below are the amended text.
+
+- **A1 (2026-08-15, pre-data: estimator corrected from Kaplan-Meier to Aalen-Johansen).** v0.1 §3 treated errored requests as censored observations in a Kaplan-Meier completion curve. That is a competing-risks error: Kaplan-Meier's censoring assumption is that a censored subject could still experience the event, and an errored request can never complete, so errors-as-censored biases the completion estimate upward (in a window of 50 errors at 0.5 s and 50 completions at 1 s, the v0.1 estimator reports completion probability 1.0 by 1 s; the fraction of scheduled requests that completed is 0.5). §3 now specifies the Aalen-Johansen cumulative-incidence estimator: completions are the event of interest, errors are competing terminal events, and only requests with no terminal event by the pinned timeout (or run end) are censored. Timeout censoring is unchanged, and with no errors in a window the estimator reduces exactly to one minus the Kaplan-Meier survival function. Changed by this amendment: §0 commitments, §2 report generator, §3 curve definition and conditional-percentile rule, AC4b/AC6 wording, the §9 build-order note, the appendix headline template, and the report JSON schema (schema_version 2: `km_curve` is now `completion_incidence`). Identified in external adversarial review of v0.1; adopted before any provider data collection.
+
+Framing note: the first publication is a resilience characterization of vLLM under replica loss, published under the Percentes benchmark project. The word benchmark earns itself when a second stack arrives (the deferred cross-stack comparison, §11).
 
 Standing caveat: the acceptance criteria certify the instrument against a mock, not any claim about real GPU behavior. Small N on rented hardware, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are scoped in the claims and named in the report.
 
@@ -50,7 +63,7 @@ Replica loss is the dominant availability event for hosted LLM inference; this s
 
 **Recovery detector.** Hysteresis-based, two baselines, decomposed. Section 5.
 
-**Report generator.** Full metric set as JSON plus human-readable report from one config, including KM curves and the conditional headline (appendix). Distributional metrics come from merged HdrHistograms queried once, never averaged percentiles.
+**Report generator.** Full metric set as JSON plus human-readable report from one config, including completion-incidence curves and the conditional headline (appendix). Distributional metrics come from merged HdrHistograms queried once, never averaged percentiles.
 
 **Local-first.** Everything runs in Phase 0 on kind or k3s with a mock inference server speaking the same SSE API, with configurable TTFT and per-token latency and fault modes: stall, error, stream-abort, slow-reload-on-reschedule, and silent-hang (no RST). Zero GPU until Phase 1.
 
@@ -64,8 +77,8 @@ Every scheduled request is a sample and ends in exactly one state:
 Reporting per window:
 - **Completed-only distributions:** TTFT and end-to-end percentiles from merged HdrHistograms over completed requests, always labeled "conditional on completion."
 - **Failure rates as first-class headline metrics:** error rate and censored rate per window, alongside in-flight loss accounting (requests active on the killed replica at T_inject, classified by outcome).
-- **Kaplan-Meier completion curves** over ALL scheduled requests in the window: completions are events at their latency; errored and censored requests are censored observations at their observed times. Report the curve for baseline, fault, and recovery windows. A KM quantile q is reported only where the curve actually crosses q within the timeout horizon; otherwise report "p_q greater than 30 s."
-- **Conditional-percentile rule:** any window with error-plus-censored fraction above 5 percent must present the KM curve alongside any completed-only percentiles, with the caveat explicit.
+- **Aalen-Johansen completion-incidence curves** (amendment A1) over ALL scheduled requests in the window: the curve is the cumulative incidence of completion, the estimated probability that a scheduled request has completed by time t. Completions are the event of interest at their latency. Errors are **competing terminal events** at their failure times: they remove probability mass that can never become a completion, so they are never treated as censored (treating them as censored is the Kaplan-Meier competing-risks error that biases completion upward). Only requests with no terminal event by the pinned timeout or run end are censored observations, at their observed times, where the outcome remains unknown. With zero errors in a window the estimator reduces exactly to one minus the Kaplan-Meier survival function, so the timeout treatment is unchanged from v0.1. Report the curve for baseline, fault, and recovery windows. A quantile q is reported only where the curve actually crosses q within the timeout horizon; otherwise report "p_q greater than 30 s." In a window with errors the curve may plateau below 1.0 inside the horizon.
+- **Conditional-percentile rule:** any window with error-plus-censored fraction above 5 percent must present the completion-incidence curve alongside any completed-only percentiles, with the caveat explicit.
 
 Also normative: intended dispatch times fixed in advance; ITL as pooled per-window histograms (per-request p99 forbidden; per-request max named as such); one pinned HdrHistogram configuration across all runs and windows with highestTrackableValue at least the run timeout, enabling lossless merge; windows aligned to pre-fault, during-fault, post-fault, never straddling T_inject; throughput as completions per second per window; goodput as the fraction of a window's scheduled requests that complete within the §4 SLO, also reported as SLO-meeting completions per second; loss counts reported as a function of the pinned 30 s timeout.
 
@@ -104,7 +117,7 @@ A request meets SLO iff TTFT at most 1000 ms, end-to-end at most 14 s (1000 ms p
 
 - **Pre-registered primary endpoint:** TTR to single-replica equilibrium under the clean-delete variant. Everything else is secondary or exploratory and labeled so; Holm correction where several secondaries are formally compared.
 - Run-level scalars: report all five values, the median, the mean, and a t-interval (t=2.776, df=4). For plausibly heavy-tailed scalars (the TTRs), the median and the min-max range lead; the t-interval is reported with a normality caveat rather than as the headline. Bootstrap at N=5 is forbidden.
-- No MDE claim is made for the single-stack study; there is no comparison to power. The v0.1.1 run-to-run coefficient of variation becomes the measured noise floor that v0.2's comparison design and its pre-registered two-sample MDE will be built on.
+- No MDE claim is made for the single-stack study; there is no comparison to power. The single-stack run-to-run coefficient of variation becomes the measured noise floor that the cross-stack comparison design (§11) and its pre-registered two-sample MDE will be built on.
 - Tail policy: p95 and p99 with order-statistic confidence intervals where the completed-sample budget permits; p99.9 and max are descriptive-only unless a long steady-state run is explicitly sized for them with a binomial validity gate. No estimated quantiles from short fault windows.
 
 ## 8. Acceptance criteria (Phase 0, against the mock; numbers pinned)
@@ -118,9 +131,9 @@ Reference conditions for the AC suite: lambda=20 rps, stall duration D=10 s wher
 - **AC2d client validity:** under injected client CPU pressure (stress on 80 percent of cores), the gate fires on the pinned thresholds rather than silently degrading.
 - **AC3 injection timing:** fault fires within plus-minus 500 ms of T_inject; armed/fire/expiry timestamps recorded.
 - **AC4 loss accounting:** in-flight requests on a killed mock replica are classified (errored) and appear in the failure rates, absent from latency histograms.
-- **AC4b censoring accounting:** in silent-hang mode, affected requests are censored at exactly the 30 s pinned timeout, appear in the censored rate and the KM curve, and are absent from latency histograms.
+- **AC4b censoring accounting:** in silent-hang mode, affected requests are censored at exactly the 30 s pinned timeout, appear in the censored rate and as censored observations in the completion-incidence curve, and are absent from latency histograms.
 - **AC5 recovery detection:** scripted mock recovery yields TTR within plus-minus R of the script; both baselines reported distinctly; hysteresis prevents oscillation-induced early recovery in a scripted flapping scenario; non-recovery past the 600 s timeout reported as such.
-- **AC6 reporting:** JSON plus human-readable report from one config, including KM curves, failure rates, the sensitivity table, and the conditional headline.
+- **AC6 reporting:** JSON plus human-readable report from one config, including completion-incidence curves, failure rates, the sensitivity table, and the conditional headline.
 - **AC7 harness reproducibility:** one-command reproduce from a clean checkout against the local cluster.
 
 Caveat, printed in the AC output itself: passing AC1 through AC7 certifies the instrument, not any real-GPU claim.
@@ -131,7 +144,7 @@ Caveat, printed in the AC output itself: passing AC1 through AC7 certifies the i
 2. Mock inference server with all fault modes including silent-hang and slow-reload.
 3. Load generator. Gated on AC1, AC2, AC2b, AC2c, AC2d. The scheduling, re-basing, and recording design requires independent human review before merge.
 4. Chaos orchestrator with pre-armed expiry semantics. AC3.
-5. Metrics collector with the three-state outcome model and KM estimator. AC4, AC4b. The censoring implementation requires independent human review before merge.
+5. Metrics collector with the three-state outcome model and Aalen-Johansen incidence estimator (amendment A1). AC4, AC4b. The censoring implementation requires independent human review before merge.
 6. Recovery detector with hysteresis, two baselines, decomposition scaffolding. AC5. Independent human review before merge.
 7. Report generator. AC6.
 8. End-to-end one-command run. AC7.
@@ -148,10 +161,10 @@ Deploy a per-request (eBPF) dataplane, per §1, so the share gate is enforced ra
 
 **Proxy validation, honestly framed:** pre-register the equivalence quantities (in-flight loss fraction, TTR, survivor p95) and a tolerance; collect real spot-preemption events opportunistically (running on spot makes them free) and report their distribution against the two injected variants as a third regime. A single real event confirms the code path, nothing more, and the report says so.
 
-## 11. v0.2 (deferred cross-stack comparison)
+## 11. Deferred cross-stack comparison (a future major revision)
 
-The v0.2 study compares vLLM against a second serving stack (Triton) on the same harness, gates, and pre-registered protocol. All Triton capability claims (backend behavior, native TTFT/ITL exposure, dynamic-batcher status, streaming order) are UNVERIFIED pending a pinned Triton version; recent Triton releases may expose latency metrics, so nothing in the v0.2 protocol may be asserted from this document — every capability claim is re-verified against the pinned versions at build time. The v0.2 comparison additionally requires the measured noise floor from v0.1.1 and a pre-registered two-sample MDE before any winner language.
+The cross-stack study compares vLLM against a second serving stack (Triton) on the same harness, gates, and pre-registered protocol. All Triton capability claims (backend behavior, native TTFT/ITL exposure, dynamic-batcher status, streaming order) are UNVERIFIED pending a pinned Triton version; recent Triton releases may expose latency metrics, so nothing in the cross-stack protocol may be asserted from this document; every capability claim is re-verified against the pinned versions at build time. The comparison additionally requires the measured noise floor from the single-stack study and a pre-registered two-sample MDE before any winner language.
 
 ## Appendix: conditional headline template (censoring-aware)
 
-"Under abrupt loss of one vLLM replica at [measured] percent utilization, [A] percent of in-flight requests failed immediately (clean deletion) versus [B] percent failing and [C] percent timing out at 30 s (black-hole node loss); survivor TTFT (conditional on completion) degraded from [baseline] to [peak], with completion probability within 1 s falling to [KM figure]; recovery to single-replica equilibrium took [T_eq] (median of 5 runs, range [lo]-[hi]), decomposed as [measured segments], with [dominant segment] dominating. Methodology, raw per-run data, and the reproducible harness: [link]."
+"Under abrupt loss of one vLLM replica at [measured] percent utilization, [A] percent of in-flight requests failed immediately (clean deletion) versus [B] percent failing and [C] percent timing out at 30 s (black-hole node loss); survivor TTFT (conditional on completion) degraded from [baseline] to [peak], with the cumulative incidence of completion within 1 s falling to [Aalen-Johansen figure]; recovery to single-replica equilibrium took [T_eq] (median of 5 runs, range [lo]-[hi]), decomposed as [measured segments], with [dominant segment] dominating. Methodology, raw per-run data, and the reproducible harness: [link]."

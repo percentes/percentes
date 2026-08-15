@@ -191,8 +191,9 @@ func TestFaultStreamAbortAfterTokens(t *testing.T) {
 }
 
 // TestFaultSilentHang (config-scripted) is the AC4b fault source: affected
-// requests receive no bytes, no FIN, and no RST — ever. The client's
-// pinned 30 s timeout is the only terminal event (censoring, §3).
+// requests receive no bytes, no FIN, and no RST — ever. No terminal event
+// arrives; the client's pinned 30 s timeout is where censoring is
+// recorded (§3).
 func TestFaultSilentHang(t *testing.T) {
 	cfg := baseMockCfg()
 	cfg.TTFT = fixed(10)

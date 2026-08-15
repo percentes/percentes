@@ -1,6 +1,6 @@
 // Package report generates the full metric set as JSON plus a
-// human-readable report from one config (SPEC.md §2): KM curves, failure
-// rates, conditional-on-completion distributions, the recovery analysis
+// human-readable report from one config (SPEC.md §2): completion-incidence
+// curves, failure rates, conditional-on-completion distributions, the recovery analysis
 // with its sensitivity table, the decomposition, gates, and the
 // conditional headline (appendix template). Distributional numbers come
 // from the merged histograms queried once — never averaged percentiles.
@@ -39,7 +39,7 @@ func Generate(art *run.Artifacts) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("report: marshal config: %w", err)
 	}
 	rep := &Report{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		ConfigSHA256:  fmt.Sprintf("%x", sha256.Sum256(cfgRaw)),
 		Caveat:        Caveat,
 		Headline:      headline(art),
@@ -75,7 +75,7 @@ func headline(art *run.Artifacts) string {
 		pctErr = 100 * float64(errored) / float64(pop)
 		pctCens = 100 * float64(censored) / float64(pop)
 	}
-	km1s := fault.KM.CompletionAt(1_000_000)
+	cif1s := fault.Incidence.IncidenceAt(1_000_000)
 	ttr := "not recovered within the fault-window timeout"
 	if art.Detector.EquilibriumEstimable {
 		if t := art.Detector.ToEquilibrium.TTRSeconds; t != nil {
@@ -87,12 +87,12 @@ func headline(art *run.Artifacts) string {
 	return fmt.Sprintf(
 		"Under %s fault injection (mock variant, Phase 0 instrument certification): %.1f%% of in-flight requests failed and %.1f%% timed out at 30 s (%d %s); "+
 			"survivor TTFT (conditional on completion) moved from p50 %.0f ms (baseline) to p50 %.0f ms (fault window); "+
-			"completion probability within 1 s in the fault window was %.3f (KM); "+
+			"cumulative incidence of completion within 1 s in the fault window was %.3f (Aalen-Johansen); "+
 			"recovery to single-replica equilibrium: %s; goodput deficit %.1f goodput-seconds vs pre-fault; "+
 			"decomposed segments: %s. Single run against the mock; no real-GPU claim.",
 		art.Config.Fault.Variant, pctErr, pctCens, pop, popLabel,
 		float64(base.TTFTConditional.P50Us)/1000, float64(fault.TTFTConditional.P50Us)/1000,
-		km1s, ttr, art.Detector.DeficitToPreFault, measuredSegments(art))
+		cif1s, ttr, art.Detector.DeficitToPreFault, measuredSegments(art))
 }
 
 func measuredSegments(art *run.Artifacts) string {
@@ -176,9 +176,9 @@ func human(r *Report) string {
 			w("  TTFT<=%4dms & e2e<=%5dms: goodput %.4f", sp.TTFTMs, sp.E2EMs, sp.GoodputFrac)
 		}
 		if st.ConditionalCaveat {
-			w("CONDITIONAL CAVEAT: error+censored fraction exceeds 5%%; read the completed-only percentiles against the KM curve below (§3).")
+			w("CONDITIONAL CAVEAT: error+censored fraction exceeds 5%%; read the completed-only percentiles against the completion-incidence curve below (§3).")
 		}
-		w("%s", kmText(&st.KM))
+		w("%s", incidenceText(&st.Incidence))
 		w("")
 	}
 
@@ -265,21 +265,28 @@ func summary(s histo.Summary) string {
 		s.Count, float64(s.P50Us)/1000, float64(s.P95Us)/1000, float64(s.P99Us)/1000, float64(s.P999Us)/1000, float64(s.MaxUs)/1000)
 }
 
-func kmText(km *collect.KMCurve) string {
+func incidenceText(cif *collect.IncidenceCurve) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "KM completion curve (n=%d over ALL scheduled; horizon %.0fs):\n", km.N, float64(km.HorizonUs)/1e6)
+	fmt.Fprintf(&b, "Completion incidence, Aalen-Johansen (n=%d over ALL scheduled; errors compete, timeouts censored; horizon %.0fs):\n", cif.N, float64(cif.HorizonUs)/1e6)
 	for _, q := range []float64{0.5, 0.9, 0.95, 0.99} {
-		if t, ok := km.Quantile(q); ok {
+		if t, ok := cif.Quantile(q); ok {
 			fmt.Fprintf(&b, "  p%-4g completion at %.3fs\n", q*100, float64(t)/1e6)
 		} else {
-			fmt.Fprintf(&b, "  p%-4g > %.0fs (curve does not cross within the timeout horizon)\n", q*100, float64(km.HorizonUs)/1e6)
+			fmt.Fprintf(&b, "  p%-4g > %.0fs (curve does not cross within the timeout horizon)\n", q*100, float64(cif.HorizonUs)/1e6)
 		}
 	}
-	// A compact curve rendering: up to 12 evenly spaced points.
-	step := len(km.Points)/12 + 1
-	for i := 0; i < len(km.Points); i += step {
-		p := km.Points[i]
-		fmt.Fprintf(&b, "  t=%8.3fs completion=%.4f (at risk %d)\n", float64(p.TimeUs)/1e6, p.Completion, p.AtRisk)
+	// A compact curve rendering: up to 12 evenly spaced points, plus the
+	// last point always. The final incidence is where a window with errors
+	// settles below 1.0, so sampling must never drop it.
+	point := func(p collect.IncidencePoint) {
+		fmt.Fprintf(&b, "  t=%8.3fs incidence=%.4f (at risk %d)\n", float64(p.TimeUs)/1e6, p.Incidence, p.AtRisk)
+	}
+	step := len(cif.Points)/12 + 1
+	for i := 0; i < len(cif.Points); i += step {
+		point(cif.Points[i])
+	}
+	if n := len(cif.Points); n > 0 && (n-1)%step != 0 {
+		point(cif.Points[n-1])
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

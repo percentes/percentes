@@ -10,13 +10,15 @@
 //     completion. Errored and censored requests NEVER enter latency
 //     histograms.
 //   - Failure rates (error rate, censored rate) are first-class.
-//   - Kaplan-Meier completion curves over ALL scheduled requests.
+//   - Aalen-Johansen completion-incidence curves over ALL scheduled
+//     requests: errors are competing terminal events, only timeouts (and
+//     run-end) are censored (§3).
 //   - Windows are aligned to phases and never straddle T_inject; requests
 //     belong to the window of their INTENDED dispatch time (the schedule
 //     is the pre-registered object; a request scheduled pre-fault whose
 //     life crosses T_inject is pre-fault load).
 //   - Any window with error+censored fraction above 5% must present the
-//     KM curve alongside completed-only percentiles, caveat explicit.
+//     incidence curve alongside completed-only percentiles, caveat explicit.
 package collect
 
 import (
@@ -54,9 +56,9 @@ type Stats struct {
 	E2EConditional  histo.Summary `json:"e2e_conditional_on_completion"`
 	ITLPooled       histo.Summary `json:"itl_pooled"`
 
-	KM KMCurve `json:"km_curve"`
+	Incidence IncidenceCurve `json:"completion_incidence"`
 	// ConditionalCaveat: error+censored fraction exceeds 5%, so
-	// completed-only percentiles MUST be read against the KM curve (§3).
+	// completed-only percentiles MUST be read against the incidence curve (§3).
 	ConditionalCaveat bool `json:"conditional_caveat"`
 
 	ThroughputRPS float64 `json:"throughput_rps"` // completions per second
@@ -119,7 +121,7 @@ func Collect(cfg *config.Config, requests []loadgen.Request, w Window) (*Stats, 
 	st := &Stats{Window: w, ErrClasses: map[string]int{}}
 	ttft, e2e, itl := histo.New(cfg.Histogram), histo.New(cfg.Histogram), histo.New(cfg.Histogram)
 	horizonUs := int64(cfg.Client.HTTPTimeoutS) * 1_000_000
-	var kmObs []KMObservation
+	var curveObs []Obs
 	goodput := 0
 	sweepGood := make([]int, len(cfg.SLO.Sweep.TTFTMs)*len(cfg.SLO.Sweep.E2EMs))
 
@@ -147,7 +149,7 @@ func Collect(cfg *config.Config, requests []loadgen.Request, w Window) (*Stats, 
 					return nil, fmt.Errorf("collect: itl: %w", err)
 				}
 			}
-			kmObs = append(kmObs, KMObservation{TimeUs: r.E2ENs() / 1000, Completed: true})
+			curveObs = append(curveObs, Obs{TimeUs: r.E2ENs() / 1000, Kind: ObsCompletion})
 			if meetsSLO(cfg, r) {
 				goodput++
 			}
@@ -163,10 +165,10 @@ func Collect(cfg *config.Config, requests []loadgen.Request, w Window) (*Stats, 
 		case loadgen.OutcomeErrored:
 			st.Errored++
 			st.ErrClasses[r.ErrClass]++
-			kmObs = append(kmObs, KMObservation{TimeUs: obsUs, Completed: false})
+			curveObs = append(curveObs, Obs{TimeUs: obsUs, Kind: ObsError})
 		case loadgen.OutcomeCensored:
 			st.Censored++
-			kmObs = append(kmObs, KMObservation{TimeUs: obsUs, Completed: false})
+			curveObs = append(curveObs, Obs{TimeUs: obsUs, Kind: ObsCensored})
 		default:
 			return nil, fmt.Errorf("collect: request %d has no terminal outcome %q", r.Index, r.Outcome)
 		}
@@ -185,7 +187,7 @@ func Collect(cfg *config.Config, requests []loadgen.Request, w Window) (*Stats, 
 	st.TTFTConditional = ttft.Summarize()
 	st.E2EConditional = e2e.Summarize()
 	st.ITLPooled = itl.Summarize()
-	st.KM = EstimateKM(kmObs, horizonUs)
+	st.Incidence = EstimateIncidence(curveObs, horizonUs)
 	st.ConditionalCaveat = st.ErrorRate+st.CensoredRate > 0.05
 
 	for ti, tms := range cfg.SLO.Sweep.TTFTMs {

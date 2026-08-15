@@ -12,7 +12,7 @@ import (
 )
 
 // TestAC6Reporting: JSON plus human-readable report from one config,
-// including KM curves, failure rates, the sensitivity table, and the
+// including completion-incidence curves, failure rates, the sensitivity table, and the
 // conditional headline, with the instrument caveat in the output.
 func TestAC6Reporting(t *testing.T) {
 	if testing.Short() {
@@ -53,9 +53,9 @@ func TestAC6Reporting(t *testing.T) {
 		if !ok {
 			t.Fatalf("AC6: window %q missing", name)
 		}
-		km := wobj["km_curve"].(map[string]any)
-		if km["n"].(float64) == 0 {
-			t.Errorf("AC6: window %q KM curve is empty", name)
+		cif := wobj["completion_incidence"].(map[string]any)
+		if cif["n"].(float64) == 0 {
+			t.Errorf("AC6: window %q completion-incidence curve is empty", name)
 		}
 		if _, ok := wobj["error_rate"]; !ok {
 			t.Errorf("AC6: window %q missing failure rates", name)
@@ -88,7 +88,7 @@ func TestAC6Reporting(t *testing.T) {
 
 	// Human-readable artifact.
 	for _, want := range []string{
-		"KM completion curve",
+		"Completion incidence, Aalen-Johansen",
 		"Sensitivity table",
 		"conditional on completion",
 		"Conditional headline",

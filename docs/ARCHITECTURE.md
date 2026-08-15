@@ -28,11 +28,12 @@ decision you'll see:
   run. The generator never slows down because the system did — a stalled
   system must not be allowed to hide its own stall (coordinated
   omission, SPEC §2).
-- **Three-state outcomes** (§3): every scheduled request ends in exactly one
-  of completed / errored / censored. Only completions enter latency
-  histograms; failures are first-class rates; censored requests (no
-  terminal event by the pinned 30 s timeout) enter Kaplan-Meier curves,
-  never latency percentiles.
+- **Three-state outcomes** (§3, amendment A1): every scheduled request ends
+  in exactly one of completed / errored / censored. Only completions enter
+  latency histograms; failures are first-class rates; the completion curve
+  is the Aalen-Johansen cumulative incidence, in which errors compete and
+  only censored requests (no terminal event by the pinned 30 s timeout)
+  are censored observations — never latency percentiles.
 - **Pre-registered numbers**: every gate, tolerance, and detector
   parameter is pinned in SPEC.md, enforced at config-load time, and a
   config that weakens one refuses to load.
@@ -58,7 +59,7 @@ decision you'll see:
 Downstream, `collect.Collect` assigns the request to the window of its
 *intended* time (windows never straddle T_inject, §3), records completed
 latencies into the pinned HdrHistogram configuration via `recordValue()`
-only, adds every request to that window's KM curve, and accumulates
+only, adds every request to that window's incidence curve, and accumulates
 failure rates, goodput, the §4 threshold sweep, and §7 tail CIs.
 `detect.BuildSeries` buckets the same requests at 1 Hz for the recovery
 detector. Nothing is computed twice from different sources: report
@@ -131,7 +132,7 @@ with median+range; drops are named, never imputed).
 | `internal/histo` | Pinned HdrHistogram wrapper; `recordValue()` only; lint bans correction APIs | §3 | `New`, `Record`, `Summarize` | lint (repo-wide correction-API ban); AC1 oracles via internal/ac |
 | `internal/loadgen` | Open-loop generator: pre-fixed schedule, pacer+spin dispatch, SSE client, three-state classification, client-validity gates | §2, §3 | `BuildSchedule`, `Run` | in-package body + opt-in live-smoke units; AC1–AC2d + `-race` via internal/run |
 | `internal/orchestrator` | Pre-armed fault execution with armed/fire/expiry audit; injectors: mock admin, clean pod delete, node partition | §1, §2, AC3 | `Execute`, `NewMockInjector`, `NewCleanDeleteInjector`, `newNodePartitionInjector` (unexported pending Phase-1 NodeOps wiring) | AC3 + fake-ops tests |
-| `internal/collect` | Windowed three-state stats, KM estimator, in-flight accounting, §4 sweep + modal/SD, §7 tail CIs | §3, §4, §7 | `Collect`, `EstimateKM`, `AccountInFlight`, `AnalyzeThresholds` | hand-computed KM oracles, AC4/4b |
+| `internal/collect` | Windowed three-state stats, Aalen-Johansen incidence estimator, in-flight accounting, §4 sweep + modal/SD, §7 tail CIs | §3, §4, §7 | `Collect`, `EstimateIncidence`, `AccountInFlight`, `AnalyzeThresholds` | hand-computed incidence oracles, AC4/4b |
 | `internal/detect` | Recovery detector (leading windows, hysteresis, two baselines, sensitivity sweep, deficit, components), decomposition scaffolding, recovery probes, /health-vs-inference calibration | §5, AC5 | `BuildSeries`, `Run`, `ProbeRecovery`, `NewPhase0Decomposition` | synthetic-series units + AC5 |
 | `internal/run` | The run engine: composes everything above into one run's Artifacts | §2 | `Execute` | in-process e2e under `-race` |
 | `internal/report` | JSON + human report pair from one run or one campaign; numbers read once from artifacts | §2, §3, §4, §5, §7 | `Generate`, `GenerateCampaign` | in-package renderer units + AC6 field assertions |
@@ -157,7 +158,7 @@ Single-run report (`report.json`):
 |---|---|---|
 | `windows.*.ttft_conditional_on_completion` / `e2e_...` | `collect.Collect` → `histo.Summarize` | §3 completed-only |
 | `windows.*.error_rate`, `censored_rate`, `err_classes` | `collect.Collect` | §3 first-class rates |
-| `windows.*.km_curve` (+ "p_q > 30s" quantiles) | `collect.EstimateKM` | §3 KM over ALL scheduled |
+| `windows.*.completion_incidence` (+ uncrossed quantiles reported as beyond the horizon) | `collect.EstimateIncidence` | §3 incidence over ALL scheduled |
 | `windows.*.itl_pooled` | `collect.Collect` (pooled per window) | §3 (per-request p99 forbidden) |
 | `windows.*.goodput_sweep` | `collect.Collect` 3×3 grid | §4 sweep |
 | `windows.*.ttft_tail_ci` / `e2e_tail_ci` | `collect.tailCIs` (exact order stats) | §7 tail policy |
@@ -204,7 +205,7 @@ uncertified gate never passes.
 | `stall` | server-wide emission freeze, staggered flush on expiry | completions delayed; excess lands in p99.9/max (AC2); λ×D attributable samples (AC2b) |
 | `error` | 5xx on new requests; in-flight untouched | error-rate step in the fault window; goodput dip → detector TTR |
 | `stream_abort` | RST in-flight at fire (SO_LINGER=0); admissions RST after N tokens | in-flight classified errored/reset, absent from histograms (AC4) |
-| `silent_hang` | no bytes, no FIN, no RST, ever (hijacked conns); captured requests stay hung past expiry | censored at exactly 30 s, in KM as censorings, "p_90 > 30s" (AC4b) |
+| `silent_hang` | no bytes, no FIN, no RST, ever (hijacked conns); captured requests stay hung past expiry | censored at exactly 30 s, in the incidence curve as censorings, p90 beyond the horizon (AC4b) |
 | `slow_reload` | 503 for a duration after process start | replica-ready probe boundary; recovery decomposition |
 
 ## 8. How to change things safely
@@ -234,7 +235,8 @@ uncertified gate never passes.
   latencies re-base to it (coordinated-omission correctness).
 - **Send skew**: actual dispatch − intended; gated ≤5 ms p99.
 - **Censored**: no terminal event by the pinned 30 s client timeout; a
-  KM censoring observation, never a latency sample.
+  censored observation in the incidence curve, never a latency sample.
+  Errors are NOT censored: they are competing terminal events (A1).
 - **Goodput**: fraction of *scheduled* requests completing within the §4
   SLO (TTFT ≤1 s ∧ e2e ≤14 s).
 - **TTR**: time from actual fire to the first hysteresis-surviving

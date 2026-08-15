@@ -55,8 +55,8 @@ func TestCollectThreeStateAccounting(t *testing.T) {
 	if !st.ConditionalCaveat {
 		t.Error("error+censored = 50% > 5%: conditional caveat must be set")
 	}
-	if st.KM.N != 4 {
-		t.Errorf("KM over ALL scheduled: n=%d, want 4", st.KM.N)
+	if st.Incidence.N != 4 {
+		t.Errorf("incidence curve over ALL scheduled: n=%d, want 4", st.Incidence.N)
 	}
 	if st.GoodputFrac != 0.25 {
 		t.Errorf("goodput: one of four meets SLO, got %v", st.GoodputFrac)

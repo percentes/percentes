@@ -17,10 +17,11 @@ Three commitments separate this harness from a load tester:
   latency is re-based to the request's *intended* dispatch time.
 - **Three-state outcomes.** Every scheduled request ends in exactly one
   of completed / errored / censored. Only completions enter latency
-  histograms; failure rates are first-class; censored requests enter
-  Kaplan-Meier completion curves, never percentiles. A quantile the
-  curve does not cross is reported as "beyond the horizon," never
-  extrapolated.
+  histograms; failure rates are first-class; the completion curve is the
+  Aalen-Johansen cumulative incidence over all scheduled requests, in
+  which errors are competing terminal events and only timeouts are
+  censored (SPEC §0, amendment A1). A quantile the curve does not cross
+  is reported as "beyond the horizon," never extrapolated.
 - **Run-invalidating self-checks.** The client must prove it was not
   the bottleneck (send-skew, CPU, and GC-pause gates, all pinned and
   run-failing). A run that cannot demonstrate its own validity exits

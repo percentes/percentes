@@ -89,7 +89,7 @@ func TestAC4LossAccounting(t *testing.T) {
 
 // TestAC4bCensoringAccounting: in silent-hang mode, affected requests are
 // censored at exactly the 30 s pinned timeout, appear in the censored
-// rate and the KM curve, and are absent from latency histograms.
+// rate and the incidence curve, and are absent from latency histograms.
 func TestAC4bCensoringAccounting(t *testing.T) {
 	if testing.Short() {
 		t.Skip("AC suite skipped in -short mode")
@@ -129,16 +129,16 @@ func TestAC4bCensoringAccounting(t *testing.T) {
 		}
 	}
 
-	// KM: censored requests are censored observations at the timeout —
-	// the fault-window curve must not cross high quantiles inside the
-	// horizon ("p_q > 30 s"), while the median still exists.
-	if _, ok := fault.KM.Quantile(0.5); !ok {
-		t.Error("AC4b: fault-window KM median should exist (most requests complete)")
+	// Incidence curve: censored requests are censored observations at the
+	// timeout — the fault-window curve must not cross high quantiles inside
+	// the horizon ("p_q > 30 s"), while the median still exists.
+	if _, ok := fault.Incidence.Quantile(0.5); !ok {
+		t.Error("AC4b: fault-window incidence median should exist (most requests complete)")
 	}
-	if q, ok := fault.KM.Quantile(0.9); ok {
-		t.Errorf("AC4b: with ~27%% censored, KM p90 must be reported as beyond the horizon, got %.3fs", float64(q)/1e6)
+	if q, ok := fault.Incidence.Quantile(0.9); ok {
+		t.Errorf("AC4b: with ~27%% censored, incidence p90 must be reported as beyond the horizon, got %.3fs", float64(q)/1e6)
 	}
-	if got := fault.KM.N; got != fault.Scheduled {
-		t.Errorf("AC4b: KM must cover ALL scheduled requests: n=%d scheduled=%d", got, fault.Scheduled)
+	if got := fault.Incidence.N; got != fault.Scheduled {
+		t.Errorf("AC4b: incidence curve must cover ALL scheduled requests: n=%d scheduled=%d", got, fault.Scheduled)
 	}
 }

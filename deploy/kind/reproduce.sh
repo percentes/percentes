@@ -101,7 +101,7 @@ for key in ("config", "config_sha256", "caveat", "conditional_headline",
 assert "certifies the instrument" in rep["caveat"]
 for w in ("baseline", "fault"):
     assert w in rep["windows"], f"window {w} missing"
-    assert rep["windows"][w]["km_curve"]["n"] > 0, f"window {w} KM empty"
+    assert rep["windows"][w]["completion_incidence"]["n"] > 0, f"window {w} completion incidence empty"
 det = rep["detector"]
 assert len(det["sensitivity"]) == 27, "sensitivity table incomplete"
 sg = rep["share_gate"]

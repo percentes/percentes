@@ -2,6 +2,7 @@ package report
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -45,8 +46,8 @@ func TestGenerateCarriesCaveatAndValidJSON(t *testing.T) {
 	if err := json.Unmarshal(raw, &rep); err != nil {
 		t.Fatal(err)
 	}
-	if rep.SchemaVersion != 1 {
-		t.Errorf("schema_version = %d, want 1", rep.SchemaVersion)
+	if rep.SchemaVersion != 2 {
+		t.Errorf("schema_version = %d, want 2", rep.SchemaVersion)
 	}
 	if len(rep.ConfigSHA256) != 64 {
 		t.Errorf("config_sha256 must be 64 hex chars, got %q", rep.ConfigSHA256)
@@ -83,24 +84,45 @@ func TestHumanReportNamesUnmeasuredCPU(t *testing.T) {
 	}
 }
 
-// kmText's two branches are the §3 never-extrapolate rule made visible:
-// a crossed quantile renders a time; an uncrossed one renders the
+// incidenceText's two branches are the §3 never-extrapolate rule made
+// visible: a crossed quantile renders a time; an uncrossed one renders the
 // "curve does not cross" refusal. Oracle: completions at 1s and 2s plus
-// two censored-at-horizon observations — completion reaches 0.5 exactly,
+// two censored-at-horizon observations — incidence reaches 0.5 exactly,
 // so p50 crosses (ties-events-first) and p90 cannot.
-func TestKMTextRefusesUncrossedQuantiles(t *testing.T) {
-	km := collect.EstimateKM([]collect.KMObservation{
-		{TimeUs: 1_000_000, Completed: true},
-		{TimeUs: 2_000_000, Completed: true},
-		{TimeUs: 30_000_000, Completed: false},
-		{TimeUs: 30_000_000, Completed: false},
+func TestIncidenceTextRefusesUncrossedQuantiles(t *testing.T) {
+	cif := collect.EstimateIncidence([]collect.Obs{
+		{TimeUs: 1_000_000, Kind: collect.ObsCompletion},
+		{TimeUs: 2_000_000, Kind: collect.ObsCompletion},
+		{TimeUs: 30_000_000, Kind: collect.ObsCensored},
+		{TimeUs: 30_000_000, Kind: collect.ObsCensored},
 	}, 30_000_000)
-	text := kmText(&km)
+	text := incidenceText(&cif)
 	if !strings.Contains(text, "p50   completion at 2.000s") {
 		t.Errorf("p50 crosses at the second completion (2/4 = 0.5):\n%s", text)
 	}
 	if !strings.Contains(text, "p90   > 30s") {
 		t.Errorf("p90 is never reached and must be refused, not extrapolated:\n%s", text)
+	}
+}
+
+// The curve rendering samples at most 12 points, but the last point is the
+// window's final incidence: in a window with errors that is where the curve
+// settles below 1.0. Oracle: 14 completions plus one error, so the sampling
+// stride (14/12+1 = 2) does not land on the last index.
+func TestIncidenceTextAlwaysShowsFinalPoint(t *testing.T) {
+	obs := []collect.Obs{{TimeUs: 500_000, Kind: collect.ObsError}}
+	for i := 1; i <= 14; i++ {
+		obs = append(obs, collect.Obs{TimeUs: int64(i) * 1_000_000, Kind: collect.ObsCompletion})
+	}
+	cif := collect.EstimateIncidence(obs, 30_000_000)
+	final := cif.Points[len(cif.Points)-1]
+	text := incidenceText(&cif)
+	want := fmt.Sprintf("incidence=%.4f", final.Incidence)
+	if !strings.Contains(text, want) {
+		t.Errorf("final incidence %q missing from the rendered curve:\n%s", want, text)
+	}
+	if final.Incidence >= 1.0 {
+		t.Fatalf("oracle broken: with one error the curve must plateau below 1.0, got %v", final.Incidence)
 	}
 }
 
