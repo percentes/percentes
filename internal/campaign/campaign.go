@@ -13,7 +13,7 @@
 //     t-interval carries a normality caveat (§7).
 //   - No bootstrap, no MDE/power claim (§7).
 //   - The run-to-run coefficient of variation is surfaced as the measured
-//     noise floor for v0.2.
+//     noise floor for the deferred cross-stack comparison.
 package campaign
 
 import (
@@ -68,7 +68,7 @@ type Report struct {
 	Endpoints   []ScalarSummary `json:"endpoints"`
 	ValidRuns   int             `json:"valid_runs"`
 	// NoiseFloorCoV is the run-to-run CoV of the primary endpoint, the
-	// measured noise floor for v0.2's MDE (§7).
+	// measured noise floor for the cross-stack comparison's MDE (§7).
 	NoiseFloorCoV *float64 `json:"noise_floor_cov,omitempty"`
 	Caveat        string   `json:"caveat"`
 }
@@ -107,8 +107,9 @@ func Run(ctx context.Context, cfg *config.Config, opts run.Options, variantLabel
 	}
 
 	rep.Endpoints = summarize(rep.PerRun, variantLabel)
-	// The noise floor for v0.2's MDE is the run-to-run CoV of the
-	// PRIMARY endpoint (§7) — equilibrium TTR under clean_delete only.
+	// The noise floor for the cross-stack comparison's MDE is the run-to-run
+	// CoV of the PRIMARY endpoint (§7): equilibrium TTR under clean_delete
+	// only.
 	// A black-hole campaign's equilibrium CoV is a secondary-endpoint
 	// dispersion in a different fault regime and gets no such label.
 	for i := range rep.Endpoints {
@@ -116,7 +117,7 @@ func Run(ctx context.Context, cfg *config.Config, opts run.Options, variantLabel
 			rep.Endpoints[i].ContributingN >= 2 && rep.Endpoints[i].Summary.CoVDefined {
 			cov := rep.Endpoints[i].Summary.CoV
 			rep.NoiseFloorCoV = &cov
-			rep.Endpoints[i].NoiseFloorNote = "run-to-run CoV of the primary endpoint: the measured noise floor for v0.2's pre-registered two-sample MDE (§7)"
+			rep.Endpoints[i].NoiseFloorNote = "run-to-run CoV of the primary endpoint: the measured noise floor for the deferred cross-stack comparison's pre-registered two-sample MDE (§7)"
 		}
 	}
 	return rep, nil

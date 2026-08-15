@@ -51,7 +51,7 @@ func TestLossFractionRequiresVictimAttribution(t *testing.T) {
 	}
 }
 
-// The v0.2-MDE noise floor is the PRIMARY endpoint's CoV — clean_delete
+// The cross-stack-MDE noise floor is the PRIMARY endpoint's CoV, clean_delete
 // only (§7). A black-hole campaign's equilibrium CoV gets no such label.
 func TestNoiseFloorOnlyForCleanDelete(t *testing.T) {
 	cfg := baseCfg(t)
@@ -67,7 +67,7 @@ func TestNoiseFloorOnlyForCleanDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rep.NoiseFloorCoV != nil {
-		t.Fatalf("black_hole equilibrium CoV must not be labeled the v0.2 noise floor (secondary endpoint): %v", *rep.NoiseFloorCoV)
+		t.Fatalf("black_hole equilibrium CoV must not be labeled the cross-stack noise floor (secondary endpoint): %v", *rep.NoiseFloorCoV)
 	}
 	for _, e := range rep.Endpoints {
 		if e.NoiseFloorNote != "" {

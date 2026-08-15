@@ -2,8 +2,8 @@
 // run-level scalar summary (all five values verbatim, median, mean, a
 // t-interval with the pre-registered t=2.776 at df=4, and the min-max
 // range), the run-to-run coefficient of variation that becomes the
-// measured noise floor for v0.2, and Holm correction for a family of
-// secondary comparisons.
+// measured noise floor for the deferred cross-stack comparison, and Holm
+// correction for a family of secondary comparisons.
 //
 // Normative rules encoded here:
 //   - All five per-run values are published verbatim (§5).
@@ -73,7 +73,8 @@ type Summary struct {
 	AtPinnedDF  bool    `json:"at_pinned_df"`
 
 	// CoV is the run-to-run coefficient of variation (SampleSD/mean),
-	// the measured noise floor v0.2's MDE will build on (§7). CoVDefined
+	// the measured noise floor the cross-stack comparison's MDE will
+	// build on (§7). CoVDefined
 	// is false when the mean is zero OR n<2 (a single observation has no
 	// dispersion; its SampleSD=0 is a default, not a real 0); readers
 	// must check it.
