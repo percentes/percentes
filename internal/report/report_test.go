@@ -28,6 +28,25 @@ func minimalArtifacts() *run.Artifacts {
 	}
 }
 
+// The JSON artifact carries the instrument commit so a published number
+// traces to the build that produced it. Test binaries lack VCS stamping,
+// so the field must degrade to "unknown", never to empty.
+func TestReportCarriesInstrumentCommit(t *testing.T) {
+	raw, _, err := Generate(minimalArtifacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		InstrumentCommit string `json:"instrument_commit"`
+	}
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.InstrumentCommit == "" {
+		t.Error("instrument_commit must never serialize empty")
+	}
+}
+
 // The caveat is the report's honesty banner. It must appear in the JSON
 // artifact and twice in the human report (header and footer).
 func TestGenerateCarriesCaveatAndValidJSON(t *testing.T) {

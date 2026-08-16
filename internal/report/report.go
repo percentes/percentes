@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -20,16 +21,44 @@ import (
 )
 
 // Caveat is printed in every report and in the AC output itself (§8).
-const Caveat = "CAVEAT: passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behavior. Small N, injected-fault-versus-reality gaps, and mock fidelity limits are handled by scoping claims, not by pretending."
+const Caveat = "CAVEAT: passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behavior. Small N, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are scoped in the claims and named in the report."
 
 // Report is the JSON artifact: the config embedded verbatim plus every
 // run product.
 type Report struct {
 	SchemaVersion int    `json:"schema_version"`
 	ConfigSHA256  string `json:"config_sha256"`
-	Caveat        string `json:"caveat"`
-	Headline      string `json:"conditional_headline"`
+	// InstrumentCommit is the VCS revision of the binary that produced
+	// the report ("<sha>", "<sha>-dirty", or "unknown" when the build
+	// carries no VCS stamp).
+	InstrumentCommit string `json:"instrument_commit"`
+	Caveat           string `json:"caveat"`
+	Headline         string `json:"conditional_headline"`
 	*run.Artifacts
+}
+
+// instrumentCommit reads the build's VCS stamp.
+func instrumentCommit() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	rev, dirty := "", false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return "unknown"
+	}
+	if dirty {
+		return rev + "-dirty"
+	}
+	return rev
 }
 
 // Generate renders both artifacts from one run.
@@ -39,11 +68,12 @@ func Generate(art *run.Artifacts) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("report: marshal config: %w", err)
 	}
 	rep := &Report{
-		SchemaVersion: 2,
-		ConfigSHA256:  fmt.Sprintf("%x", sha256.Sum256(cfgRaw)),
-		Caveat:        Caveat,
-		Headline:      headline(art),
-		Artifacts:     art,
+		SchemaVersion:    2,
+		ConfigSHA256:     fmt.Sprintf("%x", sha256.Sum256(cfgRaw)),
+		InstrumentCommit: instrumentCommit(),
+		Caveat:           Caveat,
+		Headline:         headline(art),
+		Artifacts:        art,
 	}
 	raw, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
@@ -65,7 +95,7 @@ func headline(art *run.Artifacts) string {
 	// attributed.
 	inFl := art.InFlight
 	pop, errored, censored := inFl.Total, inFl.Errored, inFl.Censored
-	popLabel := "in flight at fire, all replicas — no victim attributed"
+	popLabel := "in flight on all replicas at fire, no victim attributed"
 	if art.VictimReplica != "" {
 		pop, errored, censored = inFl.OnVictim, inFl.OnVictimErrored, inFl.OnVictimCensored
 		popLabel = fmt.Sprintf("in flight on killed replica %s at fire", art.VictimReplica)
@@ -113,7 +143,8 @@ func human(r *Report) string {
 	art := r.Artifacts
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 
-	w("Percentes run report — %s", art.Config.Run.Name)
+	w("Percentes run report: %s", art.Config.Run.Name)
+	w("instrument commit: %s", r.InstrumentCommit)
 	w("config sha256: %s", r.ConfigSHA256)
 	w("")
 	w("%s", Caveat)
@@ -136,7 +167,7 @@ func human(r *Report) string {
 		g.Pass, g.SendSkewP99Us, g.SendSkewMaxUs, g.Undispatched, cpuCell, g.GCPauseP99Ms)
 	w("share gate: applicable=%v pass=%v shares=%v", art.ShareGate.Applicable, art.ShareGate.Pass, art.ShareGate.Shares)
 	if art.VictimReplica != "" {
-		w("killed pod: %s (share at T_inject: %.3f) — §1", art.VictimReplica, art.ShareGate.VictimShareAtInject)
+		w("killed pod: %s (share at T_inject: %.3f), §1", art.VictimReplica, art.ShareGate.VictimShareAtInject)
 	}
 	if art.Orchestration != nil {
 		if errMs, err := art.Orchestration.FireErrorMs(); err == nil {
@@ -208,7 +239,7 @@ func human(r *Report) string {
 	if d.EquilibriumEstimable {
 		w("single-replica equilibrium baseline: %.4f (degraded plateau [%.0fs, %.0fs) of run time)", d.EquilibriumBaseline, d.EquilibriumWindowStartS, d.EquilibriumWindowEndS)
 	} else {
-		w("single-replica equilibrium baseline: NOT ESTIMABLE — %s", d.EquilibriumNote)
+		w("single-replica equilibrium baseline: NOT ESTIMABLE (%s)", d.EquilibriumNote)
 	}
 	w("TTR to pre-fault baseline:    %s", ttrText(d.ToPreFault))
 	w("TTR to equilibrium baseline:  %s", ttrText(d.ToEquilibrium))
@@ -221,7 +252,7 @@ func human(r *Report) string {
 	for _, n := range compNames {
 		w("component %-11s %s", n+":", ttrText(d.Components[n]))
 	}
-	w("backlog drain: measured=%v — %s", d.BacklogDrainMeasured, d.BacklogDrainNote)
+	w("backlog drain: measured=%v (%s)", d.BacklogDrainMeasured, d.BacklogDrainNote)
 	w("")
 	w("== Sensitivity table (X x R x H; §5) ==")
 	w("%-6s %-4s %-4s | %-22s %-22s", "entry", "R", "H", "TTR->prefault", "TTR->equilibrium")
@@ -267,7 +298,7 @@ func summary(s histo.Summary) string {
 
 func incidenceText(cif *collect.IncidenceCurve) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Completion incidence, Aalen-Johansen (n=%d over ALL scheduled; errors compete, timeouts censored; horizon %.0fs):\n", cif.N, float64(cif.HorizonUs)/1e6)
+	fmt.Fprintf(&b, "Completion incidence, Aalen-Johansen (n=%d over ALL scheduled; errors compete, timeouts censored; %d outstanding at the horizon; horizon %.0fs):\n", cif.N, cif.Censored, float64(cif.HorizonUs)/1e6)
 	for _, q := range []float64{0.5, 0.9, 0.95, 0.99} {
 		if t, ok := cif.Quantile(q); ok {
 			fmt.Fprintf(&b, "  p%-4g completion at %.3fs\n", q*100, float64(t)/1e6)
