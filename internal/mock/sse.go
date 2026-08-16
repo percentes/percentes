@@ -172,7 +172,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// Gate at the write: a stall holds the stream here (in-flight and
 		// new streams both), then emission resumes — staggered by a
 		// deterministic per-stream jitter (0-100 ms) so a released
-		// backlog drains as a spread, not an instantaneous storm.
+		// backlog does not flush in one burst.
 		act, stalled := s.engine.gateEmit(ctx, exempt)
 		if act == actProceed && stalled {
 			jitter := time.Duration(rng.Float64() * float64(100*time.Millisecond))

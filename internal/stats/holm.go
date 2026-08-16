@@ -6,9 +6,9 @@ import (
 
 // comparison is one secondary hypothesis test entering the Holm family
 // (§7: "Holm correction where several secondaries are formally
-// compared"). The caller supplies the raw p-value; this package does not
-// invent tests — it only controls the family-wise error rate over
-// pre-registered secondary comparisons.
+// compared"). The caller supplies the raw p-value; this package only
+// controls the family-wise error rate over pre-registered secondary
+// comparisons.
 type comparison struct {
 	Name string  `json:"name"`
 	PRaw float64 `json:"p_raw"`

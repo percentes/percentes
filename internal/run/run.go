@@ -183,7 +183,7 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 
 	// §5 decomposition: the probes launched at fire time report their
 	// first-success timestamps (or their failure, leaving the segment
-	// honestly N/A); goodput-restored comes from the detector.
+	// N/A); goodput-restored comes from the detector.
 	art.Decomposition = detect.NewPhase0Decomposition()
 	fireWall := res.EpochWall.Add(time.Duration(art.ActualFireNs))
 	for i := 0; i < probes; i++ {
@@ -275,7 +275,7 @@ func validity(art *Artifacts) (bool, []string) {
 	if !art.Loadgen.Gates.Pass {
 		reason := "client-validity gate failed (§2)"
 		if !art.Loadgen.Gates.CPUMeasured {
-			reason += ": host CPU unmeasured on this platform build — an uncertified gate does not pass"
+			reason += ": host CPU unmeasured on this platform build"
 		}
 		reasons = append(reasons, reason)
 	}

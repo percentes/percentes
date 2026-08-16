@@ -39,7 +39,7 @@ func (f *fakeInjector) Observed(ctx context.Context) (fired, expired *time.Time,
 // A caller-supplied Options.Injector must actually be armed and drive the
 // orchestration — the seam the Phase 1 injectors reach the run through.
 // Without this the clean-delete/node-partition injectors would be
-// unreachable from any binary (the defect this test pins shut).
+// unreachable from any binary.
 func TestExecuteUsesSuppliedInjector(t *testing.T) {
 	cfg, err := config.LoadFile("../../configs/ac.reference.yaml")
 	if err != nil {

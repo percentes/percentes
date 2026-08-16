@@ -109,7 +109,7 @@ func noteSuffix(note string) string {
 	if note == "" {
 		return ""
 	}
-	return " — " + note
+	return " (" + note + ")"
 }
 
 func ptrS(p *float64) string {

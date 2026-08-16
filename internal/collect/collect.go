@@ -70,7 +70,8 @@ type Stats struct {
 	GoodputSweep []SweepPoint `json:"goodput_sweep"`
 
 	// Order-statistic confidence intervals for p95/p99 (§7 tail policy),
-	// computed from exact order statistics of the raw completed samples
+	// whose endpoints are order statistics of the raw completed samples
+	// (interval ranks via the normal approximation to the binomial),
 	// where the sample budget permits.
 	TTFTTailCI TailCIs `json:"ttft_tail_ci"`
 	E2ETailCI  TailCIs `json:"e2e_tail_ci"`
@@ -206,9 +207,8 @@ func Collect(cfg *config.Config, requests []loadgen.Request, w Window) (*Stats, 
 
 // tailCIs computes distribution-free order-statistic confidence intervals
 // (95% level, normal approximation to the binomial ranks) for p95 and
-// p99. Permitted only when the interval's ranks fall inside the sample —
-// the §7 "where the completed-sample budget permits" condition, tested
-// rather than assumed.
+// p99. Permitted only when the interval's ranks fall inside the sample:
+// the §7 "where the completed-sample budget permits" condition.
 func tailCIs(rawUs []int64) TailCIs {
 	sorted := make([]int64, len(rawUs))
 	copy(sorted, rawUs)

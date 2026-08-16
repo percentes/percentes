@@ -136,7 +136,7 @@ func TestCampaignSecondaryUnderBlackHole(t *testing.T) {
 }
 
 // A run with no estimable equilibrium contributes no equilibrium value —
-// it is dropped and reported, never imputed (§7 honesty).
+// it is dropped and reported, never imputed (§7).
 func TestCampaignDropsNonEstimable(t *testing.T) {
 	cfg := baseCfg(t)
 	cfg.Fault.Variant = config.VariantCleanDelete

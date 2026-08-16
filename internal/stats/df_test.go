@@ -25,7 +25,7 @@ func TestTIntervalDFCorrect(t *testing.T) {
 }
 
 // A single observation has no dispersion: CoV must be undefined, never a
-// misleading 0 (its SampleSD=0 is a default, not a measurement).
+// misleading 0 (at n=1 SampleSD is left at its zero value).
 func TestCoVUndefinedForSingleValue(t *testing.T) {
 	s := Summarize([]float64{42}, true)
 	if s.CoVDefined {

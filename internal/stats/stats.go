@@ -91,7 +91,7 @@ type Summary struct {
 
 // Summarize computes the §7 summary. It panics on an empty input (a
 // campaign always has N>=1 runs by construction; an empty slice is a
-// programming error, not a data condition).
+// programming error).
 func Summarize(values []float64, heavy bool) Summary {
 	n := len(values)
 	if n == 0 {

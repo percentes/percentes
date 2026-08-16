@@ -405,8 +405,7 @@ type Decomposition struct {
 }
 
 // NewPhase0Decomposition returns the §5 segment table with every boundary
-// marked N/A until measured; the Kubernetes- and log-derived segments stay
-// N/A against the Phase 0 mock and are reported so, never inferred.
+// marked N/A until measured.
 func NewPhase0Decomposition() *Decomposition {
 	na := func(name, source, note string) Segment {
 		return Segment{Name: name, Source: source, Measured: false, Note: note}

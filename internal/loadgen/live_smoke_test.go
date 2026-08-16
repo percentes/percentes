@@ -12,13 +12,13 @@ import (
 // authenticated streaming completions against a hosted OpenAI-compatible
 // endpoint, through the unmodified open-loop pipeline.
 //
-// Opt-in only — `make test` and CI never touch the network:
+// Opt-in only; `make test` and CI never touch the network:
 //
 //	PERCENTES_LIVE_SMOKE=1 GROQ_API_KEY=... go test ./internal/loadgen -run TestLiveHostedSmoke -v
 //
 // The offered rate is deliberately tiny (0.25 rps, 3 requests, 32 output
-// tokens each) so the run sits far under any provider free-tier limit —
-// rate-limit discipline proper is a separate build (the 429 controller).
+// tokens each) so the run sits far under any provider free-tier limit;
+// rate-limit discipline is out of scope for this smoke test.
 func TestLiveHostedSmoke(t *testing.T) {
 	if os.Getenv("PERCENTES_LIVE_SMOKE") != "1" {
 		t.Skip("live smoke is opt-in: set PERCENTES_LIVE_SMOKE=1")

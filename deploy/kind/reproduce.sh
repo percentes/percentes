@@ -67,7 +67,7 @@ say "building and running the harness (one config drives the run)"
 # (gopsutil -> IOKit/CoreFoundation) can hit the same dyld wedge on a
 # degraded system. CGO_ENABLED=0 keeps Linux CPU-gate sampling fully
 # functional (/proc needs no cgo); on darwin the host-CPU gate reports
-# unmeasured and therefore does not pass — honest, never silent.
+# unmeasured and therefore does not pass.
 BIN="$(mktemp -d)/percentes"
 CGO_ENABLED=0 go build -o "$BIN" ./cmd/percentes
 mkdir -p results
@@ -86,7 +86,7 @@ CODE=$?
 set -e
 tail -5 "$OUT.log" 2>/dev/null || true
 [ "$CODE" = "0" ] || [ "$CODE" = "2" ] || { tail -40 "$OUT.log" 2>/dev/null || true; fail "harness run errored (exit $CODE)"; }
-[ "$CODE" = "2" ] && echo "   note: run completed but a run-failing gate marked it invalid (exit 2) — gates are part of the instrument"
+[ "$CODE" = "2" ] && echo "   note: run completed but a run-failing gate marked it invalid (exit 2)"
 
 say "verifying the report pair"
 python3 - "$OUT" <<'EOF'

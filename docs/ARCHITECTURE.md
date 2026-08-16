@@ -16,9 +16,9 @@ Kubernetes-served LLM inference service loses a replica under sustained
 load — how many in-flight and
 queued requests fail or time out, how the survivor degrades, and how long
 recovery takes. Phase 0 (complete) builds and certifies the *instrument*
-against a mock inference server on a local kind cluster — passing the
-acceptance suite certifies the measurement machinery, not any real-GPU
-claim. The Phase 1 groundwork (complete, GPU-untouched) adds everything
+against a mock inference server on a local kind cluster; passing the
+acceptance suite says nothing about real-GPU behavior.
+The Phase 1 groundwork (complete, GPU-untouched) adds everything
 for the real experiment that can be verified without hardware.
 
 The core methodological commitments, which shape almost every design
@@ -28,7 +28,7 @@ decision you'll see:
   run. The generator never slows down because the system did — a stalled
   system must not be allowed to hide its own stall (coordinated
   omission, SPEC §2).
-- **Three-state outcomes** (§3, amendment A1): every scheduled request ends
+- **Three-state outcomes** (§3): every scheduled request ends
   in exactly one of completed / errored / censored. Only completions enter
   latency histograms; failures are first-class rates; the completion curve
   is the Aalen-Johansen cumulative incidence, in which errors compete and
@@ -74,7 +74,7 @@ lateness is coordinated omission creeping back in. It does this with a
 **two-stage, nested precision design** (`internal/loadgen/loadgen.go`).
 See `docs/pacer-timing.drawio` for the diagram.
 
-**Stage 1 — the pacer (one thread, spawn lead = `spawnLeadNs` = 10 ms).**
+**Stage 1: the pacer (one thread, spawn lead = `spawnLeadNs` = 10 ms).**
 The main loop sleeps until `t_i − 10 ms`, then only *spawns* the worker
 goroutine for request `i` and immediately moves on to the next. It never
 does the precise wait itself. Rationale: if one thread did the exact
@@ -85,7 +85,7 @@ decouples the two stages: the 10 ms is slack that absorbs pacer-wakeup
 jitter, and each worker targets its own **absolute** `t_i`, so a late
 spawn shortens only that worker's runway and never cascades.
 
-**Stage 2 — the worker (precise wait = timer then spin, boundary
+**Stage 2: the worker (precise wait = timer then spin, boundary
 `spinNs` = 1.5 ms).** Each worker sleeps on a `time.Timer` until
 `t_i − 1.5 ms` (cheap — yields the CPU, but imprecise: `<-timer.C`
 wakeup has scheduler latency), then **busy-spins** `for now() < t_i {}`
@@ -236,7 +236,7 @@ uncertified gate never passes.
 - **Send skew**: actual dispatch − intended; gated ≤5 ms p99.
 - **Censored**: no terminal event by the pinned 30 s client timeout; a
   censored observation in the incidence curve, never a latency sample.
-  Errors are NOT censored: they are competing terminal events (A1).
+  Errors are NOT censored: they are competing terminal events (§3).
 - **Goodput**: fraction of *scheduled* requests completing within the §4
   SLO (TTFT ≤1 s ∧ e2e ≤14 s).
 - **TTR**: time from actual fire to the first hysteresis-surviving

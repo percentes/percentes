@@ -237,8 +237,7 @@ func TestFaultSilentHang(t *testing.T) {
 	}
 	// During the window: nothing.
 	assertSilence(1200*time.Millisecond, "during window")
-	// Past expiry (t≈1.5+... > 1.7): a captured request stays hung —
-	// a healed partition does not resurrect dead in-flight work.
+	// Past expiry (t≈1.5+... > 1.7): a captured request stays hung.
 	assertSilence(800*time.Millisecond, "after window expiry")
 
 	if herr := <-healthDone; herr == nil {
@@ -260,8 +259,8 @@ func TestFaultSilentHang(t *testing.T) {
 }
 
 // TestFaultSilentHangMidStream: a stream already emitting tokens when
-// silent_hang fires goes silent WITHOUT any terminal event — no more
-// bytes, no FIN, no RST — and stays silent past window expiry. This is
+// silent_hang fires goes silent WITHOUT any terminal event (no more
+// bytes, no FIN, no RST) and stays silent past window expiry. This is
 // the killed-replica in-flight class AC4b's censoring depends on: any
 // server-side terminal event before the client's 30 s timeout would flip
 // the request from censored to errored.
@@ -409,8 +408,7 @@ func TestAdminArmValidation(t *testing.T) {
 
 // TestConfigFileDrivesFaults loads a complete run config through the same
 // strict loader the mockserver binary uses and proves the scheduled fault
-// fires from file configuration alone — "fault modes demonstrably
-// scriptable from the config file".
+// fires from file configuration alone.
 func TestConfigFileDrivesFaults(t *testing.T) {
 	raw, err := os.ReadFile("../../configs/ac.reference.yaml")
 	if err != nil {

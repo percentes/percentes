@@ -70,9 +70,8 @@ func startMockProcess(t *testing.T, cfg *config.Config) string {
 // launchMock builds the run config to a temp file, starts the mockserver
 // binary on an ephemeral port, and returns its base URL plus a stop func
 // that terminates the process and removes the temp dir. It takes no
-// *testing.T so the shared stall setup (getStallRun) can record a setup
-// failure once and fail every consumer deterministically, rather than
-// binding a fatal to whichever test first triggered the sync.Once.
+// *testing.T: getStallRun records a setup failure once and fails every
+// consumer.
 func launchMock(cfg *config.Config) (baseURL string, stop func(), err error) {
 	dir, err := os.MkdirTemp("", "percentes-mock-*")
 	if err != nil {

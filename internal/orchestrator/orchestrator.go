@@ -68,10 +68,8 @@ func Execute(ctx context.Context, inj Injector, epoch time.Time, tInject time.Du
 	}
 	ts.ArmedAt = time.Now()
 
-	// Poll for observed fire/expiry until past planned expiry plus slack.
-	// A non-nil Observed error is terminal — the injector could not carry
-	// out or track the injection (e.g. a failed grace=0 delete) — so
-	// surface it immediately rather than masking it as an expiry timeout.
+	// Poll for observed fire/expiry until past planned expiry plus slack;
+	// a non-nil Observed error is terminal (see Injector.Observed).
 	deadline := ts.PlannedExpiry.Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		fired, expired, err := inj.Observed(ctx)

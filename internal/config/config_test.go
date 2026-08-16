@@ -114,8 +114,7 @@ func TestUnknownFieldRejected(t *testing.T) {
 }
 
 // TestPinnedValueEnforcement mutates each pre-registered number and
-// asserts validation rejects the config, naming the field. The gates are
-// unweakenable by construction.
+// asserts validation rejects the config, naming the field.
 func TestPinnedValueEnforcement(t *testing.T) {
 	cases := []struct {
 		name    string

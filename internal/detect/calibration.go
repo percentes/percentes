@@ -11,7 +11,7 @@ import (
 // HealthCalibration is the §5 one-off Phase-1 calibration: it compares
 // /health-200 timing against direct first-inference success on the pinned
 // vLLM version, so the relationship between "health-ready" and
-// "actually-serving" is DOCUMENTED, not assumed. Both probes run against
+// "actually-serving" is measured directly. Both probes run against
 // the same pod (direct IP), from the same start, on the monotonic clock.
 type HealthCalibration struct {
 	HealthReadyAfterS    float64 `json:"health_ready_after_s"`
