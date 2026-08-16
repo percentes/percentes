@@ -8,8 +8,9 @@ import (
 func almost(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 // Aalen-Johansen reduces to 1-KM when censoring is the only non-completion
-// mechanism. Hand-computed: completions at 1,2,3s; timeout-censored at 2.5s.
-// CIF(1)=1/4, CIF(2)=1/2, CIF(3)=1 (censored obs leaves the risk set after 2).
+// mechanism. Hand-computed: completions at 1,2,3s; censored at 2.5s
+// (run-end). CIF(1)=1/4, CIF(2)=1/2, CIF(3)=1 (censored obs leaves the
+// risk set after 2).
 func TestAJPureCensoringEqualsKM(t *testing.T) {
 	obs := []Obs{
 		{TimeUs: 1_000_000, Kind: ObsCompletion},
@@ -41,7 +42,7 @@ func TestAJPureCensoringEqualsKM(t *testing.T) {
 // waiting". Completions at 1,2,3s with an ERROR at 2.5s:
 // CIF(1)=1/4, CIF(2)=1/2; the error at 2.5 consumes overall survival
 // (S: 1/2 -> 1/4) without adding completion incidence; CIF(3)=1/2+1/4=3/4.
-// Under the old errors-as-censored KM this window claimed 1.0.
+// An errors-as-censored estimator gives 1.0 here.
 func TestAJErrorsCompete(t *testing.T) {
 	obs := []Obs{
 		{TimeUs: 1_000_000, Kind: ObsCompletion},
@@ -64,9 +65,9 @@ func TestAJErrorsCompete(t *testing.T) {
 	}
 }
 
-// The executed counterexample from the external reviews: 50 errors at 0.5s
-// plus 50 completions at 1s. Errors-as-censored KM reported completion 1.000
-// by 1s; the true fraction of scheduled requests that completed is 0.500.
+// 50 errors at 0.5s plus 50 completions at 1s: half the scheduled requests
+// complete, so incidence at 1s is 0.500. An errors-as-censored estimator
+// gives 1.000.
 func TestAJCounterexampleFiftyFifty(t *testing.T) {
 	var obs []Obs
 	for i := 0; i < 50; i++ {
@@ -75,7 +76,7 @@ func TestAJCounterexampleFiftyFifty(t *testing.T) {
 	}
 	c := EstimateIncidence(obs, 30_000_000)
 	if got := c.IncidenceAt(1_000_000); !almost(got, 0.5) {
-		t.Errorf("incidence at 1s = %v, want 0.500 (old KM claimed 1.000)", got)
+		t.Errorf("incidence at 1s = %v, want 0.500", got)
 	}
 	if _, ok := c.Quantile(0.9); ok {
 		t.Error("p90 must be refused: only half the scheduled requests ever complete")
@@ -96,7 +97,7 @@ func TestAJTieConvention(t *testing.T) {
 		t.Errorf("tie handling: %+v", c.Points[0])
 	}
 	if !almost(c.Points[1].Incidence, 2.0/3.0) {
-		t.Errorf("final incidence: %+v (old errors-as-censored KM claimed 1.0)", c.Points[1])
+		t.Errorf("final incidence: %+v, want 2/3", c.Points[1])
 	}
 }
 
@@ -115,6 +116,51 @@ func TestAJQuantileBeyondHorizon(t *testing.T) {
 	}
 	if q, ok := c.Quantile(0.25); !ok || q != 1_000_000 {
 		t.Errorf("p25 should cross at 1s: got %d ok=%v", q, ok)
+	}
+}
+
+// An undefined ObsKind is a programming error: EstimateIncidence must panic.
+func TestAJInvalidKindPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("EstimateIncidence must panic on an undefined ObsKind")
+		}
+	}()
+	EstimateIncidence([]Obs{{TimeUs: 1_000_000, Kind: ObsKind(99)}}, 30_000_000)
+}
+
+// Quantile panics on q outside (0, 1]; ok=false is reserved for the §3
+// not-crossed refusal.
+func TestAJQuantileOutOfRangePanics(t *testing.T) {
+	c := EstimateIncidence([]Obs{{TimeUs: 1_000_000, Kind: ObsCompletion}}, 30_000_000)
+	for _, q := range []float64{1.0000000005, 0, -0.5, 1.5} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Quantile(%v) must panic: outside (0, 1]", q)
+				}
+			}()
+			c.Quantile(q)
+		}()
+	}
+	if tUs, ok := c.Quantile(1.0); !ok || tUs != 1_000_000 {
+		t.Errorf("Quantile(1.0) crosses at 1s when incidence reaches 1: got %d ok=%v", tUs, ok)
+	}
+}
+
+// Re-basing to intended dispatch time can push a completion's TimeUs past
+// the horizon by up to the max send-skew. The point stays on the curve;
+// quantiles are never claimed past the horizon.
+func TestAJRebasedOvershootBeyondHorizon(t *testing.T) {
+	c := EstimateIncidence([]Obs{{TimeUs: 30_040_000, Kind: ObsCompletion}}, 30_000_000)
+	if len(c.Points) != 1 {
+		t.Fatalf("the overshoot completion is real and must stay on the curve: %+v", c.Points)
+	}
+	if _, ok := c.Quantile(0.5); ok {
+		t.Error("no quantile may be claimed beyond the horizon")
+	}
+	if got := c.IncidenceAt(31_000_000); !almost(got, 1.0) {
+		t.Errorf("IncidenceAt reports observed data: got %v, want 1.0", got)
 	}
 }
 
