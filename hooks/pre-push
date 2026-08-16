@@ -1,11 +1,11 @@
 #!/bin/sh
-# The race unit suite, which is what the CI lint job runs (about 35s here).
-# The AC suite, kind smoke and campaign e2e stay in CI; `make test` runs the
-# full gate locally when you want it.
+# The race unit suite, which is what the CI lint job runs. The AC suite,
+# kind smoke and campaign e2e stay in CI; `make test` runs the full gate
+# locally when you want it.
 # Bypass once with `git push --no-verify`.
 set -u
 
-printf 'pre-push: go test -race -short ./... (about 35s)\n'
+printf 'pre-push: go test -race -short ./...\n'
 go test -race -short ./... -count=1 || {
 	printf '\npre-push: unit tests failed, push aborted\n\n' >&2
 	exit 1
