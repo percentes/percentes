@@ -1,6 +1,6 @@
 #!/bin/sh
 # Subject-line rules: one line, 55 characters or fewer, lowercase
-# conventional prefix, no body, no em-dash.
+# conventional prefix, plain ASCII, no body.
 # Bypass once with `git commit --no-verify`.
 set -u
 
@@ -24,9 +24,12 @@ len=${#subject}
 [ -z "$body" ] || die "subject only, no body. Found:
 $body"
 
-case "$subject" in
-*—* | *–*) die "dash character in the subject; use a comma, colon or parentheses" ;;
-esac
+# Subjects stay ASCII: smart punctuation renders inconsistently across
+# terminals and breaks naive changelog and grep tooling.
+if printf '%s' "$subject" | LC_ALL=C grep -q '[^ -~]'; then
+	die "subject must be plain ASCII:
+  $subject"
+fi
 
 printf '%s\n' "$subject" |
 	grep -Eq '^(feat|fix|docs|test|chore|refactor|perf|style|ci|build|spec)(\([a-z0-9,/_-]+\))?: .+' ||
