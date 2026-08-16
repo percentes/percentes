@@ -1,0 +1,39 @@
+#!/bin/sh
+# Fast gates, mirroring the CI lint job minus the race suite (pre-push runs
+# that). Install with `make hooks`; bypass once with `git commit --no-verify`.
+set -u
+
+die() { printf '\npre-commit: %s\n\n' "$1" >&2; exit 1; }
+
+# gofmt checks the STAGED Go files only, so an unrelated dirty file in the
+# working tree cannot block an otherwise clean commit. CI gates on the whole
+# repo, which pre-push and CI both cover.
+staged_go=$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')
+if [ -n "$staged_go" ]; then
+	unformatted=$(printf '%s\n' "$staged_go" | xargs gofmt -l)
+	[ -z "$unformatted" ] || die "unformatted, run gofmt -w:
+$unformatted"
+fi
+
+staged_sh=$(git diff --cached --name-only --diff-filter=ACMR -- '*.sh')
+if [ -n "$staged_sh" ]; then
+	IFS='
+'
+	for f in $staged_sh; do
+		bash -n "$f" || die "shell syntax error in $f"
+	done
+	unset IFS
+fi
+
+# build and lint read the working tree, not the index.
+go build ./... || die "go build failed"
+
+# GOPATH/bin is often off PATH in a hook's environment, so look there too.
+lint=$(command -v golangci-lint 2>/dev/null) || lint="$(go env GOPATH)/bin/golangci-lint"
+if [ -x "$lint" ]; then
+	"$lint" run || die "golangci-lint failed"
+else
+	go vet ./... || die "go vet failed"
+	printf 'pre-commit: golangci-lint absent, CI still runs it. Install the pinned version:\n' >&2
+	printf '  go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.59.1\n' >&2
+fi

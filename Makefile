@@ -6,9 +6,15 @@ KIND    ?= $(shell command -v kind 2>/dev/null || echo $(HOME)/go/bin/kind)
 CLUSTER ?= percentes
 IMAGE   ?= percentes/mockserver:dev
 
-.PHONY: all build test test-unit docker-build kind-up kind-down kind-smoke clean
+.PHONY: all build test test-unit docker-build kind-up kind-down kind-smoke clean hooks
 
 all: build
+
+# Point git at the repo's hooks: gofmt/build/lint on commit, subject-line
+# rules on commit-msg, race unit tests on push. One command per clone.
+hooks:
+	git config core.hooksPath hooks
+	@echo "hooks installed (core.hooksPath=hooks)"
 
 build:
 	$(GO) build ./...

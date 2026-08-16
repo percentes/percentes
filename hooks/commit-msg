@@ -1,0 +1,36 @@
+#!/bin/sh
+# Subject-line rules: one line, 55 characters or fewer, lowercase
+# conventional prefix, no body, no em-dash.
+# Bypass once with `git commit --no-verify`.
+set -u
+
+die() { printf '\ncommit-msg: %s\n\n' "$1" >&2; exit 1; }
+
+clean=$(grep -v '^#' "$1" | grep -v '^[[:space:]]*$')
+subject=$(printf '%s\n' "$clean" | head -1)
+body=$(printf '%s\n' "$clean" | tail -n +2)
+
+# Git-generated and in-progress messages are exempt.
+case "$subject" in
+Merge\ * | Revert\ * | fixup!\ * | squash!\ *) exit 0 ;;
+esac
+
+[ -n "$subject" ] || die "empty commit message"
+
+len=${#subject}
+[ "$len" -le 55 ] || die "subject is $len characters, limit 55:
+  $subject"
+
+[ -z "$body" ] || die "subject only, no body. Found:
+$body"
+
+case "$subject" in
+*—* | *–*) die "dash character in the subject; use a comma, colon or parentheses" ;;
+esac
+
+printf '%s\n' "$subject" |
+	grep -Eq '^(feat|fix|docs|test|chore|refactor|perf|style|ci|build|spec)(\([a-z0-9,/_-]+\))?: .+' ||
+	die "expected '<type>(<scope>): <change>', type one of
+  feat fix docs test chore refactor perf style ci build spec
+got:
+  $subject"

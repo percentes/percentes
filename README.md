@@ -20,8 +20,8 @@ Three commitments separate this harness from a load tester:
   histograms; failure rates are first-class; the completion curve is the
   Aalen-Johansen cumulative incidence over all scheduled requests, in
   which errors are competing terminal events and only timeouts are
-  censored (SPEC §0, amendment A1). A quantile the curve does not cross
-  is reported as "beyond the horizon," never extrapolated.
+  censored (SPEC §3). A quantile the curve does not cross
+  is reported as beyond the horizon, never extrapolated.
 - **Run-invalidating self-checks.** The client must prove it was not
   the bottleneck (send-skew, CPU, and GC-pause gates, all pinned and
   run-failing). A run that cannot demonstrate its own validity exits
@@ -50,7 +50,12 @@ Requires Go 1.21+, Docker, and [kind](https://kind.sigs.k8s.io/).
 make test        # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
 make test-unit   # fast path: unit/integration tests only
 make reproduce   # AC7: one-command full harness run against the local cluster
+make hooks       # once per clone: run the CI fast gates on commit and push
 ```
+
+`make hooks` points git at `hooks/`: gofmt, build and golangci-lint on
+commit, and the race unit suite on push, so a change fails locally before
+it fails CI.
 
 ## Layout
 
