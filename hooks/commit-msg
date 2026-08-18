@@ -17,6 +17,12 @@ esac
 
 [ -n "$subject" ] || die "empty commit message"
 
+# Machine-local checks, when present.
+local_hook="$(git rev-parse --git-dir)/hooks-local/commit-msg"
+if [ -x "$local_hook" ]; then
+	"$local_hook" "$1" || die "local checks failed"
+fi
+
 len=${#subject}
 [ "$len" -le 55 ] || die "subject is $len characters, limit 55:
   $subject"

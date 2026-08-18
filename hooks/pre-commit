@@ -25,6 +25,12 @@ if [ -n "$staged_sh" ]; then
 	unset IFS
 fi
 
+# Machine-local checks, when present.
+local_hook="$(git rev-parse --git-dir)/hooks-local/pre-commit"
+if [ -x "$local_hook" ]; then
+	"$local_hook" || die "local checks failed"
+fi
+
 # build and lint read the working tree, not the index.
 go build ./... || die "go build failed"
 
