@@ -216,6 +216,46 @@ func TestEquilibriumFactsAccompanyTTR(t *testing.T) {
 	}
 }
 
+// A run with no estimable equilibrium prints TTR to equilibrium as
+// "n/a (<reason>)" in the headline and the detector block (§5); the
+// equilibrium deficit and the sensitivity table's equilibrium column
+// follow. The pre-fault baseline exists, so its non-recovery verdict
+// still prints.
+func TestEquilibriumNAForms(t *testing.T) {
+	const note = "degraded plateau shorter than R; single-replica equilibrium not estimable for this run"
+	art := minimalArtifacts()
+	art.Windows["baseline"] = &collect.Stats{}
+	art.Windows["fault"] = &collect.Stats{}
+	art.Detector = &detect.Result{
+		PreFaultBaseline: 1.0,
+		EquilibriumNote:  note,
+		ToPreFault:       detect.Detection{Baseline: 1.0, NotRecovered: true},
+		Sensitivity:      []detect.SensitivityRow{{Params: detect.Params{WindowS: 10, EntryPct: 90, ExitPct: 85, HoldS: 30}, NotRecoveredPre: true}},
+	}
+	_, humanText, err := Generate(art)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(humanText, "TTR to equilibrium baseline:  n/a ("+note+");") {
+		t.Errorf("non-estimable equilibrium must render the N/A form with the reason:\n%s", humanText)
+	}
+	if got := strings.Count(humanText, "n/a ("+note+")"); got != 2 {
+		t.Errorf("the N/A form must print in the headline and the detector block, found %d:\n%s", got, humanText)
+	}
+	if strings.Contains(humanText, "(baseline 0.0000)") {
+		t.Errorf("no verdict may render against the never-established baseline:\n%s", humanText)
+	}
+	if !strings.Contains(humanText, "TTR to pre-fault baseline:    NOT RECOVERED within the fault-window timeout (baseline 1.0000)") {
+		t.Errorf("the pre-fault verdict is against a real baseline and must stay:\n%s", humanText)
+	}
+	if !strings.Contains(humanText, "integrated goodput deficit: 0.00 (vs pre-fault), n/a (vs equilibrium)") {
+		t.Errorf("the equilibrium deficit was never computed and must render n/a:\n%s", humanText)
+	}
+	if !strings.Contains(humanText, "90     10   30   | not recovered          n/a") {
+		t.Errorf("sensitivity equilibrium column must render n/a:\n%s", humanText)
+	}
+}
+
 // The curve rendering samples at most 12 points, but the last point is the
 // window's final incidence: in a window with errors that is where the curve
 // settles below 1.0. Oracle: 14 completions plus one error, so the sampling

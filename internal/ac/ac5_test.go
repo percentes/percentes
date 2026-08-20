@@ -55,8 +55,11 @@ func TestAC5ScriptedRecovery(t *testing.T) {
 	if res.EquilibriumEstimable {
 		t.Errorf("AC5: total-outage equilibrium must be not-estimable, got %.3f", res.EquilibriumBaseline)
 	}
-	if res.EquilibriumNote == "" || !res.ToEquilibrium.NotRecovered {
+	if res.EquilibriumNote == "" {
 		t.Error("AC5: the equilibrium baseline must be reported distinctly (explicit not-estimable + reason)")
+	}
+	if res.ToEquilibrium.NotRecovered || res.ToEquilibrium.TTRSeconds != nil {
+		t.Errorf("AC5: TTR to a non-estimable equilibrium must carry no verdict (§5 N/A): %+v", res.ToEquilibrium)
 	}
 	if res.PreFaultBaseline < 0.95 {
 		t.Errorf("AC5: pre-fault baseline should be ~1.0 on a healthy mock, got %.3f", res.PreFaultBaseline)

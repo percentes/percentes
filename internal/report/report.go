@@ -256,9 +256,16 @@ func human(r *Report) string {
 	} else {
 		w("single-replica equilibrium baseline: NOT ESTIMABLE (%s)", d.EquilibriumNote)
 	}
+	// TTR and deficit against a non-estimable equilibrium are N/A (§5).
+	eqTTR := "n/a (" + d.EquilibriumNote + ")"
+	eqDeficit := "n/a"
+	if d.EquilibriumEstimable {
+		eqTTR = ttrText(d.ToEquilibrium)
+		eqDeficit = fmt.Sprintf("%.2f", d.DeficitToEquilibrium)
+	}
 	w("TTR to pre-fault baseline:    %s", ttrText(d.ToPreFault))
-	w("TTR to equilibrium baseline:  %s; the baseline is a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout (§5)", ttrText(d.ToEquilibrium))
-	w("integrated goodput deficit: %.2f (vs pre-fault), %.2f (vs equilibrium) goodput-seconds", d.DeficitToPreFault, d.DeficitToEquilibrium)
+	w("TTR to equilibrium baseline:  %s; the baseline is a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout (§5)", eqTTR)
+	w("integrated goodput deficit: %.2f (vs pre-fault), %s (vs equilibrium) goodput-seconds", d.DeficitToPreFault, eqDeficit)
 	compNames := make([]string, 0, len(d.Components))
 	for n := range d.Components {
 		compNames = append(compNames, n)
@@ -349,9 +356,14 @@ func ttrText(d detect.Detection) string {
 	return fmt.Sprintf("TTR %.1fs (baseline %.4f, canceled entries %d, re-degradations %d)", *d.TTRSeconds, d.Baseline, d.CanceledEntries, d.ReDegradations)
 }
 
+// A cell with neither a TTR nor a non-recovery verdict is the
+// non-estimable-equilibrium case: N/A (§5).
 func ttrCell(t *float64, notRecovered bool) string {
-	if notRecovered || t == nil {
+	switch {
+	case notRecovered:
 		return "not recovered"
+	case t == nil:
+		return "n/a"
 	}
 	return fmt.Sprintf("%.1fs", *t)
 }

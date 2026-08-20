@@ -57,8 +57,17 @@ func TestDetectCleanRecovery(t *testing.T) {
 	if res.EquilibriumEstimable {
 		t.Errorf("total outage must not yield an estimable equilibrium (got %.3f)", res.EquilibriumBaseline)
 	}
-	if res.EquilibriumNote == "" || !res.ToEquilibrium.NotRecovered {
-		t.Error("non-estimable equilibrium must carry its note and a non-recovery detection")
+	if res.EquilibriumNote == "" {
+		t.Error("non-estimable equilibrium must carry its note")
+	}
+	// §5: a non-estimable equilibrium records no verdict.
+	if res.ToEquilibrium.NotRecovered || res.ToEquilibrium.TTRSeconds != nil {
+		t.Errorf("non-estimable equilibrium must yield no detection verdict: %+v", res.ToEquilibrium)
+	}
+	for _, row := range res.Sensitivity {
+		if row.NotRecoveredEq || row.TTRToEquilibrium != nil {
+			t.Fatalf("sensitivity rows must carry no equilibrium verdict either: %+v", row)
+		}
 	}
 	if res.DeficitToPreFault < 19 || res.DeficitToPreFault > 21 {
 		t.Errorf("integrated deficit ~20 goodput-seconds for a 20s total outage, got %v", res.DeficitToPreFault)

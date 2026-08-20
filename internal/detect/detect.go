@@ -230,7 +230,9 @@ func deficit(buckets []Bucket, comp component, baseline float64, fireAnchorNs, u
 	return total
 }
 
-// SensitivityRow is one entry of the §5 pre-registered sweep.
+// SensitivityRow is one entry of the §5 pre-registered sweep. The
+// equilibrium fields carry no verdict when the equilibrium is not
+// estimable.
 type SensitivityRow struct {
 	Params           Params   `json:"params"`
 	TTRToPreFault    *float64 `json:"ttr_to_prefault_s,omitempty"`
@@ -256,6 +258,8 @@ type Result struct {
 	EquilibriumNote         string  `json:"equilibrium_note,omitempty"`
 
 	// Two baselines, both reported (§5): they answer different questions.
+	// ToEquilibrium carries no verdict (no TTR, no non-recovery) when the
+	// equilibrium is not estimable; its TTR is N/A, never imputed.
 	ToPreFault    Detection `json:"to_pre_fault"`
 	ToEquilibrium Detection `json:"to_equilibrium"`
 
@@ -327,7 +331,7 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, fireAnchorNs, timeou
 	if res.EquilibriumEstimable {
 		res.ToEquilibrium = detect(buckets, compGoodput, res.EquilibriumBaseline, fireAnchorNs, timeoutNs, p)
 	} else {
-		res.ToEquilibrium = Detection{Baseline: res.EquilibriumBaseline, Params: p, NotRecovered: true}
+		res.ToEquilibrium = Detection{Baseline: res.EquilibriumBaseline, Params: p}
 	}
 
 	untilPre := timeoutNs
@@ -352,7 +356,6 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, fireAnchorNs, timeou
 				row := SensitivityRow{
 					Params:        sp,
 					TTRToPreFault: dp.TTRSeconds, NotRecoveredPre: dp.NotRecovered,
-					NotRecoveredEq: true,
 				}
 				if res.EquilibriumEstimable {
 					de := detect(buckets, compGoodput, res.EquilibriumBaseline, fireAnchorNs, timeoutNs, sp)
