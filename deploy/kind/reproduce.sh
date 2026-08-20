@@ -99,7 +99,7 @@ for key in ("config", "config_sha256", "caveat", "conditional_headline",
             "windows", "detector", "in_flight_at_fire", "decomposition", "share_gate"):
     assert key in rep, f"report.json missing {key}"
 assert "certifies the instrument" in rep["caveat"]
-for w in ("baseline", "fault"):
+for w in ("baseline", "guard", "fault"):
     assert w in rep["windows"], f"window {w} missing"
     assert rep["windows"][w]["completion_incidence"]["n"] > 0, f"window {w} completion incidence empty"
 det = rep["detector"]

@@ -1,19 +1,22 @@
-// Package validity implements the SPEC.md §10 run-validity gates
-// G1-G6, all run-failing. A run that fails any applicable gate is
-// invalid and its numbers are not published as a characterization result.
+// Package validity implements the SPEC.md §10 run-validity gates G1-G6. A
+// run that fails any applicable gate other than G3 and G4 is invalid and
+// its numbers are not published as a characterization result; failure or
+// non-observation of G3 or G4 strips the node-loss-representative label
+// and reports the run as clean-variant-equivalent, leaving it valid.
 //
-// Three gates are derived from the harness artifacts and evaluate in
+// Four gates are derived from the harness artifacts and evaluate in
 // Phase 0 and Phase 1 alike: G1 per-replica share (45-55% pre-fault),
-// G2 client-validity, G6 baseline goodput near 100%. Three depend on
-// real-infrastructure observations only available in Phase 1: G3
-// zero-RSTs-from-the-dead-replica (packet capture), G4 endpoint-staleness
-// window >= 20s (EndpointSlice polling), G5 GPU clock/power fingerprints
-// equal (nvidia-smi). Those three take injected Observation values (concrete
+// G2 client-validity, G3 zero errored outcomes among the victim-attributed
+// in-flight requests (§1(i)), G6 baseline goodput >= 0.99. Two depend
+// on real-infrastructure observations only available in Phase 1: G4
+// endpoint-staleness window >= 20s with victim-bound traffic observed in it
+// (EndpointSlice polling), G5 GPU clock/power fingerprints equal
+// (nvidia-smi). Those two take injected Observation values (concrete
 // structs) so the gate LOGIC is tested with struct fixtures here; the
-// collectors are wired at Phase 1 against the real cluster. A gate whose observation
-// is absent is reported "not observed" and, when it is applicable to the
-// variant, fails the run — an unobserved run-failing gate is never a
-// silent pass.
+// collectors are wired at Phase 1 against the real cluster. A gate whose
+// observation is absent is reported "not observed" and, when it is
+// applicable to the variant, never passes: for G3 and G4 that costs the
+// label, for every other gate the run.
 package validity
 
 import (
@@ -30,14 +33,19 @@ type Gate struct {
 	Applicable bool   `json:"applicable"`
 	Observed   bool   `json:"observed"`
 	Pass       bool   `json:"pass"`
-	Detail     string `json:"detail"`
+	// LabelDetermining marks the black-hole assertion gates G3 and G4:
+	// failure or non-observation strips the node-loss-representative label
+	// and leaves the run valid (§10).
+	LabelDetermining bool   `json:"label_determining"`
+	Detail           string `json:"detail"`
 }
 
 // Observations carries the Phase-1 infrastructure signals for the gates
 // that cannot be derived from client-side artifacts. Zero-valued fields
-// mean "not observed" (the gate then reports so and fails if applicable).
+// mean "not observed" (the gate then reports so and does not pass).
 type Observations struct {
-	// G3: client-side packet capture result for the black-hole variant.
+	// RSTCapture is mechanism evidence for the black-hole variant, recorded
+	// in the Report and gating nothing (§1(i)).
 	RSTCapture *RSTCaptureResult
 	// G4: observed ready-EndpointSlice staleness window for the dead pod.
 	EndpointStaleness *StalenessResult
@@ -45,8 +53,9 @@ type Observations struct {
 	GPUFingerprints []GPUFingerprint
 }
 
-// RSTCaptureResult is the G3 signal: how many TCP RSTs were sourced from
-// the dead replica during the fault window (must be zero).
+// RSTCaptureResult records how many TCP RSTs were sourced from the dead
+// replica during the fault window. Zero is expected by construction under a
+// DROP-all partition, so it is a sanity check, never a gate (§1(i)).
 type RSTCaptureResult struct {
 	Captured        bool `json:"captured"`
 	RSTsFromDeadPod int  `json:"rsts_from_dead_pod"`
@@ -57,6 +66,11 @@ type RSTCaptureResult struct {
 type StalenessResult struct {
 	Observed         bool    `json:"observed"`
 	StalenessWindowS float64 `json:"staleness_window_s"`
+	// VictimTrafficObserved records at least one post-T_inject connection or
+	// request routed to the stale endpoint inside the window; a stale entry
+	// alone does not establish that the dataplane still routed to the dead
+	// pod (§1(ii)).
+	VictimTrafficObserved bool `json:"victim_traffic_observed"`
 }
 
 // GPUFingerprint is one replica's nvidia-smi clock/power fingerprint for
@@ -69,31 +83,47 @@ type GPUFingerprint struct {
 
 // Report is the full G1-G6 evaluation for one run.
 type Report struct {
-	Gates   []Gate `json:"gates"`
+	Gates []Gate `json:"gates"`
+	// AllPass is the run's validity: every applicable gate except the
+	// label-determining pair passed (§10).
 	AllPass bool   `json:"all_pass"`
 	Variant string `json:"variant"`
+	// NodeLossRepresentative carries the §1 label: false when an applicable
+	// label-determining gate failed or went unobserved, and the run is then
+	// reported as clean-variant-equivalent (§10).
+	NodeLossRepresentative bool `json:"node_loss_representative"`
+	// RSTCapture carries the black-hole mechanism evidence through to the
+	// report; it is recorded where taken and gates nothing (§1(i)).
+	RSTCapture *RSTCaptureResult `json:"rst_capture,omitempty"`
 }
 
 // Evaluate runs all six gates for one run's artifacts plus the Phase-1
 // observations. The variant selects which gates are applicable (G3/G4 are
-// black-hole only, §10).
+// black-hole only, §10), and G3/G4 decide the node-loss-representative
+// label rather than the run's validity.
 func Evaluate(art *run.Artifacts, obs Observations) Report {
-	rep := Report{Variant: art.Config.Fault.Variant}
+	rep := Report{Variant: art.Config.Fault.Variant, RSTCapture: obs.RSTCapture}
 	isBlackHole := art.Config.Fault.Variant == config.VariantBlackHole
 
 	rep.Gates = []Gate{
 		gateG1(art),
 		gateG2(art),
-		gateG3(art, obs, isBlackHole),
+		gateG3(art, isBlackHole),
 		gateG4(art, obs, isBlackHole),
 		gateG5(art, obs),
 		gateG6(art),
 	}
 	rep.AllPass = true
+	rep.NodeLossRepresentative = isBlackHole
 	for _, g := range rep.Gates {
-		if g.Applicable && !g.Pass {
-			rep.AllPass = false
+		if !g.Applicable || g.Pass {
+			continue
 		}
+		if g.LabelDetermining {
+			rep.NodeLossRepresentative = false
+			continue
+		}
+		rep.AllPass = false
 	}
 	return rep
 }
@@ -130,30 +160,35 @@ func gateG2(art *run.Artifacts) Gate {
 	return g
 }
 
-// G3 (black-hole only): zero RSTs from the dead replica in the capture
-// (§1 runtime assertion i, §10). Requires the packet-capture observation.
-func gateG3(art *run.Artifacts, obs Observations, isBlackHole bool) Gate {
-	g := Gate{ID: "G3", Name: "zero RSTs from the dead replica (packet capture)", Applicable: isBlackHole}
+// G3 (black-hole only): zero errored outcomes among the victim-attributed
+// in-flight requests (§1 runtime assertion i, §10). Derived from the
+// run's own artifacts; the outcome model leaves every non-completing one
+// censored at the pinned timeout.
+func gateG3(art *run.Artifacts, isBlackHole bool) Gate {
+	g := Gate{ID: "G3", Name: "zero errored outcomes among victim-attributed in-flight requests", Applicable: isBlackHole, LabelDetermining: true}
 	if !isBlackHole {
 		g.Observed, g.Pass = true, true
-		g.Detail = "not the black-hole variant: RST-absence assertion not applicable"
+		g.Detail = "not the black-hole variant: client-silence assertion not applicable"
 		return g
 	}
-	if obs.RSTCapture == nil || !obs.RSTCapture.Captured {
+	if art.VictimReplica == "" {
 		g.Observed, g.Pass = false, false
-		g.Detail = "REQUIRES a client-side packet capture (Phase 1); a black-hole run without it is reported clean-variant-equivalent, not node-loss-representative (§1)"
+		g.Detail = "REQUIRES per-request victim attribution; a black-hole run without it is reported clean-variant-equivalent, not node-loss-representative (§1(i))"
 		return g
 	}
+	inf := art.InFlight
 	g.Observed = true
-	g.Pass = obs.RSTCapture.RSTsFromDeadPod == 0
-	g.Detail = fmt.Sprintf("%d RSTs from the dead pod during the fault window (must be 0)", obs.RSTCapture.RSTsFromDeadPod)
+	g.Pass = inf.OnVictimErrored == 0
+	g.Detail = fmt.Sprintf("in flight on victim %s at fire: %d completed, %d errored (must be 0), %d censored at the pinned timeout",
+		art.VictimReplica, inf.OnVictimCompleted, inf.OnVictimErrored, inf.OnVictimCensored)
 	return g
 }
 
-// G4 (black-hole only): observed endpoint-staleness window >= 20s (§1
-// runtime assertion ii, §10). Requires the EndpointSlice observation.
+// G4 (black-hole only): observed endpoint-staleness window >= 20s with
+// victim-bound traffic observed inside it (§1 runtime assertion ii,
+// §10). Requires the EndpointSlice observation.
 func gateG4(art *run.Artifacts, obs Observations, isBlackHole bool) Gate {
-	g := Gate{ID: "G4", Name: "endpoint-staleness window >= 20s", Applicable: isBlackHole}
+	g := Gate{ID: "G4", Name: "endpoint-staleness window >= 20s with victim-bound traffic observed", Applicable: isBlackHole, LabelDetermining: true}
 	if !isBlackHole {
 		g.Observed, g.Pass = true, true
 		g.Detail = "not the black-hole variant: staleness assertion not applicable"
@@ -162,12 +197,14 @@ func gateG4(art *run.Artifacts, obs Observations, isBlackHole bool) Gate {
 	minS := float64(art.Config.Fault.EndpointStalenessMinS)
 	if obs.EndpointStaleness == nil || !obs.EndpointStaleness.Observed {
 		g.Observed, g.Pass = false, false
-		g.Detail = fmt.Sprintf("REQUIRES EndpointSlice polling (Phase 1); pinned minimum %.0fs (§1(ii)/§10 G4)", minS)
+		g.Detail = fmt.Sprintf("REQUIRES EndpointSlice polling and routed-path observation (Phase 1); pinned minimum %.0fs (§1(ii)/§10 G4)", minS)
 		return g
 	}
+	st := obs.EndpointStaleness
 	g.Observed = true
-	g.Pass = obs.EndpointStaleness.StalenessWindowS >= minS
-	g.Detail = fmt.Sprintf("observed %.1fs staleness window (minimum %.0fs)", obs.EndpointStaleness.StalenessWindowS, minS)
+	g.Pass = st.StalenessWindowS >= minS && st.VictimTrafficObserved
+	g.Detail = fmt.Sprintf("observed %.1fs staleness window (minimum %.0fs), victim-bound traffic routed to the stale endpoint: %v",
+		st.StalenessWindowS, minS, st.VictimTrafficObserved)
 	return g
 }
 
@@ -208,16 +245,16 @@ func gateG5(art *run.Artifacts, obs Observations) Gate {
 	return g
 }
 
-// G6: baseline goodput near 100% (§4, §10). Derived from the detector's
-// pre-fault baseline. "Near 100%" is read as the SLO's own near-100
-// calibration requirement (§4): >= 0.99.
+// G6: baseline goodput at least the pinned minimum (§10 G6). Derived
+// from the detector's pre-fault baseline, which ends at the guard start (§3):
+// the guard window never enters this gate.
 func gateG6(art *run.Artifacts) Gate {
-	g := Gate{ID: "G6", Name: "baseline goodput near 100%", Applicable: true, Observed: true}
+	g := Gate{ID: "G6", Name: fmt.Sprintf("baseline goodput >= %.2f", config.PinnedBaselineGoodputMin), Applicable: true, Observed: true}
 	base := 0.0
 	if art.Detector != nil {
 		base = art.Detector.PreFaultBaseline
 	}
-	g.Pass = base >= 0.99
-	g.Detail = fmt.Sprintf("baseline goodput %.4f (must be >= 0.99; §4: near 100%% or the load calibration is wrong and is redone)", base)
+	g.Pass = base >= config.PinnedBaselineGoodputMin
+	g.Detail = fmt.Sprintf("baseline goodput %.4f (pinned minimum %.2f, §10 G6; below it the load calibration is wrong and is redone)", base, config.PinnedBaselineGoodputMin)
 	return g
 }

@@ -153,13 +153,18 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 		art.ActualFireNs = orch.ObservedFire.Sub(res.EpochWall).Nanoseconds()
 	}
 
-	// Windows (§3): aligned to phases, never straddling T_inject.
+	// Windows (§3): aligned to phases, never straddling T_inject. The
+	// baseline ends one pinned client timeout before the fire anchor and
+	// the guard window runs from there to T_inject (§3).
+	fireAnchorNs := collect.FireAnchorNs(res.TInjectNs, art.ActualFireNs)
+	guardStartNs := collect.GuardStartNs(cfg, fireAnchorNs, res.WarmupEndNs)
 	windows := []collect.Window{
-		{Name: "baseline", StartNs: res.WarmupEndNs, EndNs: res.TInjectNs},
+		{Name: "baseline", StartNs: res.WarmupEndNs, EndNs: guardStartNs},
+		{Name: "guard", StartNs: guardStartNs, EndNs: res.TInjectNs},
 		{Name: "fault", StartNs: res.TInjectNs, EndNs: res.FaultEndNs},
 	}
 	buckets := detect.BuildSeries(cfg, res.Requests, res.WarmupEndNs, res.RunEndNs)
-	art.Detector = detect.Run(cfg, buckets, res.WarmupEndNs, art.ActualFireNs, res.FaultEndNs)
+	art.Detector = detect.Run(cfg, buckets, res.WarmupEndNs, fireAnchorNs, res.FaultEndNs)
 
 	// The recovery point splits the fault window into degraded and
 	// recovered sub-windows for reporting.
@@ -178,7 +183,7 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 
 	art.VictimReplica = opts.VictimReplica
 	art.InFlight = collect.AccountInFlight(res.Requests, art.ActualFireNs, opts.VictimReplica)
-	art.ShareGate = shareGate(cfg, res, art.ActualFireNs, opts.VictimReplica)
+	art.ShareGate = shareGate(cfg, res, guardStartNs, opts.VictimReplica)
 	art.ThresholdAnalysis = collect.AnalyzeThresholds(cfg, art.Windows["baseline"], art.Windows["fault"])
 
 	// §5 decomposition: the probes launched at fire time report their
@@ -219,9 +224,11 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	return art, nil
 }
 
-// shareGate computes per-replica request share over the baseline window
-// (§1: 45-55% pre-fault, run-failing for multi-replica targets).
-func shareGate(cfg *config.Config, res *loadgen.Result, fireNs int64, victim string) ShareGateResult {
+// shareGate computes per-replica request share over the guard-bounded
+// baseline window (§1: 45-55% pre-fault, run-failing for multi-replica
+// targets). Membership ends at the guard start: the share gate is a
+// baseline-derived quantity, so no guard-window request enters it.
+func shareGate(cfg *config.Config, res *loadgen.Result, guardStartNs int64, victim string) ShareGateResult {
 	out := ShareGateResult{Shares: map[string]float64{}}
 	if cfg.Target.Replicas < 2 {
 		out.Note = "single-replica target: §1 share gate applies to multi-replica topologies"
@@ -233,7 +240,7 @@ func shareGate(cfg *config.Config, res *loadgen.Result, fireNs int64, victim str
 	total := 0
 	for i := range res.Requests {
 		r := &res.Requests[i]
-		if r.IntendedNs < res.WarmupEndNs || r.IntendedNs >= res.TInjectNs || r.Replica == "" {
+		if r.IntendedNs < res.WarmupEndNs || r.IntendedNs >= guardStartNs || r.Replica == "" {
 			continue
 		}
 		counts[r.Replica]++

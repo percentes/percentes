@@ -126,7 +126,7 @@ func TestPinnedValueEnforcement(t *testing.T) {
 		{"client timeout narrowed", acRef, func(c *Config) { c.Client.HTTPTimeoutS = 29 }, "client.http_timeout_s"},
 		{"retries enabled", acRef, func(c *Config) { c.Client.Retries = 1 }, "client.retries"},
 		{"max_tokens changed", acRef, func(c *Config) { c.Load.MaxTokens = 128 }, "load.max_tokens"},
-		{"ignore_eos disabled", acRef, func(c *Config) { c.Load.IgnoreEOS = false }, "load.ignore_eos"},
+		{"ignore_eos disabled on a non-hosted target", acRef, func(c *Config) { c.Load.IgnoreEOS = false }, "load.ignore_eos"},
 		{"unique prefixes disabled", acRef, func(c *Config) { c.Load.UniquePrefixes = false }, "load.unique_prefixes"},
 		{"connections under-provisioned", acRef, func(c *Config) { c.Load.Connections = 7 }, "load.connections"},
 		{"ac lambda off reference", acRef, func(c *Config) { c.Load.RateRPS = 25 }, "load.rate_rps"},
@@ -173,6 +173,17 @@ func TestPinnedValueEnforcement(t *testing.T) {
 		{"experiment rtt not recorded", experimentRef, func(c *Config) { c.Client.Placement.RecordRTT = false }, "client.placement.record_rtt"},
 		{"experiment kv cache unpinned", experimentRef, func(c *Config) { c.Pins.Engine.KVCacheGB = 0 }, "pins.engine.kv_cache_gb"},
 		{"experiment with mock section", experimentRef, func(c *Config) { c.Mock = &Mock{} }, "mock: must be absent"},
+
+		{"black-hole partition duration unpinned", experimentRef, func(c *Config) {
+			c.Fault.Variant, c.Fault.PartitionDurationS = VariantBlackHole, 60
+		}, "fault.partition_duration_s"},
+		{"grace period not below the partition duration", experimentRef, func(c *Config) {
+			c.Fault.Variant = VariantBlackHole
+			c.Pins.Kubernetes.NodeMonitorGracePeriodS = 120
+		}, "node_monitor_grace_period_s"},
+		{"no-fault variant carrying an injection option", acRef, func(c *Config) {
+			c.Fault, c.Mock = Fault{Variant: VariantNone, InjectionToleranceMs: 500}, nil
+		}, "no injection options"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,6 +197,41 @@ func TestPinnedValueEnforcement(t *testing.T) {
 				t.Fatalf("error must name %q, got: %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+// The ignore_eos pin is mode-conditional (§6): the hosted wire request
+// omits the vLLM extension, so a hosted config states false and a hosted
+// config asserting true does not load.
+func TestHostedIgnoreEOSPin(t *testing.T) {
+	c := loadRef(t, acRef)
+	c.Target.Hosted = true
+	c.Target.ModelName = "llama-3.1-8b-instant"
+	c.Target.APIKeyEnv = "SOME_KEY_ENV"
+
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "load.ignore_eos") {
+		t.Fatalf("hosted target with ignore_eos true must be refused on it, got: %v", err)
+	}
+
+	c.Load.IgnoreEOS = false
+	if err := c.Validate(); err != nil {
+		t.Fatalf("hosted target with ignore_eos false must load: %v", err)
+	}
+}
+
+// A hosted load run has no fault: variant "none" makes it expressible
+// (§6).
+func TestNoFaultVariantLoads(t *testing.T) {
+	c := loadRef(t, acRef)
+	c.Fault, c.Mock = Fault{Variant: VariantNone}, nil
+	c.Target.Hosted = true
+	c.Target.ModelName = "llama-3.1-8b-instant"
+	c.Target.APIKeyEnv = "SOME_KEY_ENV"
+	c.Load.IgnoreEOS = false
+
+	if err := c.Validate(); err != nil {
+		t.Fatalf("no-fault hosted config must load: %v", err)
 	}
 }
 

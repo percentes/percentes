@@ -3,7 +3,7 @@
 // curves, failure rates, conditional-on-completion distributions, the recovery analysis
 // with its sensitivity table, the decomposition, gates, and the
 // conditional headline (appendix template). Distributional numbers come
-// from the merged histograms queried once — never averaged percentiles.
+// from the merged histograms queried once, never averaged percentiles.
 package report
 
 import (
@@ -118,7 +118,8 @@ func headline(art *run.Artifacts) string {
 		"Under %s fault injection (mock variant, Phase 0 instrument certification): %.1f%% of in-flight requests failed and %.1f%% timed out at 30 s (%d %s); "+
 			"survivor TTFT (conditional on completion) moved from p50 %.0f ms (baseline) to p50 %.0f ms (fault window); "+
 			"cumulative incidence of completion within 1 s in the fault window was %.3f (Aalen-Johansen); "+
-			"recovery to single-replica equilibrium: %s; goodput deficit %.1f goodput-seconds vs pre-fault; "+
+			"recovery to single-replica equilibrium (a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout; §5): %s; "+
+			"goodput deficit %.1f goodput-seconds vs pre-fault; "+
 			"decomposed segments: %s. Single run against the mock; no real-GPU claim.",
 		art.Config.Fault.Variant, pctErr, pctCens, pop, popLabel,
 		float64(base.TTFTConditional.P50Us)/1000, float64(fault.TTFTConditional.P50Us)/1000,
@@ -189,10 +190,24 @@ func human(r *Report) string {
 	for name := range art.Windows {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	// Chronological, so the guard window renders between the baseline and
+	// the fault it guards (§3).
+	sort.Slice(names, func(i, j int) bool {
+		a, b := art.Windows[names[i]].Window, art.Windows[names[j]].Window
+		if a.StartNs != b.StartNs {
+			return a.StartNs < b.StartNs
+		}
+		if a.EndNs != b.EndNs {
+			return a.EndNs < b.EndNs
+		}
+		return names[i] < names[j]
+	})
 	for _, name := range names {
 		st := art.Windows[name]
 		w("== Window %q [%.1fs, %.1fs) ==", name, float64(st.Window.StartNs)/1e9, float64(st.Window.EndNs)/1e9)
+		if name == "guard" {
+			w("PRE-FAULT GUARD WINDOW (§3): the last pinned client timeout before the fire anchor; the fault can terminate requests intended here, so this is not pre-fault degradation and it feeds no baseline-derived quantity.")
+		}
 		w("scheduled=%d completed=%d errored=%d censored=%d", st.Scheduled, st.Completed, st.Errored, st.Censored)
 		w("error rate=%.4f censored rate=%.4f (first-class)", st.ErrorRate, st.CensoredRate)
 		if len(st.ErrClasses) > 0 {
@@ -242,7 +257,7 @@ func human(r *Report) string {
 		w("single-replica equilibrium baseline: NOT ESTIMABLE (%s)", d.EquilibriumNote)
 	}
 	w("TTR to pre-fault baseline:    %s", ttrText(d.ToPreFault))
-	w("TTR to equilibrium baseline:  %s", ttrText(d.ToEquilibrium))
+	w("TTR to equilibrium baseline:  %s; the baseline is a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout (§5)", ttrText(d.ToEquilibrium))
 	w("integrated goodput deficit: %.2f (vs pre-fault), %.2f (vs equilibrium) goodput-seconds", d.DeficitToPreFault, d.DeficitToEquilibrium)
 	compNames := make([]string, 0, len(d.Components))
 	for n := range d.Components {
@@ -299,11 +314,16 @@ func summary(s histo.Summary) string {
 func incidenceText(cif *collect.IncidenceCurve) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Completion incidence, Aalen-Johansen (n=%d over ALL scheduled; errors compete, timeouts censored; %d outstanding at the horizon; horizon %.0fs):\n", cif.N, cif.Censored, float64(cif.HorizonUs)/1e6)
+	// The ceiling picks the refusal form: above it no crossing can exist
+	// at any t (§3).
+	ceiling := cif.Ceiling()
 	for _, q := range []float64{0.5, 0.9, 0.95, 0.99} {
 		if t, ok := cif.Quantile(q); ok {
 			fmt.Fprintf(&b, "  p%-4g completion at %.3fs\n", q*100, float64(t)/1e6)
+		} else if ceiling >= q {
+			fmt.Fprintf(&b, "  p%-4g > %.0fs (ceiling %.2f)\n", q*100, float64(cif.HorizonUs)/1e6, ceiling)
 		} else {
-			fmt.Fprintf(&b, "  p%-4g > %.0fs (curve does not cross within the timeout horizon)\n", q*100, float64(cif.HorizonUs)/1e6)
+			fmt.Fprintf(&b, "  p%-4g unattainable (final completion incidence %.2f; ceiling %.2f)\n", q*100, cif.FinalIncidence(), ceiling)
 		}
 	}
 	// A compact curve rendering: up to 12 evenly spaced points, plus the

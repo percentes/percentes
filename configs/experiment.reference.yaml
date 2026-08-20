@@ -78,6 +78,7 @@ fault:
   t_inject_offset_s: 300   # == baseline_s: §1 has no gap phase (enforced)
   injection_tolerance_ms: 500
   endpoint_staleness_min_s: 20 # pinned (§1 black-hole assertion ii / §10 G4)
+  partition_duration_s: 120    # pinned black-hole pre-armed expiry (§1)
 
 pins:
   vllm:
@@ -105,6 +106,8 @@ pins:
   kubernetes:
     version: PIN-AT-PHASE1
     cni: PIN-AT-PHASE1
+    # Per-connection unless the recorded mode documents a request-aware
+    # layer-7 proxy, and only then is the §1 share band enforced (§1).
     dataplane_mode: PIN-AT-PHASE1
     kube_proxy_mode: PIN-AT-PHASE1
     node_monitor_grace_period_s: 40  # record the cluster's actual value (§1)

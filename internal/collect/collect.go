@@ -15,8 +15,12 @@
 //     run-end) are censored (§3).
 //   - Windows are aligned to phases and never straddle T_inject; requests
 //     belong to the window of their INTENDED dispatch time (the schedule
-//     is the pre-registered object; a request scheduled pre-fault whose
-//     life crosses T_inject is pre-fault load).
+//     is the pre-registered object). The baseline window ends one pinned
+//     client timeout before the fire anchor, and the guard window runs
+//     from there to T_inject: a request intended inside the guard can
+//     still be unresolved when the fault fires, so its outcome would be
+//     fault-caused but baseline-attributed (§3). The guard
+//     carries the full metric set and feeds no baseline-derived quantity.
 //   - Any window with error+censored fraction above 5% must present the
 //     incidence curve alongside completed-only percentiles, caveat explicit.
 package collect
@@ -36,6 +40,28 @@ type Window struct {
 	Name    string `json:"name"`
 	StartNs int64  `json:"start_ns"`
 	EndNs   int64  `json:"end_ns"`
+}
+
+// FireAnchorNs is the §3 fire anchor: the earlier of the planned T_inject
+// and the recorded actual fire time (§3; the injection-timing
+// gate permits firing within 500 ms of T_inject).
+func FireAnchorNs(tInjectNs, actualFireNs int64) int64 {
+	if actualFireNs < tInjectNs {
+		return actualFireNs
+	}
+	return tInjectNs
+}
+
+// GuardStartNs is the baseline end and guard-window start (§3): one pinned
+// client timeout before the fire anchor, floored at the measurement start.
+// A pre-fault phase shorter than the timeout leaves the baseline window
+// empty and the whole phase in the guard.
+func GuardStartNs(cfg *config.Config, fireAnchorNs, measureStartNs int64) int64 {
+	start := fireAnchorNs - int64(cfg.Client.HTTPTimeoutS)*1_000_000_000
+	if start < measureStartNs {
+		return measureStartNs
+	}
+	return start
 }
 
 // Stats is the full §3 reporting set for one window.

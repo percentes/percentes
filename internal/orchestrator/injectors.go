@@ -93,11 +93,12 @@ type nodeOps interface {
 	PartitionStatus(ctx context.Context, node string) (fired, expired *time.Time, err error)
 }
 
-// nodePartitionInjector fires the pre-armed full-node partition — the
-// only node-loss-representative condition (§1). It records armed/fire/
-// expiry via the pre-armed job's own timestamps, so the orchestrator
-// never needs to reach the partitioned node. Unexported Phase 1
-// scaffolding: no real nodeOps exists until the multi-node bring-up.
+// nodePartitionInjector fires the pre-armed full-node partition,
+// node-loss-representative for the degradation window only (§1).
+// It records armed/fire/expiry via the pre-armed job's own timestamps,
+// so the orchestrator never needs to reach the partitioned node.
+// Unexported Phase 1 scaffolding: no real nodeOps exists until the
+// multi-node bring-up.
 type nodePartitionInjector struct {
 	Ops  nodeOps
 	Node string

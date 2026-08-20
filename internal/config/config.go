@@ -24,11 +24,13 @@ const (
 )
 
 // Fault variants (§1). VariantMock is the Phase 0 injector family; the
-// mock's fault modes are configured in Mock.FaultSchedule.
+// mock's fault modes are configured in Mock.FaultSchedule. VariantNone is
+// a run with no injection, the shape of a hosted load run (§6).
 const (
 	VariantCleanDelete = "clean_delete"
 	VariantBlackHole   = "black_hole"
 	VariantMock        = "mock"
+	VariantNone        = "none"
 )
 
 // Pre-registered constants. These are the SPEC.md numbers; Validate()
@@ -57,6 +59,9 @@ const (
 	PinnedShareMinPct = 45
 	PinnedShareMaxPct = 55
 
+	// §10 G6: minimum pre-fault baseline goodput.
+	PinnedBaselineGoodputMin = 0.99
+
 	// §5: recovery detector.
 	PinnedDetectorWindowS  = 10
 	PinnedDetectorEntryPct = 90
@@ -82,6 +87,10 @@ const (
 	// remain in ready EndpointSlices for at least this long or the run is
 	// downgraded to clean-variant-equivalent.
 	PinnedEndpointStalenessMinS = 20
+
+	// §1: black-hole partition duration, pre-armed expiry. It must
+	// exceed the cluster's recorded node-monitor-grace-period.
+	PinnedPartitionDurationS = 120
 
 	// §3: one pinned HdrHistogram configuration across all runs and windows.
 	PinnedHistogramUnit       = "us"
@@ -143,9 +152,11 @@ type Load struct {
 	RateRPS           float64 `yaml:"rate_rps" json:"rate_rps"`
 	ArrivalProcess    string  `yaml:"arrival_process" json:"arrival_process"` // "poisson" | "deterministic"
 	InputLengthTokens int     `yaml:"input_length_tokens" json:"input_length_tokens"`
-	MaxTokens         int     `yaml:"max_tokens" json:"max_tokens"`           // pinned 256 (§6)
-	IgnoreEOS         bool    `yaml:"ignore_eos" json:"ignore_eos"`           // pinned true (§6)
-	UniquePrefixes    bool    `yaml:"unique_prefixes" json:"unique_prefixes"` // pinned true (§6)
+	MaxTokens         int     `yaml:"max_tokens" json:"max_tokens"` // pinned 256 (§6)
+	// IgnoreEOS is pinned true for self-hosted and mock targets and false
+	// for hosted targets, which omit the vLLM extension on the wire (§6).
+	IgnoreEOS      bool `yaml:"ignore_eos" json:"ignore_eos"`
+	UniquePrefixes bool `yaml:"unique_prefixes" json:"unique_prefixes"` // pinned true (§6)
 	// Connections is the number of independent HTTP/1.1 connections the
 	// client maintains; must be ≥ 4 × replica count (§1).
 	Connections int `yaml:"connections" json:"connections"`
@@ -264,6 +275,10 @@ type Fault struct {
 	// EndpointStalenessMinS is the §1(ii)/§10 G4 black-hole gate: minimum
 	// observed ready-EndpointSlice staleness window; pinned 20.
 	EndpointStalenessMinS int `yaml:"endpoint_staleness_min_s" json:"endpoint_staleness_min_s"`
+	// PartitionDurationS is the black-hole pre-armed expiry; pinned 120 and
+	// above the recorded node-monitor-grace-period (§1). The injector
+	// takes the duration from here, never from a command-line flag.
+	PartitionDurationS int `yaml:"partition_duration_s,omitempty" json:"partition_duration_s,omitempty"`
 }
 
 // Pins is the full §6 configuration-control pin list. Every field is
@@ -327,26 +342,32 @@ type GPUPins struct {
 	ClockPowerPolicy string `yaml:"clock_power_policy" json:"clock_power_policy"`
 }
 
-// DataplanesBalancingPerRequest are the recorded dataplane modes that
-// distribute individual requests across endpoints. Modes outside this set
-// bind a connection to one endpoint for its lifetime, which makes the §1
-// per-replica share a binomial draw over the connection count rather than
-// a property of the target.
+// DataplanesBalancingPerRequest are the recorded dataplane modes that route
+// at layer 7 (application level) and so assign each request to an endpoint
+// independently. A layer-4 (connection-level) dataplane, eBPF ones
+// included, binds a connection to one endpoint for its lifetime, which
+// makes the §1 per-replica share a binomial draw over the connection count
+// rather than a property of the target (§1).
 var DataplanesBalancingPerRequest = map[string]bool{
-	"ebpf-cilium": true,
+	"l7-envoy-cilium-ingress": true,
+	"l7-gateway-api":          true,
 }
 
-// BalancesPerRequest reports whether the recorded dataplane distributes
-// per request. An unrecognised or empty mode is treated as per-connection,
-// so the §1 band is enforced only where the topology can satisfy it.
+// BalancesPerRequest reports whether the recorded dataplane routes at layer
+// 7. §1 classifies conservatively: a mode that does not positively document
+// a request-aware layer-7 mechanism is per-connection, so the §1 band is
+// enforced only where the topology can satisfy it (§1).
 func BalancesPerRequest(dataplaneMode string) bool {
 	return DataplanesBalancingPerRequest[dataplaneMode]
 }
 
 type KubernetesPins struct {
-	Version       string `yaml:"version" json:"version"`
-	CNI           string `yaml:"cni" json:"cni"`
-	DataplaneMode string `yaml:"dataplane_mode" json:"dataplane_mode"` // e.g. "kube-proxy-iptables", "kube-proxy-ipvs", "ebpf-cilium"
+	Version string `yaml:"version" json:"version"`
+	CNI     string `yaml:"cni" json:"cni"`
+	// DataplaneMode records the routing layer (§1): "l7-envoy-cilium-ingress"
+	// and "l7-gateway-api" are per-request; "kube-proxy-iptables",
+	// "kube-proxy-ipvs", and "ebpf-cilium" are per-connection.
+	DataplaneMode string `yaml:"dataplane_mode" json:"dataplane_mode"`
 	KubeProxyMode string `yaml:"kube_proxy_mode" json:"kube_proxy_mode"`
 	// NodeMonitorGracePeriodS records the cluster's actual value (§1).
 	NodeMonitorGracePeriodS int `yaml:"node_monitor_grace_period_s" json:"node_monitor_grace_period_s"`

@@ -75,8 +75,13 @@ func (c *Config) validateLoad(v *validator) {
 		v.errf("load.input_length_tokens: must be > 0 (fixed input length, §1), got %d", c.Load.InputLengthTokens)
 	}
 	v.pinI("load.max_tokens", c.Load.MaxTokens, PinnedMaxTokens)
-	if !c.Load.IgnoreEOS {
-		v.errf("load.ignore_eos: pinned true (§6)")
+	// §6: the flag never reaches a hosted wire, so the pin is
+	// mode-conditional and states what the request carries.
+	if c.Target.Hosted && c.Load.IgnoreEOS {
+		v.errf("load.ignore_eos: pinned false for a hosted target (§6)")
+	}
+	if !c.Target.Hosted && !c.Load.IgnoreEOS {
+		v.errf("load.ignore_eos: pinned true for self-hosted and mock targets (§6)")
 	}
 	if !c.Load.UniquePrefixes {
 		v.errf("load.unique_prefixes: pinned true (§6: unique per-request prefixes regardless)")
@@ -189,8 +194,19 @@ func (c *Config) validateFault(v *validator) {
 		if c.Mock == nil {
 			v.errf("mock: required when fault.variant is \"mock\"")
 		}
+	case VariantNone:
+		// §6: a no-fault run arms nothing, so it carries no injection
+		// instant and no injection option.
+		if c.Mock != nil {
+			v.errf("mock: must be absent when fault.variant is %q", VariantNone)
+		}
+		if c.Fault.TInjectOffsetS != 0 || c.Fault.InjectionToleranceMs != 0 ||
+			c.Fault.EndpointStalenessMinS != 0 || c.Fault.PartitionDurationS != 0 {
+			v.errf("fault: variant %q takes no injection options (t_inject_offset_s, injection_tolerance_ms, endpoint_staleness_min_s, partition_duration_s; §6)", VariantNone)
+		}
+		return
 	default:
-		v.errf("fault.variant: must be one of %q, %q, %q; got %q", VariantCleanDelete, VariantBlackHole, VariantMock, c.Fault.Variant)
+		v.errf("fault.variant: must be one of %q, %q, %q, %q; got %q", VariantCleanDelete, VariantBlackHole, VariantMock, VariantNone, c.Fault.Variant)
 	}
 	if c.Profile == ProfileExperiment {
 		// §1 phase sequence has no gap: the fault immediately follows the
@@ -201,6 +217,14 @@ func (c *Config) validateFault(v *validator) {
 	}
 	v.pinI("fault.injection_tolerance_ms", c.Fault.InjectionToleranceMs, PinnedInjectionToleranceMs)
 	v.pinI("fault.endpoint_staleness_min_s", c.Fault.EndpointStalenessMinS, PinnedEndpointStalenessMinS)
+	if c.Fault.Variant == VariantBlackHole {
+		v.pinI("fault.partition_duration_s", c.Fault.PartitionDurationS, PinnedPartitionDurationS)
+		// §1: the node stays Ready until the grace period expires, so a
+		// value at or above the duration leaves no staleness window in it.
+		if g := c.Pins.Kubernetes.NodeMonitorGracePeriodS; g > 0 && g >= c.Fault.PartitionDurationS {
+			v.errf("pins.kubernetes.node_monitor_grace_period_s: must be below fault.partition_duration_s (%d, §1 black-hole variant), got %d", c.Fault.PartitionDurationS, g)
+		}
+	}
 }
 
 func (c *Config) validatePins(v *validator) {

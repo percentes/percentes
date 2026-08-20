@@ -71,6 +71,56 @@ func TestDetectCleanRecovery(t *testing.T) {
 	}
 }
 
+// The pre-fault baseline stops at the guard start, one pinned 30 s client
+// timeout before the fire anchor (§3, §5). Oracle: fire at 40 s puts the
+// guard at [10s, 40s); the 10 s of baseline before it is clean and the
+// guard is wholly bad, so the baseline is 1.0. Booking the guard to the
+// baseline would give 200/800 = 0.25 and drop the entry bar with it.
+func TestPreFaultBaselineExcludesGuardWindow(t *testing.T) {
+	cfg := pinnedParams(t)
+	buckets := mkBuckets(160, func(s int) int {
+		if s >= 10 && s < 60 { // guard window, then the outage after fire
+			return 0
+		}
+		return 20
+	})
+	res := Run(cfg, buckets, 0, 40*sec, 160*sec)
+
+	if res.PreFaultBaseline != 1.0 {
+		t.Errorf("guard-window seconds must stay out of the pre-fault baseline: got %v, want 1.0", res.PreFaultBaseline)
+	}
+	for _, name := range []string{"ttft_slo", "e2e_slo"} {
+		if c := res.Components[name]; c.Baseline != 1.0 {
+			t.Errorf("component %s baseline must be guard-bounded too: got %v, want 1.0", name, c.Baseline)
+		}
+	}
+	if res.ToPreFault.TTRSeconds == nil {
+		t.Fatal("service returns at 60 s: recovery to the undiluted baseline must be detected")
+	}
+	if ttr := *res.ToPreFault.TTRSeconds; ttr < 19 || ttr > 21 {
+		t.Errorf("TTR to pre-fault: %vs, want ~20s (fire 40 s, service back at 60 s)", ttr)
+	}
+}
+
+// The §3 straddling-bucket rule applies at the new boundary: a guard start
+// inside a bucket leaves that bucket in no window. Oracle: fire at 40.5 s
+// puts the guard start at 10.5 s, so the bad bucket [10s, 11s) is dropped
+// and the baseline is the clean 1.0; admitting it would give 200/220 = 0.909.
+func TestPreFaultBaselineDropsBucketStraddlingGuardStart(t *testing.T) {
+	cfg := pinnedParams(t)
+	buckets := mkBuckets(160, func(s int) int {
+		if s >= 10 && s < 60 {
+			return 0
+		}
+		return 20
+	})
+	res := Run(cfg, buckets, 0, 40*sec+5e8, 160*sec)
+
+	if res.PreFaultBaseline != 1.0 {
+		t.Errorf("the bucket straddling the guard start belongs to no window: got %v, want 1.0", res.PreFaultBaseline)
+	}
+}
+
 // Hysteresis: a dip during the hold cancels the candidate; recovery is
 // only declared once service stays above the entry bar for the full hold.
 func TestDetectHysteresisCancelsFlappingEntry(t *testing.T) {

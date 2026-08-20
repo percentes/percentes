@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/detect"
 	"github.com/percentes/percentes/internal/loadgen"
@@ -21,7 +22,8 @@ func runDetector(t *testing.T, sc scenario) (*detect.Result, *loadgen.Result, in
 	}
 	fireNs := recs[0].FiredAt.Sub(res.EpochWall).Nanoseconds()
 	buckets := detect.BuildSeries(cfg, res.Requests, res.WarmupEndNs, res.RunEndNs)
-	return detect.Run(cfg, buckets, res.WarmupEndNs, fireNs, res.FaultEndNs), res, fireNs
+	anchor := collect.FireAnchorNs(res.TInjectNs, fireNs)
+	return detect.Run(cfg, buckets, res.WarmupEndNs, anchor, res.FaultEndNs), res, fireNs
 }
 
 // TestAC5ScriptedRecovery: a scripted 20 s outage yields TTR within +-R
@@ -109,10 +111,12 @@ func TestAC5NonRecovery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("AC suite skipped in -short mode")
 	}
+	// The pre-fault phase exceeds the pinned 30 s timeout so the
+	// baseline window carries traffic of its own.
 	res, _, _ := runDetector(t, scenario{
-		warmupS: 2, baselineS: 20, windowS: 30, cooldownS: 2, tInjectS: 20,
+		warmupS: 2, baselineS: 38, windowS: 22, cooldownS: 1, tInjectS: 38,
 		ttft: fixed(100), itl: fixed(5),
-		schedule: []config.MockFault{{Mode: config.MockFaultError, StartOffsetS: 22, DurationS: 40}}, // outlasts the window
+		schedule: []config.MockFault{{Mode: config.MockFaultError, StartOffsetS: 40, DurationS: 40}}, // outlasts the window
 	})
 
 	if !res.ToPreFault.NotRecovered || res.ToPreFault.TTRSeconds != nil {

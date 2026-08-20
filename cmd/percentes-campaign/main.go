@@ -1,5 +1,5 @@
-// percentes-campaign runs an N-run (variant, config) campaign — the
-// SPEC.md §5 repetition unit, N pinned to 5 by the experiment profile —
+// percentes-campaign runs an N-run (variant, config) campaign: the
+// SPEC.md §5 repetition unit, N pinned to 5 by the experiment profile,
 // and writes the campaign report pair (§5/§7 statistics + §10 validity
 // gates). Phase 0 drives it against the mock; Phase 1 swaps in the
 // clean-delete or node-partition injector and supplies the GPU-cluster
@@ -30,7 +30,7 @@ func main() {
 	outDir := flag.String("out", "results/campaign", "output directory")
 	adminURL := flag.String("admin-url", "", "victim replica admin endpoint (mock variant)")
 	injectMode := flag.String("inject-mode", config.MockFaultError, "mock fault mode to arm")
-	injectDuration := flag.Float64("inject-duration-s", 10, "armed fault window duration")
+	injectDuration := flag.Float64("inject-duration-s", 10, "armed fault window duration (mock injector only)")
 	victim := flag.String("victim", "", "victim replica identity (mock: hostname; clean_delete: pod name)")
 	namespace := flag.String("namespace", "percentes", "victim pod namespace (clean_delete variant)")
 	victimNode := flag.String("victim-node", "", "victim node name (black_hole variant)")
@@ -50,13 +50,20 @@ func main() {
 		InjectDurationS: *injectDuration,
 		VictimReplica:   *victim,
 	}
+	// §1: the black-hole partition expires at the pinned configuration
+	// duration; --inject-duration-s serves the mock injector.
+	if cfg.Fault.Variant == config.VariantBlackHole {
+		opts.InjectDurationS = float64(cfg.Fault.PartitionDurationS)
+	}
 
 	// Route fault.variant to an injector: mock uses the admin injector at
 	// AdminURL (default); clean_delete does a grace=0 pod delete via
 	// kubectl; black_hole needs a real NodeOps and a multi-node cluster and
-	// is refused here (SPEC.md §10). The run engine stays agnostic beyond
-	// timestamps (§2).
+	// is refused here (SPEC.md §10); none arms nothing (§6). The run engine
+	// stays agnostic beyond timestamps (§2).
 	switch cfg.Fault.Variant {
+	case config.VariantNone:
+		opts.AdminURL = ""
 	case config.VariantCleanDelete:
 		if *victim == "" {
 			log.Fatal("percentes-campaign: clean_delete requires --victim (pod name)")
@@ -69,8 +76,10 @@ func main() {
 		log.Fatal("percentes-campaign: black_hole requires a multi-node GPU cluster and a real NodeOps; see SPEC.md §10")
 	}
 
-	// Evaluate the §10 validity gates per run. Phase 0 supplies no GPU
-	// observations, so G5 (and G3/G4 under black_hole) fail unobserved.
+	// Evaluate the §10 validity gates per run. G3 derives from the run's own
+	// artifacts (§1(i)); Phase 0 supplies no injected observations, so G5 (and
+	// G4 under black_hole) fail unobserved, and a failed G4 strips the
+	// node-loss-representative label without invalidating the run (§10).
 	//
 	// gates[i] pairs with run i+1; campaign.Run calls the runner
 	// sequentially. Parallelizing it would race this append.

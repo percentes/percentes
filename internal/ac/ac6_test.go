@@ -19,11 +19,13 @@ func TestAC6Reporting(t *testing.T) {
 		t.Skip("AC suite skipped in -short mode")
 	}
 	// The fault window must hold the outage (5 s), the recovery, and the
-	// detector's full 30 s hold after the entry candidate.
+	// detector's full 30 s hold after the entry candidate; the pre-fault
+	// phase must exceed the pinned 30 s timeout so the baseline window
+	// carries traffic alongside the guard.
 	cfg := buildConfig(t, scenario{
-		warmupS: 2, baselineS: 20, windowS: 45, cooldownS: 2, tInjectS: 20,
+		warmupS: 1, baselineS: 38, windowS: 45, cooldownS: 1, tInjectS: 38,
 		ttft: fixed(100), itl: fixed(5),
-		schedule: []config.MockFault{{Mode: config.MockFaultError, StartOffsetS: 22, DurationS: 5}},
+		schedule: []config.MockFault{{Mode: config.MockFaultError, StartOffsetS: 39, DurationS: 5}},
 	})
 	base := startMockProcess(t, cfg)
 	cfg.Target.BaseURL = base
@@ -48,7 +50,7 @@ func TestAC6Reporting(t *testing.T) {
 		}
 	}
 	windows := parsed["windows"].(map[string]any)
-	for _, name := range []string{"baseline", "fault"} {
+	for _, name := range []string{"baseline", "guard", "fault"} {
 		wobj, ok := windows[name].(map[string]any)
 		if !ok {
 			t.Fatalf("AC6: window %q missing", name)
@@ -67,7 +69,7 @@ func TestAC6Reporting(t *testing.T) {
 	}
 	// §4: the goodput-versus-threshold sweep and the modal/baseline-SD
 	// statement must be present in the report.
-	for _, name := range []string{"baseline", "fault"} {
+	for _, name := range []string{"baseline", "guard", "fault"} {
 		if sweep := windows[name].(map[string]any)["goodput_sweep"].([]any); len(sweep) != 9 {
 			t.Errorf("AC6: window %q goodput sweep must have 9 cells, got %d", name, len(sweep))
 		}
@@ -84,6 +86,11 @@ func TestAC6Reporting(t *testing.T) {
 		if !strings.Contains(humanText, want) {
 			t.Errorf("AC6: human report missing %q", want)
 		}
+	}
+	// The guard window is reported in full and labeled, so its numbers
+	// cannot be read as pre-fault degradation (§3).
+	if !strings.Contains(humanText, "PRE-FAULT GUARD WINDOW (§3)") {
+		t.Error("AC6: the guard window must be labeled where it is rendered")
 	}
 
 	// Human-readable artifact.

@@ -24,6 +24,7 @@ func TestHostedTargetValidation(t *testing.T) {
 	}
 
 	c.Target.APIKeyEnv = "SOME_KEY_ENV"
+	c.Load.IgnoreEOS = false // pinned false for a hosted target (§6)
 	if err := c.Validate(); err != nil {
 		t.Fatalf("fully-specified hosted target must validate: %v", err)
 	}

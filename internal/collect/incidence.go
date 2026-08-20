@@ -13,7 +13,8 @@ import (
 // event by the pinned timeout (or run end) are censored observations. With
 // no competing events the estimator reduces exactly to 1-KM. A quantile is
 // reported only where the curve actually crosses it within the timeout
-// horizon; otherwise "p_q > 30 s".
+// horizon; otherwise the refusal form is decided by the ceiling, final
+// incidence plus the outstanding censored mass (§3).
 
 // ObsKind classifies one scheduled request's terminal state for the curve.
 type ObsKind int
@@ -50,6 +51,9 @@ type IncidenceCurve struct {
 	// Censored counts the observations still unresolved at their cutoff;
 	// the report states this outstanding mass alongside the curve.
 	Censored int `json:"censored"`
+	// FinalSurvival is event-free survival where the curve ends: the
+	// censored mass outstanding at the horizon (§3).
+	FinalSurvival float64 `json:"final_survival"`
 	// HorizonUs is the pinned client timeout; quantiles are only claimed
 	// inside it. Re-based completion times may exceed it by up to the max
 	// send-skew; such points stay on the curve and never satisfy a quantile.
@@ -114,15 +118,16 @@ func EstimateIncidence(obs []Obs, horizonUs int64) IncidenceCurve {
 		}
 		atRisk -= removed
 	}
+	curve.FinalSurvival = s
 	return curve
 }
 
 // Quantile returns the smallest t with completion incidence >= q, and
 // whether the curve crosses q within the horizon. When ok is false the
-// report must state "p_q > horizon" (§3), never an extrapolated number.
-// q outside (0, 1] is a programming error: Quantile panics. eps forgives
-// floating-point undershoot at exact step boundaries; a q within eps above
-// a step below 1 also passes.
+// report refuses q by the ceiling rule (§3), never with an
+// extrapolated number. q outside (0, 1] is a programming error: Quantile
+// panics. eps forgives floating-point undershoot at exact step boundaries;
+// a q within eps above a step below 1 also passes.
 func (c *IncidenceCurve) Quantile(q float64) (tUs int64, ok bool) {
 	if q <= 0 || q > 1 {
 		panic(fmt.Sprintf("collect: quantile %v outside (0, 1]", q))
@@ -134,6 +139,21 @@ func (c *IncidenceCurve) Quantile(q float64) (tUs int64, ok bool) {
 		}
 	}
 	return 0, false
+}
+
+// FinalIncidence is the completion incidence where the curve ends.
+func (c *IncidenceCurve) FinalIncidence() float64 {
+	if len(c.Points) == 0 {
+		return 0
+	}
+	return c.Points[len(c.Points)-1].Incidence
+}
+
+// Ceiling is the highest incidence the curve could ever reach: final
+// incidence plus the outstanding censored mass. A quantile above the
+// ceiling is unattainable at any t (§3).
+func (c *IncidenceCurve) Ceiling() float64 {
+	return c.FinalIncidence() + c.FinalSurvival
 }
 
 // IncidenceAt returns CIF(tUs) = P(completed by tUs) — the headline uses

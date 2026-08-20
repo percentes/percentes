@@ -66,6 +66,64 @@ func TestCollectThreeStateAccounting(t *testing.T) {
 	}
 }
 
+// Guard-window arithmetic on the pinned §1 profile: warm-up ends at 60 s and
+// T_inject is at 360 s, so with the fault firing on time the baseline runs
+// [60 s, 330 s), the guard [330 s, 360 s), and the fault window from 360 s.
+func TestGuardWindowBoundsNominalRun(t *testing.T) {
+	cfg := testCfg(t)
+	sec := int64(1e9)
+	warmupEnd, tInject, actualFire := 60*sec, 360*sec, 360*sec
+
+	anchor := FireAnchorNs(tInject, actualFire)
+	if anchor != 360*sec {
+		t.Fatalf("on-time fire: anchor %v, want 360s", anchor)
+	}
+	guardStart := GuardStartNs(cfg, anchor, warmupEnd)
+	if guardStart != 330*sec {
+		t.Errorf("baseline must end one pinned 30 s timeout before the anchor: got %v, want 330s", guardStart)
+	}
+	if got := (guardStart - warmupEnd) / sec; got != 270 {
+		t.Errorf("baseline statistics must cover 270 s of the 300 s phase, got %ds", got)
+	}
+	if got := (tInject - guardStart) / sec; got != 30 {
+		t.Errorf("guard window must span the pinned 30 s timeout, got %ds", got)
+	}
+}
+
+// The anchor is the EARLIER of T_inject and the recorded actual fire, so a
+// fault firing inside the 500 ms injection tolerance moves the baseline end
+// with it (§3). Oracle: firing 400 ms early puts the anchor at 359.6 s
+// and the baseline end at 329.6 s; a late fire leaves the anchor at T_inject.
+func TestGuardWindowBoundsEarlyAndLateFire(t *testing.T) {
+	cfg := testCfg(t)
+	sec := int64(1e9)
+	warmupEnd, tInject := 60*sec, 360*sec
+
+	early := FireAnchorNs(tInject, 360*sec-4e8)
+	if early != 360*sec-4e8 {
+		t.Fatalf("early fire must anchor the windows: got %v", early)
+	}
+	if got := GuardStartNs(cfg, early, warmupEnd); got != 330*sec-4e8 {
+		t.Errorf("baseline end under an early fire: got %v, want 329.6s", got)
+	}
+	late := FireAnchorNs(tInject, 360*sec+4e8)
+	if late != tInject {
+		t.Errorf("a late fire must not extend the baseline past T_inject: got %v", late)
+	}
+}
+
+// A pre-fault phase shorter than the pinned timeout cannot carry a baseline
+// at all: the guard start floors at the measurement start, leaving the
+// baseline window empty and every pre-fault request in the guard.
+func TestGuardStartFloorsAtMeasurementStart(t *testing.T) {
+	cfg := testCfg(t)
+	sec := int64(1e9)
+	warmupEnd := 3 * sec
+	if got := GuardStartNs(cfg, warmupEnd+15*sec, warmupEnd); got != warmupEnd {
+		t.Errorf("guard start must floor at the measurement start: got %v, want %v", got, warmupEnd)
+	}
+}
+
 func TestAccountInFlight(t *testing.T) {
 	sec := int64(1e9)
 	tInject := 20 * sec

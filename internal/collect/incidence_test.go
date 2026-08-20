@@ -83,6 +83,83 @@ func TestAJCounterexampleFiftyFifty(t *testing.T) {
 	}
 }
 
+// The ceiling is final completion incidence plus the censored mass
+// outstanding at the horizon (§3). Hand-computed: 50 errors at
+// 0.5s take survival to 0.500, the 50 completions at 1s carry CIF to 0.500
+// and leave nothing outstanding, so the ceiling is 0.500 and no p90 exists
+// at any t.
+func TestAJCeilingWithoutCensoredMass(t *testing.T) {
+	var obs []Obs
+	for i := 0; i < 50; i++ {
+		obs = append(obs, Obs{TimeUs: 500_000, Kind: ObsError})
+		obs = append(obs, Obs{TimeUs: 1_000_000, Kind: ObsCompletion})
+	}
+	c := EstimateIncidence(obs, 30_000_000)
+	if !almost(c.FinalIncidence(), 0.5) || !almost(c.FinalSurvival, 0) {
+		t.Errorf("final incidence=%v outstanding=%v, want 0.500/0.000", c.FinalIncidence(), c.FinalSurvival)
+	}
+	if !almost(c.Ceiling(), 0.5) {
+		t.Errorf("ceiling=%v, want 0.500", c.Ceiling())
+	}
+	if _, ok := c.Quantile(0.9); ok {
+		t.Error("p90 sits above the ceiling and must be refused")
+	}
+}
+
+// Censored requests remaining is not the test for a reachable quantile: 50
+// errors at 0.5s, 30 completions at 1s (CIF 0.300) and 20 censored at the
+// horizon (outstanding 0.200) give the same 0.500 ceiling, so p90 is
+// unattainable here too (§3).
+func TestAJCeilingWithCensoredMass(t *testing.T) {
+	var obs []Obs
+	for i := 0; i < 50; i++ {
+		obs = append(obs, Obs{TimeUs: 500_000, Kind: ObsError})
+	}
+	for i := 0; i < 30; i++ {
+		obs = append(obs, Obs{TimeUs: 1_000_000, Kind: ObsCompletion})
+	}
+	for i := 0; i < 20; i++ {
+		obs = append(obs, Obs{TimeUs: 30_000_000, Kind: ObsCensored})
+	}
+	c := EstimateIncidence(obs, 30_000_000)
+	if !almost(c.FinalIncidence(), 0.3) || !almost(c.FinalSurvival, 0.2) {
+		t.Errorf("final incidence=%v outstanding=%v, want 0.300/0.200", c.FinalIncidence(), c.FinalSurvival)
+	}
+	if !almost(c.Ceiling(), 0.5) {
+		t.Errorf("ceiling=%v, want 0.500 (0.300 completed + 0.200 outstanding)", c.Ceiling())
+	}
+	if _, ok := c.Quantile(0.9); ok {
+		t.Error("p90 sits above the ceiling and must be refused")
+	}
+}
+
+// A ceiling at or above q leaves a crossing possible past the horizon: 5
+// errors at 0.5s take survival to 0.950, 25 completions at 1s carry CIF to
+// 0.250, and 70 censored at the horizon hold 0.700 outstanding, for a
+// ceiling of 0.950 (§3).
+func TestAJCeilingAboveQuantile(t *testing.T) {
+	var obs []Obs
+	for i := 0; i < 5; i++ {
+		obs = append(obs, Obs{TimeUs: 500_000, Kind: ObsError})
+	}
+	for i := 0; i < 25; i++ {
+		obs = append(obs, Obs{TimeUs: 1_000_000, Kind: ObsCompletion})
+	}
+	for i := 0; i < 70; i++ {
+		obs = append(obs, Obs{TimeUs: 30_000_000, Kind: ObsCensored})
+	}
+	c := EstimateIncidence(obs, 30_000_000)
+	if !almost(c.FinalIncidence(), 0.25) || !almost(c.FinalSurvival, 0.7) {
+		t.Errorf("final incidence=%v outstanding=%v, want 0.250/0.700", c.FinalIncidence(), c.FinalSurvival)
+	}
+	if !almost(c.Ceiling(), 0.95) {
+		t.Errorf("ceiling=%v, want 0.950", c.Ceiling())
+	}
+	if _, ok := c.Quantile(0.9); ok {
+		t.Error("p90 is below the ceiling but uncrossed inside the horizon: still no claimed time")
+	}
+}
+
 // Ties at the same time: all terminal events at t (completions AND errors)
 // share the same at-risk count. Completion at 1s + error at 1s + completion
 // at 2s: CIF(1)=1/3 (n=3), S(1)=1/3, CIF(2)=1/3+1/3=2/3.
@@ -101,8 +178,9 @@ func TestAJTieConvention(t *testing.T) {
 	}
 }
 
-// A quantile the curve never crosses inside the horizon must be reported
-// as not-crossed ("p_q > 30 s"), never extrapolated.
+// A quantile the curve never crosses inside the horizon is refused, never
+// extrapolated; the 0.750 outstanding here holds the ceiling at 1.000, so
+// the crossing may still exist past the horizon (§3).
 func TestAJQuantileBeyondHorizon(t *testing.T) {
 	obs := []Obs{
 		{TimeUs: 1_000_000, Kind: ObsCompletion},

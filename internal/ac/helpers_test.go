@@ -4,8 +4,8 @@
 // against the in-process mock; they are skipped in -short mode and run
 // without the race detector (timing fidelity).
 //
-// Printed by TestMain, per §8: passing AC1-AC7 certifies the instrument,
-// not any real-GPU claim.
+// Printed by TestMain, per §8: passing AC1-AC7 certifies the instrument
+// against the mock.
 package ac
 
 import (

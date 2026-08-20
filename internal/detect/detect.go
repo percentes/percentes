@@ -12,13 +12,14 @@
 // following H one-second window starts all stay >= the entry bar (a dip
 // below entry cancels the candidate; a dip below the exit bar after
 // confirmed recovery is a re-degradation). TTR = first surviving entry
-// minus T_inject. Non-recovery past the fault-window timeout is reported
-// as such, never extrapolated.
+// minus the fire anchor (§3). Non-recovery past the fault-window timeout
+// is reported as such, never extrapolated.
 package detect
 
 import (
 	"time"
 
+	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
 )
@@ -121,8 +122,8 @@ type Detection struct {
 }
 
 // detect runs the hysteresis state machine over buckets, scanning entry
-// candidates from tInjectNs; windows must start before timeoutNs.
-func detect(buckets []Bucket, comp component, baseline float64, tInjectNs, timeoutNs int64, p Params) Detection {
+// candidates from the fire anchor; windows must start before timeoutNs.
+func detect(buckets []Bucket, comp component, baseline float64, fireAnchorNs, timeoutNs int64, p Params) Detection {
 	det := Detection{Baseline: baseline, Params: p}
 	if len(buckets) == 0 || baseline <= 0 {
 		det.NotRecovered = true
@@ -132,9 +133,9 @@ func detect(buckets []Bucket, comp component, baseline float64, tInjectNs, timeo
 	exitBar := baseline * float64(p.ExitPct) / 100
 	origin := buckets[0].StartNs
 
-	// Scan starts at the first bucket fully AFTER the fire time: the
-	// bucket straddling T_inject belongs to no window (§3).
-	firstIdx := int((tInjectNs - origin + nsPerSec - 1) / nsPerSec)
+	// Scan starts at the first bucket fully AFTER the fire anchor: the
+	// straddling bucket belongs to no window (§3).
+	firstIdx := int((fireAnchorNs - origin + nsPerSec - 1) / nsPerSec)
 	if firstIdx < 0 {
 		firstIdx = 0
 	}
@@ -163,7 +164,7 @@ func detect(buckets []Bucket, comp component, baseline float64, tInjectNs, timeo
 			continue
 		}
 		at := buckets[i].StartNs
-		ttr := float64(at-tInjectNs) / float64(nsPerSec)
+		ttr := float64(at-fireAnchorNs) / float64(nsPerSec)
 		det.RecoveredAtNs, det.TTRSeconds = &at, &ttr
 
 		// Post-recovery re-degradation with the full hysteresis band: an
@@ -208,14 +209,14 @@ func baselineOver(buckets []Bucket, comp component, fromNs, toNs int64) float64 
 	return float64(num) / float64(den)
 }
 
-// deficit integrates (baseline - goodput)+ x 1s from T_inject to recovery
-// (or the timeout when unrecovered) — the crossing-time-fragility
+// deficit integrates (baseline - goodput)+ x 1s from the fire anchor to
+// recovery (or the timeout when unrecovered): the crossing-time-fragility
 // companion metric (§5).
-func deficit(buckets []Bucket, comp component, baseline float64, tInjectNs, untilNs int64) float64 {
+func deficit(buckets []Bucket, comp component, baseline float64, fireAnchorNs, untilNs int64) float64 {
 	total := 0.0
 	for i := range buckets {
 		b := &buckets[i]
-		if b.StartNs < tInjectNs || b.StartNs >= untilNs {
+		if b.StartNs < fireAnchorNs || b.StartNs >= untilNs {
 			continue
 		}
 		n, d := comp(b)
@@ -274,8 +275,9 @@ type Result struct {
 }
 
 // Run executes the full §5 analysis. buckets must cover
-// [warmupEnd, runEnd); tInjectNs/timeoutNs delimit the fault window.
-func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, tInjectNs, timeoutNs int64) *Result {
+// [warmupEnd, runEnd); fireAnchorNs is the §3 fire anchor (the earlier of
+// T_inject and the recorded actual fire) and timeoutNs ends the fault window.
+func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, fireAnchorNs, timeoutNs int64) *Result {
 	p := Params{
 		WindowS:  cfg.RecoveryDetector.WindowS,
 		EntryPct: cfg.RecoveryDetector.EntryPct,
@@ -288,22 +290,25 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, tInjectNs, timeoutNs
 		Components:           map[string]Detection{},
 	}
 
-	// Pre-fault baseline ends at the last bucket boundary fully before
-	// the fire: the straddling bucket belongs to no window (§3).
+	// Pre-fault baseline ends at the guard start, one pinned client
+	// timeout before the fire anchor (§3), aligned down to a bucket
+	// boundary: a bucket straddling that end belongs to no window (§3).
+	// The guard window never enters this baseline.
 	origin := int64(0)
 	if len(buckets) > 0 {
 		origin = buckets[0].StartNs
 	}
-	alignedInject := origin + ((tInjectNs - origin) / nsPerSec * nsPerSec)
-	res.PreFaultBaseline = baselineOver(buckets, compGoodput, warmupEndNs, alignedInject)
+	guardStartNs := collect.GuardStartNs(cfg, fireAnchorNs, warmupEndNs)
+	alignedGuardStart := origin + ((guardStartNs - origin) / nsPerSec * nsPerSec)
+	res.PreFaultBaseline = baselineOver(buckets, compGoodput, warmupEndNs, alignedGuardStart)
 
-	res.ToPreFault = detect(buckets, compGoodput, res.PreFaultBaseline, tInjectNs, timeoutNs, p)
+	res.ToPreFault = detect(buckets, compGoodput, res.PreFaultBaseline, fireAnchorNs, timeoutNs, p)
 
 	// Single-replica equilibrium: estimated over the DEGRADED plateau —
 	// from R seconds after fire (settle) until recovery-to-pre-fault, or
 	// the timeout when unrecovered. The fault-window tail would collapse
 	// into the post-recovery state in any recovered run (§5).
-	plateauStart := tInjectNs + int64(p.WindowS)*nsPerSec
+	plateauStart := fireAnchorNs + int64(p.WindowS)*nsPerSec
 	plateauEnd := timeoutNs
 	if at := res.ToPreFault.RecoveredAtNs; at != nil && *at < plateauEnd {
 		plateauEnd = *at
@@ -320,7 +325,7 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, tInjectNs, timeoutNs
 		res.EquilibriumNote = "degraded plateau shorter than R; single-replica equilibrium not estimable for this run"
 	}
 	if res.EquilibriumEstimable {
-		res.ToEquilibrium = detect(buckets, compGoodput, res.EquilibriumBaseline, tInjectNs, timeoutNs, p)
+		res.ToEquilibrium = detect(buckets, compGoodput, res.EquilibriumBaseline, fireAnchorNs, timeoutNs, p)
 	} else {
 		res.ToEquilibrium = Detection{Baseline: res.EquilibriumBaseline, Params: p, NotRecovered: true}
 	}
@@ -329,13 +334,13 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, tInjectNs, timeoutNs
 	if res.ToPreFault.RecoveredAtNs != nil {
 		untilPre = *res.ToPreFault.RecoveredAtNs
 	}
-	res.DeficitToPreFault = deficit(buckets, compGoodput, res.PreFaultBaseline, tInjectNs, untilPre)
+	res.DeficitToPreFault = deficit(buckets, compGoodput, res.PreFaultBaseline, fireAnchorNs, untilPre)
 	if res.EquilibriumEstimable {
 		untilEq := timeoutNs
 		if res.ToEquilibrium.RecoveredAtNs != nil {
 			untilEq = *res.ToEquilibrium.RecoveredAtNs
 		}
-		res.DeficitToEquilibrium = deficit(buckets, compGoodput, res.EquilibriumBaseline, tInjectNs, untilEq)
+		res.DeficitToEquilibrium = deficit(buckets, compGoodput, res.EquilibriumBaseline, fireAnchorNs, untilEq)
 	}
 
 	// Pre-registered sensitivity sweep (§5); exit stays pinned.
@@ -343,14 +348,14 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, tInjectNs, timeoutNs
 		for _, r := range cfg.RecoveryDetector.Sensitivity.WindowS {
 			for _, h := range cfg.RecoveryDetector.Sensitivity.HoldS {
 				sp := Params{WindowS: r, EntryPct: x, ExitPct: p.ExitPct, HoldS: h}
-				dp := detect(buckets, compGoodput, res.PreFaultBaseline, tInjectNs, timeoutNs, sp)
+				dp := detect(buckets, compGoodput, res.PreFaultBaseline, fireAnchorNs, timeoutNs, sp)
 				row := SensitivityRow{
 					Params:        sp,
 					TTRToPreFault: dp.TTRSeconds, NotRecoveredPre: dp.NotRecovered,
 					NotRecoveredEq: true,
 				}
 				if res.EquilibriumEstimable {
-					de := detect(buckets, compGoodput, res.EquilibriumBaseline, tInjectNs, timeoutNs, sp)
+					de := detect(buckets, compGoodput, res.EquilibriumBaseline, fireAnchorNs, timeoutNs, sp)
 					row.TTRToEquilibrium, row.NotRecoveredEq = de.TTRSeconds, de.NotRecovered
 				}
 				res.Sensitivity = append(res.Sensitivity, row)
@@ -364,8 +369,8 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, tInjectNs, timeoutNs
 		"e2e_slo":    compE2ESLO,
 		"error_rate": compNonError,
 	} {
-		base := baselineOver(buckets, comp, warmupEndNs, alignedInject)
-		res.Components[name] = detect(buckets, comp, base, tInjectNs, timeoutNs, p)
+		base := baselineOver(buckets, comp, warmupEndNs, alignedGuardStart)
+		res.Components[name] = detect(buckets, comp, base, fireAnchorNs, timeoutNs, p)
 	}
 	return res
 }

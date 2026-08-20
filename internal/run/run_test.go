@@ -86,8 +86,10 @@ func TestExecuteEndToEndUnderRace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Run.Phases = config.Phases{WarmupS: 1, BaselineS: 6, FaultWindowTimeoutS: 10, CooldownS: 1}
-	cfg.Fault.TInjectOffsetS = 6
+	// The pre-fault phase exceeds the pinned 30 s client timeout so the
+	// baseline window carries traffic alongside the guard.
+	cfg.Run.Phases = config.Phases{WarmupS: 1, BaselineS: 36, FaultWindowTimeoutS: 10, CooldownS: 1}
+	cfg.Fault.TInjectOffsetS = 36
 	cfg.Load.ArrivalProcess = "deterministic"
 	cfg.Target.Replicas = 1
 	cfg.Mock.ListenAddr = "127.0.0.1:0"
@@ -122,7 +124,19 @@ func TestExecuteEndToEndUnderRace(t *testing.T) {
 	if art.Orchestration == nil || art.Orchestration.ObservedFire == nil {
 		t.Fatal("orchestrated fault must record its observed fire")
 	}
-	for _, wname := range []string{"baseline", "fault"} {
+	// Window set: the baseline ends one pinned client timeout before the
+	// fire anchor, and the guard runs from there to T_inject.
+	wantGuardStart := art.Loadgen.TInjectNs - int64(cfg.Client.HTTPTimeoutS)*1e9
+	if art.ActualFireNs < art.Loadgen.TInjectNs {
+		wantGuardStart = art.ActualFireNs - int64(cfg.Client.HTTPTimeoutS)*1e9
+	}
+	if got := art.Windows["baseline"].Window.EndNs; got != wantGuardStart {
+		t.Errorf("baseline must end at the guard start: got %.3fs, want %.3fs", float64(got)/1e9, float64(wantGuardStart)/1e9)
+	}
+	if g := art.Windows["guard"].Window; g.StartNs != wantGuardStart || g.EndNs != art.Loadgen.TInjectNs {
+		t.Errorf("guard window must span [guard start, T_inject): got [%.3fs, %.3fs)", float64(g.StartNs)/1e9, float64(g.EndNs)/1e9)
+	}
+	for _, wname := range []string{"baseline", "guard", "fault"} {
 		st, ok := art.Windows[wname]
 		if !ok || st.Scheduled == 0 {
 			t.Fatalf("window %q missing or empty", wname)

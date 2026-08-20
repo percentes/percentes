@@ -103,11 +103,12 @@ func TestHumanReportNamesUnmeasuredCPU(t *testing.T) {
 	}
 }
 
-// incidenceText's two branches are the §3 never-extrapolate rule made
+// incidenceText's three branches are the §3 never-extrapolate rule made
 // visible: a crossed quantile renders a time; an uncrossed one renders the
-// "curve does not cross" refusal. Oracle: completions at 1s and 2s plus
-// two censored-at-horizon observations — incidence reaches 0.5 exactly,
-// so p50 crosses (ties-events-first) and p90 cannot.
+// refusal its ceiling selects. Oracle: completions at 1s and 2s plus two
+// censored-at-horizon observations: incidence reaches 0.5 exactly, so p50
+// crosses (ties-events-first), and p90 is refused with the whole 0.500
+// outstanding mass above it (ceiling 1.00).
 func TestIncidenceTextRefusesUncrossedQuantiles(t *testing.T) {
 	cif := collect.EstimateIncidence([]collect.Obs{
 		{TimeUs: 1_000_000, Kind: collect.ObsCompletion},
@@ -119,8 +120,99 @@ func TestIncidenceTextRefusesUncrossedQuantiles(t *testing.T) {
 	if !strings.Contains(text, "p50   completion at 2.000s") {
 		t.Errorf("p50 crosses at the second completion (2/4 = 0.5):\n%s", text)
 	}
-	if !strings.Contains(text, "p90   > 30s") {
+	if !strings.Contains(text, "p90   > 30s (ceiling 1.00)") {
 		t.Errorf("p90 is never reached and must be refused, not extrapolated:\n%s", text)
+	}
+}
+
+// The ceiling decides which refusal prints (§3). Oracle: 50
+// errors at 0.5s and 50 completions at 1s, nothing censored, so the ceiling
+// is 0.500 and p90 exists at no t.
+func TestIncidenceTextUnattainableWithoutCensoredMass(t *testing.T) {
+	var obs []collect.Obs
+	for i := 0; i < 50; i++ {
+		obs = append(obs, collect.Obs{TimeUs: 500_000, Kind: collect.ObsError})
+		obs = append(obs, collect.Obs{TimeUs: 1_000_000, Kind: collect.ObsCompletion})
+	}
+	cif := collect.EstimateIncidence(obs, 30_000_000)
+	text := incidenceText(&cif)
+	if !strings.Contains(text, "p90   unattainable (final completion incidence 0.50; ceiling 0.50)") {
+		t.Errorf("a p90 above the ceiling must print the unattainable form:\n%s", text)
+	}
+	if strings.Contains(text, "p90   > 30s") {
+		t.Errorf("the beyond-the-horizon form states a crossing that cannot exist:\n%s", text)
+	}
+}
+
+// Outstanding censored mass does not by itself make a quantile reachable
+// (§3). Oracle: 50 errors at 0.5s, 30 completions at 1s and
+// 20 censored at the horizon give ceiling 0.500 again, final incidence 0.300.
+func TestIncidenceTextUnattainableWithCensoredMass(t *testing.T) {
+	var obs []collect.Obs
+	for i := 0; i < 50; i++ {
+		obs = append(obs, collect.Obs{TimeUs: 500_000, Kind: collect.ObsError})
+	}
+	for i := 0; i < 30; i++ {
+		obs = append(obs, collect.Obs{TimeUs: 1_000_000, Kind: collect.ObsCompletion})
+	}
+	for i := 0; i < 20; i++ {
+		obs = append(obs, collect.Obs{TimeUs: 30_000_000, Kind: collect.ObsCensored})
+	}
+	cif := collect.EstimateIncidence(obs, 30_000_000)
+	text := incidenceText(&cif)
+	if !strings.Contains(text, "p90   unattainable (final completion incidence 0.30; ceiling 0.50)") {
+		t.Errorf("ceiling 0.500 puts p90 out of reach with censored requests outstanding:\n%s", text)
+	}
+}
+
+// Where the ceiling reaches q the crossing may exist beyond the timeout, and
+// the refusal says so with the ceiling (§3). Oracle: 5 errors
+// at 0.5s, 25 completions at 1s and 70 censored at the horizon give ceiling
+// 0.950, which p90 sits under and p99 above, so one window prints both forms.
+func TestIncidenceTextBeyondHorizonCarriesCeiling(t *testing.T) {
+	var obs []collect.Obs
+	for i := 0; i < 5; i++ {
+		obs = append(obs, collect.Obs{TimeUs: 500_000, Kind: collect.ObsError})
+	}
+	for i := 0; i < 25; i++ {
+		obs = append(obs, collect.Obs{TimeUs: 1_000_000, Kind: collect.ObsCompletion})
+	}
+	for i := 0; i < 70; i++ {
+		obs = append(obs, collect.Obs{TimeUs: 30_000_000, Kind: collect.ObsCensored})
+	}
+	cif := collect.EstimateIncidence(obs, 30_000_000)
+	text := incidenceText(&cif)
+	if !strings.Contains(text, "p90   > 30s (ceiling 0.95)") {
+		t.Errorf("a p90 under the ceiling must print the beyond-the-horizon form:\n%s", text)
+	}
+	if !strings.Contains(text, "p99   unattainable (final completion incidence 0.25; ceiling 0.95)") {
+		t.Errorf("p99 is above the same window's ceiling and must be refused as unattainable:\n%s", text)
+	}
+}
+
+// §5's two facts about the equilibrium baseline (a within-run estimate, an
+// operating point shaped by the pinned timeout under deliberate overload)
+// accompany TTR-to-equilibrium wherever it is printed (§5).
+func TestEquilibriumFactsAccompanyTTR(t *testing.T) {
+	const facts = "within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout"
+	art := minimalArtifacts()
+	art.Windows["baseline"] = &collect.Stats{}
+	art.Windows["fault"] = &collect.Stats{}
+	if got := headline(art); !strings.Contains(got, facts) {
+		t.Errorf("headline TTR-to-equilibrium missing the §5 facts:\n%s", got)
+	}
+	_, humanText, err := Generate(art)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ttrLine string
+	for _, line := range strings.Split(humanText, "\n") {
+		if strings.HasPrefix(line, "TTR to equilibrium baseline:") {
+			ttrLine = line
+		}
+	}
+	if !strings.Contains(ttrLine, facts) {
+		t.Errorf("detector TTR-to-equilibrium missing the §5 facts: %q", ttrLine)
 	}
 }
 
