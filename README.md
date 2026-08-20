@@ -20,11 +20,12 @@ The harness makes three commitments:
   histograms; failure rates are first-class; the completion curve is the
   Aalen-Johansen cumulative incidence over all scheduled requests, in
   which errors are competing terminal events and only timeouts are
-  censored (SPEC §3). A quantile the curve does not cross is refused,
-  never extrapolated, in one of two forms decided by the window's ceiling
-  (final completion incidence plus the censored mass still outstanding at
-  the horizon): beyond the horizon where the ceiling reaches the quantile,
-  unattainable where it does not.
+  censored (SPEC §3).
+  - A quantile the curve does not cross is refused, never extrapolated,
+    in one of two forms decided by the window's ceiling (final completion
+    incidence plus the censored mass still outstanding at the horizon):
+    greater than the horizon where the ceiling reaches the quantile,
+    unattainable where it does not.
 - **Run-invalidating self-checks.** The client must prove it was not
   the bottleneck (send-skew, CPU, and GC-pause gates, all pinned and
   run-failing). A run that cannot demonstrate its own validity exits
