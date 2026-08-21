@@ -23,13 +23,14 @@ The harness makes three commitments:
   censored (SPEC §3).
   - A quantile the curve does not cross is refused, never extrapolated,
     in one of two forms decided by the window's ceiling (final completion
-    incidence plus the censored mass still outstanding at the horizon):
+    incidence plus the event-free survival remaining where the curve ends):
     greater than the horizon where the ceiling reaches the quantile,
     unattainable where it does not.
 - **Run-invalidating self-checks.** The client must prove it was not
-  the bottleneck (send-skew, CPU, and GC-pause gates, all pinned and
-  run-failing). A run that cannot demonstrate its own validity exits
-  invalid instead of publishing.
+  the bottleneck (send-skew, undispatched-request, CPU, and GC-pause
+  gates, all pinned and run-failing). These are the client gates; the
+  full run-validity set is SPEC §10. A run that cannot demonstrate its
+  own validity exits invalid instead of publishing.
 
 [SPEC.md](SPEC.md) is the authoritative, pre-registered specification:
 every gate, tolerance, and detector parameter carries a pinned number,
@@ -40,9 +41,10 @@ to its source in the code.
 
 ## Scope
 
-Phase 0 (complete) builds and certifies the measurement instrument
-against a mock OpenAI-compatible SSE server on a local kind cluster:
-passing the acceptance suite certifies the measurement machinery only;
+Phase 0 builds and certifies the measurement instrument against a mock
+OpenAI-compatible SSE server on a local kind cluster (the SPEC §8
+re-certification is pending): passing the acceptance suite certifies
+the measurement machinery only;
 real-GPU claims wait for Phase 1, which characterizes real vLLM on GPU
 hardware with the same harness and gates.
 

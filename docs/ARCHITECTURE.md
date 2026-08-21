@@ -13,9 +13,10 @@ SPEC.md is authoritative everywhere.
 Percentes measures LLM-inference reliability under load and failure.
 Replica loss is the Phase 0/1 fault class: what happens when a
 Kubernetes-served LLM inference service loses a replica under sustained
-load: the three questions SPEC.md §1 pins. Phase 0 (complete) builds and certifies the *instrument*
-against a mock inference server on a local kind cluster; passing the
-acceptance suite says nothing about real-GPU behavior.
+load: the three questions SPEC.md §1 pins. Phase 0 builds and certifies the *instrument*
+against a mock inference server on a local kind cluster (the §8
+re-certification is pending); passing the acceptance suite says nothing
+about real-GPU behavior.
 The Phase 1 groundwork (complete, GPU-untouched) adds everything
 for the real experiment that can be verified without hardware.
 
@@ -30,9 +31,10 @@ The core methodological commitments:
   is the Aalen-Johansen cumulative incidence, in which errors compete and
   only censored requests (no terminal event by the pinned 30 s timeout)
   are censored observations, never latency percentiles.
-- **Pre-registered numbers**: every pre-registered value is pinned in
-  SPEC.md and enforced at config-load time (SPEC.md §0 states the
-  pledge; `internal/config` enforces it).
+- **Pre-registered numbers**: the values SPEC.md pins are enforced at
+  config-load time (SPEC.md §0 states the pledge; `internal/config`
+  enforces it); calibration-derived values (lambda_max, lambda_r) and
+  the Phase 1 infrastructure pins land with the Phase 1 schema.
 - **Unmeasured reports as unmeasured**: anything unmeasured is reported
   as unmeasured-and-failing (gates) or N/A-with-reason (segments,
   equilibrium).
@@ -124,7 +126,7 @@ with median+range; drops are named, never imputed).
 
 | Package | Role | Spec anchors | Key entry points | Tests |
 |---|---|---|---|---|
-| `internal/config` | One YAML schema drives everything; full §6 pin list; strict decode; every pre-registered number enforced as an equality at load | §1–§6, §8 | `LoadFile`, `Config.Validate` | mutation test per pin |
+| `internal/config` | One YAML schema drives everything; §6 pins for the Phase 0 profiles; strict decode; each carried pin enforced as an equality at load | §1–§6, §8 | `LoadFile`, `Config.Validate` | mutation test per pin |
 | `internal/mock` + `cmd/mockserver` | OpenAI-compatible SSE mock with analytic TTFT/ITL distributions and five scriptable fault modes | §2 "Local-first" | `New`, `Server.Start`, `/admin/faults` | per-mode behavior tests incl. raw-TCP no-RST |
 | `internal/histo` | Pinned HdrHistogram wrapper; `RecordValue()` only; lint bans correction APIs | §3 | `New`, `Record`, `Summarize` | lint (repo-wide correction-API ban); AC1 oracles via internal/ac |
 | `internal/loadgen` | Open-loop generator: pre-fixed schedule, pacer+spin dispatch, SSE client, three-state classification, client-validity gates | §2, §3 | `BuildSchedule`, `Run` | in-package body + opt-in live-smoke units; AC1–AC2d + `-race` via internal/run |
@@ -135,7 +137,7 @@ with median+range; drops are named, never imputed).
 | `internal/report` | JSON + human report pair from one run or one campaign; numbers read once from artifacts | §2, §3, §4, §5, §7 | `Generate`, `GenerateCampaign` | in-package renderer units + AC6 field assertions |
 | `internal/stats` | §7 statistics: verbatim values, median, mean, df-correct t-interval, CoV/noise floor, Holm | §7 | `Summarize`, `holm` | hand-computed oracles |
 | `internal/campaign` | N-run repetition engine; per-run seeds; endpoint aggregation with named drops | §5, §7, §10 | `Run` | fake-runner units |
-| `internal/validity` | §10 run-validity gates G1–G6; applicable-but-unobserved ⇒ FAIL | §10 | `Evaluate` | per-gate units |
+| `internal/validity` | §10 run-validity gates G1–G6; applicable-but-unobserved ⇒ FAIL; a failed or unobserved G3/G4 strips the node-loss-representative label and the run stays valid | §10 | `Evaluate` | per-gate units |
 | `cmd/percentes` | One run → report pair; exit 0/2/1 | AC7 | | via reproduce.sh |
 | `cmd/percentes-campaign` | N-run campaign → campaign report pair; routes `fault.variant` to its injector (mock admin / clean-delete kubectl; black-hole refused pending the Phase-1 NodeOps wiring) | §5/§7/§10 | | via campaign-e2e.sh |
 
@@ -183,7 +185,7 @@ Campaign report (`campaign.json`): `campaign.per_run[*]` from
 | Client validity (§2) | skew p99≤5ms/max≤50ms; zero undispatched; CPU≤70%/5s; GC p99<1ms | `loadgen.evaluateGates` → run invalid |
 | Share gate (§1/G1) | 45–55% per replica pre-fault | `run.shareGate` |
 | Injection timing (AC3) | ±500 ms | `run.validity` via orchestrator records |
-| G1–G6 (§10) | per SPEC | `validity.Evaluate` per campaign run; unobserved-but-applicable ⇒ FAIL |
+| G1–G6 (§10) | per SPEC | `validity.Evaluate` per campaign run; unobserved-but-applicable ⇒ FAIL; failed or unobserved G3/G4 strips the label, run stays valid |
 
 SPEC.md §10 additionally defines G7 (baseline queue stability),
 spec-defined and pending the Phase 1 collector; the code does not yet
