@@ -23,8 +23,10 @@ import (
 // Caveat is printed in every report and in the AC output itself (§8).
 const Caveat = "CAVEAT: passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behavior. Small N, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are scoped in the claims and named in the report."
 
-// Report is the JSON artifact: the config embedded verbatim plus every
-// run product.
+// Report is the JSON artifact: the parsed config plus every run
+// product. ConfigSHA256 covers the configuration file bytes where the
+// config was loaded from a file, and the JSON encoding of the parsed
+// config otherwise.
 type Report struct {
 	SchemaVersion int    `json:"schema_version"`
 	ConfigSHA256  string `json:"config_sha256"`
@@ -63,9 +65,13 @@ func instrumentCommit() string {
 
 // Generate renders both artifacts from one run.
 func Generate(art *run.Artifacts) ([]byte, string, error) {
-	cfgRaw, err := json.Marshal(art.Config)
-	if err != nil {
-		return nil, "", fmt.Errorf("report: marshal config: %w", err)
+	cfgRaw := art.Config.Raw
+	if len(cfgRaw) == 0 {
+		var err error
+		cfgRaw, err = json.Marshal(art.Config)
+		if err != nil {
+			return nil, "", fmt.Errorf("report: marshal config: %w", err)
+		}
 	}
 	rep := &Report{
 		SchemaVersion:    2,

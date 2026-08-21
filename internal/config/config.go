@@ -3,9 +3,11 @@
 // load generator, chaos orchestrator, mock server, metrics collector,
 // recovery detector, and report generator all read sections of this file.
 //
-// The schema carries the full SPEC.md §6 pin list. Every gate, tolerance,
-// and detector parameter that SPEC.md pre-registers is enforced by
-// Validate(); a config that weakens a pinned number does not load.
+// The schema carries the SPEC.md §6 pins the Phase 0 profiles use;
+// calibration values and the Phase 1 infrastructure pins land with the
+// Phase 1 schema. Every gate, tolerance, and detector parameter that
+// SPEC.md pre-registers is enforced by Validate(); a config that weakens
+// a pinned number does not load.
 package config
 
 // Profile selects which validation regime applies.
@@ -129,6 +131,10 @@ type Config struct {
 	// Mock configures the Phase 0 mock inference server. Required when
 	// fault.variant is "mock"; must be absent otherwise.
 	Mock *Mock `yaml:"mock,omitempty" json:"mock,omitempty"`
+
+	// Raw holds the configuration file bytes as parsed, so the report's
+	// config hash covers the published file.
+	Raw []byte `yaml:"-" json:"-"`
 }
 
 // Run identifies the run and fixes its phase structure (§1).
@@ -157,8 +163,9 @@ type Load struct {
 	// for hosted targets, which omit the vLLM extension on the wire (§6).
 	IgnoreEOS      bool `yaml:"ignore_eos" json:"ignore_eos"`
 	UniquePrefixes bool `yaml:"unique_prefixes" json:"unique_prefixes"` // pinned true (§6)
-	// Connections is the number of independent HTTP/1.1 connections the
-	// client maintains; must be ≥ 4 × replica count (§1).
+	// Connections is a minimum idle-provisioning floor (≥ 4 × replica
+	// count) added to the demand-driven pool, which is uncapped per §1
+	// (internal/loadgen provisions 2 × rate × 30 s).
 	Connections int `yaml:"connections" json:"connections"`
 }
 
@@ -281,10 +288,12 @@ type Fault struct {
 	PartitionDurationS int `yaml:"partition_duration_s,omitempty" json:"partition_duration_s,omitempty"`
 }
 
-// Pins is the full §6 configuration-control pin list. Every field is
-// required. Phase 0 (mock) configs record explicit "n/a-phase0-mock"
-// values rather than omitting fields: the schema carries the list in full
-// from day one, and Phase 1 replaces the placeholders with real pins.
+// Pins is the §6 configuration-control pin list the Phase 0 schema
+// carries. Every field is required. Phase 0 (mock) configs record
+// explicit "n/a-phase0-mock" values rather than omitting fields, and
+// Phase 1 replaces the placeholders with real pins; calibration values
+// and the remaining Phase 1 infrastructure pins land with the Phase 1
+// schema.
 type Pins struct {
 	VLLM       VLLMPins       `yaml:"vllm" json:"vllm"`
 	Model      ModelPins      `yaml:"model" json:"model"`

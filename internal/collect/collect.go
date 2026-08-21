@@ -46,7 +46,8 @@ type Window struct {
 // and the recorded actual fire time (§3; the injection-timing
 // gate permits firing within 500 ms of T_inject).
 func FireAnchorNs(tInjectNs, actualFireNs int64) int64 {
-	if actualFireNs < tInjectNs {
+	// Zero means no recorded fire time.
+	if actualFireNs != 0 && actualFireNs < tInjectNs {
 		return actualFireNs
 	}
 	return tInjectNs
@@ -346,8 +347,9 @@ func modeMs(rawUs []int64) float64 {
 }
 
 // InFlightAccounting classifies the requests that were in flight at
-// T_inject (dispatched, no terminal event yet) by their eventual outcome
-// (§3 in-flight loss accounting), split by serving replica when known.
+// the fire instant (dispatched, no terminal event yet) by their eventual
+// outcome (§3 in-flight loss accounting), split by serving replica when
+// known.
 type InFlightAccounting struct {
 	Total     int            `json:"total"`
 	Completed int            `json:"completed"`
@@ -364,15 +366,15 @@ type InFlightAccounting struct {
 }
 
 // AccountInFlight performs the §3 in-flight loss accounting: it selects the
-// requests dispatched before T_inject that had no terminal event by then,
-// classifies each by eventual outcome, splits the counts by serving
-// replica, and isolates the victim replica's in-flight requests (the
-// headline killed-replica class) when victimReplica is known.
-func AccountInFlight(requests []loadgen.Request, tInjectNs int64, victimReplica string) InFlightAccounting {
+// requests dispatched before the fire instant that had no terminal event
+// by then, classifies each by eventual outcome, splits the counts by
+// serving replica, and isolates the victim replica's in-flight requests
+// (the headline killed-replica class) when victimReplica is known.
+func AccountInFlight(requests []loadgen.Request, fireNs int64, victimReplica string) InFlightAccounting {
 	acc := InFlightAccounting{ByReplica: map[string]int{}}
 	for i := range requests {
 		r := &requests[i]
-		if r.DispatchNs == 0 || r.DispatchNs >= tInjectNs || r.DoneNs < tInjectNs {
+		if r.DispatchNs == 0 || r.DispatchNs >= fireNs || r.DoneNs < fireNs {
 			continue
 		}
 		acc.Total++

@@ -14,7 +14,7 @@ import (
 // no competing events the estimator reduces exactly to 1-KM. A quantile is
 // reported only where the curve actually crosses it within the timeout
 // horizon; otherwise the refusal form is decided by the ceiling, final
-// incidence plus the outstanding censored mass (§3).
+// incidence plus the final event-free survival (§3).
 
 // ObsKind classifies one scheduled request's terminal state for the curve.
 type ObsKind int
@@ -51,8 +51,9 @@ type IncidenceCurve struct {
 	// Censored counts the observations still unresolved at their cutoff;
 	// the report states this outstanding mass alongside the curve.
 	Censored int `json:"censored"`
-	// FinalSurvival is event-free survival where the curve ends: the
-	// censored mass outstanding at the horizon (§3).
+	// FinalSurvival is event-free survival where the curve ends (§3); it
+	// equals the censored fraction only when no terminal event falls
+	// after a censoring time.
 	FinalSurvival float64 `json:"final_survival"`
 	// HorizonUs is the pinned client timeout; quantiles are only claimed
 	// inside it. Re-based completion times may exceed it by up to the max
@@ -150,7 +151,7 @@ func (c *IncidenceCurve) FinalIncidence() float64 {
 }
 
 // Ceiling is the highest incidence the curve could ever reach: final
-// incidence plus the outstanding censored mass. A quantile above the
+// incidence plus the final event-free survival. A quantile above the
 // ceiling is unattainable at any t (§3).
 func (c *IncidenceCurve) Ceiling() float64 {
 	return c.FinalIncidence() + c.FinalSurvival

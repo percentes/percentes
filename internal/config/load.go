@@ -34,5 +34,6 @@ func Parse(raw []byte) (*Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	cfg.Raw = raw
 	return &cfg, nil
 }

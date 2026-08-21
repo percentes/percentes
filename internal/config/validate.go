@@ -87,7 +87,7 @@ func (c *Config) validateLoad(v *validator) {
 		v.errf("load.unique_prefixes: pinned true (§6: unique per-request prefixes regardless)")
 	}
 	if minConns := PinnedConnMultiplier * c.Target.Replicas; c.Load.Connections < minConns {
-		v.errf("load.connections: must be >= %d (4 x %d replicas, §1), got %d", minConns, c.Target.Replicas, c.Load.Connections)
+		v.errf("load.connections: must be >= %d (4 x %d replicas, §6), got %d", minConns, c.Target.Replicas, c.Load.Connections)
 	}
 }
 

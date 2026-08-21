@@ -83,8 +83,8 @@ func TestAJCounterexampleFiftyFifty(t *testing.T) {
 	}
 }
 
-// The ceiling is final completion incidence plus the censored mass
-// outstanding at the horizon (§3). Hand-computed: 50 errors at
+// The ceiling is final completion incidence plus the final event-free
+// survival (§3). Hand-computed: 50 errors at
 // 0.5s take survival to 0.500, the 50 completions at 1s carry CIF to 0.500
 // and leave nothing outstanding, so the ceiling is 0.500 and no p90 exists
 // at any t.
