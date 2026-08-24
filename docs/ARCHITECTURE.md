@@ -49,7 +49,8 @@ The core methodological commitments:
                         first content chunk → FirstTokNs          TTFT = FirstTok − t_i
                         per-token gaps → ITLsUs[]                 (re-based to INTENDED time)
                         terminal event:
-                          data:[DONE]      → completed, DoneNs    e2e = Done − t_i
+                          data:[DONE], content seen → completed, DoneNs   e2e = Done − t_i
+                          data:[DONE], no content   → errored (empty_stream)
                           5xx/RST/bad SSE  → errored (+class)
                           ctx deadline 30s → censored
 ```
@@ -201,7 +202,7 @@ per run via `validity.Evaluate`, so it exits 2 for the CPU gate *and*
 because G5 has no GPU fingerprint pre-hardware. Either way an
 uncertified gate never passes.
 
-## 7. Fault modes → measurement signatures
+## 7. Fault modes and their measurement signatures
 
 | Mode | Mock behavior | What the instrument must show |
 |---|---|---|

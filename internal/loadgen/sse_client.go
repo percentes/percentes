@@ -52,6 +52,12 @@ func (g *gen) execute(r *Request) {
 		l := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(l, "data: [DONE]"):
+			// [DONE] with no prior content event: an empty stream is
+			// errored, never a completion (§3).
+			if r.FirstTokNs == 0 {
+				r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrEmptyStream, g.now()
+				return
+			}
 			r.Outcome, r.DoneNs = OutcomeCompleted, g.now()
 			return
 		case strings.HasPrefix(l, "data: ") && strings.Contains(l, `"content"`):

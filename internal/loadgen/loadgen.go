@@ -47,6 +47,7 @@ const (
 	ErrReset           = "reset"
 	ErrMalformedStream = "malformed_stream"
 	ErrConnect         = "connect"
+	ErrEmptyStream     = "empty_stream"
 )
 
 // Request is one scheduled request's full lifecycle. All times are

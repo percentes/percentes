@@ -86,7 +86,7 @@ This study measures the cost of losing one serving replica under sustained load.
 
 Every scheduled request is a sample and ends in exactly one state:
 - **Completed:** latency = completion_time minus t_i. Enters the latency histograms.
-- **Errored:** explicit failure (5xx, reset, malformed stream) at failure_time. Counted in the error rate for its window. NEVER enters latency histograms.
+- **Errored:** explicit failure (5xx, reset, malformed stream, or a stream that terminates with no content event: class empty_stream) at failure_time. Counted in the error rate for its window. NEVER enters latency histograms.
 - **Censored:** no terminal event by the pinned client timeout (30 s) or run end. Counted in the censored rate with its observation time. NEVER enters latency histograms.
 
 Reporting per window:
