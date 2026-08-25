@@ -2,7 +2,7 @@
 # NOT RUNNABLE IN PHASE 0: this file documents the experiment profile with
 # every §6 pin present. Placeholder pins marked PIN-AT-PHASE1 must be
 # replaced with measured values during Phase 1 setup; run-validity gates
-# G1-G6 (§10) additionally verify the environment at run time.
+# G1-G7 (§10) additionally verify the environment at run time.
 schema_version: 1
 profile: experiment
 

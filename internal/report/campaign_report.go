@@ -85,7 +85,7 @@ func humanCampaign(cr *CampaignReport) string {
 	w("")
 
 	if len(cr.ValidityGates) > 0 {
-		w("== Run-validity gates (§10 G1-G6) ==")
+		w("== Run-validity gates (§10 G1-G7) ==")
 		for i, gr := range cr.ValidityGates {
 			w("run %d (variant %s): all_pass=%v", i+1, gr.Variant, gr.AllPass)
 			for _, g := range gr.Gates {

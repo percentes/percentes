@@ -1,4 +1,4 @@
-// Package validity implements the SPEC.md §10 run-validity gates G1-G6. A
+// Package validity implements the SPEC.md §10 run-validity gates G1-G7. A
 // run that fails any applicable gate other than G3 and G4 is invalid and
 // its numbers are not published as a characterization result; failure or
 // non-observation of G3 or G4 strips the node-loss-representative label
@@ -13,9 +13,10 @@
 // (EndpointSlice polling), G5 GPU clock/power fingerprints equal
 // (nvidia-smi). Those two take injected Observation values (concrete
 // structs) so the gate LOGIC is tested with struct fixtures here; the
-// collectors are wired at Phase 1 against the real cluster. G4 with no
-// observation costs the label (§10); G5 with no fingerprints reports not
-// applicable until the collector exists, as §10 already treats G7. Hosted
+// collectors are wired at Phase 1 against the real cluster. The seventh,
+// G7 baseline queue stability, awaits the Phase 1 server-gauge scrape.
+// G4 with no observation costs the label (§10); G5 and G7 report not
+// applicable until their collectors exist. Hosted
 // targets evaluate only G2 and G6, with G6 redefined as
 // completion-within-timeout and reported rather than run-invalidating
 // (§6).
@@ -30,7 +31,7 @@ import (
 
 // Gate is one run-validity gate result.
 type Gate struct {
-	ID         string `json:"id"` // "G1".."G6"
+	ID         string `json:"id"` // "G1".."G7"
 	Name       string `json:"name"`
 	Applicable bool   `json:"applicable"`
 	Observed   bool   `json:"observed"`
@@ -87,7 +88,7 @@ type GPUFingerprint struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
-// Report is the full G1-G6 evaluation for one run.
+// Report is the full G1-G7 evaluation for one run.
 type Report struct {
 	Gates []Gate `json:"gates"`
 	// AllPass is the run's validity: every applicable gate except the
@@ -103,7 +104,7 @@ type Report struct {
 	RSTCapture *RSTCaptureResult `json:"rst_capture,omitempty"`
 }
 
-// Evaluate runs all six gates for one run's artifacts plus the Phase-1
+// Evaluate emits all seven gate results for one run's artifacts plus the Phase-1
 // observations. The variant selects which gates are applicable (G3/G4 are
 // black-hole only, §10), and G3/G4 decide the node-loss-representative
 // label rather than the run's validity.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Campaign e2e on kind: the §5 repetition pipeline (percentes-campaign) against
 # the live 2-replica mock deployment — N runs, per-run §10 validity gates,
-# §7 aggregation, campaign report pair. Exits 2 pre-hardware (G5
-# unobserved; on darwin the client CPU gate is unmeasured); this script
+# §7 aggregation, campaign report pair. Exits 2 when a run-invalidating
+# gate fails (on darwin the client CPU gate is unmeasured); this script
 # asserts report completeness, not run validity.
 set -euo pipefail
 
@@ -63,7 +63,7 @@ CODE=$?
 set -e
 tail -4 "$OUT.log" 2>/dev/null || true
 [ "$CODE" = "0" ] || [ "$CODE" = "2" ] || { tail -40 "$OUT.log" 2>/dev/null || true; fail "campaign errored (exit $CODE)"; }
-[ "$CODE" = "2" ] && echo "   note: exit 2 = at least one run-validity gate failed (expected pre-hardware: G5 unobserved; darwin CPU unmeasured)"
+[ "$CODE" = "2" ] && echo "   note: exit 2 = at least one run is invalid (on darwin: client CPU gate unmeasured)"
 
 say "verifying the campaign report"
 python3 - "$OUT" <<'EOF'
@@ -74,25 +74,29 @@ with open(f"{out}/campaign.json") as f:
     rep = json.load(f)
 camp = rep["campaign"]
 assert camp["repetitions"] == 2 and len(camp["per_run"]) == 2, "must publish every run verbatim (§5)"
+per = camp["per_run"]
+assert all(r.get("in_flight_loss_fraction") is not None for r in per), "victim-scoped loss must be present per run"
 names = {e["name"] for e in camp["endpoints"]}
 for want in ("ttr_equilibrium_s", "in_flight_loss_fraction", "survivor_p95_ms", "integrated_goodput_deficit"):
     assert want in names, f"endpoint {want} missing"
+# The endpoint aggregates valid runs only (§7); attribution is already
+# asserted above over every run verbatim.
 lf = next(e for e in camp["endpoints"] if e["name"] == "in_flight_loss_fraction")
-assert lf["contributing_n"] == 2, f"both runs are victim-attributed, got {lf['contributing_n']}"
+assert lf["contributing_n"] == camp["valid_runs"], f"endpoint must aggregate the valid runs: contributing_n={lf['contributing_n']} valid_runs={camp['valid_runs']}"
 assert camp.get("noise_floor_cov") is None, "noise floor label is clean_delete-only (§7); mock variant must not carry it"
 gates = rep["validity_gates"]
 assert len(gates) == 2, "one §10 gate report per run"
 for i, g in enumerate(gates):
     ids = {x["id"]: x for x in g["gates"]}
-    assert set(ids) == {"G1","G2","G3","G4","G5","G6"}, f"run {i}: gate set incomplete"
-    assert ids["G5"]["pass"] is False and ids["G5"]["observed"] is False, "G5 must fail-unobserved without GPU fingerprints"
+    assert set(ids) == {"G1","G2","G3","G4","G5","G6","G7"}, f"run {i}: gate set mismatch: {sorted(ids)}"
+    # G5 and G7 have no Phase-0 collector and report not applicable (§10).
+    for na in ("G5", "G7"):
+        assert not ids[na]["applicable"] and not ids[na]["pass"], f"run {i}: {na} must report not applicable pre-Phase-1: {ids[na]}"
     # kind runs kube-proxy iptables, a per-connection dataplane, so §1 makes
     # the share descriptive here: assert it was measured, print the value.
     assert ids["G1"]["applicable"] and ids["G1"]["observed"], f"run {i}: share must be measured: {ids['G1']}"
     print(f"   run {i} share: {ids['G1']['detail']}")
-per = camp["per_run"]
-assert all(r["in_flight_loss_fraction"] is not None for r in per), "victim-scoped loss must be present per run"
-print(f"   campaign ok: {camp['valid_runs']}/2 fully-valid runs (expected 0 pre-hardware), "
+print(f"   campaign ok: {camp['valid_runs']}/2 fully-valid runs, "
       f"loss fractions {[round(r['in_flight_loss_fraction'],3) for r in per]}")
 EOF
 

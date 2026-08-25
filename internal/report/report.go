@@ -37,7 +37,7 @@ type Report struct {
 	InstrumentCommit string `json:"instrument_commit"`
 	Caveat           string `json:"caveat"`
 	Headline         string `json:"conditional_headline"`
-	// ValidityGates is the §10 G1-G6 evaluation for this run.
+	// ValidityGates is the §10 G1-G7 evaluation for this run.
 	ValidityGates *validity.Report `json:"validity_gates,omitempty"`
 	*run.Artifacts
 }
@@ -313,7 +313,7 @@ func human(r *Report) string {
 	}
 	w("")
 	if r.ValidityGates != nil {
-		w("== Run-validity gates (§10 G1-G6) ==")
+		w("== Run-validity gates (§10 G1-G7) ==")
 		for _, g := range r.ValidityGates.Gates {
 			status := "n/a"
 			if g.Applicable {

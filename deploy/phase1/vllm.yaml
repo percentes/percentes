@@ -2,7 +2,8 @@
 # GPU worker node, behind one Service. NOT RUNNABLE IN PHASE 0 — requires
 # a real GPU cluster. Every PIN-AT-PHASE1 marker must be replaced with the
 # measured value and recorded in the run config's §6 pin list before use;
-# the run-validity gates (internal/validity, G1-G6) are run-failing.
+# the run-validity gates (internal/validity, G1-G7) are run-failing
+# except the label-determining G3/G4.
 #
 # No liveness probe (as in Phase 0): the black-hole partition must be able
 # to blackhole the node without the kubelet restarting the pod out from

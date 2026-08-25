@@ -119,7 +119,7 @@ run-failing: p99 ≤ 5 ms, max ≤ 50 ms.
    from those artifacts alone. Exit 0 valid, 2 gate-invalid, 1 error.
 
 `percentes-campaign` wraps this N times (per-run seed = base+i), evaluates the
-§10 G1–G6 gates per run, and aggregates per-run scalars under the §7
+§10 G1–G7 gates per run, and aggregates per-run scalars under the §7
 statistics (median/mean/df-correct t-interval; heavy-tailed scalars lead
 with median+range; drops are named, never imputed).
 
@@ -138,7 +138,7 @@ with median+range; drops are named, never imputed).
 | `internal/report` | JSON + human report pair from one run or one campaign; numbers read once from artifacts | §2, §3, §4, §5, §7 | `Generate`, `GenerateCampaign` | in-package renderer units + AC6 field assertions |
 | `internal/stats` | §7 statistics: verbatim values, median, mean, df-correct t-interval, CoV/noise floor, Holm | §7 | `Summarize`, `holm` | hand-computed oracles |
 | `internal/campaign` | N-run repetition engine; per-run seeds; endpoint aggregation with named drops | §5, §7, §10 | `Run` | fake-runner units |
-| `internal/validity` | §10 run-validity gates G1–G6; applicable-but-unobserved ⇒ FAIL; a failed or unobserved G3/G4 strips the node-loss-representative label and the run stays valid | §10 | `Evaluate` | per-gate units |
+| `internal/validity` | §10 run-validity gates G1–G7; applicable-but-unobserved ⇒ FAIL; a failed or unobserved G3/G4 strips the node-loss-representative label and the run stays valid | §10 | `Evaluate` | per-gate units |
 | `cmd/percentes` | One run → report pair; exit 0/2/1 | AC7 | | via reproduce.sh |
 | `cmd/percentes-campaign` | N-run campaign → campaign report pair; routes `fault.variant` to its injector (mock admin / clean-delete kubectl; black-hole refused pending the Phase-1 NodeOps wiring) | §5/§7/§10 | | via campaign-e2e.sh |
 
@@ -186,21 +186,18 @@ Campaign report (`campaign.json`): `campaign.per_run[*]` from
 | Client validity (§2) | skew p99≤5ms/max≤50ms; zero undispatched; CPU≤70%/5s; GC p99<1ms | `loadgen.evaluateGates` → run invalid |
 | Share gate (§1/G1) | 45–55% per replica pre-fault | `run.shareGate` |
 | Injection timing (AC3) | ±500 ms | `run.validity` via orchestrator records |
-| G1–G6 (§10) | per SPEC | `validity.Evaluate` per campaign run; unobserved-but-applicable ⇒ FAIL; failed or unobserved G3/G4 strips the label, run stays valid |
+| G1–G7 (§10) | per SPEC | `validity.Evaluate` per run in both binaries; unobserved-but-applicable ⇒ FAIL; failed or unobserved G3/G4 strips the label, run stays valid |
 
-SPEC.md §10 additionally defines G7 (baseline queue stability),
-spec-defined and pending the Phase 1 collector; the code does not yet
-evaluate it.
+G5 and G7 depend on Phase 1 collectors (nvidia-smi fingerprints, the
+vLLM waiting-queue gauge); until those exist the gate table carries
+them as not-applicable rows.
 
-One consequence shows up in every local report, though from two
-different gates depending on which binary you run. A single `percentes`
-run is judged by `run.validity` (client-validity gate + share gate +
-injection timing only, it does not evaluate G1–G6), so on macOS it
-exits 2 because the CPU gate is unmeasured (CGO-free build; Linux
-measures via /proc). A `percentes-campaign` run additionally evaluates G1–G6
-per run via `validity.Evaluate`, so it exits 2 for the CPU gate *and*
-because G5 has no GPU fingerprint pre-hardware. Either way an
-uncertified gate never passes.
+One consequence shows up on macOS under the CGO_ENABLED=0 builds the
+make targets pin. Both binaries evaluate the §10 gates per run via
+`validity.Evaluate` and fold run-invalidating failures into the exit
+code; G1 and G2 are folded in by `run.Execute` itself. The client CPU
+gate is unmeasured in that build (Linux measures via /proc), so such a
+run exits 2. An applicable gate that goes unobserved never passes.
 
 ## 7. Fault modes and their measurement signatures
 
