@@ -38,6 +38,9 @@ func humanCampaign(cr *CampaignReport) string {
 	w("%s", Caveat)
 	w("")
 	w("repetitions: %d, valid runs: %d/%d", rep.Repetitions, rep.ValidRuns, rep.Repetitions)
+	if cr.Campaign.InvalidRuns > 0 {
+		w("invalid runs excluded from endpoint summaries: %d (rows kept in the per-run table, §5)", cr.Campaign.InvalidRuns)
+	}
 	w("primary endpoint (§7): %s", campaign.PrimaryEndpoint)
 	w("%s", rep.Caveat)
 	w("")
@@ -49,8 +52,8 @@ func humanCampaign(cr *CampaignReport) string {
 		if r.InFlightLossFraction == nil && r.InFlightLossAllReplicasUnscoped != nil {
 			lossCell = fmt.Sprintf("[unscoped %.4f]", *r.InFlightLossAllReplicasUnscoped)
 		}
-		w("%-4d %-6v %-12s %-12s %-10s %-12.1f %-10.2f",
-			r.Run, r.Valid, ptrS(r.TTREquilibriumS), ptrS(r.TTRPreFaultS), lossCell, r.SurvivorP95Ms, r.IntegratedDeficit)
+		w("%-4d %-6v %-12s %-12s %-10s %-12s %-10.2f",
+			r.Run, r.Valid, ptrS(r.TTREquilibriumS), ptrS(r.TTRPreFaultS), lossCell, ptrS(r.SurvivorP95Ms), r.IntegratedDeficit)
 	}
 	w("")
 

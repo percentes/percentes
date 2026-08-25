@@ -6,7 +6,9 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/percentes/percentes/internal/collect"
@@ -72,8 +74,11 @@ type Artifacts struct {
 	ShareGate     ShareGateResult            `json:"share_gate"`
 	// ThresholdAnalysis is the §4 modal/baseline-SD statement.
 	ThresholdAnalysis collect.ThresholdAnalysis `json:"threshold_analysis"`
-	RunValid          bool                      `json:"run_valid"`
-	InvalidReasons    []string                  `json:"invalid_reasons,omitempty"`
+	// ScheduleFired counts the mock's recorded fault fires, read back from
+	// /admin/faults after a schedule-driven run; nil means unattested.
+	ScheduleFired  *int     `json:"schedule_fired,omitempty"`
+	RunValid       bool     `json:"run_valid"`
+	InvalidReasons []string `json:"invalid_reasons,omitempty"`
 }
 
 // Execute performs one full run.
@@ -87,7 +92,11 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	tInject := time.Duration((cfg.Run.Phases.WarmupS + cfg.Fault.TInjectOffsetS) * float64(time.Second))
 
 	inj := opts.Injector
-	if inj == nil && opts.AdminURL != "" {
+	scheduleDriven := cfg.Fault.Variant == config.VariantMock && cfg.Mock != nil && len(cfg.Mock.FaultSchedule) > 0
+	// An explicit injector request (Options.InjectMode) arms via the admin
+	// endpoint; an AdminURL alone against a scheduled mock is read-back
+	// access, since the mock armed its own schedule at startup.
+	if inj == nil && opts.AdminURL != "" && opts.InjectMode != "" {
 		inj = orchestrator.NewMockInjector(opts.AdminURL, opts.InjectMode, 0)
 	}
 	if inj != nil {
@@ -98,7 +107,7 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 			orchDone <- err
 		}()
 	} else {
-		orchDone <- nil // schedule-driven mock faults, nothing to arm
+		orchDone <- nil // schedule-driven mock faults or none: nothing to arm
 	}
 
 	// §5 decomposition probes run DURING the fault window: they start at
@@ -220,6 +229,11 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 		art.Decomposition.SetMeasured("routing_propagation", *ready.EndAt, *traffic.EndAt)
 	}
 
+	if scheduleDriven && opts.AdminURL != "" {
+		if n, ferr := scheduleFires(ctx, opts.AdminURL, epoch); ferr == nil {
+			art.ScheduleFired = &n
+		}
+	}
 	art.RunValid, art.InvalidReasons = validity(art)
 	return art, nil
 }
@@ -279,6 +293,20 @@ func shareGate(cfg *config.Config, res *loadgen.Result, guardStartNs int64, vict
 
 func validity(art *Artifacts) (bool, []string) {
 	var reasons []string
+	// A fault-labelled run must show its fault source: an armed injector,
+	// or a schedule whose fires read back nonzero.
+	scheduled := art.Config.Fault.Variant == config.VariantMock && art.Config.Mock != nil && len(art.Config.Mock.FaultSchedule) > 0
+	switch {
+	case art.Config.Fault.Variant == config.VariantNone:
+	case art.Orchestration != nil:
+		// Injector-armed: the fire-timing audit below covers it.
+	case scheduled && art.ScheduleFired == nil:
+		reasons = append(reasons, "mock fault schedule unattested: fire records were not read back")
+	case scheduled && *art.ScheduleFired == 0:
+		reasons = append(reasons, "mock fault schedule never fired")
+	case !scheduled:
+		reasons = append(reasons, fmt.Sprintf("fault variant %q had no fault source: nothing was armed", art.Config.Fault.Variant))
+	}
 	if !art.Loadgen.Gates.Pass {
 		reason := "client-validity gate failed (§2)"
 		if !art.Loadgen.Gates.CPUMeasured {
@@ -297,4 +325,36 @@ func validity(art *Artifacts) (bool, []string) {
 		}
 	}
 	return len(reasons) == 0, reasons
+}
+
+// scheduleFires counts schedule-source fires recorded after the run
+// epoch, so a long-lived mock's earlier fires never attest a later run.
+func scheduleFires(ctx context.Context, adminURL string, since time.Time) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, adminURL+"/admin/faults", nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Faults []struct {
+			Source  string     `json:"source"`
+			FiredAt *time.Time `json:"fired_at"`
+		} `json:"faults"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, f := range out.Faults {
+		if f.Source == "schedule" && f.FiredAt != nil && f.FiredAt.After(since) {
+			n++
+		}
+	}
+	return n, nil
 }

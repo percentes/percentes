@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -49,9 +50,15 @@ func (g *gen) execute(r *Request) {
 	var prevTokNs int64
 	for {
 		line, err := reader.ReadString('\n')
+		// A non-EOF read error means the partial line is untrusted:
+		// classify the transport failure, never the fragment.
+		if err != nil && err != io.EOF {
+			g.classifyStreamErr(r, err)
+			return
+		}
 		l := strings.TrimSpace(line)
 		switch {
-		case strings.HasPrefix(l, "data: [DONE]"):
+		case l == "data: [DONE]":
 			// [DONE] with no prior content event: an empty stream is
 			// errored, never a completion (§3).
 			if r.FirstTokNs == 0 {
@@ -60,15 +67,31 @@ func (g *gen) execute(r *Request) {
 			}
 			r.Outcome, r.DoneNs = OutcomeCompleted, g.now()
 			return
-		case strings.HasPrefix(l, "data: ") && strings.Contains(l, `"content"`):
-			r.Tokens++
-			now := g.now()
-			if r.FirstTokNs == 0 {
-				r.FirstTokNs = now
-			} else {
-				r.ITLsUs = append(r.ITLsUs, (now-prevTokNs)/1000)
+		case strings.HasPrefix(l, "data: "):
+			// A chunk counts as a token only when its decoded delta carries
+			// nonempty content; an undecodable payload is a malformed
+			// stream (§3).
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+				} `json:"choices"`
 			}
-			prevTokNs = now
+			if json.Unmarshal([]byte(strings.TrimPrefix(l, "data: ")), &chunk) != nil {
+				r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, g.now()
+				return
+			}
+			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+				r.Tokens++
+				now := g.now()
+				if r.FirstTokNs == 0 {
+					r.FirstTokNs = now
+				} else {
+					r.ITLsUs = append(r.ITLsUs, (now-prevTokNs)/1000)
+				}
+				prevTokNs = now
+			}
 		}
 		if err != nil {
 			g.classifyStreamErr(r, err)

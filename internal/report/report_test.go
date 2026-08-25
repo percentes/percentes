@@ -32,7 +32,7 @@ func minimalArtifacts() *run.Artifacts {
 // traces to the build that produced it. Test binaries lack VCS stamping,
 // so the field must degrade to "unknown", never to empty.
 func TestReportCarriesInstrumentCommit(t *testing.T) {
-	raw, _, err := Generate(minimalArtifacts())
+	raw, _, err := Generate(minimalArtifacts(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestReportCarriesInstrumentCommit(t *testing.T) {
 // The caveat is the report's honesty banner. It must appear in the JSON
 // artifact and twice in the human report (header and footer).
 func TestGenerateCarriesCaveatAndValidJSON(t *testing.T) {
-	raw, humanText, err := Generate(minimalArtifacts())
+	raw, humanText, err := Generate(minimalArtifacts(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestHeadlineRefusesWithoutWindows(t *testing.T) {
 func TestHumanReportNamesUnmeasuredCPU(t *testing.T) {
 	art := minimalArtifacts()
 	art.Loadgen.Gates.CPUMeasured = false
-	_, humanText, err := Generate(art)
+	_, humanText, err := Generate(art, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestEquilibriumFactsAccompanyTTR(t *testing.T) {
 	if got := headline(art); !strings.Contains(got, facts) {
 		t.Errorf("headline TTR-to-equilibrium missing the §5 facts:\n%s", got)
 	}
-	_, humanText, err := Generate(art)
+	_, humanText, err := Generate(art, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestEquilibriumNAForms(t *testing.T) {
 		ToPreFault:       detect.Detection{Baseline: 1.0, NotRecovered: true},
 		Sensitivity:      []detect.SensitivityRow{{Params: detect.Params{WindowS: 10, EntryPct: 90, ExitPct: 85, HoldS: 30}, NotRecoveredPre: true}},
 	}
-	_, humanText, err := Generate(art)
+	_, humanText, err := Generate(art, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

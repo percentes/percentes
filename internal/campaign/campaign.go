@@ -43,7 +43,7 @@ type Scalars struct {
 	// separately and labeled.
 	InFlightLossFraction            *float64 `json:"in_flight_loss_fraction,omitempty"`
 	InFlightLossAllReplicasUnscoped *float64 `json:"in_flight_loss_all_replicas_unscoped,omitempty"`
-	SurvivorP95Ms                   float64  `json:"survivor_p95_ms"`
+	SurvivorP95Ms                   *float64 `json:"survivor_p95_ms,omitempty"`
 	IntegratedDeficit               float64  `json:"integrated_goodput_deficit"`
 }
 
@@ -67,6 +67,9 @@ type Report struct {
 	PerRun      []Scalars       `json:"per_run"`
 	Endpoints   []ScalarSummary `json:"endpoints"`
 	ValidRuns   int             `json:"valid_runs"`
+	// InvalidRuns counts runs excluded from the §7 endpoint summaries as
+	// invalid for any recorded reason; their rows stay in PerRun (§5).
+	InvalidRuns int `json:"invalid_runs"`
 	// NoiseFloorCoV is the run-to-run CoV of the primary endpoint, the
 	// measured noise floor for the cross-stack comparison's MDE (§7).
 	NoiseFloorCoV *float64 `json:"noise_floor_cov,omitempty"`
@@ -106,7 +109,7 @@ func Run(ctx context.Context, cfg *config.Config, opts run.Options, variantLabel
 		}
 	}
 
-	rep.Endpoints = summarize(rep.PerRun, variantLabel)
+	rep.Endpoints, rep.InvalidRuns = summarize(rep.PerRun, variantLabel)
 	// The noise floor for the cross-stack comparison's MDE is the run-to-run
 	// CoV of the PRIMARY endpoint (§7): equilibrium TTR under clean_delete
 	// only.
@@ -145,8 +148,11 @@ func extractScalars(runIdx int, art *run.Artifacts) Scalars {
 		frac := float64(inf.Errored+inf.Censored) / float64(inf.Total)
 		s.InFlightLossAllReplicasUnscoped = &frac
 	}
-	if fault, ok := art.Windows["fault"]; ok {
-		s.SurvivorP95Ms = float64(fault.E2EConditional.P95Us) / 1000
+	// A window with no completed samples has no survivor percentile; the
+	// scalar stays nil.
+	if fault, ok := art.Windows["fault"]; ok && fault.E2EConditional.Count > 0 {
+		v := float64(fault.E2EConditional.P95Us) / 1000
+		s.SurvivorP95Ms = &v
 	}
 	return s
 }
@@ -154,7 +160,18 @@ func extractScalars(runIdx int, art *run.Artifacts) Scalars {
 // summarize builds the §7 scalar summaries. The equilibrium TTR is the
 // primary endpoint only for the clean-delete variant; otherwise it is
 // secondary. TTRs are heavy-tailed.
-func summarize(runs []Scalars, variant string) []ScalarSummary {
+func summarize(runs []Scalars, variant string) ([]ScalarSummary, int) {
+	// §5 publishes every per-run value verbatim in the table; the §7
+	// endpoint summaries hold valid runs only.
+	var valid []Scalars
+	for _, r := range runs {
+		if r.Valid {
+			valid = append(valid, r)
+		}
+	}
+	excluded := len(runs) - len(valid)
+	runs = valid
+
 	equilibriumEndpoint := "secondary"
 	if variant == config.VariantCleanDelete {
 		equilibriumEndpoint = "primary"
@@ -217,17 +234,31 @@ func summarize(runs []Scalars, variant string) []ScalarSummary {
 			DroppedReason: "no run had victim attribution; the §10 pre-registered quantity is unavailable (see in_flight_loss_all_replicas_unscoped per run)",
 		})
 	}
-	out = append(out, ScalarSummary{
+	sp, spDropped := collectPtr(func(r Scalars) *float64 { return r.SurvivorP95Ms })
+	survivor := ScalarSummary{
 		Name: "survivor_p95_ms", Endpoint: "secondary",
-		Summary:       stats.Summarize(collectVal(func(r Scalars) float64 { return r.SurvivorP95Ms }), true),
-		ContributingN: len(runs),
-	})
-	out = append(out, ScalarSummary{
-		Name: "integrated_goodput_deficit", Endpoint: "exploratory",
-		Summary:       stats.Summarize(collectVal(func(r Scalars) float64 { return r.IntegratedDeficit }), false),
-		ContributingN: len(runs),
-	})
-	return out
+		ContributingN: len(sp),
+		DroppedRuns:   spDropped,
+		DroppedReason: droppedReason(spDropped, "no completed samples in the fault window"),
+	}
+	if len(sp) > 0 {
+		survivor.Summary = stats.Summarize(sp, true)
+	}
+	out = append(out, survivor)
+	deficit := ScalarSummary{Name: "integrated_goodput_deficit", Endpoint: "exploratory", ContributingN: len(runs)}
+	if len(runs) > 0 {
+		deficit.Summary = stats.Summarize(collectVal(func(r Scalars) float64 { return r.IntegratedDeficit }), false)
+	}
+	out = append(out, deficit)
+	return out, excluded
+}
+
+// droppedReason labels a nonzero drop count.
+func droppedReason(n int, why string) string {
+	if n == 0 {
+		return ""
+	}
+	return why
 }
 
 // reasonIfDropped returns reason only when dropped > 0, so a summary with

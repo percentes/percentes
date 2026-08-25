@@ -37,6 +37,7 @@ func artWith(ttrEq, ttrPf *float64, estimable bool, lossFrac float64, p95Ms floa
 	inf.Total = 100
 	inf.Errored = int(lossFrac * 100)
 	fault := &collect.Stats{}
+	fault.E2EConditional.Count = 10
 	fault.E2EConditional.P95Us = int64(p95Ms * 1000)
 	return &run.Artifacts{
 		Detector: det,

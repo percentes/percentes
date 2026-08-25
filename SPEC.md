@@ -76,7 +76,7 @@ This study measures the cost of losing one serving replica under sustained load.
 
 **Metrics collector:** client-side stream is authoritative for latency, errors, and censoring. Server-side vLLM Prometheus metrics are explanatory and provide per-replica request counters for the share gate, plus batching and cache occupancy. Per replica and per window the collector records the vLLM waiting-queue and running-request gauges, KV-cache occupancy, and GPU busy percent from nvidia-smi or DCGM; these are reported as context for the utilization definition (§10) and none of them defines the band. vLLM metric names vary across releases (at the time of writing: vllm:num_requests_waiting, vllm:num_requests_running, vllm:gpu_cache_usage_perc); the exact names are re-verified against the pinned vLLM version, and a gauge the pinned version does not emit is reported N/A, never inferred. Records client-to-service RTT and generator placement; server-side TTFT histograms reported alongside client-side.
 
-**Recovery detector:** hysteresis-based, two baselines, decomposed. Section 5.
+**Recovery detector:** hysteresis-based (recovery enters and exits at separated thresholds, so noise at the boundary cannot toggle it), two baselines, decomposed. Section 5.
 
 **Report generator:** full metric set as JSON plus human-readable report from one config, including completion-incidence curves and the conditional headline (appendix). Distributional metrics come from merged HdrHistograms queried once, never averaged percentiles.
 
@@ -242,7 +242,15 @@ Deploy a request-aware layer-7 proxy, per §1, so the share gate is enforced rat
 
 Phase 1 setup verifies the one-token-per-event invariant for the pinned vLLM version: for a sample of requests, the count of SSE content events observed by the client is compared against the server-reported completion token count. If they match, ITL is labeled inter-token; if not, it is reported as inter-chunk latency (section 3).
 
-**Run-validity gates:** G1 per-replica share 45-55 percent pre-fault (enforced under per-request balancing; descriptive under per-connection routing, §1); G2 client-validity gate clean; G3 (black-hole only, label-determining) zero errored outcomes among victim-attributed in-flight requests, every non-completing one censored at the pinned timeout (§1(i); requires victim attribution); G4 (black-hole only, label-determining) observed endpoint-staleness window at least 20 s with victim-bound traffic observed inside the window; G5 GPU clock and power fingerprints equal across replicas and runs (Phase 1 additionally records per-replica GPU clock and throttle-reason counters over the fault window and reports them alongside G5); G6 baseline goodput at least 0.99 (section 3 goodput over the pre-fault baseline window); G7 baseline queue stability: per-replica mean of the vLLM waiting-queue gauge over the baseline window at most 1.0, protecting the calibrated band against capacity drift since calibration (Phase 1: requires the server-gauge scrape; reported not applicable until it exists).
+**Run-validity gates:**
+
+- **G1** per-replica share 45-55 percent pre-fault (enforced under per-request balancing; descriptive under per-connection routing, §1)
+- **G2** client-validity gate clean (§2)
+- **G3** (black-hole only, label-determining) zero errored outcomes among victim-attributed in-flight requests, every non-completing one censored at the pinned timeout (§1(i); requires victim attribution)
+- **G4** (black-hole only, label-determining) observed endpoint-staleness window at least 20 s with victim-bound traffic observed inside the window
+- **G5** GPU clock and power fingerprints equal across replicas and runs (Phase 1: requires the nvidia-smi fingerprint collector; reported not applicable until it exists; Phase 1 additionally records per-replica GPU clock and throttle-reason counters over the fault window and reports them alongside G5)
+- **G6** baseline goodput at least 0.99 (section 3 goodput over the pre-fault baseline window)
+- **G7** baseline queue stability: per-replica mean of the vLLM waiting-queue gauge over the baseline window at most 1.0, protecting the calibrated band against capacity drift since calibration (Phase 1: requires the server-gauge scrape; reported not applicable until it exists)
 
 Failure or non-observation of G3 or G4 strips the node-loss-representative label and the run is reported as clean-variant-equivalent (§1); the run stays valid. Every other applicable gate failure invalidates the run.
 

@@ -13,10 +13,12 @@
 // (EndpointSlice polling), G5 GPU clock/power fingerprints equal
 // (nvidia-smi). Those two take injected Observation values (concrete
 // structs) so the gate LOGIC is tested with struct fixtures here; the
-// collectors are wired at Phase 1 against the real cluster. A gate whose
-// observation is absent is reported "not observed" and, when it is
-// applicable to the variant, never passes: for G3 and G4 that costs the
-// label, for every other gate the run.
+// collectors are wired at Phase 1 against the real cluster. G4 with no
+// observation costs the label (§10); G5 with no fingerprints reports not
+// applicable until the collector exists, as §10 already treats G7. Hosted
+// targets evaluate only G2 and G6, with G6 redefined as
+// completion-within-timeout and reported rather than run-invalidating
+// (§6).
 package validity
 
 import (
@@ -36,8 +38,12 @@ type Gate struct {
 	// LabelDetermining marks the black-hole assertion gates G3 and G4:
 	// failure or non-observation strips the node-loss-representative label
 	// and leaves the run valid (§10).
-	LabelDetermining bool   `json:"label_determining"`
-	Detail           string `json:"detail"`
+	LabelDetermining bool `json:"label_determining"`
+	// ReportedOnly marks the hosted G6: its result publishes with the run
+	// rather than invalidating it, since withholding it would leave a
+	// published set holding only endpoints that performed well (§6).
+	ReportedOnly bool   `json:"reported_only,omitempty"`
+	Detail       string `json:"detail"`
 }
 
 // Observations carries the Phase-1 infrastructure signals for the gates
@@ -105,18 +111,39 @@ func Evaluate(art *run.Artifacts, obs Observations) Report {
 	rep := Report{Variant: art.Config.Fault.Variant, RSTCapture: obs.RSTCapture}
 	isBlackHole := art.Config.Fault.Variant == config.VariantBlackHole
 
-	rep.Gates = []Gate{
-		gateG1(art),
-		gateG2(art),
-		gateG3(art, isBlackHole),
-		gateG4(art, obs, isBlackHole),
-		gateG5(art, obs),
-		gateG6(art),
+	if art.Config.Target.Hosted {
+		// §6: against a hosted target only G2 and G6 are evaluable; the
+		// rest report not applicable, never passed.
+		na := func(id, name string) Gate {
+			return Gate{ID: id, Name: name, Detail: "hosted target: reported as not applicable, never as passed (§6)"}
+		}
+		rep.Gates = []Gate{
+			na("G1", "per-replica share 45-55% pre-fault"),
+			gateG2(art),
+			na("G3", "zero errored outcomes among victim-attributed in-flight requests"),
+			na("G4", "endpoint-staleness window >= 20s with victim-bound traffic observed"),
+			na("G5", "GPU clock/power fingerprints equal across replicas and runs"),
+			gateG6Hosted(art),
+			na("G7", "baseline queue stability: per-replica waiting-queue mean <= 1.0"),
+		}
+	} else {
+		rep.Gates = []Gate{
+			gateG1(art),
+			gateG2(art),
+			gateG3(art, isBlackHole),
+			gateG4(art, obs, isBlackHole),
+			gateG5(art, obs),
+			gateG6(art),
+			{ID: "G7", Name: "baseline queue stability: per-replica waiting-queue mean <= 1.0",
+				Detail: "requires the server-gauge scrape (Phase 1); reported not applicable until it exists (§10)"},
+		}
 	}
 	rep.AllPass = true
-	rep.NodeLossRepresentative = isBlackHole
+	// §6: a hosted run is not a run of the §1 experiment, so the label
+	// never applies to it.
+	rep.NodeLossRepresentative = isBlackHole && !art.Config.Target.Hosted
 	for _, g := range rep.Gates {
-		if !g.Applicable || g.Pass {
+		if !g.Applicable || g.Pass || g.ReportedOnly {
 			continue
 		}
 		if g.LabelDetermining {
@@ -126,6 +153,56 @@ func Evaluate(art *run.Artifacts, obs Observations) Report {
 		rep.AllPass = false
 	}
 	return rep
+}
+
+// FailReasons lists the run-invalidating gate failures: applicable,
+// failed, neither label-determining nor reported-only (§10).
+func (r Report) FailReasons(skip ...string) []string {
+	skipped := map[string]bool{}
+	for _, id := range skip {
+		skipped[id] = true
+	}
+	var out []string
+	for _, g := range r.Gates {
+		if skipped[g.ID] || !g.Applicable || g.Pass || g.LabelDetermining || g.ReportedOnly {
+			continue
+		}
+		out = append(out, fmt.Sprintf("§10 %s failed: %s", g.ID, g.Detail))
+	}
+	return out
+}
+
+// G6 against a hosted target: completion-within-timeout, the fraction of
+// scheduled requests completing before the pinned 30 s client timeout,
+// because no hosted SLO exists (§6). Reported, never run-invalidating.
+func gateG6Hosted(art *run.Artifacts) Gate {
+	g := Gate{
+		ID:           "G6",
+		Name:         fmt.Sprintf("completion-within-timeout >= %.2f (hosted G6 definition, §6)", config.PinnedBaselineGoodputMin),
+		Applicable:   true,
+		Observed:     true,
+		ReportedOnly: true,
+	}
+	// The derived fault_degraded/fault_recovered windows overlap the fault
+	// window; only the phase windows enter the fraction.
+	var completed, scheduled int
+	for _, name := range []string{"baseline", "guard", "fault"} {
+		w, ok := art.Windows[name]
+		if !ok {
+			continue
+		}
+		completed += w.Completed
+		scheduled += w.Completed + w.Errored + w.Censored
+	}
+	if scheduled == 0 {
+		g.Observed = false
+		g.Detail = "no scheduled requests in any window; completion-within-timeout not observable"
+		return g
+	}
+	frac := float64(completed) / float64(scheduled)
+	g.Pass = frac >= config.PinnedBaselineGoodputMin
+	g.Detail = fmt.Sprintf("completion-within-timeout %.4f over %d scheduled (pinned line %.2f, §6; reported, not run-invalidating)", frac, scheduled, config.PinnedBaselineGoodputMin)
+	return g
 }
 
 // G1: per-replica share 45-55% pre-fault (§1, §10). Applicable to
@@ -177,6 +254,11 @@ func gateG3(art *run.Artifacts, isBlackHole bool) Gate {
 		return g
 	}
 	inf := art.InFlight
+	if inf.OnVictim == 0 {
+		g.Observed, g.Pass = false, false
+		g.Detail = "zero victim-attributed in-flight requests at fire: header-based attribution misses requests the victim never answered, so §1(i) cannot be attested; label stripped, run stays valid"
+		return g
+	}
 	g.Observed = true
 	g.Pass = inf.OnVictimErrored == 0
 	g.Detail = fmt.Sprintf("in flight on victim %s at fire: %d completed, %d errored (must be 0), %d censored at the pinned timeout",
@@ -213,8 +295,10 @@ func gateG4(art *run.Artifacts, obs Observations, isBlackHole bool) Gate {
 func gateG5(art *run.Artifacts, obs Observations) Gate {
 	g := Gate{ID: "G5", Name: "GPU clock/power fingerprints equal across replicas and runs", Applicable: true}
 	if len(obs.GPUFingerprints) == 0 {
-		g.Observed, g.Pass = false, false
-		g.Detail = "REQUIRES per-replica-per-run nvidia-smi fingerprints (Phase 1); no GPU in Phase 0"
+		// The nvidia-smi collector is wired at Phase 1; until observations
+		// exist the gate reports not applicable, as §10 treats G7.
+		g.Applicable, g.Observed, g.Pass = false, false, false
+		g.Detail = "nvidia-smi fingerprint collector not wired (Phase 1); reported not applicable until it exists"
 		return g
 	}
 	// Coverage before equality: §10 requires equality ACROSS replicas and

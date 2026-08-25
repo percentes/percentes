@@ -18,6 +18,7 @@ import (
 	"github.com/percentes/percentes/internal/detect"
 	"github.com/percentes/percentes/internal/histo"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 // Caveat is printed in every report and in the AC output itself (§8).
@@ -36,6 +37,8 @@ type Report struct {
 	InstrumentCommit string `json:"instrument_commit"`
 	Caveat           string `json:"caveat"`
 	Headline         string `json:"conditional_headline"`
+	// ValidityGates is the §10 G1-G6 evaluation for this run.
+	ValidityGates *validity.Report `json:"validity_gates,omitempty"`
 	*run.Artifacts
 }
 
@@ -64,7 +67,7 @@ func instrumentCommit() string {
 }
 
 // Generate renders both artifacts from one run.
-func Generate(art *run.Artifacts) ([]byte, string, error) {
+func Generate(art *run.Artifacts, gates *validity.Report) ([]byte, string, error) {
 	cfgRaw := art.Config.Raw
 	if len(cfgRaw) == 0 {
 		var err error
@@ -79,6 +82,7 @@ func Generate(art *run.Artifacts) ([]byte, string, error) {
 		InstrumentCommit: instrumentCommit(),
 		Caveat:           Caveat,
 		Headline:         headline(art),
+		ValidityGates:    gates,
 		Artifacts:        art,
 	}
 	raw, err := json.MarshalIndent(rep, "", "  ")
@@ -86,6 +90,15 @@ func Generate(art *run.Artifacts) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("report: marshal: %w", err)
 	}
 	return raw, human(rep), nil
+}
+
+// p50Cell renders a conditional p50, refusing to fabricate a measured
+// zero when the window holds no completed samples.
+func p50Cell(s histo.Summary) string {
+	if s.Count == 0 {
+		return "no completed samples"
+	}
+	return fmt.Sprintf("p50 %.0f ms", float64(s.P50Us)/1000)
 }
 
 // headline fills the appendix conditional-headline template with this
@@ -122,13 +135,13 @@ func headline(art *run.Artifacts) string {
 	}
 	return fmt.Sprintf(
 		"Under %s fault injection (mock variant, Phase 0 instrument certification): %.1f%% of in-flight requests failed and %.1f%% timed out at 30 s (%d %s); "+
-			"survivor TTFT (conditional on completion) moved from p50 %.0f ms (baseline) to p50 %.0f ms (fault window); "+
+			"survivor TTFT (conditional on completion) moved from %s (baseline) to %s (fault window); "+
 			"cumulative incidence of completion within 1 s in the fault window was %.3f (Aalen-Johansen); "+
 			"recovery to single-replica equilibrium (a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout; §5): %s; "+
 			"goodput deficit %.1f goodput-seconds vs pre-fault; "+
 			"decomposed segments: %s. Single run against the mock; no real-GPU claim.",
 		art.Config.Fault.Variant, pctErr, pctCens, pop, popLabel,
-		float64(base.TTFTConditional.P50Us)/1000, float64(fault.TTFTConditional.P50Us)/1000,
+		p50Cell(base.TTFTConditional), p50Cell(fault.TTFTConditional),
 		cif1s, ttr, art.Detector.DeficitToPreFault, measuredSegments(art))
 }
 
@@ -299,6 +312,24 @@ func human(r *Report) string {
 		}
 	}
 	w("")
+	if r.ValidityGates != nil {
+		w("== Run-validity gates (§10 G1-G6) ==")
+		for _, g := range r.ValidityGates.Gates {
+			status := "n/a"
+			if g.Applicable {
+				if !g.Observed {
+					status = "UNOBSERVED->FAIL"
+				} else if g.Pass {
+					status = "pass"
+				} else {
+					status = "FAIL"
+				}
+			}
+			w("  %s %-45s %-16s %s", g.ID, g.Name, status, g.Detail)
+		}
+		w("all pass: %v; node-loss-representative: %v", r.ValidityGates.AllPass, r.ValidityGates.NodeLossRepresentative)
+		w("")
+	}
 	w("%s", Caveat)
 	return b.String()
 }

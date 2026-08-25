@@ -16,6 +16,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 func main() {
@@ -56,7 +57,16 @@ func main() {
 		log.Fatalf("percentes: %v", err)
 	}
 
-	rawJSON, humanText, err := report.Generate(art)
+	// Run validity includes the §10 gate evaluation; a failed gate
+	// reaches the exit code and the report. G1 and G2 are skipped here
+	// because run.Execute already records their failures.
+	gates := validity.Evaluate(art, validity.Observations{})
+	if reasons := gates.FailReasons("G1", "G2"); len(reasons) > 0 {
+		art.RunValid = false
+		art.InvalidReasons = append(art.InvalidReasons, reasons...)
+	}
+
+	rawJSON, humanText, err := report.Generate(art, &gates)
 	if err != nil {
 		log.Fatalf("percentes: %v", err)
 	}

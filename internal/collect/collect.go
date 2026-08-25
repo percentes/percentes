@@ -26,6 +26,7 @@
 package collect
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
@@ -267,16 +268,16 @@ type ThresholdAnalysis struct {
 	ModalFaultTTFTMs float64 `json:"modal_fault_ttft_ms"`
 	ModalFaultE2EMs  float64 `json:"modal_fault_e2e_ms"`
 	// Distances are (modal - threshold) / baselineSD, signed.
-	TTFTThresholdSDs map[string]float64 `json:"ttft_threshold_sds"`
-	E2EThresholdSDs  map[string]float64 `json:"e2e_threshold_sds"`
-	Valid            bool               `json:"valid"`
-	Note             string             `json:"note,omitempty"`
+	TTFTThresholdSDs map[string]SDDistance `json:"ttft_threshold_sds"`
+	E2EThresholdSDs  map[string]SDDistance `json:"e2e_threshold_sds"`
+	Valid            bool                  `json:"valid"`
+	Note             string                `json:"note,omitempty"`
 }
 
 // AnalyzeThresholds computes the §4 modal/SD statement from the baseline
 // and fault windows' raw completed samples.
 func AnalyzeThresholds(cfg *config.Config, baseline, fault *Stats) ThresholdAnalysis {
-	out := ThresholdAnalysis{TTFTThresholdSDs: map[string]float64{}, E2EThresholdSDs: map[string]float64{}}
+	out := ThresholdAnalysis{TTFTThresholdSDs: map[string]SDDistance{}, E2EThresholdSDs: map[string]SDDistance{}}
 	if len(baseline.RawTTFTUs) < 2 || len(fault.RawTTFTUs) == 0 {
 		out.Note = "insufficient completed samples in baseline or fault window"
 		return out
@@ -295,11 +296,43 @@ func AnalyzeThresholds(cfg *config.Config, baseline, fault *Stats) ThresholdAnal
 	return out
 }
 
-func sdDistance(modalMs, thresholdMs, sdMs float64) float64 {
+func sdDistance(modalMs, thresholdMs, sdMs float64) SDDistance {
 	if sdMs == 0 {
-		return math.Inf(int(math.Copysign(1, modalMs-thresholdMs)))
+		return SDDistance(math.Inf(int(math.Copysign(1, modalMs-thresholdMs))))
 	}
-	return (modalMs - thresholdMs) / sdMs
+	return SDDistance((modalMs - thresholdMs) / sdMs)
+}
+
+// SDDistance is a signed modal-threshold distance in baseline SDs. §4
+// mandates signed infinity at zero SD; JSON has no Inf, so it marshals
+// as the strings "+inf" and "-inf".
+type SDDistance float64
+
+func (d SDDistance) MarshalJSON() ([]byte, error) {
+	switch {
+	case math.IsInf(float64(d), 1):
+		return []byte(`"+inf"`), nil
+	case math.IsInf(float64(d), -1):
+		return []byte(`"-inf"`), nil
+	}
+	return json.Marshal(float64(d))
+}
+
+func (d *SDDistance) UnmarshalJSON(b []byte) error {
+	switch string(b) {
+	case `"+inf"`:
+		*d = SDDistance(math.Inf(1))
+		return nil
+	case `"-inf"`:
+		*d = SDDistance(math.Inf(-1))
+		return nil
+	}
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return err
+	}
+	*d = SDDistance(f)
+	return nil
 }
 
 // stddevMs is the two-pass sample standard deviation (n-1) of the completed

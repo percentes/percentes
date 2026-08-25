@@ -3,15 +3,50 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
 	"sort"
 	"strings"
 )
+
+// checkFinite refuses NaN and infinities anywhere in the configuration:
+// the relational validators below pass vacuously on NaN, so ordered
+// comparisons alone cannot hold the pins.
+func checkFinite(v *validator, val reflect.Value, path string) {
+	switch val.Kind() {
+	case reflect.Float32, reflect.Float64:
+		if f := val.Float(); math.IsNaN(f) || math.IsInf(f, 0) {
+			v.errf("%s: non-finite value %v refuses to load", path, f)
+		}
+	case reflect.Struct:
+		for i := 0; i < val.NumField(); i++ {
+			name, _, _ := strings.Cut(val.Type().Field(i).Tag.Get("yaml"), ",")
+			if name == "" || name == "-" {
+				name = val.Type().Field(i).Name
+			}
+			checkFinite(v, val.Field(i), path+"."+name)
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < val.Len(); i++ {
+			checkFinite(v, val.Index(i), fmt.Sprintf("%s[%d]", path, i))
+		}
+	case reflect.Map:
+		for _, k := range val.MapKeys() {
+			checkFinite(v, val.MapIndex(k), fmt.Sprintf("%s[%v]", path, k.Interface()))
+		}
+	case reflect.Pointer, reflect.Interface:
+		if !val.IsNil() {
+			checkFinite(v, val.Elem(), path)
+		}
+	}
+}
 
 // Validate enforces the schema. Pre-registered numbers (SPEC.md §§1-6, 8)
 // are enforced as equalities: a config that widens a tolerance or weakens
 // a gate is rejected, not warned about.
 func (c *Config) Validate() error {
 	v := &validator{}
+	checkFinite(v, reflect.ValueOf(*c), "config")
 
 	if c.SchemaVersion != 1 {
 		v.errf("schema_version: must be 1, got %d", c.SchemaVersion)

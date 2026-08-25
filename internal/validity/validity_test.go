@@ -52,9 +52,9 @@ func gateByID(rep Report, id string) Gate {
 }
 
 // A clean clean-delete run passes: G1/G2/G6 derive clean, G3/G4 are not
-// applicable to the variant, G5 needs a fingerprint (absent in Phase 0),
-// so G5 is the only failing gate — and it is applicable, so the run is
-// invalid: Phase 1 runs must supply fingerprints.
+// applicable to the variant; G5 with no fingerprint collector reports
+// not applicable (as §10 treats G7), so a clean Phase 0 run is valid.
+// Once fingerprints are supplied G5 gates again.
 func TestCleanDeleteGatesWithoutHardware(t *testing.T) {
 	rep := Evaluate(cleanArt(config.VariantCleanDelete), Observations{})
 	if gateByID(rep, "G1").Pass != true || gateByID(rep, "G2").Pass != true || gateByID(rep, "G6").Pass != true {
@@ -64,11 +64,11 @@ func TestCleanDeleteGatesWithoutHardware(t *testing.T) {
 		t.Error("G3/G4 must be inapplicable to clean_delete")
 	}
 	g5 := gateByID(rep, "G5")
-	if g5.Pass || g5.Observed {
-		t.Error("G5 must fail-unobserved without fingerprints (never a silent pass)")
+	if g5.Pass || g5.Observed || g5.Applicable {
+		t.Error("G5 without a collector must report not applicable, never a silent pass")
 	}
-	if rep.AllPass {
-		t.Error("a run missing a required GPU fingerprint must not be all-pass")
+	if !rep.AllPass {
+		t.Error("a clean Phase 0 run with no fingerprint collector must be valid")
 	}
 }
 

@@ -76,10 +76,10 @@ func main() {
 		log.Fatal("percentes-campaign: black_hole requires a multi-node GPU cluster and a real NodeOps; see SPEC.md §10")
 	}
 
-	// Evaluate the §10 validity gates per run. G3 derives from the run's own
-	// artifacts (§1(i)); Phase 0 supplies no injected observations, so G5 (and
-	// G4 under black_hole) fail unobserved, and a failed G4 strips the
-	// node-loss-representative label without invalidating the run (§10).
+	// Evaluate the §10 validity gates per run and fold the verdict into the
+	// run's validity: campaign counts and endpoint summaries key off it.
+	// G5 with no fingerprint collector reports not applicable; a failed G4
+	// strips the node-loss-representative label without invalidating (§10).
 	//
 	// gates[i] pairs with run i+1; campaign.Run calls the runner
 	// sequentially. Parallelizing it would race this append.
@@ -89,7 +89,12 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
-		gates = append(gates, validity.Evaluate(art, validity.Observations{}))
+		rep := validity.Evaluate(art, validity.Observations{})
+		gates = append(gates, rep)
+		if reasons := rep.FailReasons("G1", "G2"); len(reasons) > 0 {
+			art.RunValid = false
+			art.InvalidReasons = append(art.InvalidReasons, reasons...)
+		}
 		return art, nil
 	}
 
@@ -125,14 +130,14 @@ func main() {
 	fmt.Println(humanText)
 	fmt.Printf("\ncampaign reports: %s, %s\n", jsonPath, txtPath)
 
-	allValid := true
+	allValid := rep.ValidRuns == rep.Repetitions
 	for _, g := range gates {
 		if !g.AllPass {
 			allValid = false
 		}
 	}
 	if !allValid {
-		fmt.Println("CAMPAIGN NOTE: at least one run failed a run-validity gate (§10); see per-run gates above.")
+		fmt.Println("CAMPAIGN NOTE: at least one run is invalid (§10 gate or run audit); see per-run gates and invalid_reasons above.")
 		os.Exit(2)
 	}
 }

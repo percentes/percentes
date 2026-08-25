@@ -9,6 +9,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 // TestAC6Reporting: JSON plus human-readable report from one config,
@@ -30,11 +31,14 @@ func TestAC6Reporting(t *testing.T) {
 	base := startMockProcess(t, cfg)
 	cfg.Target.BaseURL = base
 
-	art, err := run.Execute(context.Background(), cfg, run.Options{})
+	// The schedule-driven fault is attested by fire read-back (§2), so the
+	// run needs the mock's admin endpoint.
+	art, err := run.Execute(context.Background(), cfg, run.Options{AdminURL: base})
 	if err != nil {
 		t.Fatalf("AC6: run: %v", err)
 	}
-	rawJSON, humanText, err := report.Generate(art)
+	gates := validity.Evaluate(art, validity.Observations{})
+	rawJSON, humanText, err := report.Generate(art, &gates)
 	if err != nil {
 		t.Fatalf("AC6: generate: %v", err)
 	}
