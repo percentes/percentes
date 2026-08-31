@@ -158,6 +158,7 @@ func main() {
 			sc.Buffer(make([]byte, 1<<20), 1<<20)
 			var lastLines, head []string
 			var firstTok time.Time
+			sawDone := false
 			for sc.Scan() {
 				line := strings.TrimSpace(sc.Text())
 				if len(head) < 3 && line != "" {
@@ -170,6 +171,7 @@ func main() {
 				o.sawData = true
 				payload = strings.TrimPrefix(payload, " ")
 				if payload == "[DONE]" {
+					sawDone = true
 					break
 				}
 				lastLines = append(lastLines, payload)
@@ -246,6 +248,12 @@ func main() {
 			}
 			if o.err != "" { // in-band error chunk
 				atomic.AddInt64(&errored, 1)
+				record(o)
+				return
+			}
+			if !sawDone {
+				atomic.AddInt64(&errored, 1)
+				o.err = "stream ended before [DONE]"
 				record(o)
 				return
 			}
