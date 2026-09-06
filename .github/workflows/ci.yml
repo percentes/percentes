@@ -23,7 +23,20 @@ jobs:
       - name: unit tests (race)
         run: go test -race -short ./... -count=1
 
-  ac-suite:
+  unit-ac:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21.x"
+      - name: unit tests
+        run: make test-unit
+      - name: AC suite (local mock)
+        run: make test-ac
+
+  kind:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -36,5 +49,9 @@ jobs:
         with:
           cluster_name: percentes
           config: deploy/kind/kind-config.yaml
-      - name: Full gate (unit, AC suite, kind smoke, reproduce, campaign e2e)
-        run: make test
+      - name: kind smoke
+        run: make kind-smoke
+      - name: reproduce
+        run: make reproduce
+      - name: campaign e2e
+        run: make campaign-e2e
