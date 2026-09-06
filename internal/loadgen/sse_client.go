@@ -41,8 +41,12 @@ func (g *gen) execute(r *Request) {
 	r.Replica = resp.Header.Get("X-Percentes-Replica")
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096)) //nolint:errcheck
-		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrHTTPStatus, g.now()
+		class := ErrStatusOther
+		// Status 429 is classified apart from other non-200 statuses (§3).
+		if resp.StatusCode == http.StatusTooManyRequests {
+			class = ErrStatus429
+		}
+		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, class, g.now()
 		return
 	}
 

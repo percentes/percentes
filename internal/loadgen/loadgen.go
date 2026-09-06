@@ -43,11 +43,12 @@ const (
 
 // Error classes within OutcomeErrored.
 const (
-	ErrHTTPStatus      = "http_status"
+	ErrStatusOther     = "status_other"
 	ErrReset           = "reset"
 	ErrMalformedStream = "malformed_stream"
 	ErrConnect         = "connect"
 	ErrEmptyStream     = "empty_stream"
+	ErrStatus429       = "status_429"
 )
 
 // Request is one scheduled request's full lifecycle. All times are
@@ -149,8 +150,12 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		}
 	}
 	g := &gen{
-		cfg:    cfg,
-		client: &http.Client{Transport: transport},
+		cfg: cfg,
+		client: &http.Client{
+			Transport: transport,
+			// Redirects are not followed (§3).
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		filler: buildFiller(cfg.Load.InputLengthTokens),
 		model:  model,
 		apiKey: apiKey,
