@@ -51,8 +51,9 @@ The core methodological commitments:
                         terminal event:
                           data:[DONE], content seen → completed, DoneNs   e2e = Done − t_i
                           data:[DONE], no content   → errored (empty_stream)
-                          5xx/RST/bad SSE  → errored (+class)
-                          ctx deadline 30s → censored
+                          HTTP 429                       → errored (status_429)
+                          non-200/RST/bad SSE/other fail → errored (+class)
+                          ctx deadline 30s               → censored
 ```
 
 Downstream, `collect.Collect` assigns the request to the window of its

@@ -1,6 +1,6 @@
 # v0.2 Harness Spec — Replica-Loss Resilience Characterization for Kubernetes LLM Inference
 ### Project: Percentes. This document is the authoritative specification for the Percentes harness.
-### Status: Phase 0 (mock-only, zero GPU) implemented; §8 certification re-run pending against the revised text. Phase 1 (the first runs on real GPUs) pending hardware.
+### Status: Phase 0 (mock-only, zero GPU) implemented; §8 acceptance suite passed against this text on 6 September 2026. Phase 1 (the first runs on real GPUs) pending hardware.
 
 ## 0. Scope and amendment log
 
@@ -15,7 +15,7 @@ The commitments that shape the rest of the specification: the outcome model is b
 ### Versions
 
 - **v0.1** (2026-07-28): first public version. One normative change predates the amendment log and is recorded here: on 2026-07-30, pre-data, the §1 load-balancing share band was made regime-conditional (run-failing under per-request dataplanes, recorded rather than asserted under per-connection routing), and the §1 client-connection bullet was corrected from a fixed count of dedicated connections to the demand-driven pool the client implements. Early commits label this version "v0.1.1" and use "v0.2" for the deferred cross-stack study (§11).
-- **v0.2** (2026-08-15, this version; revised 2026-08-19): the A1 estimator correction and subsequent pre-data revisions. The git log is the change record.
+- **v0.2** (2026-08-15, this version; revised through 2026-09-06): the A1 estimator correction and subsequent pre-data revisions. The git log is the change record.
 
 ### Amendment log
 
@@ -86,8 +86,8 @@ This study measures the cost of losing one serving replica under sustained load.
 
 Every scheduled request is a sample and ends in exactly one state:
 - **Completed:** latency = completion_time minus t_i. Enters the latency histograms.
-- **Errored:** explicit failure (5xx, reset, malformed stream, or a stream that terminates with no content event: class empty_stream) at failure_time. Counted in the error rate for its window. NEVER enters latency histograms.
-- **Censored:** no terminal event by the pinned client timeout (30 s) or run end. Counted in the censored rate with its observation time. NEVER enters latency histograms.
+- **Errored:** explicit failure at failure_time. A timeout with no terminal event is censored, below; any other explicit failure carries exactly one of six classes by stage: before a final response status arrives, reset (an error for which errors.Is(err, syscall.ECONNRESET) holds) or connect (the residual: any other failure before a final status, including a refused connection); on a delivered final status, status_429 or status_other (any other non-200 status; redirects are not followed, so a 3xx is a delivered status; named http_status before 2026-09-06); and on the stream of a 200, empty_stream (termination at the [DONE] terminator with no prior content event), reset, or malformed_stream (the residual: any other termination before [DONE], including a non-SSE body, an undecodable event payload and a clean end). Failure time is the arrival of the status or the failing read; an error body is not read, and the connection is closed. A delivered final status is terminal regardless of any deadline that fires afterwards. Where a single error satisfies more than one test, precedence is deadline (censored), then reset, then the stage's residual class. The pinned per-request deadline is the client's only timeout. Counted in the error rate for its window. NEVER enters latency histograms.
+- **Censored:** no terminal event by the pinned client timeout (30 s) or run end; the generator drains dispatched requests to their own deadline, so run end censors only an aborted run. A timeout after content events is still censored, and partial content never enters the latency histograms. Counted in the censored rate with its observation time. NEVER enters latency histograms.
 
 Reporting per window:
 - **Completed-only distributions:** TTFT and end-to-end percentiles from merged HdrHistograms over completed requests, always labeled "conditional on completion."
@@ -174,7 +174,7 @@ Against a hosted target:
 - Pins that cannot be applied or verified: ignore_eos and any output-length forcing; KV-cache budget; prefix-caching state; continuous-batching verification; serving-stack version and image digest; scheduler settings; CUDA-graph enablement; GPU SKU, driver, and clock and power fingerprints; the Kubernetes, CNI, dataplane, kube-proxy, and node-monitor-grace-period pins; per-replica request counters. Each is reported as not verifiable, never as satisfied.
 - Output length: with no forcing, realized completion length varies per request; the per-request completion token count is recorded and reported as a distribution where the response carries one, and reported as not verifiable where it does not, with the client-side count of SSE content events reported as a distribution in either case. Tokens-lost and the §4 e2e SLO derivation (1000 ms plus 256 tokens at a 20 tokens-per-second floor, rounded up to 14 s) are defined against the forced budget and do not transfer. No hosted SLO is defined in this document.
 - Run validity: of the §10 gates, only G2 (client validity) and G6 (baseline goodput) are evaluable. Against a hosted target, G6's goodput is completion-within-timeout, the fraction of scheduled requests completing before the pinned 30 s timeout, because no hosted SLO exists; hosted G6 is labeled with that definition wherever it is reported, and it is reported rather than run-invalidating: a hosted run below the 0.99 line publishes with the gate marked failed, since withholding it would leave a published set holding only endpoints that performed well. G1, G3, G4, G5, and G7 (baseline queue stability, a server-side gauge; §10) are reported as not applicable, never as passed. A hosted run is not a run of the §1 experiment.
-- Pre-registration: no hosted-provider measurement is published under this document. A separate hosted protocol with the same pin-and-refuse discipline, covering at minimum request rate, run duration, prompt set, endpoint and model selection, the temporal sampling frame, the classification of provider throttling responses (HTTP 429 and equivalents) within the §3 outcome model, and any hosted SLO, is published before any provider data collection.
+- Pre-registration: no hosted-provider measurement is published under this document. A separate hosted protocol with the same pin-and-refuse discipline, covering at minimum request rate, run duration, prompt set, endpoint and model selection, the temporal sampling frame, the treatment of HTTP 429 responses and any provider-specific admission-control signals beyond their §3 classification, and any hosted SLO, is published before any provider data collection.
 - Configuration validation, mode-conditional: self-hosted and mock targets pin load.ignore_eos true; hosted targets pin load.ignore_eos false, so the configuration states exactly what the wire request carries; either mode with the other value refuses to load.
 
 ## 7. Statistics (single-stack study)
