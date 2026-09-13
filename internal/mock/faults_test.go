@@ -450,3 +450,28 @@ func TestConfigFileDrivesFaults(t *testing.T) {
 		t.Fatalf("config-scripted fault must be recorded and expired: %+v", recs)
 	}
 }
+
+// TestFaultThrottleWindow (config-scripted): during the window new
+// requests get a 429; before and after, they succeed.
+func TestFaultThrottleWindow(t *testing.T) {
+	cfg := baseMockCfg()
+	cfg.TTFT = fixed(10)
+	cfg.ITL = fixed(2)
+	cfg.FaultSchedule = []config.MockFault{
+		{Mode: config.MockFaultThrottle, StartOffsetS: 0.5, DurationS: 0.8},
+	}
+	s := startServer(t, cfg)
+	base := "http://" + s.Addr()
+
+	if res := doStream(t, base, 2); res.status != 200 || res.err != nil {
+		t.Fatalf("pre-window request must succeed: status=%d err=%v", res.status, res.err)
+	}
+	time.Sleep(700 * time.Millisecond)
+	if res := doStream(t, base, 2); res.status != 429 {
+		t.Fatalf("mid-window request must 429, got status=%d err=%v", res.status, res.err)
+	}
+	time.Sleep(800 * time.Millisecond)
+	if res := doStream(t, base, 2); res.status != 200 || res.err != nil {
+		t.Fatalf("post-window request must succeed: status=%d err=%v", res.status, res.err)
+	}
+}

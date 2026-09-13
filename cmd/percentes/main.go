@@ -23,7 +23,7 @@ func main() {
 	configPath := flag.String("config", "", "path to the run config YAML (required)")
 	outDir := flag.String("out", "results", "output directory for report.json and report.txt")
 	adminURL := flag.String("admin-url", "", "victim replica admin endpoint; when set the orchestrator pre-arms the fault there")
-	injectMode := flag.String("inject-mode", config.MockFaultError, "mock fault mode to arm (stall|error|stream_abort|silent_hang)")
+	injectMode := flag.String("inject-mode", config.MockFaultError, "mock fault mode to arm (stall|error|throttle|stream_abort|silent_hang)")
 	injectDuration := flag.Float64("inject-duration-s", 10, "armed fault window duration")
 	victim := flag.String("victim", "", "victim replica identity (pod name) for in-flight attribution")
 	probeDirect := flag.String("probe-direct", "", "victim-direct inference URL for the replica-ready probe")

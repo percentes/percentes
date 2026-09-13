@@ -1,7 +1,8 @@
 // Package mock implements the Phase 0 mock inference server (SPEC.md §2
 // "Local-first"): an OpenAI-compatible SSE server with configurable TTFT
-// and per-token latency and scriptable fault modes — stall, error,
-// stream-abort, silent-hang (no RST), and slow-reload-on-reschedule.
+// and per-token latency and scriptable fault modes: stall, error,
+// throttle (429), stream-abort, silent-hang (no RST), and
+// slow-reload-on-reschedule.
 //
 // The data plane is /v1/chat/completions and /health. /admin and /metrics
 // are out-of-band harness instrumentation and stay reachable during
@@ -180,7 +181,7 @@ func (s *Server) handleAdminFaults(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch req.Mode {
-		case config.MockFaultStall, config.MockFaultError, config.MockFaultStreamAbort, config.MockFaultSilentHang:
+		case config.MockFaultStall, config.MockFaultError, config.MockFaultThrottle, config.MockFaultStreamAbort, config.MockFaultSilentHang:
 		default:
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown mode %q", req.Mode)})
 			return

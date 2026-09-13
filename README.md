@@ -42,9 +42,8 @@ to its source in the code.
 ## Scope
 
 Phase 0 builds and certifies the measurement instrument against a mock
-OpenAI-compatible SSE server on a local kind cluster (the SPEC §8
-re-certification is pending): passing the acceptance suite certifies
-the measurement machinery only;
+OpenAI-compatible SSE server on a local kind cluster: passing the
+acceptance suite certifies the measurement machinery only;
 real-GPU claims wait for Phase 1, which characterizes real vLLM on GPU
 hardware with the same harness and gates.
 

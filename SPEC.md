@@ -80,7 +80,7 @@ This study measures the cost of losing one serving replica under sustained load.
 
 **Report generator:** full metric set as JSON plus human-readable report from one config, including completion-incidence curves and the conditional headline (appendix). Distributional metrics come from merged HdrHistograms queried once, never averaged percentiles.
 
-**Local-first:** everything runs in Phase 0 on kind or k3s with a mock inference server speaking the same SSE API, with configurable TTFT and per-token latency and fault modes: stall, error, stream-abort, slow-reload-on-reschedule, and silent-hang (no RST). Zero GPU until Phase 1.
+**Local-first:** everything runs in Phase 0 on kind or k3s with a mock inference server speaking the same SSE API, with configurable TTFT and per-token latency and fault modes: stall, error, throttle (429 on new requests), stream-abort, slow-reload-on-reschedule, and silent-hang (no RST). Zero GPU until Phase 1.
 
 ## 3. Metrics and the censoring treatment (normative)
 

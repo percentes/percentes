@@ -344,10 +344,10 @@ func (c *Config) validateMock(v *validator) {
 	for i, f := range m.FaultSchedule {
 		field := fmt.Sprintf("mock.fault_schedule[%d]", i)
 		switch f.Mode {
-		case MockFaultStall, MockFaultError, MockFaultStreamAbort, MockFaultSilentHang:
+		case MockFaultStall, MockFaultError, MockFaultThrottle, MockFaultStreamAbort, MockFaultSilentHang:
 		default:
-			v.errf("%s.mode: must be one of %q, %q, %q, %q; got %q", field,
-				MockFaultStall, MockFaultError, MockFaultStreamAbort, MockFaultSilentHang, f.Mode)
+			v.errf("%s.mode: must be one of %q, %q, %q, %q, %q; got %q", field,
+				MockFaultStall, MockFaultError, MockFaultThrottle, MockFaultStreamAbort, MockFaultSilentHang, f.Mode)
 			continue
 		}
 		if f.StartOffsetS < 0 {

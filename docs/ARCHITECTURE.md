@@ -14,9 +14,8 @@ Percentes measures LLM-inference reliability under load and failure.
 Replica loss is the Phase 0/1 fault class: what happens when a
 Kubernetes-served LLM inference service loses a replica under sustained
 load: the three questions SPEC.md §1 pins. Phase 0 builds and certifies the *instrument*
-against a mock inference server on a local kind cluster (the §8
-re-certification is pending); passing the acceptance suite says nothing
-about real-GPU behavior.
+against a mock inference server on a local kind cluster; passing the
+acceptance suite says nothing about real-GPU behavior.
 The Phase 1 groundwork (complete, GPU-untouched) adds everything
 for the real experiment that can be verified without hardware.
 
@@ -49,8 +48,8 @@ The core methodological commitments:
                         first content chunk → FirstTokNs          TTFT = FirstTok − t_i
                         per-token gaps → ITLsUs[]                 (re-based to INTENDED time)
                         terminal event:
-                          data:[DONE], content seen → completed, DoneNs   e2e = Done − t_i
-                          data:[DONE], no content   → errored (empty_stream)
+                          data:[DONE], content seen      → completed, DoneNs   e2e = Done − t_i
+                          data:[DONE], no content        → errored (empty_stream)
                           HTTP 429                       → errored (status_429)
                           non-200/RST/bad SSE/other fail → errored (+class)
                           ctx deadline 30s               → censored
@@ -206,6 +205,7 @@ run exits 2. An applicable gate that goes unobserved never passes.
 |---|---|---|
 | `stall` | server-wide emission freeze, staggered flush on expiry | completions delayed; excess lands in p99.9/max (AC2); λ×D attributable samples (AC2b) |
 | `error` | 5xx on new requests; in-flight untouched | error-rate step in the fault window; goodput dip → detector TTR |
+| `throttle` | 429 on new requests; in-flight untouched | `status_429` in the fault window's error classes, absent from the baseline; error-rate step |
 | `stream_abort` | RST in-flight at fire (SO_LINGER=0); admissions RST after N tokens | in-flight classified errored/reset, absent from histograms (AC4) |
 | `silent_hang` | no bytes, no FIN, no RST, ever (hijacked conns); captured requests stay hung past expiry | censored at exactly 30 s, in the incidence curve as censorings, p90 beyond the horizon (AC4b) |
 | `slow_reload` | 503 for a duration after process start | replica-ready probe boundary; recovery decomposition |

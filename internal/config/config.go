@@ -397,11 +397,12 @@ type StoragePins struct {
 // Mock inference server (Phase 0, §2 "Local-first").
 // ---------------------------------------------------------------------------
 
-// Mock fault modes (§2): stall, error, stream-abort, slow-reload-on-
-// reschedule (see Mock.SlowReload), and silent-hang (no RST).
+// Mock fault modes (§2): stall, error, throttle (429), stream-abort,
+// slow-reload-on-reschedule (see Mock.SlowReload), and silent-hang (no RST).
 const (
 	MockFaultStall       = "stall"
 	MockFaultError       = "error"
+	MockFaultThrottle    = "throttle"
 	MockFaultStreamAbort = "stream_abort"
 	MockFaultSilentHang  = "silent_hang"
 )

@@ -84,7 +84,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case verdict.httpError != 0:
 		s.requestsTotal.WithLabelValues(fmt.Sprint(verdict.httpError)).Inc()
-		writeJSON(w, verdict.httpError, map[string]any{"error": "injected fault: error mode"})
+		writeJSON(w, verdict.httpError, map[string]any{"error": fmt.Sprintf("injected fault: status %d", verdict.httpError)})
 		return
 	case verdict.act == actHang:
 		// The window fired between the check above and admit: same fate.

@@ -194,6 +194,8 @@ func (e *engine) admit() admitVerdict {
 	switch a.Mode {
 	case config.MockFaultError:
 		return admitVerdict{act: actProceed, httpError: 500, abortAfterTokens: -1}
+	case config.MockFaultThrottle:
+		return admitVerdict{act: actProceed, httpError: 429, abortAfterTokens: -1}
 	case config.MockFaultSilentHang:
 		return admitVerdict{act: actHang}
 	case config.MockFaultStreamAbort:
