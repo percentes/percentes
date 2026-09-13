@@ -8,6 +8,7 @@ import (
 	"github.com/percentes/percentes/internal/detect"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/serverstats"
 )
 
 func cleanArt(variant string) *run.Artifacts {
@@ -53,7 +54,7 @@ func gateByID(rep Report, id string) Gate {
 
 // A clean clean-delete run passes: G1/G2/G6 derive clean, G3/G4 are not
 // applicable to the variant; G5 with no fingerprint collector reports
-// not applicable (as §10 treats G7), so a clean Phase 0 run is valid.
+// not applicable, as G7 does with no scrape configured, so a clean Phase 0 run is valid.
 // Once fingerprints are supplied G5 gates again.
 func TestCleanDeleteGatesWithoutHardware(t *testing.T) {
 	rep := Evaluate(cleanArt(config.VariantCleanDelete), Observations{})
@@ -230,5 +231,64 @@ func TestG2PropagatesClientGate(t *testing.T) {
 	art.Loadgen.Gates.CPUMeasured = false
 	if gateByID(Evaluate(art, Observations{}), "G2").Pass {
 		t.Error("G2 must fail when the client-validity gate failed")
+	}
+}
+
+// G7 reports not applicable until the server-gauge scrape is configured
+// (§10).
+func TestG7NotApplicableWithoutScrape(t *testing.T) {
+	g := gateByID(Evaluate(cleanArt(config.VariantCleanDelete), Observations{}), "G7")
+	if g.Applicable || g.Observed || g.Pass {
+		t.Fatalf("G7 without a scrape must be not applicable and not passed, got %+v", g)
+	}
+}
+
+// G7 passes when every replica's baseline mean is at or under the pinned
+// maximum, and the run stays valid.
+func TestG7PassesUnderPinnedMaximum(t *testing.T) {
+	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting",
+		Means: map[string]serverstats.Mean{"a": {Value: 0.2, Samples: 30}, "b": {Value: 1.0, Samples: 30}}}}
+	rep := Evaluate(cleanArt(config.VariantCleanDelete), obs)
+	g := gateByID(rep, "G7")
+	if !g.Applicable || !g.Observed || !g.Pass {
+		t.Fatalf("G7 must pass at means 0.2 and 1.0 against a maximum of 1.0, got %+v", g)
+	}
+	if !rep.AllPass {
+		t.Fatalf("run must stay valid, gates: %+v", rep.Gates)
+	}
+}
+
+// One replica over the maximum fails G7 and invalidates the run: the
+// calibrated band has drifted (§10 G7).
+func TestG7FailsOnQueueDrift(t *testing.T) {
+	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting",
+		Means: map[string]serverstats.Mean{"a": {Value: 0.1, Samples: 30}, "b": {Value: 1.01, Samples: 30}}}}
+	rep := Evaluate(cleanArt(config.VariantCleanDelete), obs)
+	if gateByID(rep, "G7").Pass {
+		t.Fatal("G7 must fail when a replica's baseline mean exceeds 1.0")
+	}
+	if rep.AllPass {
+		t.Fatal("a G7 failure must invalidate the run (§10: every non-label gate failure invalidates)")
+	}
+}
+
+// Coverage before threshold, as G5: a replica with no baseline sample
+// leaves G7 unobserved.
+func TestG7IncompleteCoverageCannotPass(t *testing.T) {
+	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting",
+		Means: map[string]serverstats.Mean{"a": {Value: 0, Samples: 30}}, ScrapeErrors: 12}}
+	g := gateByID(Evaluate(cleanArt(config.VariantCleanDelete), obs), "G7")
+	if g.Observed || g.Pass {
+		t.Fatalf("one of two replicas sampled must be unobserved and not passed, got %+v", g)
+	}
+}
+
+// A hosted target never evaluates G7 (§6), even with a scrape supplied.
+func TestG7HostedNotApplicable(t *testing.T) {
+	art := cleanArt(config.VariantNone)
+	art.Config.Target.Hosted = true
+	obs := Observations{Queue: &QueueObservation{Gauge: "x", Means: map[string]serverstats.Mean{"a": {Value: 0, Samples: 1}, "b": {Value: 0, Samples: 1}}}}
+	if g := gateByID(Evaluate(art, obs), "G7"); g.Applicable || g.Pass {
+		t.Fatalf("hosted G7 must be not applicable, got %+v", g)
 	}
 }

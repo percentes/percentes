@@ -16,12 +16,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/percentes/percentes/internal/campaign"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/orchestrator"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/serverstats"
 	"github.com/percentes/percentes/internal/validity"
 )
 
@@ -85,11 +87,25 @@ func main() {
 	// sequentially. Parallelizing it would race this append.
 	var gates []validity.Report
 	runner := func(ctx context.Context, c *config.Config, o run.Options) (*run.Artifacts, error) {
+		// §10 G7: a fresh sampler per run, started on that run's epoch.
+		sampler := serverstats.ForRun(c.Target.MetricsURLs, c.Target.QueueGauge, time.Duration(config.PinnedQueueSampleIntervalS)*time.Second)
+		if sampler != nil {
+			o.OnEpoch = func(time.Time) { sampler.Start(ctx) }
+		}
 		art, err := run.Execute(ctx, c, o)
 		if err != nil {
+			if sampler != nil {
+				sampler.Stop()
+			}
 			return nil, err
 		}
-		rep := validity.Evaluate(art, validity.Observations{})
+		obs := validity.Observations{}
+		if sampler != nil {
+			startNs, endNs := art.BaselineNs()
+			means, scrapeErrs := sampler.Reduce(art.Loadgen.EpochWall, startNs, endNs)
+			obs.Queue = &validity.QueueObservation{Gauge: c.Target.QueueGauge, IntervalS: config.PinnedQueueSampleIntervalS, Means: means, ScrapeErrors: scrapeErrs}
+		}
+		rep := validity.Evaluate(art, obs)
 		gates = append(gates, rep)
 		if reasons := rep.FailReasons("G1", "G2"); len(reasons) > 0 {
 			art.RunValid = false

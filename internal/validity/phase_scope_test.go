@@ -25,7 +25,7 @@ func TestG3ZeroAttributedIsUnobserved(t *testing.T) {
 }
 
 // Until the nvidia-smi collector exists, G5 with no fingerprints is not
-// applicable (as §10 treats G7), so a Phase 0 run can be valid.
+// applicable, as G7 does with no scrape configured, so a Phase 0 run can be valid.
 func TestG5NotApplicableWithoutCollector(t *testing.T) {
 	rep := Evaluate(cleanArt(config.VariantCleanDelete), Observations{})
 	g := gateByID(rep, "G5")

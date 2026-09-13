@@ -61,6 +61,7 @@ func TestSection6PinCoverage(t *testing.T) {
 		"client placement node class":       string(c.Client.Placement.NodeClass),
 		"client placement zone":             c.Client.Placement.Zone,
 		"client placement subnet":           c.Client.Placement.Subnet,
+		"waiting-queue gauge name (G7)":     c.Target.QueueGauge,
 	}
 	for name, val := range strPins {
 		if strings.TrimSpace(val) == "" {
@@ -70,6 +71,9 @@ func TestSection6PinCoverage(t *testing.T) {
 
 	if c.Pins.Engine.KVCacheGB <= 0 {
 		t.Error("§6 pin \"KV-cache budget in absolute gigabytes\": not carried")
+	}
+	if len(c.Target.MetricsURLs) != c.Target.Replicas {
+		t.Error("§6 pin \"one metrics endpoint per replica (G7)\": not carried")
 	}
 	if c.Pins.Engine.MaxNumSeqs <= 0 {
 		t.Error("§6 pin \"max-num-seqs\": not carried")
@@ -173,6 +177,13 @@ func TestPinnedValueEnforcement(t *testing.T) {
 		{"experiment rtt not recorded", experimentRef, func(c *Config) { c.Client.Placement.RecordRTT = false }, "client.placement.record_rtt"},
 		{"experiment kv cache unpinned", experimentRef, func(c *Config) { c.Pins.Engine.KVCacheGB = 0 }, "pins.engine.kv_cache_gb"},
 		{"experiment with mock section", experimentRef, func(c *Config) { c.Mock = &Mock{} }, "mock: must be absent"},
+		{"experiment metrics endpoints short of replicas", experimentRef, func(c *Config) { c.Target.MetricsURLs = c.Target.MetricsURLs[:1] }, "target.metrics_urls"},
+		{"experiment queue gauge dropped", experimentRef, func(c *Config) { c.Target.QueueGauge = "" }, "target.queue_gauge"},
+		{"queue gauge without endpoints", acRef, func(c *Config) { c.Target.QueueGauge = "vllm:num_requests_waiting" }, "target.queue_gauge"},
+		{"hosted target with metrics endpoints", acRef, func(c *Config) {
+			c.Target.Hosted, c.Target.ModelName, c.Target.APIKeyEnv, c.Load.IgnoreEOS = true, "llama-3.1-8b-instant", "SOME_KEY_ENV", false
+			c.Target.MetricsURLs, c.Target.QueueGauge = []string{"http://a/metrics", "http://b/metrics"}, "q"
+		}, "target.metrics_urls"},
 
 		{"black-hole partition duration unpinned", experimentRef, func(c *Config) {
 			c.Fault.Variant, c.Fault.PartitionDurationS = VariantBlackHole, 60

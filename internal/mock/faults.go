@@ -63,7 +63,9 @@ type engine struct {
 	active   *FaultRecord
 	changeCh chan struct{} // closed and replaced on every fire/expire
 
-	onFire func(mode string) // metrics hook, may be nil
+	// onStall reports a stream entering (+1) or leaving (-1) a stall wait.
+	onStall func(delta float64)
+	onFire  func(mode string) // metrics hook, may be nil
 }
 
 func newEngine(start time.Time, done chan struct{}) *engine {
@@ -222,6 +224,11 @@ func (e *engine) silentHangActive() bool {
 // frozen streams do not release their backlogs in the same instant.
 func (e *engine) gateEmit(ctx context.Context, exemptFromAbort bool) (action, bool) {
 	stalled := false
+	defer func() {
+		if stalled && e.onStall != nil {
+			e.onStall(-1)
+		}
+	}()
 	for {
 		a, ch := e.current()
 		if a == nil {
@@ -229,6 +236,9 @@ func (e *engine) gateEmit(ctx context.Context, exemptFromAbort bool) (action, bo
 		}
 		switch a.Mode {
 		case config.MockFaultStall:
+			if !stalled && e.onStall != nil {
+				e.onStall(1)
+			}
 			stalled = true
 			select {
 			case <-ch: // state changed; re-check

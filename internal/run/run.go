@@ -40,6 +40,10 @@ type Options struct {
 	// and traffic-restored probes from fire time.
 	ProbeDirectURL  string
 	ProbeServiceURL string
+	// OnEpoch fires once the run epoch is anchored, before the first
+	// dispatch, so a caller can start observers that must share the
+	// run's clock (the §10 G7 server-gauge sampler).
+	OnEpoch func(epoch time.Time)
 }
 
 // ShareGateResult is the §1 per-replica request-share gate, computed in
@@ -82,6 +86,13 @@ type Artifacts struct {
 }
 
 // Execute performs one full run.
+// BaselineNs returns the §3 baseline window, guard excluded, as monotonic
+// offsets from the run epoch.
+func (a *Artifacts) BaselineNs() (startNs, endNs int64) {
+	w := a.Windows["baseline"].Window
+	return w.StartNs, w.EndNs
+}
+
 func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts, error) {
 	art := &Artifacts{Config: cfg, Windows: map[string]*collect.Stats{}}
 
@@ -145,7 +156,13 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	launchProbe("replica_ready", opts.ProbeDirectURL, "")
 	launchProbe("traffic_restored", opts.ProbeServiceURL, opts.VictimReplica)
 
-	res, err := loadgen.Run(ctx, cfg, &loadgen.Hooks{OnEpoch: func(e time.Time) { epoch = e; close(epochReady) }})
+	res, err := loadgen.Run(ctx, cfg, &loadgen.Hooks{OnEpoch: func(e time.Time) {
+		epoch = e
+		close(epochReady)
+		if opts.OnEpoch != nil {
+			opts.OnEpoch(e)
+		}
+	}})
 	if err != nil {
 		return nil, fmt.Errorf("run: loadgen: %w", err)
 	}

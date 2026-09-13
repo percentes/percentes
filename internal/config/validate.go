@@ -214,6 +214,21 @@ func (c *Config) validateTarget(v *validator) {
 			v.errf("target.api_key_env: required for a hosted target (name of the env var holding the bearer token; never the token itself)")
 		}
 	}
+	// §10 G7: the scrape needs one endpoint per replica and a gauge name;
+	// a hosted target has no replica endpoints (§6).
+	if n := len(c.Target.MetricsURLs); n > 0 {
+		if c.Target.Hosted {
+			v.errf("target.metrics_urls: not read for a hosted target (§6)")
+		}
+		if n != c.Target.Replicas {
+			v.errf("target.metrics_urls: %d entries for %d replicas (one per replica, §10 G7)", n, c.Target.Replicas)
+		}
+		if c.Target.QueueGauge == "" {
+			v.errf("target.queue_gauge: required when target.metrics_urls is set (§10 G7)")
+		}
+	} else if c.Target.QueueGauge != "" {
+		v.errf("target.queue_gauge: set without target.metrics_urls")
+	}
 }
 
 func (c *Config) validateFault(v *validator) {

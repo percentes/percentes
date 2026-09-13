@@ -41,7 +41,9 @@ type Server struct {
 	requestsTotal *prometheus.CounterVec
 	tokensTotal   prometheus.Counter
 	activeStreams prometheus.Gauge
-	faultsFired   *prometheus.CounterVec
+	// requestsWaiting counts streams blocked in a stall window.
+	requestsWaiting prometheus.Gauge
+	faultsFired     *prometheus.CounterVec
 }
 
 // New builds a server from the mock section of the run config. The config
@@ -66,7 +68,11 @@ func New(cfg config.Mock) *Server {
 		Name: "percentes_mock_faults_fired_total",
 		Help: "Fault windows fired, by mode.",
 	}, []string{"mode"})
-	s.registry.MustRegister(s.requestsTotal, s.tokensTotal, s.activeStreams, s.faultsFired)
+	s.requestsWaiting = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "percentes_mock_requests_waiting",
+		Help: "Admitted streams held behind an active stall, the mock's waiting queue (§10 G7).",
+	})
+	s.registry.MustRegister(s.requestsTotal, s.tokensTotal, s.activeStreams, s.faultsFired, s.requestsWaiting)
 	return s
 }
 
@@ -87,6 +93,7 @@ func (s *Server) Start() error {
 
 	s.engine = newEngine(s.start, s.done)
 	s.engine.onFire = func(mode string) { s.faultsFired.WithLabelValues(mode).Inc() }
+	s.engine.onStall = func(delta float64) { s.requestsWaiting.Add(delta) }
 	for _, f := range s.cfg.FaultSchedule {
 		if _, err := s.engine.arm(f.Mode, "schedule", f.StartOffsetS, f.DurationS, f.AbortAfterTokens); err != nil {
 			l.Close()

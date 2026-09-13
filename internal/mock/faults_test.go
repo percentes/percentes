@@ -475,3 +475,44 @@ func TestFaultThrottleWindow(t *testing.T) {
 		t.Fatalf("post-window request must succeed: status=%d err=%v", res.status, res.err)
 	}
 }
+
+// TestStallWaitingGauge: a stream held behind an active stall is counted
+// on percentes_mock_requests_waiting for the duration of the hold, and
+// the gauge returns to zero once the stall expires (§10 G7 source).
+func TestStallWaitingGauge(t *testing.T) {
+	const stallD = 1200 * time.Millisecond
+	cfg := baseMockCfg()
+	cfg.TTFT = fixed(50)
+	cfg.ITL = fixed(40)
+	cfg.FaultSchedule = []config.MockFault{
+		{Mode: config.MockFaultStall, StartOffsetS: 0.4, DurationS: stallD.Seconds()},
+	}
+	s := startServer(t, cfg)
+	base := "http://" + s.Addr()
+
+	gauge := func() string {
+		for _, line := range strings.Split(metricsText(t, base), "\n") {
+			if strings.HasPrefix(line, "percentes_mock_requests_waiting ") {
+				return strings.TrimPrefix(line, "percentes_mock_requests_waiting ")
+			}
+		}
+		return "<absent>"
+	}
+	if g := gauge(); g != "0" {
+		t.Fatalf("before the stall the gauge must read 0, got %q", g)
+	}
+
+	done := make(chan *streamResult, 1)
+	go func() { done <- doStream(t, base, 30) }() // 50ms + 29*40ms straddles the stall
+	time.Sleep(900 * time.Millisecond)            // inside the window (0.4s to 1.6s)
+	if g := gauge(); g != "1" {
+		t.Fatalf("during the stall one held stream must read 1, got %q", g)
+	}
+	res := <-done
+	if res.err != nil || res.status != 200 {
+		t.Fatalf("stalled stream must still complete: status=%d err=%v", res.status, res.err)
+	}
+	if g := gauge(); g != "0" {
+		t.Fatalf("after the stall the gauge must return to 0, got %q", g)
+	}
+}

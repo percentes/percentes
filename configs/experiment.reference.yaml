@@ -72,6 +72,11 @@ share_gate:
 target:
   base_url: http://PIN-AT-PHASE1:8000
   replicas: 2              # pinned topology (§1)
+  # §10 G7: one Prometheus endpoint per replica, sampled every second from
+  # the run epoch; the gauge name is re-verified against the pinned vLLM
+  # version (§2).
+  metrics_urls: [http://PIN-AT-PHASE1-replica-0:8000/metrics, http://PIN-AT-PHASE1-replica-1:8000/metrics]
+  queue_gauge: vllm:num_requests_waiting   # pinned (§6)
 
 fault:
   variant: clean_delete    # pre-registered primary endpoint variant (§7)

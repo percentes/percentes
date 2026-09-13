@@ -139,6 +139,7 @@ with median+range; drops are named, never imputed).
 | `internal/stats` | §7 statistics: verbatim values, median, mean, df-correct t-interval, CoV/noise floor, Holm | §7 | `Summarize`, `holm` | hand-computed oracles |
 | `internal/campaign` | N-run repetition engine; per-run seeds; endpoint aggregation with named drops | §5, §7, §10 | `Run` | fake-runner units |
 | `internal/validity` | §10 run-validity gates G1–G7; applicable-but-unobserved ⇒ FAIL; a failed or unobserved G3/G4 strips the node-loss-representative label and the run stays valid | §10 | `Evaluate` | per-gate units |
+| `internal/serverstats` | Samples each replica's Prometheus text endpoint from the run epoch and reduces to per-replica baseline-window means for G7; an absent gauge or a counter is an error | §6, §10 | `ForRun`, `Sampler.Start`/`Reduce`, `BaselineMeans` | httptest gauge servers; epoch-window oracle |
 | `cmd/percentes` | One run → report pair; exit 0/2/1 | AC7 | | via reproduce.sh |
 | `cmd/percentes-campaign` | N-run campaign → campaign report pair; routes `fault.variant` to its injector (mock admin / clean-delete kubectl; black-hole refused pending the Phase-1 NodeOps wiring) | §5/§7/§10 | | via campaign-e2e.sh |
 
@@ -188,9 +189,16 @@ Campaign report (`campaign.json`): `campaign.per_run[*]` from
 | Injection timing (AC3) | ±500 ms | `run.validity` via orchestrator records |
 | G1–G7 (§10) | per SPEC | `validity.Evaluate` per run in both binaries; unobserved-but-applicable ⇒ FAIL; failed or unobserved G3/G4 strips the label, run stays valid |
 
-G5 and G7 depend on Phase 1 collectors (nvidia-smi fingerprints, the
-vLLM waiting-queue gauge); until those exist the gate table carries
-them as not-applicable rows.
+G5 depends on the Phase 1 nvidia-smi fingerprint collector and carries a
+not-applicable row until it exists. G7 reads `internal/serverstats`: when
+`target.metrics_urls` names one Prometheus endpoint per replica, each is
+sampled at the pinned cadence from the run epoch and the pinned
+waiting-queue gauge (`target.queue_gauge`, `vllm:num_requests_waiting` on
+vLLM, `percentes_mock_requests_waiting` on the mock) is averaged per
+replica over the §3 baseline window, guard excluded; a replica with no
+baseline sample fails coverage. Unset, G7 is a not-applicable row. The kind
+campaign does not yet set `metrics_urls`, since each pod's endpoint needs
+its own address behind the single NodePort service.
 
 One consequence shows up on macOS under the CGO_ENABLED=0 builds the
 make targets pin. Both binaries evaluate the §10 gates per run via

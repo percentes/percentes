@@ -72,6 +72,11 @@ share_gate:
 target:
   base_url: http://127.0.0.1:18000
   replicas: 2
+  # §10 G7: one Prometheus endpoint per replica and the pinned waiting-queue
+  # gauge; unset in Phase 0, so G7 reports not applicable. vLLM exposes
+  # vllm:num_requests_waiting; the mock exposes percentes_mock_requests_waiting.
+  # metrics_urls: [http://replica-0:8000/metrics, http://replica-1:8000/metrics]
+  # queue_gauge: vllm:num_requests_waiting
 
 fault:
   variant: mock

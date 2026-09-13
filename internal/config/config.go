@@ -63,6 +63,10 @@ const (
 
 	// §10 G6: minimum pre-fault baseline goodput.
 	PinnedBaselineGoodputMin = 0.99
+	// §10 G7: per-replica mean of the waiting-queue gauge over the
+	// baseline window, sampled at the pinned cadence.
+	PinnedQueueGaugeMax        = 1.0
+	PinnedQueueSampleIntervalS = 1
 
 	// §5: recovery detector.
 	PinnedDetectorWindowS  = 10
@@ -265,6 +269,15 @@ type Target struct {
 	// Only the variable NAME is configuration — configs stay publishable;
 	// the value is resolved at run start and never recorded.
 	APIKeyEnv string `yaml:"api_key_env" json:"api_key_env"`
+	// MetricsURLs are the replicas' Prometheus text endpoints, one per
+	// replica, sampled over the baseline window for G7 (§10). Empty
+	// leaves G7 reported not applicable.
+	MetricsURLs []string `yaml:"metrics_urls,omitempty" json:"metrics_urls,omitempty"`
+	// QueueGauge is the waiting-queue gauge name to read from each
+	// endpoint; a §6 pin recorded with the run. vLLM exposes
+	// vllm:num_requests_waiting; the mock exposes
+	// percentes_mock_requests_waiting.
+	QueueGauge string `yaml:"queue_gauge,omitempty" json:"queue_gauge,omitempty"`
 }
 
 // Fault is the orchestrator plan (§1, §2). Timestamps for armed/fire/expiry

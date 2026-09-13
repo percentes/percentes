@@ -14,9 +14,10 @@
 // (nvidia-smi). Those two take injected Observation values (concrete
 // structs) so the gate LOGIC is tested with struct fixtures here; the
 // collectors are wired at Phase 1 against the real cluster. The seventh,
-// G7 baseline queue stability, awaits the Phase 1 server-gauge scrape.
+// G7 baseline queue stability, reads the serverstats scrape of each
+// replica's waiting-queue gauge when target.metrics_urls is configured.
 // G4 with no observation costs the label (§10); G5 and G7 report not
-// applicable until their collectors exist. Hosted
+// applicable until their collectors are wired. Hosted
 // targets evaluate only G2 and G6, with G6 redefined as
 // completion-within-timeout and reported rather than run-invalidating
 // (§6).
@@ -24,9 +25,12 @@ package validity
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/serverstats"
 )
 
 // Gate is one run-validity gate result.
@@ -58,6 +62,21 @@ type Observations struct {
 	EndpointStaleness *StalenessResult
 	// G5: per-replica-per-run GPU clock/power fingerprints.
 	GPUFingerprints []GPUFingerprint
+	// G7: per-replica waiting-queue means over the baseline window from
+	// the server-gauge scrape; nil means the scrape was not configured.
+	Queue *QueueObservation
+}
+
+// QueueObservation is the G7 signal: the pinned gauge's mean per replica
+// over the baseline window, with the sample count behind each mean.
+type QueueObservation struct {
+	Gauge string `json:"gauge"`
+	// IntervalS is the sample cadence in seconds, a §6 pin recorded with
+	// the gate.
+	IntervalS float64                     `json:"interval_s"`
+	Means     map[string]serverstats.Mean `json:"means"`
+	// ScrapeErrors counts failed scrapes over the run.
+	ScrapeErrors int `json:"scrape_errors"`
 }
 
 // RSTCaptureResult records how many TCP RSTs were sourced from the dead
@@ -135,8 +154,7 @@ func Evaluate(art *run.Artifacts, obs Observations) Report {
 			gateG4(art, obs, isBlackHole),
 			gateG5(art, obs),
 			gateG6(art),
-			{ID: "G7", Name: "baseline queue stability: per-replica waiting-queue mean <= 1.0",
-				Detail: "requires the server-gauge scrape (Phase 1); reported not applicable until it exists (§10)"},
+			gateG7(art, obs),
 		}
 	}
 	rep.AllPass = true
@@ -297,7 +315,8 @@ func gateG5(art *run.Artifacts, obs Observations) Gate {
 	g := Gate{ID: "G5", Name: "GPU clock/power fingerprints equal across replicas and runs", Applicable: true}
 	if len(obs.GPUFingerprints) == 0 {
 		// The nvidia-smi collector is wired at Phase 1; until observations
-		// exist the gate reports not applicable, as §10 treats G7.
+		// exist the gate reports not applicable, as G7 does when
+		// target.metrics_urls is unset.
 		g.Applicable, g.Observed, g.Pass = false, false, false
 		g.Detail = "nvidia-smi fingerprint collector not wired (Phase 1); reported not applicable until it exists"
 		return g
@@ -327,6 +346,34 @@ func gateG5(art *run.Artifacts, obs Observations) Gate {
 		}
 	}
 	g.Detail = fmt.Sprintf("%d fingerprints all equal (%q) across %d replicas", len(obs.GPUFingerprints), first, len(distinct))
+	return g
+}
+
+// G7: per-replica mean of the waiting-queue gauge over the baseline window
+// at most the pinned maximum (§10 G7). Coverage before threshold, as G5.
+func gateG7(art *run.Artifacts, obs Observations) Gate {
+	g := Gate{ID: "G7", Name: fmt.Sprintf("baseline queue stability: per-replica waiting-queue mean <= %.1f", config.PinnedQueueGaugeMax), Applicable: true}
+	if obs.Queue == nil {
+		g.Applicable, g.Observed, g.Pass = false, false, false
+		g.Detail = "server-gauge scrape not configured (target.metrics_urls); reported not applicable until it is (§10)"
+		return g
+	}
+	q := obs.Queue
+	if len(q.Means) < art.Config.Target.Replicas {
+		g.Observed, g.Pass = false, false
+		g.Detail = fmt.Sprintf("%s: baseline samples cover %d of %d replicas (%d scrape errors); incomplete observation cannot pass", q.Gauge, len(q.Means), art.Config.Target.Replicas, q.ScrapeErrors)
+		return g
+	}
+	g.Observed, g.Pass = true, true
+	parts := make([]string, 0, len(q.Means))
+	for replica, m := range q.Means {
+		parts = append(parts, fmt.Sprintf("%s=%.3f/n%d", replica, m.Value, m.Samples))
+		if m.Value > config.PinnedQueueGaugeMax {
+			g.Pass = false
+		}
+	}
+	sort.Strings(parts)
+	g.Detail = fmt.Sprintf("%s baseline means %s, sampled every %g s (pinned maximum %.1f, §10 G7; %d scrape errors)", q.Gauge, strings.Join(parts, " "), q.IntervalS, config.PinnedQueueGaugeMax, q.ScrapeErrors)
 	return g
 }
 

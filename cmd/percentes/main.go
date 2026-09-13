@@ -12,10 +12,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/serverstats"
 	"github.com/percentes/percentes/internal/validity"
 )
 
@@ -45,6 +47,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// §10 G7: sample each replica's waiting-queue gauge from the run
+	// epoch when target.metrics_urls is configured.
+	sampler := serverstats.ForRun(cfg.Target.MetricsURLs, cfg.Target.QueueGauge, time.Duration(config.PinnedQueueSampleIntervalS)*time.Second)
+	var onEpoch func(time.Time)
+	if sampler != nil {
+		onEpoch = func(time.Time) { sampler.Start(ctx) }
+	}
 	art, err := run.Execute(ctx, cfg, run.Options{
 		AdminURL:        *adminURL,
 		InjectMode:      *injectMode,
@@ -52,15 +61,25 @@ func main() {
 		VictimReplica:   *victim,
 		ProbeDirectURL:  *probeDirect,
 		ProbeServiceURL: *probeService,
+		OnEpoch:         onEpoch,
 	})
 	if err != nil {
+		if sampler != nil {
+			sampler.Stop()
+		}
 		log.Fatalf("percentes: %v", err)
+	}
+	obs := validity.Observations{}
+	if sampler != nil {
+		startNs, endNs := art.BaselineNs()
+		means, scrapeErrs := sampler.Reduce(art.Loadgen.EpochWall, startNs, endNs)
+		obs.Queue = &validity.QueueObservation{Gauge: cfg.Target.QueueGauge, IntervalS: config.PinnedQueueSampleIntervalS, Means: means, ScrapeErrors: scrapeErrs}
 	}
 
 	// Run validity includes the §10 gate evaluation; a failed gate
 	// reaches the exit code and the report. G1 and G2 are skipped here
 	// because run.Execute already records their failures.
-	gates := validity.Evaluate(art, validity.Observations{})
+	gates := validity.Evaluate(art, obs)
 	if reasons := gates.FailReasons("G1", "G2"); len(reasons) > 0 {
 		art.RunValid = false
 		art.InvalidReasons = append(art.InvalidReasons, reasons...)
