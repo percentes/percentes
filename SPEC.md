@@ -1,6 +1,6 @@
 # v0.2 Harness Spec — Replica-Loss Resilience Characterization for Kubernetes LLM Inference
 ### Project: Percentes. This document is the authoritative specification for the Percentes harness.
-### Status: Phase 0 (mock-only, zero GPU) implemented; §8 acceptance suite passed against this text on 6 September 2026. Phase 1 (the first runs on real GPUs) pending hardware.
+### Status: Phase 0 (mock-only, zero GPU) implemented; §8 acceptance suite passed against this text on 13 September 2026. Phase 1 (the first runs on real GPUs) pending hardware.
 
 ## 0. Scope and amendment log
 
@@ -15,7 +15,7 @@ The commitments that shape the rest of the specification: the outcome model is b
 ### Versions
 
 - **v0.1** (2026-07-28): first public version. One normative change predates the amendment log and is recorded here: on 2026-07-30, pre-data, the §1 load-balancing share band was made regime-conditional (run-failing under per-request dataplanes, recorded rather than asserted under per-connection routing), and the §1 client-connection bullet was corrected from a fixed count of dedicated connections to the demand-driven pool the client implements. Early commits label this version "v0.1.1" and use "v0.2" for the deferred cross-stack study (§11).
-- **v0.2** (2026-08-15, this version; revised through 2026-09-06): the A1 estimator correction and subsequent pre-data revisions. The git log is the change record.
+- **v0.2** (2026-08-15, this version; revised through 2026-09-13): the A1 estimator correction and subsequent pre-data revisions. The git log is the change record.
 
 ### Amendment log
 
@@ -164,6 +164,7 @@ Under the black-hole variant the two-replica baseline is reached by partition he
 - Configuration schema_version pinned at 1.
 - Black-hole partition duration pinned at 120 s in configuration (§1). Also pinned and recorded: unreachable and not-ready pod toleration seconds, Deployment update strategy, PodDisruptionBudget presence, and cluster-autoscaler status (absent or disabled for characterization runs); whether pod eviction fired during the partition is recorded per run.
 - Also pinned and recorded: the measured single-replica capacity lambda_max, the frozen arrival rate lambda_r, and the full calibration trace (§10).
+- Also pinned and recorded, for G7 (§10): the waiting-queue gauge name read from each replica's metrics endpoint (vllm:num_requests_waiting on vLLM; re-verified against the pinned version, as the metrics collector paragraph in §2 requires) and the 1 s sample cadence from the run epoch.
 
 **Hosted targets:** the instrument can drive a managed OpenAI-compatible endpoint (`target.hosted`).
 
@@ -250,7 +251,7 @@ Phase 1 setup verifies the one-token-per-event invariant for the pinned vLLM ver
 - **G4** (black-hole only, label-determining) observed endpoint-staleness window at least 20 s with victim-bound traffic observed inside the window
 - **G5** GPU clock and power fingerprints equal across replicas and runs (Phase 1: requires the nvidia-smi fingerprint collector; reported not applicable until it exists; Phase 1 additionally records per-replica GPU clock and throttle-reason counters over the fault window and reports them alongside G5)
 - **G6** baseline goodput at least 0.99 (section 3 goodput over the pre-fault baseline window)
-- **G7** baseline queue stability: per-replica mean of the vLLM waiting-queue gauge over the baseline window at most 1.0, protecting the calibrated band against capacity drift since calibration (Phase 1: requires the server-gauge scrape; reported not applicable until it exists)
+- **G7** baseline queue stability: per-replica mean of the vLLM waiting-queue gauge over the baseline window at most 1.0, protecting the calibrated band against capacity drift since calibration (evaluated from the pinned waiting-queue gauge when target.metrics_urls names one Prometheus endpoint per replica, sampled at the pinned cadence from the run epoch; a replica with no baseline sample fails coverage; reported not applicable when unset)
 
 Failure or non-observation of G3 or G4 strips the node-loss-representative label and the run is reported as clean-variant-equivalent (§1); the run stays valid. Every other applicable gate failure invalidates the run.
 
