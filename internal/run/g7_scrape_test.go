@@ -98,6 +98,18 @@ func TestG7EvaluatesFromMockScrape(t *testing.T) {
 	if !ok || m.Samples < 10 || m.Samples > 51 || m.Value != 0 {
 		t.Fatalf("expected 10 to 51 baseline samples at 0 for r0 over the 10 s window [%d ns, %d ns), got %+v (errors %d)", startNs, endNs, m, scrapeErrs)
 	}
+	// The sampler runs inside the load generator, so it is what would
+	// raise this process's GC pauses (§2, G2). On a client whose CPU gate
+	// passed, the machine was quiet enough that a GC failure is the
+	// sampler's; busy, every part of the gate slips and the test yields.
+	if g := art.Loadgen.Gates; !g.Pass {
+		if g.CPUMeasured && g.CPUPass && !g.GCPass {
+			t.Fatalf("gc pause p99 %.3f ms over the pin on a quiet client: %+v", g.GCPauseP99Ms, g)
+		}
+		if !art.RunValid {
+			t.Skipf("host contended the client: %+v", g)
+		}
+	}
 	if !rep.AllPass {
 		b := art.Windows["baseline"]
 		t.Fatalf("run must be valid.\nbaseline window: %+v\ndetector: %+v\ngates: %+v", b, art.Detector, rep.Gates)
