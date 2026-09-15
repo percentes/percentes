@@ -32,7 +32,8 @@ The core methodological commitments:
   are censored observations, never latency percentiles.
 - **Pre-registered numbers**: the values SPEC.md pins are enforced at
   config-load time (SPEC.md §0 states the pledge; `internal/config`
-  enforces it); calibration-derived values (lambda_max, lambda_r) and
+  enforces it); calibration-derived values (lambda_max, lambda_r) are
+  recorded in the config's `calibration` block once §10 has run, and
   the Phase 1 infrastructure pins land with the Phase 1 schema.
 - **Unmeasured reports as unmeasured**: anything unmeasured is reported
   as unmeasured-and-failing (gates) or N/A-with-reason (segments,
@@ -140,6 +141,8 @@ with median+range; drops are named, never imputed).
 | `internal/campaign` | N-run repetition engine; per-run seeds; endpoint aggregation with named drops | §5, §7, §10 | `Run` | fake-runner units |
 | `internal/validity` | §10 run-validity gates G1–G7; applicable-but-unobserved ⇒ FAIL; a failed or unobserved G3/G4 strips the node-loss-representative label and the run stays valid | §10 | `Evaluate` | per-gate units |
 | `internal/serverstats` | Samples each replica's Prometheus text endpoint from the run epoch and reduces to per-replica baseline-window means for G7; an absent gauge or a counter is an error | §6, §10 | `ForRun`, `Sampler.Start`/`Reduce`, `BaselineMeans` | httptest gauge servers; epoch-window oracle |
+| `internal/calibrate` | §10 single-replica capacity calibration: coarse and fine ramps against a `Runner`, two ramps agreeing within the pinned fraction or a third deciding by median, lambda_r frozen, and the §5 reference run at 2 x lambda_r; every step is a §3 collection over its measured window with the queue-gauge series kept, and the trace is rewritten after every step | §10, §5, §3 | `RunRamp`, `Calibrate`, `Reference`, `LoadRunner` | capacity-model fake runner; one step against the mock with a stall inside the settle |
+| `cmd/percentes-calibrate` | Calibration trace pair (calibration.json, calibration.txt); exit 0/2/1; `--check` validates a config and lists its placeholders | §10 | | |
 | `cmd/percentes` | One run → report pair; exit 0/2/1 | AC7 | | via reproduce.sh |
 | `cmd/percentes-campaign` | N-run campaign → campaign report pair; routes `fault.variant` to its injector (mock admin / clean-delete kubectl; black-hole refused pending the Phase-1 NodeOps wiring) | §5/§7/§10 | | via campaign-e2e.sh |
 
@@ -195,8 +198,9 @@ not-applicable row until it exists. G7 reads `internal/serverstats`: when
 sampled at the pinned cadence from the run epoch and the pinned
 waiting-queue gauge (`target.queue_gauge`, `vllm:num_requests_waiting` on
 vLLM, `percentes_mock_requests_waiting` on the mock) is averaged per
-replica over the §3 baseline window, guard excluded; a replica with no
-baseline sample fails coverage. Unset, G7 is a not-applicable row. The kind
+replica over the §3 baseline window, guard excluded; a replica with fewer
+than 90 percent of the samples expected at the cadence over that window
+fails coverage (§10). Unset, G7 is a not-applicable row. The kind
 campaign does not yet set `metrics_urls`, since each pod's endpoint needs
 its own address behind the single NodePort service.
 

@@ -101,6 +101,16 @@ func TestSection6PinCoverage(t *testing.T) {
 	}
 }
 
+// A recorded calibration that agrees with the pins loads (§10).
+func TestCalibrationBlockConsistentLoads(t *testing.T) {
+	c := loadRef(t, experimentRef)
+	c.Calibration = &Calibration{LambdaMaxRPS: 20, LambdaRRPS: 13, TraceSHA256: "abc"}
+	c.Load.RateRPS = 26
+	if err := c.Validate(); err != nil {
+		t.Fatalf("consistent calibration block must load: %v", err)
+	}
+}
+
 func TestUnknownFieldRejected(t *testing.T) {
 	raw, err := os.ReadFile(acRef)
 	if err != nil {
@@ -177,6 +187,25 @@ func TestPinnedValueEnforcement(t *testing.T) {
 		{"experiment rtt not recorded", experimentRef, func(c *Config) { c.Client.Placement.RecordRTT = false }, "client.placement.record_rtt"},
 		{"experiment kv cache unpinned", experimentRef, func(c *Config) { c.Pins.Engine.KVCacheGB = 0 }, "pins.engine.kv_cache_gb"},
 		{"experiment with mock section", experimentRef, func(c *Config) { c.Mock = &Mock{} }, "mock: must be absent"},
+		{"experiment lambda_r off the pinned fraction", experimentRef, func(c *Config) {
+			c.Calibration, c.Load.RateRPS = &Calibration{LambdaMaxRPS: 20, LambdaRRPS: 12, TraceSHA256: "abc"}, 24
+		}, "calibration.lambda_r_rps"},
+		{"experiment rate not replicas x lambda_r", experimentRef, func(c *Config) {
+			c.Calibration, c.Load.RateRPS = &Calibration{LambdaMaxRPS: 20, LambdaRRPS: 13, TraceSHA256: "abc"}, 13
+		}, "load.rate_rps"},
+		{"experiment calibration without a trace hash", experimentRef, func(c *Config) {
+			c.Calibration, c.Load.RateRPS = &Calibration{LambdaMaxRPS: 20, LambdaRRPS: 13}, 26
+		}, "calibration.trace_sha256"},
+		{"experiment deterministic arrivals", experimentRef, func(c *Config) { c.Load.ArrivalProcess = "deterministic" }, "load.arrival_process"},
+		{"experiment lambda_r zero", experimentRef, func(c *Config) {
+			c.Calibration, c.Load.RateRPS = &Calibration{LambdaMaxRPS: 2, LambdaRRPS: 0, TraceSHA256: "abc"}, 0.001
+		}, "calibration.lambda_r_rps"},
+		{"experiment lambda_max below the start rate", experimentRef, func(c *Config) {
+			c.Calibration, c.Load.RateRPS = &Calibration{LambdaMaxRPS: 1e-12, LambdaRRPS: 6.5e-13, TraceSHA256: "abc"}, 1.3e-12
+		}, "calibration.lambda_max_rps"},
+		{"experiment offered load overflows", experimentRef, func(c *Config) {
+			c.Calibration, c.Load.RateRPS = &Calibration{LambdaMaxRPS: 1.7e308, LambdaRRPS: 0.65 * 1.7e308, TraceSHA256: "abc"}, 1
+		}, "load.rate_rps"},
 		{"experiment metrics endpoints short of replicas", experimentRef, func(c *Config) { c.Target.MetricsURLs = c.Target.MetricsURLs[:1] }, "target.metrics_urls"},
 		{"experiment queue gauge dropped", experimentRef, func(c *Config) { c.Target.QueueGauge = "" }, "target.queue_gauge"},
 		{"queue gauge without endpoints", acRef, func(c *Config) { c.Target.QueueGauge = "vllm:num_requests_waiting" }, "target.queue_gauge"},

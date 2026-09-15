@@ -3,9 +3,10 @@
 // load generator, chaos orchestrator, mock server, metrics collector,
 // recovery detector, and report generator all read sections of this file.
 //
-// The schema carries the SPEC.md §6 pins the Phase 0 profiles use;
-// calibration values and the Phase 1 infrastructure pins land with the
-// Phase 1 schema. Every gate, tolerance, and detector parameter that
+// The schema carries the SPEC.md §6 pins the Phase 0 profiles use and
+// the §10 calibration block, present once lambda_max has been measured;
+// the remaining Phase 1 infrastructure pins land with the Phase 1
+// schema. Every gate, tolerance, and detector parameter that
 // SPEC.md pre-registers is enforced by Validate(); a config that weakens
 // a pinned number does not load.
 package config
@@ -67,6 +68,21 @@ const (
 	// baseline window, sampled at the pinned cadence.
 	PinnedQueueGaugeMax        = 1.0
 	PinnedQueueSampleIntervalS = 1
+
+	// §10: single-replica capacity calibration (start rate, step timings,
+	// fine-step and agreement fractions, goodput floor).
+	PinnedCalibrationStartRPS      = 2.0
+	PinnedCalibrationSettleS       = 30
+	PinnedCalibrationMeasureS      = 120
+	PinnedCalibrationFineStepFrac  = 0.10
+	PinnedCalibrationAgreementFrac = 0.10
+	PinnedCalibrationGoodputMin    = 0.99
+	// §10: a waiting-queue mean over a window is taken only when at
+	// least this fraction of the samples expected at the pinned cadence
+	// landed inside it.
+	PinnedQueueCoverageMin = 0.90
+	// §10: lambda_r is frozen at this fraction of lambda_max.
+	PinnedLambdaRFrac = 0.65
 
 	// §5: recovery detector.
 	PinnedDetectorWindowS  = 10
@@ -136,9 +152,22 @@ type Config struct {
 	// fault.variant is "mock"; must be absent otherwise.
 	Mock *Mock `yaml:"mock,omitempty" json:"mock,omitempty"`
 
+	// Calibration records the §10 result the experiment runs at (§6).
+	// Absent until calibration has run.
+	Calibration *Calibration `yaml:"calibration,omitempty" json:"calibration,omitempty"`
+
 	// Raw holds the configuration file bytes as parsed, so the report's
 	// config hash covers the published file.
 	Raw []byte `yaml:"-" json:"-"`
+}
+
+// Calibration is the recorded §10 calibration: lambda_max as measured,
+// lambda_r at the pinned fraction of it, and the SHA-256 of the
+// published trace.
+type Calibration struct {
+	LambdaMaxRPS float64 `yaml:"lambda_max_rps" json:"lambda_max_rps"`
+	LambdaRRPS   float64 `yaml:"lambda_r_rps" json:"lambda_r_rps"`
+	TraceSHA256  string  `yaml:"trace_sha256" json:"trace_sha256"`
 }
 
 // Run identifies the run and fixes its phase structure (§1).
@@ -304,9 +333,9 @@ type Fault struct {
 // Pins is the §6 configuration-control pin list the Phase 0 schema
 // carries. Every field is required. Phase 0 (mock) configs record
 // explicit "n/a-phase0-mock" values rather than omitting fields, and
-// Phase 1 replaces the placeholders with real pins; calibration values
-// and the remaining Phase 1 infrastructure pins land with the Phase 1
-// schema.
+// Phase 1 replaces the placeholders with real pins; the calibration
+// values live in Config.Calibration, and the remaining Phase 1
+// infrastructure pins land with the Phase 1 schema.
 type Pins struct {
 	VLLM       VLLMPins       `yaml:"vllm" json:"vllm"`
 	Model      ModelPins      `yaml:"model" json:"model"`

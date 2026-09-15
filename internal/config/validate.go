@@ -101,8 +101,34 @@ func (c *Config) validateLoad(v *validator) {
 	} else if c.Load.RateRPS <= 0 {
 		v.errf("load.rate_rps: must be > 0, got %g", c.Load.RateRPS)
 	}
+	// §10: once calibration is recorded, lambda_r is the pinned fraction
+	// of lambda_max and the offered load is replicas x lambda_r.
+	if cal := c.Calibration; cal != nil {
+		// A §10 result is a passing rate of the ramp, so it is at least
+		// the start rate.
+		if cal.LambdaMaxRPS < PinnedCalibrationStartRPS {
+			v.errf("calibration.lambda_max_rps: must be >= %g, the §10 start rate, got %g", PinnedCalibrationStartRPS, cal.LambdaMaxRPS)
+		} else {
+			if want := PinnedLambdaRFrac * cal.LambdaMaxRPS; !closeF(cal.LambdaRRPS, want) {
+				v.errf("calibration.lambda_r_rps: must be %g x lambda_max_rps = %g (§10), got %g", PinnedLambdaRFrac, want, cal.LambdaRRPS)
+			}
+			want := float64(c.Target.Replicas) * cal.LambdaRRPS
+			if math.IsInf(want, 0) {
+				v.errf("load.rate_rps: %d x calibration.lambda_r_rps overflows", c.Target.Replicas)
+			} else if !closeF(c.Load.RateRPS, want) {
+				v.errf("load.rate_rps: must be %d x calibration.lambda_r_rps = %g (§10), got %g", c.Target.Replicas, want, c.Load.RateRPS)
+			}
+		}
+		if cal.TraceSHA256 == "" {
+			v.errf("calibration.trace_sha256: required (§6: the full calibration trace is recorded)")
+		}
+	}
 	switch c.Load.ArrivalProcess {
-	case "poisson", "deterministic":
+	case "poisson":
+	case "deterministic":
+		if c.Profile == ProfileExperiment {
+			v.errf("load.arrival_process: pinned \"poisson\" for the experiment profile (§1, §10)")
+		}
 	default:
 		v.errf("load.arrival_process: must be \"poisson\" or \"deterministic\", got %q", c.Load.ArrivalProcess)
 	}
@@ -421,6 +447,12 @@ func (v *validator) pinI(field string, got, want int) {
 	if got != want {
 		v.errf("%s: pre-registered value is %d (SPEC.md), got %d", field, want, got)
 	}
+}
+
+// closeF compares a rate to a positive expected rate, to one part in a
+// million of the expected rate.
+func closeF(got, want float64) bool {
+	return want > 0 && math.Abs(got-want) <= 1e-6*want
 }
 
 // pinF enforces a pre-registered float equality.

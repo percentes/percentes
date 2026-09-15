@@ -137,6 +137,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  true,
 	}
+	defer transport.CloseIdleConnections()
 	model := cfg.Target.ModelName
 	if model == "" {
 		model = "percentes-mock"
@@ -230,7 +231,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	gcP99Ms := gcMon.stopAndP99Ms()
 	res.Requests = requests
 	res.Gates = evaluateGates(cfg, requests, cpuSamples, gcP99Ms, res.WarmupEndNs, res.FaultEndNs)
-	if aborted {
+	if aborted || ctx.Err() != nil {
 		return res, fmt.Errorf("loadgen: run aborted by context: %w", ctx.Err())
 	}
 	return res, nil

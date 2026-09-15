@@ -42,6 +42,9 @@ type Report struct {
 	*run.Artifacts
 }
 
+// InstrumentCommit is the build's VCS stamp as the reports record it.
+func InstrumentCommit() string { return instrumentCommit() }
+
 // instrumentCommit reads the build's VCS stamp.
 func instrumentCommit() string {
 	info, ok := debug.ReadBuildInfo()

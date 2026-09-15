@@ -25,6 +25,7 @@ bins:
 	CGO_ENABLED=0 $(GO) build -o bin/percentes ./cmd/percentes
 	CGO_ENABLED=0 $(GO) build -o bin/percentes-campaign ./cmd/percentes-campaign
 	CGO_ENABLED=0 $(GO) build -o bin/mockserver ./cmd/mockserver
+	CGO_ENABLED=0 $(GO) build -o bin/percentes-calibrate ./cmd/percentes-calibrate
 
 test-unit:
 	$(GO) test -race -short ./... -count=1

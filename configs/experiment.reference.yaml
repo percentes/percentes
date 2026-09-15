@@ -23,7 +23,7 @@ load:
   max_tokens: 256          # pinned (§6)
   ignore_eos: true         # pinned (§6)
   unique_prefixes: true    # pinned (§6)
-  connections: 8           # >= 4 x replicas (§1)
+  connections: 8           # >= 4 x replicas (§6)
 
 client:
   http_timeout_s: 30       # pinned (§6)
@@ -77,6 +77,13 @@ target:
   # version (§2).
   metrics_urls: [http://PIN-AT-PHASE1-replica-0:8000/metrics, http://PIN-AT-PHASE1-replica-1:8000/metrics]
   queue_gauge: vllm:num_requests_waiting   # pinned (§6)
+
+# §10, recorded once calibration has run (§6): lambda_r_rps must equal
+# 0.65 x lambda_max_rps and load.rate_rps must equal replicas x lambda_r_rps.
+# calibration:
+#   lambda_max_rps: PIN-AT-PHASE1
+#   lambda_r_rps: PIN-AT-PHASE1
+#   trace_sha256: PIN-AT-PHASE1
 
 fault:
   variant: clean_delete    # pre-registered primary endpoint variant (§7)
