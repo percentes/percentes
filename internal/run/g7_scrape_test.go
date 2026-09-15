@@ -81,6 +81,18 @@ func TestG7EvaluatesFromMockScrape(t *testing.T) {
 	obs := validity.Observations{Queue: &validity.QueueObservation{Gauge: cfg.Target.QueueGauge, IntervalS: 0.2, Means: means, ScrapeErrors: scrapeErrs}}
 	rep := validity.Evaluate(art, obs)
 
+	// The sampler runs inside the load generator, so it is what would
+	// raise this process's GC pauses (§2, G2). On a client whose CPU gate
+	// passed, the machine was quiet enough that a GC failure is the
+	// sampler's; busy, every part of the gate slips and the test yields.
+	if g := art.Loadgen.Gates; !g.Pass {
+		if g.CPUMeasured && g.CPUPass && !g.GCPass {
+			t.Fatalf("gc pause p99 %.3f ms over the pin on a quiet client: %+v", g.GCPauseP99Ms, g)
+		}
+		if !art.RunValid {
+			t.Skipf("host contended the client: %+v", g)
+		}
+	}
 	var g7 validity.Gate
 	for _, g := range rep.Gates {
 		if g.ID == "G7" {
@@ -93,22 +105,11 @@ func TestG7EvaluatesFromMockScrape(t *testing.T) {
 	t.Logf("G7: %s", g7.Detail)
 	// The measured baseline is [1 s, 11 s): 40 s configured, the last 30 s
 	// guard. A 200 ms ticker cannot place more than 51 samples in it, so a
-	// count above that means the guard window leaked into the mean.
+	// count above that means the guard window leaked into the mean, and G7
+	// coverage needs 45 of the 50 the cadence expects.
 	m, ok := means["r0"]
-	if !ok || m.Samples < 10 || m.Samples > 51 || m.Value != 0 {
-		t.Fatalf("expected 10 to 51 baseline samples at 0 for r0 over the 10 s window [%d ns, %d ns), got %+v (errors %d)", startNs, endNs, m, scrapeErrs)
-	}
-	// The sampler runs inside the load generator, so it is what would
-	// raise this process's GC pauses (§2, G2). On a client whose CPU gate
-	// passed, the machine was quiet enough that a GC failure is the
-	// sampler's; busy, every part of the gate slips and the test yields.
-	if g := art.Loadgen.Gates; !g.Pass {
-		if g.CPUMeasured && g.CPUPass && !g.GCPass {
-			t.Fatalf("gc pause p99 %.3f ms over the pin on a quiet client: %+v", g.GCPauseP99Ms, g)
-		}
-		if !art.RunValid {
-			t.Skipf("host contended the client: %+v", g)
-		}
+	if !ok || m.Samples < 45 || m.Samples > 51 || m.Value != 0 {
+		t.Fatalf("expected 45 to 51 baseline samples at 0 for r0 over the 10 s window [%d ns, %d ns), got %+v (errors %d)", startNs, endNs, m, scrapeErrs)
 	}
 	if !rep.AllPass {
 		b := art.Windows["baseline"]

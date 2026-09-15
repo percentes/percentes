@@ -1,6 +1,7 @@
 package validity
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/percentes/percentes/internal/collect"
@@ -41,6 +42,13 @@ func bothReplicaFingerprints() []GPUFingerprint {
 		{Replica: "a", Run: 1, Fingerprint: "x"},
 		{Replica: "b", Run: 1, Fingerprint: "x"},
 	}
+}
+
+// withBaseline gives the artifact a 300 s §3 baseline window, guard
+// excluded, so G7 can count the samples it expects.
+func withBaseline(art *run.Artifacts) *run.Artifacts {
+	art.Windows["baseline"] = &collect.Stats{Window: collect.Window{Name: "baseline", StartNs: 60e9, EndNs: 360e9}}
+	return art
 }
 
 func gateByID(rep Report, id string) Gate {
@@ -246,9 +254,9 @@ func TestG7NotApplicableWithoutScrape(t *testing.T) {
 // G7 passes when every replica's baseline mean is at or under the pinned
 // maximum, and the run stays valid.
 func TestG7PassesUnderPinnedMaximum(t *testing.T) {
-	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting",
-		Means: map[string]serverstats.Mean{"a": {Value: 0.2, Samples: 30}, "b": {Value: 1.0, Samples: 30}}}}
-	rep := Evaluate(cleanArt(config.VariantCleanDelete), obs)
+	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting", IntervalS: 1,
+		Means: map[string]serverstats.Mean{"a": {Value: 0.2, Samples: 290}, "b": {Value: 1.0, Samples: 290}}}}
+	rep := Evaluate(withBaseline(cleanArt(config.VariantCleanDelete)), obs)
 	g := gateByID(rep, "G7")
 	if !g.Applicable || !g.Observed || !g.Pass {
 		t.Fatalf("G7 must pass at means 0.2 and 1.0 against a maximum of 1.0, got %+v", g)
@@ -261,9 +269,9 @@ func TestG7PassesUnderPinnedMaximum(t *testing.T) {
 // One replica over the maximum fails G7 and invalidates the run: the
 // calibrated band has drifted (§10 G7).
 func TestG7FailsOnQueueDrift(t *testing.T) {
-	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting",
-		Means: map[string]serverstats.Mean{"a": {Value: 0.1, Samples: 30}, "b": {Value: 1.01, Samples: 30}}}}
-	rep := Evaluate(cleanArt(config.VariantCleanDelete), obs)
+	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting", IntervalS: 1,
+		Means: map[string]serverstats.Mean{"a": {Value: 0.1, Samples: 290}, "b": {Value: 1.01, Samples: 290}}}}
+	rep := Evaluate(withBaseline(cleanArt(config.VariantCleanDelete)), obs)
 	if gateByID(rep, "G7").Pass {
 		t.Fatal("G7 must fail when a replica's baseline mean exceeds 1.0")
 	}
@@ -275,11 +283,40 @@ func TestG7FailsOnQueueDrift(t *testing.T) {
 // Coverage before threshold, as G5: a replica with no baseline sample
 // leaves G7 unobserved.
 func TestG7IncompleteCoverageCannotPass(t *testing.T) {
-	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting",
-		Means: map[string]serverstats.Mean{"a": {Value: 0, Samples: 30}}, ScrapeErrors: 12}}
-	g := gateByID(Evaluate(cleanArt(config.VariantCleanDelete), obs), "G7")
+	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting", IntervalS: 1,
+		Means: map[string]serverstats.Mean{"a": {Value: 0, Samples: 290}}, ScrapeErrors: 12}}
+	g := gateByID(Evaluate(withBaseline(cleanArt(config.VariantCleanDelete)), obs), "G7")
 	if g.Observed || g.Pass {
 		t.Fatalf("one of two replicas sampled must be unobserved and not passed, got %+v", g)
+	}
+}
+
+// A replica short of the pinned fraction of the samples expected at the
+// recorded cadence over the baseline window leaves G7 unobserved (§10).
+func TestG7UnderObservedCannotPass(t *testing.T) {
+	obs := Observations{Queue: &QueueObservation{Gauge: "vllm:num_requests_waiting", IntervalS: 1,
+		Means: map[string]serverstats.Mean{"a": {Value: 0, Samples: 290}, "b": {Value: 0, Samples: 269}}, ScrapeErrors: 31}}
+	g := gateByID(Evaluate(withBaseline(cleanArt(config.VariantCleanDelete)), obs), "G7")
+	if g.Observed || g.Pass || !strings.Contains(g.Detail, "b 269") {
+		t.Fatalf("269 of 300 expected samples must be unobserved and not passed, got %+v", g)
+	}
+	obs.Queue.Means["b"] = serverstats.Mean{Value: 0, Samples: 270}
+	if g := gateByID(Evaluate(withBaseline(cleanArt(config.VariantCleanDelete)), obs), "G7"); !g.Observed || !g.Pass {
+		t.Fatalf("270 of 300 is the boundary and passes, got %+v", g)
+	}
+}
+
+// Without the cadence or the baseline window the expected count is
+// unknown, and an unknown coverage cannot pass.
+func TestG7UnknownCoverageCannotPass(t *testing.T) {
+	means := map[string]serverstats.Mean{"a": {Value: 0, Samples: 290}, "b": {Value: 0, Samples: 290}}
+	noCadence := Observations{Queue: &QueueObservation{Gauge: "x", Means: means}}
+	if g := gateByID(Evaluate(withBaseline(cleanArt(config.VariantCleanDelete)), noCadence), "G7"); g.Observed || g.Pass {
+		t.Fatalf("an unrecorded cadence must be unobserved, got %+v", g)
+	}
+	noWindow := Observations{Queue: &QueueObservation{Gauge: "x", IntervalS: 1, Means: means}}
+	if g := gateByID(Evaluate(cleanArt(config.VariantCleanDelete), noWindow), "G7"); g.Observed || g.Pass {
+		t.Fatalf("an unrecorded baseline window must be unobserved, got %+v", g)
 	}
 }
 

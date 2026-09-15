@@ -364,16 +364,40 @@ func gateG7(art *run.Artifacts, obs Observations) Gate {
 		g.Detail = fmt.Sprintf("%s: baseline samples cover %d of %d replicas (%d scrape errors); incomplete observation cannot pass", q.Gauge, len(q.Means), art.Config.Target.Replicas, q.ScrapeErrors)
 		return g
 	}
-	g.Observed, g.Pass = true, true
+	if q.IntervalS <= 0 {
+		g.Observed, g.Pass = false, false
+		g.Detail = fmt.Sprintf("%s: sample cadence unrecorded; coverage cannot be judged (§10 G7)", q.Gauge)
+		return g
+	}
+	if art.Windows["baseline"] == nil {
+		g.Observed, g.Pass = false, false
+		g.Detail = fmt.Sprintf("%s: baseline window unrecorded; coverage cannot be judged (§10 G7)", q.Gauge)
+		return g
+	}
+	startNs, endNs := art.BaselineNs()
+	expected := int(float64(endNs-startNs) / 1e9 / q.IntervalS)
+	var short []string
 	parts := make([]string, 0, len(q.Means))
 	for replica, m := range q.Means {
 		parts = append(parts, fmt.Sprintf("%s=%.3f/n%d", replica, m.Value, m.Samples))
+		if float64(m.Samples) < config.PinnedQueueCoverageMin*float64(expected) {
+			short = append(short, fmt.Sprintf("%s %d", replica, m.Samples))
+		}
+	}
+	sort.Strings(parts)
+	sort.Strings(short)
+	if len(short) > 0 {
+		g.Observed, g.Pass = false, false
+		g.Detail = fmt.Sprintf("%s: baseline samples short of %.0f%% of the %d expected every %g s (%s; %d scrape errors); incomplete observation cannot pass (§10 G7)", q.Gauge, config.PinnedQueueCoverageMin*100, expected, q.IntervalS, strings.Join(short, ", "), q.ScrapeErrors)
+		return g
+	}
+	g.Observed, g.Pass = true, true
+	for _, m := range q.Means {
 		if m.Value > config.PinnedQueueGaugeMax {
 			g.Pass = false
 		}
 	}
-	sort.Strings(parts)
-	g.Detail = fmt.Sprintf("%s baseline means %s, sampled every %g s (pinned maximum %.1f, §10 G7; %d scrape errors)", q.Gauge, strings.Join(parts, " "), q.IntervalS, config.PinnedQueueGaugeMax, q.ScrapeErrors)
+	g.Detail = fmt.Sprintf("%s baseline means %s, sampled every %g s, %d expected (pinned maximum %.1f, §10 G7; %d scrape errors)", q.Gauge, strings.Join(parts, " "), q.IntervalS, expected, config.PinnedQueueGaugeMax, q.ScrapeErrors)
 	return g
 }
 

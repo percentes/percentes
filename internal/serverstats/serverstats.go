@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -69,6 +70,9 @@ func extract(page []byte, gauge, url string) (float64, error) {
 		default:
 			return 0, fmt.Errorf("serverstats: %s: %q is a %s, not a gauge", url, gauge, mf.GetType())
 		}
+	}
+	if math.IsNaN(total) || math.IsInf(total, 0) || total < 0 {
+		return 0, fmt.Errorf("serverstats: %s: gauge %q read %v; a waiting count is finite and non-negative", url, gauge, total)
 	}
 	return total, nil
 }

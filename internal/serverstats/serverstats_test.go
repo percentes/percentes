@@ -58,6 +58,17 @@ func TestScrapeSumsLabelSets(t *testing.T) {
 	}
 }
 
+func TestScrapeRejectsNonFiniteAndNegative(t *testing.T) {
+	for _, body := range []string{"# TYPE q gauge\nq NaN\n", "# TYPE q gauge\nq +Inf\n", "# TYPE q gauge\nq -Inf\n", "# TYPE q gauge\nq -1\n"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+		_, err := Scrape(context.Background(), srv.Client(), srv.URL, "q")
+		srv.Close()
+		if err == nil {
+			t.Fatalf("%q must not read as a waiting count", body)
+		}
+	}
+}
+
 func TestSamplerCollectsPerReplica(t *testing.T) {
 	var a, b atomic.Int64
 	a.Store(2)
