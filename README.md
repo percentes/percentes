@@ -35,9 +35,10 @@ The harness makes three commitments:
 [SPEC.md](SPEC.md) is the authoritative, pre-registered specification:
 every gate, tolerance, and detector parameter carries a pinned number,
 enforced at config-load time: a configuration that weakens one refuses
-to load. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) maps each package
-to the spec clause it serves and shows how to trace any reported number
-to its source in the code.
+to load. [CHANGELOG.md](CHANGELOG.md) lists every change to those rules
+since first publication, dated. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+maps each package to the spec clause it serves and shows how to trace any
+reported number to its source in the code.
 
 ## Scope
 

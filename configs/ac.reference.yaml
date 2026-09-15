@@ -23,7 +23,7 @@ load:
   max_tokens: 256         # pinned (§6)
   ignore_eos: true        # pinned (§6)
   unique_prefixes: true   # pinned (§6)
-  connections: 8          # >= 4 x replicas (§1)
+  connections: 8          # >= 4 x replicas (§6)
 
 client:
   http_timeout_s: 30      # pinned (§6)
@@ -135,7 +135,7 @@ mock:
   slow_reload:
     enabled: false
     duration_s: 0
-  # false (the default) blackholes /health during silent_hang — the
+  # false (the default) blackholes /health during silent_hang: the
   # faithful full-node-partition behavior.
   serve_health_during_silent_hang: false
   # Config-scripted fault plan: offsets on the monotonic clock from server

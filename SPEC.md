@@ -1,8 +1,8 @@
-# v0.2 Harness Spec — Replica-Loss Resilience Characterization for Kubernetes LLM Inference
+# v0.2 Harness Spec: Replica-Loss Resilience Characterization for Kubernetes LLM Inference
 ### Project: Percentes. This document is the authoritative specification for the Percentes harness.
-### Status: Phase 0 (mock-only, zero GPU) implemented; §8 acceptance suite passed against this text on 13 September 2026. Phase 1 (the first runs on real GPUs) pending hardware.
+### Status: Phase 0 (mock-only, zero GPU) implemented; §8 acceptance suite passed against this text on 15 September 2026. Phase 1 (the first runs on real GPUs) pending hardware.
 
-## 0. Scope and amendment log
+## 0. Scope and versions
 
 This document specifies one experiment and the instrument that runs it. Every gate, tolerance, and detector parameter below carries a pre-registered number, fixed before data collection; a configuration that weakens one does not load.
 The commitments that shape the rest of the specification: the outcome model is built around completed-only latency distributions, first-class failure rates, and competing-risks completion-incidence curves, so every scheduled request is accounted for, including the ones that fail and the ones that never finish.
@@ -14,20 +14,8 @@ The commitments that shape the rest of the specification: the outcome model is b
 
 ### Versions
 
-- **v0.1** (2026-07-28): first public version. One normative change predates the amendment log and is recorded here: on 2026-07-30, pre-data, the §1 load-balancing share band was made regime-conditional (run-failing under per-request dataplanes, recorded rather than asserted under per-connection routing), and the §1 client-connection bullet was corrected from a fixed count of dedicated connections to the demand-driven pool the client implements. Early commits label this version "v0.1.1" and use "v0.2" for the deferred cross-stack study (§11).
-- **v0.2** (2026-08-15, this version; revised through 2026-09-13): the A1 estimator correction and subsequent pre-data revisions. The git log is the change record.
-
-### Amendment log
-
-Amendments carry a date and a number, and are adopted before any data they could affect is collected. The body sections below carry the normative text.
-
-- **A1 (2026-08-15, pre-data: estimator corrected from Kaplan-Meier to Aalen-Johansen).**
-  - **v0.1 §3** treated errored requests as censored observations in a Kaplan-Meier completion curve.
-  - **That is a competing-risks error:** Kaplan-Meier's censoring assumption is that a censored subject could still experience the event, and an errored request can never complete, so errors-as-censored can only overestimate completion; the overestimate is strict whenever any completion occurs after an error (in a window of 50 errors at 0.5 s and 50 completions at 1 s, the v0.1 estimator reports completion probability 1.0 by 1 s; the fraction of scheduled requests that completed is 0.5).
-  - **§3 now specifies** the Aalen-Johansen cumulative-incidence estimator: completions are the event of interest, errors are competing terminal events, and only requests with no terminal event by the pinned timeout (or run end) are censored.
-  - **Timeout censoring** is unchanged, and with no errors in a window the estimator reduces exactly to one minus the Kaplan-Meier survival function.
-  - **Changed by this amendment:** §0 commitments, §2 report generator, §3 curve definition and conditional-percentile rule, AC4b/AC6 wording, the §9 build-order note, the appendix headline template, and the report JSON schema (schema_version 2: `km_curve` is now `completion_incidence`).
-  - **Identified in external adversarial review** of v0.1; adopted before any provider data collection.
+- **v0.1** (2026-07-28): first public version. Early commits label this version "v0.1.1" and use "v0.2" for the deferred cross-stack study (§11).
+- **v0.2** (2026-08-15, this version; revised through 2026-09-15). Every change to a measurement or reporting rule since first publication is listed, dated, in CHANGELOG.md; the git log carries the text. Changes are adopted before any data they could affect is collected, and the body sections below carry the normative text.
 
 Framing note: the first publication is a resilience characterization of vLLM under replica loss, published under the Percentes benchmark project. The benchmark label refers to the deferred cross-stack comparison (§11).
 
@@ -92,7 +80,7 @@ Every scheduled request is a sample and ends in exactly one state:
 Reporting per window:
 - **Completed-only distributions:** TTFT and end-to-end percentiles from merged HdrHistograms over completed requests, always labeled "conditional on completion."
 - **Failure rates as first-class headline metrics:** error rate and censored rate per window, alongside in-flight loss accounting (requests active on the killed replica at fire, classified by outcome).
-- **Aalen-Johansen completion-incidence curves** (amendment A1) over ALL scheduled requests in the window: the curve is the cumulative incidence of completion, the estimated probability that a scheduled request has completed by time t.
+- **Aalen-Johansen completion-incidence curves** (adopted 2026-08-15, CHANGELOG.md) over ALL scheduled requests in the window: the curve is the cumulative incidence of completion, the estimated probability that a scheduled request has completed by time t.
   - **Completions** are the event of interest at their latency.
   - **Errors** are **competing terminal events** at their failure times: they remove probability mass that can never become a completion, so they are never treated as censored (treating them as censored is the Kaplan-Meier competing-risks error, which can only overestimate completion; the overestimate is strict whenever any completion occurs after an error).
   - **Only requests with no terminal event** by the pinned timeout or run end are censored observations, at their observed times, where the outcome remains unknown.
@@ -112,7 +100,7 @@ Reporting per window:
 
 The fire anchor is the earlier of T_inject and the recorded actual fire time (AC3 permits firing within 500 ms of T_inject). The baseline window ends one pinned client timeout (30 s) before it: a request intended later can still be unresolved when the fault fires, and its outcome would be fault-caused but baseline-attributed.
 
-Also normative: intended dispatch times fixed in advance; ITL as pooled per-window histograms of gaps between successive SSE content events (per-request p99 forbidden; per-request max named as such); an SSE content event is not inherently one token, so these are inter-chunk latencies, and they are labeled inter-token only where a one-token-per-event invariant is verified against the pinned server version: it holds by construction for the mock, it is verified for the pinned vLLM version at Phase 1 setup (section 10), and where unverified the metric is reported as inter-chunk latency; one pinned HdrHistogram configuration across all runs and windows with highestTrackableValue at least the run timeout, enabling lossless merge; windows aligned to pre-fault, guard, during-fault, post-fault, never straddling T_inject; the guard window, from baseline end to T_inject, carries the full per-window metric set and feeds no baseline-derived quantity; membership by intended dispatch time applies in both directions, so a request intended inside the guard window and terminated by the fault is counted in the guard window's error rate, and the fault window's error rate excludes those in-flight victims, which the in-flight loss accounting reports separately; throughput as completions per second per window; goodput as the fraction of a window's scheduled requests that complete within the §4 SLO, also reported as SLO-meeting completions per second; loss counts reported as a function of the pinned 30 s timeout. Because latency is re-based to intended dispatch time, a completion time can exceed the 30 s horizon by at most the pinned 50 ms maximum send skew; such completions stay on the completion-incidence curve, and quantiles are claimed only inside the horizon. A gap between successive SSE content events smaller than the histogram's 1 microsecond minimum is recorded as 1 microsecond, never zero, including chunks delivered together in one read.
+Also normative: intended dispatch times fixed in advance; ITL as pooled per-window histograms of gaps between successive SSE content events (per-request p99 forbidden; per-request max named as such); an SSE content event is not inherently one token, so these are inter-chunk latencies, and they are labeled inter-token only where a one-token-per-event invariant is verified against the pinned server version: it holds by construction for the mock, it is verified for the pinned vLLM version at Phase 1 setup (section 10), and where unverified the metric is reported as inter-chunk latency; one pinned HdrHistogram configuration across all runs and windows (lowest discernible value 1 microsecond, highest trackable value at least the 600 s run timeout, 3 significant figures), enabling lossless merge; windows aligned to pre-fault, guard, during-fault, post-fault, never straddling T_inject; the guard window, from baseline end to T_inject, carries the full per-window metric set and feeds no baseline-derived quantity; membership by intended dispatch time applies in both directions, so a request intended inside the guard window and terminated by the fault is counted in the guard window's error rate, and the fault window's error rate excludes those in-flight victims, which the in-flight loss accounting reports separately; throughput as completions per second per window; goodput as the fraction of a window's scheduled requests that complete within the §4 SLO, also reported as SLO-meeting completions per second; loss counts reported as a function of the pinned 30 s timeout. Because latency is re-based to intended dispatch time, a completion time can exceed the 30 s horizon by at most the pinned 50 ms maximum send skew; such completions stay on the completion-incidence curve, and quantiles are claimed only inside the horizon. A gap between successive SSE content events smaller than the histogram's 1 microsecond minimum is recorded as 1 microsecond, never zero, including chunks delivered together in one read.
 
 ## 4. SLO (pre-registered)
 
@@ -135,7 +123,7 @@ Under the black-hole variant the two-replica baseline is reached by partition he
   - **Under the §1 calibration** the survivor is deliberately past capacity, so the plateau is produced jointly by the offered load and the pinned 30 s client timeout shedding excess work; it is not a queueing-theory steady state.
   - **The window's end boundary** is the same run's recovery-to-pre-fault entry time, so the estimate is not independent of the pre-fault detection.
   - **Both facts** accompany TTR-to-equilibrium wherever it is reported.
-- **Independent reference (Phase 1):** a one-off single-replica no-fault calibration run per (model, config) at the identical offered load, prompt set, and timeout policy, executed before the characterization runs; its goodput, completion rate, error rate, and censored rate are published, and the within-run plateau estimates are reported alongside it.
+- **Independent reference (Phase 1):** a one-off single-replica no-fault calibration run per (model, config) at the identical offered load (2 lambda_r, the post-fault survivor load of §10), prompt set, and timeout policy, over the §1 warm-up and baseline durations, executed before the characterization runs; its goodput, completion rate, error rate, and censored rate are published, and the within-run plateau estimates are reported alongside it.
   - **The reference** is documented and appears in no §10 gate.
 
 **Detector, pre-registered numbers:** goodput over a sliding window R=10 s; recovery entry at X=90 percent of the applicable baseline goodput, exit (re-degradation) below 85 percent; hold H=30 s of consecutive windows above entry. That is the hysteresis: entry and exit thresholds separated (90 versus 85 percent) with a hold, so goodput noise at the boundary cannot toggle recovery. TTR = first entry that survives the hold, minus the fire anchor (§3). Sensitivity table over X in {85, 90, 95}, R in {5, 10, 20}, H in {15, 30, 60}; exit stays at 85 throughout the sweep, so the X=85 cell has no hysteresis margin; if TTR ordering across variants is not stable over the sweep, no ordering claim is made. The pre-fault baseline goodput is computed over the §3 baseline window; the guard window never enters it. Companion metric: integrated goodput deficit (area between baseline and observed goodput from the fire anchor to recovery), less threshold-fragile than any crossing time.
@@ -210,12 +198,12 @@ Caveat, printed in the AC output itself: passing AC1 through AC7 certifies the i
 2. Mock inference server with all fault modes including silent-hang and slow-reload.
 3. Load generator. Gated on AC1, AC2, AC2b, AC2c, AC2d.
 4. Chaos orchestrator with pre-armed expiry semantics. AC3.
-5. Metrics collector with the three-state outcome model and Aalen-Johansen incidence estimator (amendment A1). AC4, AC4b.
+5. Metrics collector with the three-state outcome model and Aalen-Johansen incidence estimator (adopted 2026-08-15, CHANGELOG.md). AC4, AC4b.
 6. Recovery detector with hysteresis, two baselines, decomposition scaffolding. AC5.
 7. Report generator. AC6.
 8. End-to-end one-command run. AC7.
 
-Verification. There is no independent human review gate: the project has one author and merges are not reviewed by another person. On every module: (a) hand-computed oracle tests, unit tests whose expected outputs are worked out by hand and recorded in the test file; the censoring implementation carries these in internal/collect/incidence_test.go, including the executed 50-errors-at-0.5-s plus 50-completions-at-1-s counterexample from the v0.1 review; (b) the unit tests under the Go race detector, and the section 8 acceptance suite (run without the race detector, whose scheduling distortion would break the timing gates), both in continuous integration on every push to main and every pull request; make test additionally runs the kind smoke test, the AC7 one-command reproduce, and the campaign end-to-end; (c) external adversarial review of the published spec and code by frontier language models, with adopted findings applied to this document; the A1 estimator correction came from that process.
+Verification. There is no independent human review gate: the project has one author and merges are not reviewed by another person. On every module: (a) hand-computed oracle tests, unit tests whose expected outputs are worked out by hand and recorded in the test file; the censoring implementation carries these in internal/collect/incidence_test.go, including the executed 50-errors-at-0.5-s plus 50-completions-at-1-s counterexample from the v0.1 review; (b) the unit tests under the Go race detector, and the section 8 acceptance suite (run without the race detector, whose scheduling distortion would break the timing gates), both in continuous integration on every push to main and every pull request; make test additionally runs the kind smoke test, the AC7 one-command reproduce, and the campaign end-to-end; (c) external adversarial review of the published spec and code by frontier language models, with adopted findings applied to this document; the estimator correction of 2026-08-15 came from that process.
 
 Language: Go or Rust for the load generator; the choice is documented with rationale; if Go, the GC-pause budget in section 2 is measured and asserted. Python is acceptable for orchestration, reconciliation, and reporting. HdrHistogram via recordValue() only.
 
@@ -232,7 +220,8 @@ lambda_max is measured once per Phase 1 environment, before any characterization
 - **lambda_max** is the highest passing rate.
 - **Each step:** 30 s settle, discarded, then 120 s measured.
 - **A step passes** iff, over its measured portion: goodput is at least 99 percent, the mean of the vLLM waiting-queue gauge is at most 1.0, and the §2 client-validity gate is clean.
-- **The procedure runs twice**; if the two lambda_max values differ by more than 10 percent of the larger value, a third ramp decides by median.
+  - **Sample coverage:** the queue mean is taken only when at least 90 percent of the samples expected at the pinned cadence landed inside the measured portion; a step short of that is not judged, and the procedure stops as an execution error recorded in the trace.
+- **The procedure runs twice**; if the two lambda_max values differ by more than 10 percent of the larger value, a third ramp decides by median; when they agree, lambda_max is the lower of the two.
 - **The full trace** (every step's rate, goodput, and queue-gauge series) is published with the report.
 - **lambda_r** is frozen at 0.65 times lambda_max, recorded in the run configuration, and unchanged for all N=5 runs of both variants.
   - **Recalibration** occurs only if a §6 pin changes, and is recorded.
@@ -251,11 +240,11 @@ Phase 1 setup verifies the one-token-per-event invariant for the pinned vLLM ver
 - **G4** (black-hole only, label-determining) observed endpoint-staleness window at least 20 s with victim-bound traffic observed inside the window
 - **G5** GPU clock and power fingerprints equal across replicas and runs (Phase 1: requires the nvidia-smi fingerprint collector; reported not applicable until it exists; Phase 1 additionally records per-replica GPU clock and throttle-reason counters over the fault window and reports them alongside G5)
 - **G6** baseline goodput at least 0.99 (section 3 goodput over the pre-fault baseline window)
-- **G7** baseline queue stability: per-replica mean of the vLLM waiting-queue gauge over the baseline window at most 1.0, protecting the calibrated band against capacity drift since calibration (evaluated from the pinned waiting-queue gauge when target.metrics_urls names one Prometheus endpoint per replica, sampled at the pinned cadence from the run epoch; a replica with no baseline sample fails coverage; reported not applicable when unset)
+- **G7** baseline queue stability: per-replica mean of the vLLM waiting-queue gauge over the baseline window at most 1.0, protecting the calibrated band against capacity drift since calibration (evaluated from the pinned waiting-queue gauge when target.metrics_urls names one Prometheus endpoint per replica, sampled at the pinned cadence from the run epoch; a replica with fewer than 90 percent of the samples expected at the pinned cadence over the baseline window fails coverage; reported not applicable when unset)
 
 Failure or non-observation of G3 or G4 strips the node-loss-representative label and the run is reported as clean-variant-equivalent (§1); the run stays valid. Every other applicable gate failure invalidates the run.
 
-**Proxy validation:** pre-register the equivalence quantities (in-flight loss fraction, TTR, survivor p95) and a tolerance; collect real spot-preemption events opportunistically (running on spot makes them free) and report their distribution against the two injected variants as a third regime. A single real event confirms only the code path, and the report says so. The tolerance, the minimum event count, and the decision rule are pinned by a numbered amendment before any spot-preemption comparison is published.
+**Proxy validation:** pre-register the equivalence quantities (in-flight loss fraction, TTR, survivor p95) and a tolerance; collect real spot-preemption events opportunistically (running on spot makes them free) and report their distribution against the two injected variants as a third regime. A single real event confirms only the code path, and the report says so. The tolerance, the minimum event count, and the decision rule are pinned, dated and published in CHANGELOG.md before any spot-preemption comparison is published.
 
 ## 11. Deferred cross-stack comparison (a future major revision)
 
