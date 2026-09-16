@@ -160,3 +160,24 @@ func TestReduceStopsAndWindows(t *testing.T) {
 		t.Fatalf("reduce over the whole run: errs=%d means=%v", errs, means)
 	}
 }
+
+func TestExtractRejectsNegativeLabelSetThatSumsPlausibly(t *testing.T) {
+	page := []byte(`# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{engine="0",model_name="a"} -1
+vllm:num_requests_waiting{engine="1",model_name="b"} 2
+`)
+	if _, err := extract(page, "vllm:num_requests_waiting", "http://x/metrics"); err == nil {
+		t.Fatal("a negative label set summing to 1 must be rejected")
+	}
+	ok := []byte(`# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{engine="0",model_name="a"} 1
+vllm:num_requests_waiting{engine="1",model_name="b"} 2
+`)
+	got, err := extract(ok, "vllm:num_requests_waiting", "http://x/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 3 {
+		t.Fatalf("got %v, want 3", got)
+	}
+}

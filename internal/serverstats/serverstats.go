@@ -62,17 +62,21 @@ func extract(page []byte, gauge, url string) (float64, error) {
 	}
 	var total float64
 	for _, m := range mf.GetMetric() {
+		var v float64
 		switch mf.GetType() {
 		case dto.MetricType_GAUGE:
-			total += m.GetGauge().GetValue()
+			v = m.GetGauge().GetValue()
 		case dto.MetricType_UNTYPED:
-			total += m.GetUntyped().GetValue()
+			v = m.GetUntyped().GetValue()
 		default:
 			return 0, fmt.Errorf("serverstats: %s: %q is a %s, not a gauge", url, gauge, mf.GetType())
 		}
-	}
-	if math.IsNaN(total) || math.IsInf(total, 0) || total < 0 {
-		return 0, fmt.Errorf("serverstats: %s: gauge %q read %v; a waiting count is finite and non-negative", url, gauge, total)
+		// Per label set: a negative sample cancelling a positive one
+		// sums to a plausible total.
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			return 0, fmt.Errorf("serverstats: %s: gauge %q read %v; a waiting count is finite and non-negative", url, gauge, v)
+		}
+		total += v
 	}
 	return total, nil
 }
