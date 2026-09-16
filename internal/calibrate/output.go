@@ -104,7 +104,7 @@ func stepRow(s *Step) string {
 	switch {
 	case s.Error != "":
 		verdict = "ERROR: " + s.Error
-	case !s.Pass:
+	case !s.Passed():
 		verdict = "FAIL: " + strings.Join(s.Reasons, "; ")
 	}
 	return fmt.Sprintf("  %10.4g %6d %9d %9d %9d %9d %8.4f %7s %6s  %s\n", s.RateRPS, s.Seed, sched, comp, errd, cens, s.Goodput, queueCell(s), gate, verdict)

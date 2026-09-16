@@ -45,8 +45,10 @@ type Step struct {
 	QueueSeries    []serverstats.Sample `json:"queue_series,omitempty"`
 	ScrapeErrors   int                  `json:"scrape_errors"`
 	Gates          loadgen.GateReport   `json:"gates"`
-	Pass           bool                 `json:"pass"`
-	Reasons        []string             `json:"reasons,omitempty"`
+	// Pass is the §10 verdict, absent until Judge decides the step. The
+	// §5 reference and a step that ended in an error carry no verdict.
+	Pass    *bool    `json:"pass,omitempty"`
+	Reasons []string `json:"reasons,omitempty"`
 	// Error is the execution error that ended the step, when one did. An
 	// errored step is not judged.
 	Error string `json:"error,omitempty"`
@@ -75,8 +77,12 @@ func Judge(s *Step) {
 	if !s.Gates.Pass {
 		s.Reasons = append(s.Reasons, "client-validity gate failed (§2)")
 	}
-	s.Pass = len(s.Reasons) == 0
+	pass := len(s.Reasons) == 0
+	s.Pass = &pass
 }
+
+// Passed reports a decided pass. An undecided step is not one.
+func (s *Step) Passed() bool { return s.Pass != nil && *s.Pass }
 
 // coverageOK reports whether samples reach the pinned fraction of the
 // expected count (§10).
@@ -161,7 +167,7 @@ func RunRamp(ctx context.Context, r Runner, o Options) (Ramp, error) {
 		Judge(&s)
 		ramp.Steps = append(ramp.Steps, s)
 		o.notify(ramp)
-		return s.Pass, nil
+		return s.Passed(), nil
 	}
 
 	last := 0.0

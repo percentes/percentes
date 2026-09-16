@@ -40,10 +40,10 @@ func TestLoadRunnerStepAgainstMock(t *testing.T) {
 		t.Fatalf("cadence %v s, %d expected samples over 7 s", s.QueueIntervalS, s.QueueExpected)
 	}
 	Judge(&s)
-	if !s.Pass && !s.Gates.Pass && s.Goodput >= config.PinnedCalibrationGoodputMin && s.QueueSamples > 0 {
+	if !s.Passed() && !s.Gates.Pass && s.Goodput >= config.PinnedCalibrationGoodputMin && s.QueueSamples > 0 {
 		t.Skipf("host contended the client: %+v", s.Gates)
 	}
-	if !s.Pass {
+	if !s.Passed() {
 		t.Fatalf("step must pass on a quiet host: reasons %v gates %+v", s.Reasons, s.Gates)
 	}
 	if s.Stats == nil || s.Stats.Completed < 10 {

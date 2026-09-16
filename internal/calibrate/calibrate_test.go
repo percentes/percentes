@@ -86,7 +86,7 @@ func TestRampCoarseThenFine(t *testing.T) {
 	if !ramp.Valid || !near(ramp.LambdaMax, 12) || ramp.Reason != "" {
 		t.Fatalf("lambda_max %v valid=%v reason=%q, want 12 valid", ramp.LambdaMax, ramp.Valid, ramp.Reason)
 	}
-	if ramp.Steps[3].Pass || !ramp.Steps[8].Pass || ramp.Steps[9].Pass {
+	if ramp.Steps[3].Passed() || !ramp.Steps[8].Passed() || ramp.Steps[9].Passed() {
 		t.Fatal("pass flags do not follow the capacity")
 	}
 	for i, s := range ramp.Steps {
@@ -211,7 +211,7 @@ func TestRampFineRampReachingTheCeilingIsInvalid(t *testing.T) {
 		t.Fatalf("fine ramp cut by the ceiling must be invalid with no lambda_max: %+v", ramp)
 	}
 	for _, s := range ramp.Steps[4:] {
-		if !s.Pass {
+		if !s.Passed() {
 			t.Fatalf("every fine step passed by construction: %+v", s)
 		}
 	}
@@ -223,7 +223,7 @@ func TestRampUnderObservedStepIsAnError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "under-observed") {
 		t.Fatalf("100 of 120 expected samples must stop the ramp: err %v", err)
 	}
-	if len(ramp.Steps) != 3 || ramp.Steps[2].Error == "" || ramp.Steps[2].Pass || ramp.Valid {
+	if len(ramp.Steps) != 3 || ramp.Steps[2].Error == "" || ramp.Steps[2].Pass != nil || ramp.Valid {
 		t.Fatalf("the short step is kept, errored and unjudged: %+v", ramp)
 	}
 }
@@ -274,8 +274,8 @@ func TestJudgeCriteria(t *testing.T) {
 	}
 	for _, c := range cases {
 		Judge(&c.s)
-		if c.s.Pass != c.pass {
-			t.Fatalf("%s: pass=%v reasons=%v", c.name, c.s.Pass, c.s.Reasons)
+		if c.s.Passed() != c.pass {
+			t.Fatalf("%s: pass=%v reasons=%v", c.name, c.s.Passed(), c.s.Reasons)
 		}
 	}
 }
@@ -365,7 +365,7 @@ func TestCalibrateKeepsThePartialTraceOnError(t *testing.T) {
 	if res == nil || len(res.Ramps) != 2 || len(res.Ramps[0].Steps) != 10 || len(res.Ramps[1].Steps) != 3 || res.Valid {
 		t.Fatalf("partial trace not kept: %+v", res)
 	}
-	if s := res.Ramps[1].Steps[2]; s.Error == "" || s.Pass || !near(s.RateRPS, 8) {
+	if s := res.Ramps[1].Steps[2]; s.Error == "" || s.Pass != nil || !near(s.RateRPS, 8) {
 		t.Fatalf("the errored step is kept with its error and rate: %+v", s)
 	}
 }
@@ -403,8 +403,19 @@ func TestReferenceRunsAtTheSurvivorLoadUnjudged(t *testing.T) {
 	if s == nil || !near(s.RateRPS, 2*res.LambdaR) || s.SettleS != config.PinnedWarmupS || s.MeasureS != config.PinnedBaselineS || s.Seed != 9000 {
 		t.Fatalf("reference step %+v", s)
 	}
-	if s.Pass || s.Reasons != nil {
+	if s.Pass != nil || s.Reasons != nil {
 		t.Fatalf("the reference is judged by no gate: %+v", s)
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published map[string]json.RawMessage
+	if err := json.Unmarshal(b, &published); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := published["pass"]; ok {
+		t.Fatalf("the published reference carries a verdict: %s", b)
 	}
 }
 
