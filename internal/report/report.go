@@ -22,7 +22,7 @@ import (
 )
 
 // Caveat is printed in every report and in the AC output itself (§8).
-const Caveat = "CAVEAT: passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behavior. Small N, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are scoped in the claims and named in the report."
+const Caveat = "CAVEAT: passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behaviour. Small N, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are scoped in the claims and named in the report."
 
 // Report is the JSON artifact: the parsed config plus every run
 // product. ConfigSHA256 covers the configuration file bytes where the
@@ -105,7 +105,7 @@ func p50Cell(s histo.Summary) string {
 }
 
 // headline fills the appendix conditional-headline template with this
-// run's measured values, honestly labeled for the mock variant.
+// run's measured values, honestly labelled for the mock variant.
 func headline(art *run.Artifacts) string {
 	fault, haveFault := art.Windows["fault"]
 	base, haveBase := art.Windows["baseline"]
@@ -113,7 +113,7 @@ func headline(art *run.Artifacts) string {
 		return "no fault/baseline windows collected; headline not applicable"
 	}
 	// §3's headline class is the KILLED replica's in-flight requests;
-	// fall back to all-replica accounting (labeled) when no victim is
+	// fall back to all-replica accounting (labelled) when no victim is
 	// attributed.
 	inFl := art.InFlight
 	pop, errored, censored := inFl.Total, inFl.Errored, inFl.Censored

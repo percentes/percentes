@@ -15,7 +15,7 @@ Replica loss is the Phase 0/1 fault class: what happens when a
 Kubernetes-served LLM inference service loses a replica under sustained
 load: the three questions SPEC.md §1 pins. Phase 0 builds and certifies the *instrument*
 against a mock inference server on a local kind cluster; passing the
-acceptance suite says nothing about real-GPU behavior.
+acceptance suite says nothing about real-GPU behaviour.
 The Phase 1 groundwork (complete, GPU-untouched) adds everything
 for the real experiment that can be verified without hardware.
 
@@ -129,7 +129,7 @@ with median+range; drops are named, never imputed).
 | Package | Role | Spec anchors | Key entry points | Tests |
 |---|---|---|---|---|
 | `internal/config` | One YAML schema drives everything; §6 pins for the Phase 0 profiles; strict decode; each carried pin enforced as an equality at load | §1–§6, §8 | `LoadFile`, `Config.Validate` | mutation test per pin |
-| `internal/mock` + `cmd/mockserver` | OpenAI-compatible SSE mock with analytic TTFT/ITL distributions and five scriptable fault modes | §2 "Local-first" | `New`, `Server.Start`, `/admin/faults` | per-mode behavior tests incl. raw-TCP no-RST |
+| `internal/mock` + `cmd/mockserver` | OpenAI-compatible SSE mock with analytic TTFT/ITL distributions and five scriptable fault modes | §2 "Local-first" | `New`, `Server.Start`, `/admin/faults` | per-mode behaviour tests incl. raw-TCP no-RST |
 | `internal/histo` | Pinned HdrHistogram wrapper; `RecordValue()` only; lint bans correction APIs | §3 | `New`, `Record`, `Summarize` | lint (repo-wide correction-API ban); AC1 oracles via internal/ac |
 | `internal/loadgen` | Open-loop generator: pre-fixed schedule, pacer+spin dispatch, SSE client, three-state classification, client-validity gates | §2, §3 | `BuildSchedule`, `Run` | in-package body + opt-in live-smoke units; AC1–AC2d + `-race` via internal/run |
 | `internal/orchestrator` | Pre-armed fault execution with armed/fire/expiry audit; injectors: mock admin, clean pod delete, node partition | §1, §2, AC3 | `Execute`, `NewMockInjector`, `NewCleanDeleteInjector`, `newNodePartitionInjector` (unexported pending Phase-1 NodeOps wiring) | AC3 + fake-ops tests |
@@ -213,7 +213,7 @@ run exits 2. An applicable gate that goes unobserved never passes.
 
 ## 7. Fault modes and their measurement signatures
 
-| Mode | Mock behavior | What the instrument must show |
+| Mode | Mock behaviour | What the instrument must show |
 |---|---|---|
 | `stall` | server-wide emission freeze, staggered flush on expiry | completions delayed; excess lands in p99.9/max (AC2); λ×D attributable samples (AC2b) |
 | `error` | 5xx on new requests; in-flight untouched | error-rate step in the fault window; goodput dip → detector TTR |
@@ -231,7 +231,7 @@ run exits 2. An applicable gate that goes unobserved never passes.
   request records, surface it through `run.Artifacts`, render it in
   `report`; AC6 asserts report completeness, so extend its field list.
 - **Add a fault mode**: `internal/mock/faults.go` engine + config enum +
-  validation + a behavior test asserting its transport-level signature
+  validation + a behaviour test asserting its transport-level signature
   (see the raw-TCP silent-hang test as the exemplar).
 - **Swap the target for real vLLM**: nothing in loadgen/collect/detect
   changes; supply Phase 1 pins in the config, and the fault variant

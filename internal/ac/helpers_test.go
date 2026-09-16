@@ -36,7 +36,7 @@ import (
 var mockBin string
 
 func TestMain(m *testing.M) {
-	fmt.Println("CAVEAT (SPEC.md §8): passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behavior.")
+	fmt.Println("CAVEAT (SPEC.md §8): passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behaviour.")
 	dir, err := os.MkdirTemp("", "percentes-ac-*")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -123,7 +123,7 @@ func launchMock(cfg *config.Config) (baseURL string, stop func(), err error) {
 }
 
 // scenario builds a validated ac-profile config from the reference file
-// with scenario-scale phases and the given mock behavior.
+// with scenario-scale phases and the given mock behaviour.
 type scenario struct {
 	warmupS, baselineS, windowS, cooldownS float64
 	tInjectS                               float64 // offset from measurement start; >= baselineS
