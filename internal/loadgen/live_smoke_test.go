@@ -14,7 +14,8 @@ import (
 //
 // Opt-in only; `make test` and CI never touch the network:
 //
-//	PERCENTES_LIVE_SMOKE=1 GROQ_API_KEY=... go test ./internal/loadgen -run TestLiveHostedSmoke -v
+//	PERCENTES_LIVE_SMOKE=1 GROQ_API_KEY=... PERCENTES_SMOKE_MODEL=<model-id> \
+//		go test ./internal/loadgen -run TestLiveHostedSmoke -v
 //
 // The offered rate is deliberately tiny (0.25 rps, 3 requests, 32 output
 // tokens each) so the run sits far under any provider free-tier limit;
@@ -29,7 +30,7 @@ func TestLiveHostedSmoke(t *testing.T) {
 	}
 	model := os.Getenv("PERCENTES_SMOKE_MODEL")
 	if model == "" {
-		model = "llama-3.1-8b-instant"
+		t.Skip("PERCENTES_SMOKE_MODEL not set: name a model id the endpoint serves")
 	}
 
 	cfg, err := config.LoadFile("../../configs/ac.reference.yaml")
