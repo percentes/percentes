@@ -51,7 +51,10 @@ hardware with the same harness and gates. Phase 1's §10 calibration ran on
 
 ## Quickstart (no GPU required)
 
-Requires Go 1.21+, Docker, and [kind](https://kind.sigs.k8s.io/).
+Requires Go 1.21 or newer, Docker, [kind](https://kind.sigs.k8s.io/),
+kubectl, python3 and curl. The Makefile and the git hooks select Go
+1.21.6, which is the toolchain the pinned linter can read; set
+`GOTOOLCHAIN` yourself to override.
 
 ```
 make test        # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
@@ -62,14 +65,29 @@ make hooks       # once per clone: run the CI fast gates on commit and push
 
 `make hooks` points git at `hooks/`: gofmt, build and golangci-lint on
 commit, and the race unit suite on push, so a change fails locally before
-it fails CI.
+it fails CI. `hooks/commit-msg` requires a subject line of 55 characters
+or fewer in lowercase conventional style, with no body.
+
+The full gate takes tens of minutes and its last three stages build a
+Docker image and drive a kind cluster. `make test-unit` is the fast path.
+The AC suite measures this machine as well as the code, so on a busy host
+the tests that depend on the §2 client-validity gate report SKIP rather
+than a defect; a green run with skips has not certified those criteria.
+The cluster stages bind host ports 18080 to 18082, which `SVC_PORT`,
+`POD_PORT` and `ADMIN_PORT` override. On macOS the host CPU gate reports
+unmeasured, so every cluster run prints `RUN INVALID (run-failing gate)`
+and exits 2 while the stage itself passes: the gates are enforced, and
+this platform cannot supply one of their inputs. Reports are written to
+`results/`.
 
 ## Layout
 
 ```
 cmd/percentes            single-run harness CLI
 cmd/percentes-campaign   N-run campaign runner (SPEC §5 repetition, §10 gates)
+cmd/percentes-calibrate  SPEC §10 capacity ramp and single-replica reference
 cmd/mockserver           fault-injectable mock inference server
+cmd/naivesweep           standalone reconnaissance probe, not instrument code
 internal/                loadgen, collect, detect, orchestrator, validity, ...
 configs/                 pinned reference configurations
 deploy/                  kind + mock manifests, reproduce scripts, Phase 1 vLLM manifest
