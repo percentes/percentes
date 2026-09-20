@@ -1,0 +1,128 @@
+# Percentes Phase 1 experiment configuration. The §10 calibration block below
+# holds the capacity measured on the Phase 1 host on 16 September 2026, from
+# the trace hashed there. The characterization runs have not been performed.
+# Run-validity gates G1-G7 (§10) verify the environment at run time.
+schema_version: 1
+profile: experiment
+
+run:
+  name: percentes-experiment-reference
+  seed: 42
+  repetitions: 5           # pinned N=5 (§5)
+  phases:
+    warmup_s: 60           # pinned (§1)
+    baseline_s: 300        # pinned (§1)
+    fault_window_timeout_s: 600  # pinned (§1)
+    cooldown_s: 60         # pinned (§1)
+
+load:
+  rate_rps: 6.24           # replicas x lambda_r (§10)
+  arrival_process: poisson
+  input_length_tokens: 512
+  max_tokens: 256          # pinned (§6)
+  ignore_eos: true         # pinned (§6)
+  unique_prefixes: true    # pinned (§6)
+  connections: 8           # >= 4 x replicas (§6)
+
+client:
+  http_timeout_s: 30       # pinned (§6)
+  retries: 0               # pinned (§6, §2)
+  placement:
+    dedicated_node: true   # pinned (§6)
+    node_class: non-spot   # pinned (§6)
+    zone: CANADA-1
+    subnet: 10.0.0.0/24
+    record_rtt: true       # pinned (§6)
+
+slo:
+  ttft_ms: 1000
+  e2e_ms: 14000
+  sweep:
+    ttft_ms: [800, 1000, 1500]
+    e2e_ms: [12000, 14000, 18000]
+
+histogram:
+  unit: us
+  lowest_discernible_value: 1
+  highest_trackable_value: 600000000
+  significant_figures: 3
+
+recovery_detector:
+  window_s: 10
+  entry_pct: 90
+  exit_pct: 85
+  hold_s: 30
+  sensitivity:
+    entry_pct: [85, 90, 95]
+    window_s: [5, 10, 20]
+    hold_s: [15, 30, 60]
+
+client_validity:
+  send_skew_p99_ms: 5
+  send_skew_max_ms: 50
+  max_cpu_pct: 70
+  cpu_window_s: 5
+  go_gc_pause_p99_ms: 1
+
+share_gate:
+  min_pct: 45
+  max_pct: 55
+
+target:
+  base_url: http://10.0.0.122:8000
+  model_name: Qwen/Qwen2.5-7B-Instruct
+  replicas: 2              # pinned topology (§1)
+
+# §10, measured 16 September 2026 on one NVIDIA L40, single replica. Both
+# ramps found the same lambda_max. lambda_r_rps is 0.65 x lambda_max_rps and
+# load.rate_rps is replicas x lambda_r_rps, both enforced at load time.
+calibration:
+  lambda_max_rps: 4.8
+  lambda_r_rps: 3.12
+  trace_sha256: 20c4a167e928826077ad2170c9ccaca46d48a9ad46eb26c21666485be5acce80
+
+fault:
+  variant: clean_delete    # pre-registered primary endpoint variant (§7)
+  t_inject_offset_s: 300   # == baseline_s: §1 has no gap phase (enforced)
+  injection_tolerance_ms: 500
+  endpoint_staleness_min_s: 20 # pinned (§1 black-hole assertion ii / §10 G4)
+  partition_duration_s: 120    # pinned black-hole pre-armed expiry (§1)
+
+pins:
+  vllm:
+    version: "0.29.0"
+    image_digest: vllm/vllm-openai@sha256:7ef5a35d1ef8ce2cf9d671dd91eec6e367c5849262e0362b4d3d4a26be0d87d2
+  model:
+    name: Qwen/Qwen2.5-7B-Instruct
+    revision: a09a35458c702b33eeacc393d103063234e8bc28
+    quantization: none
+  engine:
+    kv_cache_gb: 16        # absolute gigabytes (§6)
+    max_num_seqs: 256
+    scheduler_settings: max_num_seqs 256, max_num_batched_tokens 2048, chunked prefill on, policy fcfs, async scheduling on, cudagraph modes PIECEWISE and FULL (/server_info, 15 Sep 2026)
+    chunked_prefill: "on"
+    cuda_graphs: "on"
+    prefix_caching: "off"  # pinned off, verified from server metrics (§6)
+    continuous_batching: "on"  # pinned on, verified from server metrics (§6)
+  gpu:
+    sku: NVIDIA L40
+    driver: 570.195.03
+    cuda: 12.9 in the container (torch.version.cuda) on host driver 570.195.03 (CUDA 12.8 driver API)
+    cudnn: 9.20.0 (torch.backends.cudnn.version 92000)
+    nccl: 2.29.7
+    clock_power_policy: persistence on, clocks at driver default, power limit 300 W of 300 W, not settable in guest
+  kubernetes:
+    version: none
+    cni: none
+    # Per-connection unless the recorded mode documents a request-aware
+    # layer-7 proxy, and only then is the §1 share band enforced (§1).
+    dataplane_mode: none
+    kube_proxy_mode: none
+    node_monitor_grace_period_s: 40  # record the cluster's actual value (§1)
+  readiness_probe:
+    path: /health
+    period_s: 2
+    timeout_s: 1
+    failure_threshold: 3
+  storage:
+    weights_medium: root block volume vda (virtio, 100 GB), Hugging Face cache under /home/ubuntu/.cache/huggingface
