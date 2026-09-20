@@ -57,11 +57,15 @@ kubectl, python3 and curl. The Makefile and the git hooks select Go
 `GOTOOLCHAIN` yourself to override.
 
 ```
-make test        # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
-make test-unit   # fast path: unit/integration tests only
-make reproduce   # AC7: one-command full harness run against the local cluster
 make hooks       # once per clone: run the CI fast gates on commit and push
+make test-unit   # fast path, a few minutes: unit/integration tests only
+make reproduce   # AC7: one-command full harness run against the local cluster
+make test        # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
 ```
+
+In that order: `make hooks` before your first commit, `make test-unit` to see
+the tree is sound, then the cluster targets. `make test` runs all of them and
+takes tens of minutes.
 
 `make hooks` points git at `hooks/`: gofmt, build and golangci-lint on
 commit, and the race unit suite on push, so a change fails locally before
@@ -91,6 +95,17 @@ cmd/naivesweep           standalone reconnaissance probe, not instrument code
 internal/                loadgen, collect, detect, orchestrator, validity, ...
 configs/                 pinned reference configurations
 deploy/                  kind + mock manifests, reproduce scripts, Phase 1 vLLM manifest
+```
+
+## Pointing the probe at an endpoint
+
+`cmd/naivesweep` sweeps one OpenAI-compatible endpoint and reports what came
+back, including responses that returned 200 and carried nothing. It is
+reconnaissance and its numbers do not publish as a characterization. Its
+configuration, its limits and what it redacts are in its own documentation:
+
+```
+go doc ./cmd/naivesweep
 ```
 
 ## License
