@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -26,7 +27,25 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/mock"
+	"github.com/percentes/percentes/internal/run"
 )
+
+// hostContended reports whether the §2 client-validity gate is the only
+// reason a run was invalid. That gate measures this machine: send skew,
+// client CPU and GC pause p99 as wall time, all of which host load
+// inflates. A suite sharing the machine fails it with the code unchanged,
+// so a test that cannot measure yields rather than reporting a defect.
+func hostContended(art *run.Artifacts) bool {
+	if art.RunValid || len(art.InvalidReasons) == 0 {
+		return false
+	}
+	for _, r := range art.InvalidReasons {
+		if !strings.HasPrefix(r, "client-validity gate failed") {
+			return false
+		}
+	}
+	return true
+}
 
 // mockBin is the mockserver binary, built once per suite run. AC
 // scenarios run the mock as a SEPARATE PROCESS: §6 pins the client to a

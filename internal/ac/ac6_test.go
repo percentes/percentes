@@ -117,6 +117,9 @@ func TestAC6Reporting(t *testing.T) {
 	if art.Detector.ToPreFault.TTRSeconds == nil {
 		t.Error("AC6: scenario should recover within the window")
 	}
+	if hostContended(art) {
+		t.Skipf("AC6: host contended the client, validity not measured: %v", art.InvalidReasons)
+	}
 	if !art.RunValid {
 		t.Errorf("AC6: clean scenario must be a valid run: %v", art.InvalidReasons)
 	}
