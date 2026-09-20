@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -444,6 +445,40 @@ func TestClipCopiesWhatItKeeps(t *testing.T) {
 	}
 	if whole := clip(s[:10], 10); unsafe.StringData(whole) != unsafe.StringData(s) {
 		t.Error("clip copied a string it did not cut")
+	}
+}
+
+func TestTailShowsEveryRetainedEvent(t *testing.T) {
+	marks := make([]string, 0, tailEvents+1)
+	for i := 0; i <= tailEvents; i++ {
+		marks = append(marks, fmt.Sprintf("MARK%02d", i))
+	}
+	var b strings.Builder
+	for _, mark := range marks {
+		b.WriteString(`data: {"note":"` + mark + strings.Repeat("x", tailLimit) + `"}` + "\n\n")
+	}
+	b.WriteString("data: [DONE]\n\n")
+
+	var o outcome
+	_, _, _, lastLines, err := parseStream(strings.NewReader(b.String()), &o, redactor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lastLines) != tailEvents {
+		t.Fatalf("retained %d events, want %d", len(lastLines), tailEvents)
+	}
+	tail := tailOf(redactor{}, strings.Join(lastLines, tailSep), tailLimit)
+	if len(tail) > tailLimit {
+		t.Errorf("tail is %d bytes, over the %d limit", len(tail), tailLimit)
+	}
+	// Every retained event reaches the report; the evicted one does not.
+	for _, want := range marks[1:] {
+		if !strings.Contains(tail, want) {
+			t.Errorf("tail drops %s, so only part of the retained events is shown: %q", want, tail)
+		}
+	}
+	if strings.Contains(tail, marks[0]) {
+		t.Errorf("tail carries an evicted event: %q", tail)
 	}
 }
 

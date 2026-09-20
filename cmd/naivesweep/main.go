@@ -68,6 +68,17 @@ const bodyLimit = 4 << 10
 // Bytes kept of a printed field, and of a printed tail.
 const fieldLimit, tailLimit = 200, 300
 
+// Events kept for the printed tail, and for the head shown when nothing
+// streamed.
+const tailEvents = 3
+
+// Separator between retained events in the printed tail.
+const tailSep = " | "
+
+// Bytes kept of each retained event, so all of them and their separators
+// fill the tail rather than the first one filling it alone.
+const eventTailLimit = (tailLimit - (tailEvents-1)*len(tailSep)) / tailEvents
+
 // An endpoint value shorter than this is a parameter, and redacting it would
 // strike its characters out of unrelated report text.
 const secretMin = 8
@@ -123,8 +134,8 @@ func clip(s string, n int) string {
 
 var tailEscape = strings.NewReplacer("\n", `\n`, "\r", `\r`)
 
-func tailOf(rd redactor, s string) string {
-	return clip(tailEscape.Replace(rd.redact(s)), tailLimit)
+func tailOf(rd redactor, s string, n int) string {
+	return clip(tailEscape.Replace(rd.redact(s)), n)
 }
 
 // redactor replaces literal secrets; one re-encoded or split across events does not match.
@@ -418,7 +429,7 @@ func sweepOne(rt http.RoundTripper, cfg config, idx int) (outcome, bool, bool) {
 
 	if resp.StatusCode != http.StatusOK {
 		o.err = "non-200"
-		o.rawTail = tailOf(cfg.rd, strings.TrimSpace(readHead(resp.Body, bodyLimit, cfg.rd.longest)))
+		o.rawTail = tailOf(cfg.rd, strings.TrimSpace(readHead(resp.Body, bodyLimit, cfg.rd.longest)), tailLimit)
 		return o, false, false
 	}
 
@@ -428,7 +439,7 @@ func sweepOne(rt http.RoundTripper, cfg config, idx int) (outcome, bool, bool) {
 	if !firstTok.IsZero() {
 		o.ttftMs = float64(firstTok.Sub(t0).Microseconds()) / 1000
 	}
-	o.rawTail = tailOf(cfg.rd, strings.Join(lastLines, " | "))
+	o.rawTail = tailOf(cfg.rd, strings.Join(lastLines, tailSep), tailLimit)
 
 	ok, flag := verdict(&o, sawDone, head, scanErr, cfg)
 	return o, ok, flag
@@ -453,7 +464,7 @@ func verdict(o *outcome, sawDone bool, head []string, scanErr error, cfg config)
 		return false, false
 	case !o.sawData:
 		o.err = "no Server-Sent Events data lines; endpoint did not stream"
-		o.rawTail = tailOf(cfg.rd, strings.Join(head, " | "))
+		o.rawTail = tailOf(cfg.rd, strings.Join(head, tailSep), tailLimit)
 		return false, false
 	case !sawDone:
 		o.err = "stream ended before [DONE]"
@@ -563,8 +574,8 @@ func parseStream(r io.Reader, o *outcome, rd redactor) (sawDone bool, firstTok t
 		if string(payload) == "[DONE]" {
 			return true
 		}
-		lastLines = append(lastLines, tailOf(rd, string(payload)))
-		if len(lastLines) > 3 {
+		lastLines = append(lastLines, tailOf(rd, string(payload), eventTailLimit))
+		if len(lastLines) > tailEvents {
 			lastLines = lastLines[1:]
 		}
 		if decode(payload) {
@@ -601,8 +612,8 @@ func parseStream(r io.Reader, o *outcome, rd redactor) (sawDone bool, firstTok t
 			}
 			continue
 		}
-		if len(head) < 3 {
-			head = append(head, tailOf(rd, string(line)))
+		if len(head) < tailEvents {
+			head = append(head, tailOf(rd, string(line), eventTailLimit))
 		}
 		v, ok := bytes.CutPrefix(line, []byte("data:"))
 		if !ok {
