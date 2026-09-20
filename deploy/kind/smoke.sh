@@ -11,8 +11,8 @@ KIND=${KIND:-kind}
 CLUSTER=${CLUSTER:-percentes}
 IMAGE=${IMAGE:-percentes/mockserver:dev}
 NS=percentes
-SVC_PORT=18080
-POD_PORT=18081
+SVC_PORT=${SVC_PORT:-18080}
+POD_PORT=${POD_PORT:-18081}
 
 say()  { printf '\n== %s\n' "$*"; }
 fail() { printf 'SMOKE FAIL: %s\n' "$*" >&2; exit 1; }

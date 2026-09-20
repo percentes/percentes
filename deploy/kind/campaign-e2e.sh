@@ -10,7 +10,7 @@ KIND=${KIND:-kind}
 CLUSTER=${CLUSTER:-percentes}
 IMAGE=${IMAGE:-percentes/mockserver:dev}
 NS=percentes
-ADMIN_PORT=18082
+ADMIN_PORT=${ADMIN_PORT:-18082}
 OUT=results/kind-campaign
 
 say()  { printf '\n== %s\n' "$*"; }
@@ -41,10 +41,12 @@ VICTIM=$(kubectl -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0]
 say "victim replica: $VICTIM"
 kubectl -n "$NS" port-forward "pod/$VICTIM" "$ADMIN_PORT:8000" >/dev/null 2>&1 &
 PF_PIDS+=($!)
+admin_ready=
 for _ in $(seq 30); do
-  curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:$ADMIN_PORT/health" && break
+  if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:$ADMIN_PORT/health"; then admin_ready=1; break; fi
   sleep 0.5
 done
+[ -n "$admin_ready" ] || fail "admin port-forward never answered on 127.0.0.1:$ADMIN_PORT; another process may hold it (set ADMIN_PORT=<free port>)"
 
 say "running the N=2 campaign (fresh-path CGO_ENABLED=0 binary; ~5 min)"
 BIN="$(mktemp -d)/percentes-campaign"
