@@ -3,6 +3,11 @@
 # that). Install with `make hooks`; bypass once with `git commit --no-verify`.
 set -u
 
+# The pinned linter is built with go1.21.6 and cannot read export data from
+# a newer toolchain. Unset GOTOOLCHAIN in the environment to override.
+GOTOOLCHAIN=${GOTOOLCHAIN:-go1.21.6}
+export GOTOOLCHAIN
+
 die() { printf '\npre-commit: %s\n\n' "$1" >&2; exit 1; }
 
 # gofmt checks the STAGED Go files only, so an unrelated dirty file in the

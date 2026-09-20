@@ -5,6 +5,11 @@
 # Bypass once with `git push --no-verify`.
 set -u
 
+# The pinned linter is built with go1.21.6 and cannot read export data from
+# a newer toolchain. Unset GOTOOLCHAIN in the environment to override.
+GOTOOLCHAIN=${GOTOOLCHAIN:-go1.21.6}
+export GOTOOLCHAIN
+
 printf 'pre-push: go test -race -short ./...\n'
 go test -race -short ./... -count=1 || {
 	printf '\npre-push: unit tests failed, push aborted\n\n' >&2

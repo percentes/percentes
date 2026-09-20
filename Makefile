@@ -1,12 +1,15 @@
 # Percentes Phase 0 harness. `make test` is the single gate: unit tests,
 # the SPEC.md §8 AC suite, the kind smoke suite, the AC7 reproduce, and
 # the campaign e2e.
+# The pinned golangci-lint is built with go1.21.6 and cannot read export
+# data from a newer toolchain, so every go command here selects that one.
+export GOTOOLCHAIN = go1.21.6
 GO      ?= go
 KIND    ?= $(shell command -v kind 2>/dev/null || echo $(HOME)/go/bin/kind)
 CLUSTER ?= percentes
 IMAGE   ?= percentes/mockserver:dev
 
-.PHONY: all build test test-unit docker-build kind-up kind-down kind-smoke clean hooks
+.PHONY: all build bins test test-unit test-ac docker-build kind-up kind-down kind-smoke reproduce campaign-e2e clean hooks
 
 all: build
 
