@@ -16,37 +16,51 @@ OUT=results/kind-campaign
 say()  { printf '\n== %s\n' "$*"; }
 fail() { printf 'CAMPAIGN-E2E FAIL: %s\n' "$*" >&2; exit 1; }
 
+# Every cluster call names the kind context.
+KCTX="kind-$CLUSTER"
+kc() { kubectl --context "$KCTX" "$@"; }
+
+# True when nothing listens on 127.0.0.1:$1.
+port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
 PF_PIDS=()
 cleanup() { for pid in "${PF_PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
 say "ensuring cluster, image, and deployment (config from configs/kind-campaign.yaml)"
-if ! "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+if ! grep -qxF "$CLUSTER" <<<"$("$KIND" get clusters 2>/dev/null)"; then
   "$KIND" create cluster --name "$CLUSTER" --config deploy/kind/kind-config.yaml --wait 120s
 fi
 docker build -t "$IMAGE" . >/dev/null
 "$KIND" load docker-image "$IMAGE" --name "$CLUSTER"
-kubectl delete namespace "$NS" --ignore-not-found --wait=true
-kubectl apply -f deploy/mock/mock.yaml
-kubectl -n "$NS" create configmap percentes-run-config \
-  --from-file=run.yaml=configs/kind-campaign.yaml --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NS" rollout status deploy/percentes-mock --timeout=180s
+# Captured first: grep -q exiting early breaks the pipe under pipefail.
+CONTEXTS=$(kubectl config get-contexts -o name)
+grep -qxF "$KCTX" <<<"$CONTEXTS" || fail "kubeconfig has no context $KCTX"
+kc delete namespace "$NS" --ignore-not-found --wait=true
+kc apply -f deploy/mock/mock.yaml
+kc -n "$NS" create configmap percentes-run-config \
+  --from-file=run.yaml=configs/kind-campaign.yaml --dry-run=client -o yaml | kc apply -f -
+kc -n "$NS" rollout status deploy/percentes-mock --timeout=180s
 for _ in $(seq 60); do
   curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health && break
   sleep 1
 done
 curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health || fail "NodePort data path not reachable"
 
-VICTIM=$(kubectl -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
+VICTIM=$(kc -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
 say "victim replica: $VICTIM"
-kubectl -n "$NS" port-forward "pod/$VICTIM" "$ADMIN_PORT:8000" >/dev/null 2>&1 &
+port_free "$ADMIN_PORT" || fail "127.0.0.1:$ADMIN_PORT is already held; set ADMIN_PORT=<free port>"
+# Backgrounded directly so $! is kubectl's pid.
+kubectl --context "$KCTX" -n "$NS" port-forward "pod/$VICTIM" "$ADMIN_PORT:8000" >/dev/null 2>&1 &
 PF_PIDS+=($!)
+PF_PID=$!
 admin_ready=
 for _ in $(seq 30); do
+  kill -0 "$PF_PID" 2>/dev/null || fail "admin port-forward exited before answering /health"
   if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:$ADMIN_PORT/health"; then admin_ready=1; break; fi
   sleep 0.5
 done
-[ -n "$admin_ready" ] || fail "admin port-forward never answered on 127.0.0.1:$ADMIN_PORT; another process may hold it (set ADMIN_PORT=<free port>)"
+[ -n "$admin_ready" ] || fail "admin port-forward never answered on 127.0.0.1:$ADMIN_PORT"
 
 say "running the N=2 campaign (fresh-path CGO_ENABLED=0 binary; ~5 min)"
 BIN="$(mktemp -d)/percentes-campaign"

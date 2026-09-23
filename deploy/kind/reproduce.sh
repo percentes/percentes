@@ -18,13 +18,20 @@ OUT=results/kind-e2e
 say()  { printf '\n== %s\n' "$*"; }
 fail() { printf 'AC7 FAIL: %s\n' "$*" >&2; exit 1; }
 
+# Every cluster call names the kind context.
+KCTX="kind-$CLUSTER"
+kc() { kubectl --context "$KCTX" "$@"; }
+
+# True when nothing listens on 127.0.0.1:$1.
+port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
 PF_PIDS=()
 cleanup() { for pid in "${PF_PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
 say "ensuring kind cluster with the NodePort mapping"
-if "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
-  if ! docker port "$CLUSTER-control-plane" 2>/dev/null | grep -q '30800'; then
+if grep -qxF "$CLUSTER" <<<"$("$KIND" get clusters 2>/dev/null)"; then
+  if ! grep -q 30800 <<<"$(docker port "$CLUSTER-control-plane" 2>/dev/null)"; then
     echo "   existing cluster lacks the 30800->18000 mapping; recreating"
     "$KIND" delete cluster --name "$CLUSTER"
     "$KIND" create cluster --name "$CLUSTER" --config deploy/kind/kind-config.yaml --wait 120s
@@ -36,13 +43,16 @@ fi
 say "building and loading the mock image"
 docker build -t "$IMAGE" . >/dev/null
 "$KIND" load docker-image "$IMAGE" --name "$CLUSTER"
+# Captured first: grep -q exiting early breaks the pipe under pipefail.
+CONTEXTS=$(kubectl config get-contexts -o name)
+grep -qxF "$KCTX" <<<"$CONTEXTS" || fail "kubeconfig has no context $KCTX"
 
 say "deploying two replicas (config from configs/kind-e2e.yaml)"
-kubectl delete namespace "$NS" --ignore-not-found --wait=true
-kubectl apply -f deploy/mock/mock.yaml
-kubectl -n "$NS" create configmap percentes-run-config \
-  --from-file=run.yaml=configs/kind-e2e.yaml --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NS" rollout status deploy/percentes-mock --timeout=180s
+kc delete namespace "$NS" --ignore-not-found --wait=true
+kc apply -f deploy/mock/mock.yaml
+kc -n "$NS" create configmap percentes-run-config \
+  --from-file=run.yaml=configs/kind-e2e.yaml --dry-run=client -o yaml | kc apply -f -
+kc -n "$NS" rollout status deploy/percentes-mock --timeout=180s
 
 say "waiting for the NodePort data path"
 for _ in $(seq 60); do
@@ -51,16 +61,20 @@ for _ in $(seq 60); do
 done
 curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health || fail "service not reachable on host port 18000"
 
-VICTIM=$(kubectl -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
+VICTIM=$(kc -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
 say "victim replica: $VICTIM (admin via port-forward :$ADMIN_PORT)"
-kubectl -n "$NS" port-forward "pod/$VICTIM" "$ADMIN_PORT:8000" >/dev/null 2>&1 &
+port_free "$ADMIN_PORT" || fail "127.0.0.1:$ADMIN_PORT is already held; set ADMIN_PORT=<free port>"
+# Backgrounded directly so $! is kubectl's pid.
+kubectl --context "$KCTX" -n "$NS" port-forward "pod/$VICTIM" "$ADMIN_PORT:8000" >/dev/null 2>&1 &
 PF_PIDS+=($!)
+PF_PID=$!
 admin_ready=
 for _ in $(seq 30); do
+  kill -0 "$PF_PID" 2>/dev/null || fail "admin port-forward exited before answering /health"
   if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:$ADMIN_PORT/health"; then admin_ready=1; break; fi
   sleep 0.5
 done
-[ -n "$admin_ready" ] || fail "admin port-forward never answered on 127.0.0.1:$ADMIN_PORT; another process may hold it (set ADMIN_PORT=<free port>)"
+[ -n "$admin_ready" ] || fail "admin port-forward never answered on 127.0.0.1:$ADMIN_PORT"
 
 say "building and running the harness (one config drives the run)"
 # Build static (CGO_ENABLED=0) to a FRESH path every run. Two macOS

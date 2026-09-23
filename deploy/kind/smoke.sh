@@ -17,11 +17,18 @@ POD_PORT=${POD_PORT:-18081}
 say()  { printf '\n== %s\n' "$*"; }
 fail() { printf 'SMOKE FAIL: %s\n' "$*" >&2; exit 1; }
 
+# Every cluster call names the kind context.
+KCTX="kind-$CLUSTER"
+kc() { kubectl --context "$KCTX" "$@"; }
+
 PF_PIDS=()
 cleanup() {
   for pid in "${PF_PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
 }
 trap cleanup EXIT
+
+# True when nothing listens on 127.0.0.1:$1.
+port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 # Wait until a port-forward answers.
 wait_http() { # url attempts
@@ -35,26 +42,31 @@ wait_http() { # url attempts
 
 say "loading image into kind cluster '$CLUSTER'"
 "$KIND" load docker-image "$IMAGE" --name "$CLUSTER"
+# Captured first: grep -q exiting early breaks the pipe under pipefail.
+CONTEXTS=$(kubectl config get-contexts -o name)
+grep -qxF "$KCTX" <<<"$CONTEXTS" || fail "kubeconfig has no context $KCTX"
 
 say "deploying mock (fresh namespace, config from configs/kind-e2e.yaml)"
-kubectl delete namespace "$NS" --ignore-not-found --wait=true
-kubectl apply -f deploy/mock/mock.yaml
-kubectl -n "$NS" create configmap percentes-run-config \
-  --from-file=run.yaml=configs/kind-e2e.yaml --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NS" rollout status deploy/percentes-mock --timeout=180s
+kc delete namespace "$NS" --ignore-not-found --wait=true
+kc apply -f deploy/mock/mock.yaml
+kc -n "$NS" create configmap percentes-run-config \
+  --from-file=run.yaml=configs/kind-e2e.yaml --dry-run=client -o yaml | kc apply -f -
+kc -n "$NS" rollout status deploy/percentes-mock --timeout=180s
 
 say "asserting replica placement"
-READY=$(kubectl -n "$NS" get deploy percentes-mock -o jsonpath='{.status.readyReplicas}')
+READY=$(kc -n "$NS" get deploy percentes-mock -o jsonpath='{.status.readyReplicas}')
 [ "$READY" = "2" ] || fail "expected 2 ready replicas, got ${READY:-0}"
-CLUSTER_NODES=$(kubectl get nodes --no-headers | wc -l | tr -d ' ')
-SPREAD=$(kubectl -n "$NS" get pods -l app=percentes-mock -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u | wc -l | tr -d ' ')
+CLUSTER_NODES=$(kc get nodes --no-headers | wc -l | tr -d ' ')
+SPREAD=$(kc -n "$NS" get pods -l app=percentes-mock -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u | wc -l | tr -d ' ')
 if [ "$CLUSTER_NODES" -ge 2 ] && [ "$SPREAD" != "2" ]; then
   fail "multi-node cluster but replicas share a node (anti-affinity not honored)"
 fi
 echo "   replicas=2 across $SPREAD node(s) ($CLUSTER_NODES in cluster)"
 
 say "SSE streaming through the Service"
-kubectl -n "$NS" port-forward svc/percentes-mock "$SVC_PORT:8000" >/dev/null 2>&1 &
+port_free "$SVC_PORT" || fail "127.0.0.1:$SVC_PORT is already held; set SVC_PORT=<free port>"
+# Backgrounded directly so $! is kubectl's pid.
+kubectl --context "$KCTX" -n "$NS" port-forward svc/percentes-mock "$SVC_PORT:8000" >/dev/null 2>&1 &
 PF_PIDS+=($!)
 wait_http "http://127.0.0.1:$SVC_PORT/health" || fail "service port-forward never became ready"
 
@@ -67,13 +79,14 @@ printf '%s' "$SSE" | grep -q 'data: \[DONE\]' || fail "SSE stream missing [DONE]
 [ "$DATA_LINES" = "6" ] || fail "expected 6 SSE data lines (4 tokens + finish + DONE), got $DATA_LINES"
 
 say "per-replica metrics and admin-armed fault on one pod"
-POD=$(kubectl -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
-kubectl -n "$NS" port-forward "pod/$POD" "$POD_PORT:8000" >/dev/null 2>&1 &
+POD=$(kc -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
+port_free "$POD_PORT" || fail "127.0.0.1:$POD_PORT is already held; set POD_PORT=<free port>"
+kubectl --context "$KCTX" -n "$NS" port-forward "pod/$POD" "$POD_PORT:8000" >/dev/null 2>&1 &
 PF_PIDS+=($!)
 wait_http "http://127.0.0.1:$POD_PORT/health" || fail "pod port-forward never became ready"
 
-curl -sf "http://127.0.0.1:$POD_PORT/metrics" | grep -q 'percentes_mock_' \
-  || fail "per-replica Prometheus counters not exposed"
+METRICS=$(curl -sf "http://127.0.0.1:$POD_PORT/metrics")
+grep -q 'percentes_mock_' <<<"$METRICS" || fail "per-replica Prometheus counters not exposed"
 
 ARM=$(curl -sf -X POST -H 'Content-Type: application/json' \
   -d '{"mode":"error","delay_s":0,"duration_s":3}' \
@@ -93,14 +106,14 @@ POST=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'Content-Type: ap
 [ "$POST" = "200" ] || fail "expected 200 after fault expiry, got $POST"
 
 say "verifying recorded cluster pins against the live cluster"
-K8S_ACTUAL=$(kubectl version -o json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["serverVersion"]["gitVersion"])')
-K8S_PINNED=$(kubectl -n "$NS" get cm percentes-run-config -o jsonpath='{.data.run\.yaml}' \
+K8S_ACTUAL=$(kc version -o json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["serverVersion"]["gitVersion"])')
+K8S_PINNED=$(kc -n "$NS" get cm percentes-run-config -o jsonpath='{.data.run\.yaml}' \
   | awk '/^  kubernetes:/{f=1;next} f&&/version:/{print $2; exit}')
 [ "$K8S_ACTUAL" = "$K8S_PINNED" ] \
   || fail "pins.kubernetes.version ($K8S_PINNED) does not record the live cluster ($K8S_ACTUAL)"
-NMGP_PINNED=$(kubectl -n "$NS" get cm percentes-run-config -o jsonpath='{.data.run\.yaml}' \
+NMGP_PINNED=$(kc -n "$NS" get cm percentes-run-config -o jsonpath='{.data.run\.yaml}' \
   | awk '/node_monitor_grace_period_s:/{print $2; exit}')
-NMGP_FLAG=$(kubectl -n kube-system get pod -l component=kube-controller-manager \
+NMGP_FLAG=$(kc -n kube-system get pod -l component=kube-controller-manager \
   -o jsonpath='{.items[0].spec.containers[0].command}' \
   | grep -o 'node-monitor-grace-period=[0-9smh]*' | cut -d= -f2 || true)
 # Flag absent means the compiled default applies: 40s on the pinned v1.30.
