@@ -1,19 +1,17 @@
 package loadgen
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/sse"
 )
 
 // execute runs one scheduled request to its terminal state. The pinned
@@ -38,7 +36,10 @@ func (g *gen) execute(r *Request) {
 		return
 	}
 	defer resp.Body.Close()
-	r.Replica = resp.Header.Get("X-Percentes-Replica")
+	// A hosted endpoint controls the replica header, so only the mock's is recorded.
+	if !g.cfg.Target.Hosted {
+		r.Replica = resp.Header.Get("X-Percentes-Replica")
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		class := ErrStatusOther
@@ -50,57 +51,54 @@ func (g *gen) execute(r *Request) {
 		return
 	}
 
-	reader := bufio.NewReader(resp.Body)
+	var malformed, sawDone bool
 	var prevTokNs int64
-	for {
-		line, err := reader.ReadString('\n')
-		// A non-EOF read error means the partial line is untrusted:
-		// classify the transport failure, never the fragment.
-		if err != nil && err != io.EOF {
-			g.classifyStreamErr(r, err)
-			return
+	_, dropped, err := sse.Events(resp.Body, eventLimit, func(payload []byte) bool {
+		// [DONE] may carry trailing whitespace.
+		if string(bytes.TrimSpace(payload)) == "[DONE]" {
+			sawDone = true
+			return true
 		}
-		l := strings.TrimSpace(line)
-		switch {
-		case l == "data: [DONE]":
-			// [DONE] with no prior content event: an empty stream is
-			// errored, never a completion (§3).
+		// A chunk counts as a token only when its decoded delta carries
+		// nonempty content; an undecodable payload is a malformed
+		// stream (§3).
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(payload, &chunk) != nil {
+			malformed = true
+			return true
+		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			r.Tokens++
+			now := g.now()
 			if r.FirstTokNs == 0 {
-				r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrEmptyStream, g.now()
-				return
+				r.FirstTokNs = now
+			} else {
+				r.ITLsUs = append(r.ITLsUs, (now-prevTokNs)/1000)
 			}
-			r.Outcome, r.DoneNs = OutcomeCompleted, g.now()
-			return
-		case strings.HasPrefix(l, "data: "):
-			// A chunk counts as a token only when its decoded delta carries
-			// nonempty content; an undecodable payload is a malformed
-			// stream (§3).
-			var chunk struct {
-				Choices []struct {
-					Delta struct {
-						Content string `json:"content"`
-					} `json:"delta"`
-				} `json:"choices"`
-			}
-			if json.Unmarshal([]byte(strings.TrimPrefix(l, "data: ")), &chunk) != nil {
-				r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, g.now()
-				return
-			}
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				r.Tokens++
-				now := g.now()
-				if r.FirstTokNs == 0 {
-					r.FirstTokNs = now
-				} else {
-					r.ITLsUs = append(r.ITLsUs, (now-prevTokNs)/1000)
-				}
-				prevTokNs = now
-			}
+			prevTokNs = now
 		}
-		if err != nil {
-			g.classifyStreamErr(r, err)
-			return
-		}
+		return false
+	})
+	switch {
+	case err != nil:
+		// A read error, or a line over the bound, leaves the partial event untrusted.
+		g.classifyStreamErr(r, err)
+	case malformed || dropped > 0 || !sawDone:
+		// An undecodable or oversized event, or a stream that ended before
+		// [DONE]: malformed stream (§3).
+		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, g.now()
+	case r.FirstTokNs == 0:
+		// [DONE] with no prior content event: an empty stream is errored,
+		// never a completion (§3).
+		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrEmptyStream, g.now()
+	default:
+		r.Outcome, r.DoneNs = OutcomeCompleted, g.now()
 	}
 }
 
@@ -109,13 +107,24 @@ func (g *gen) execute(r *Request) {
 // budget (§6); hosted endpoints reject or ignore it, so a hosted target
 // omits it and accepts natural stops.
 func (g *gen) requestBody(r *Request) string {
-	body := fmt.Sprintf(
-		`{"model":%q,"messages":[{"role":"user","content":"cs-%d-%d %s"}],"stream":true,"max_tokens":%d`,
-		g.model, g.cfg.Run.Seed, r.Index, g.filler, g.cfg.Load.MaxTokens)
-	if !g.cfg.Target.Hosted {
-		body += `,"ignore_eos":true`
+	type message struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
 	}
-	return body + "}"
+	body, _ := json.Marshal(struct {
+		Model     string    `json:"model"`
+		Messages  []message `json:"messages"`
+		Stream    bool      `json:"stream"`
+		MaxTokens int       `json:"max_tokens"`
+		IgnoreEOS bool      `json:"ignore_eos,omitempty"`
+	}{
+		Model:     g.model,
+		Messages:  []message{{Role: "user", Content: fmt.Sprintf("cs-%d-%d %s", g.cfg.Run.Seed, r.Index, g.filler)}},
+		Stream:    true,
+		MaxTokens: g.cfg.Load.MaxTokens,
+		IgnoreEOS: !g.cfg.Target.Hosted,
+	})
+	return string(body)
 }
 
 // newRequest attaches the fixed headers. The bearer token is added only
@@ -134,6 +143,9 @@ func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error
 	req.GetBody = nil
 	return req, nil
 }
+
+// Ceiling on one scanned line and on the data fields assembled into one event.
+const eventLimit = 1 << 20
 
 func (g *gen) classifyTransportErr(r *Request, err error) {
 	r.DoneNs = g.now()

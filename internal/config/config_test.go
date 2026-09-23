@@ -176,6 +176,12 @@ func TestPinnedValueEnforcement(t *testing.T) {
 		{"node monitor grace unset", acRef, func(c *Config) { c.Pins.Kubernetes.NodeMonitorGracePeriodS = 0 }, "node_monitor_grace_period_s"},
 		{"ac profile with real variant", acRef, func(c *Config) { c.Fault.Variant = VariantCleanDelete }, "fault.variant"},
 		{"mock section missing", acRef, func(c *Config) { c.Mock = nil }, "mock: required"},
+		{"base_url does not parse", acRef, func(c *Config) { c.Target.BaseURL = "http://user:pw@host/%zz" }, "target.base_url"},
+		{"base_url without a host", acRef, func(c *Config) { c.Target.BaseURL = "host:8000" }, "target.base_url"},
+		{"metrics_urls entry does not parse", acRef, func(c *Config) {
+			c.Target.MetricsURLs = []string{"http://m/%zz", "http://m:9090/metrics"}
+			c.Target.QueueGauge = "vllm:num_requests_waiting"
+		}, "target.metrics_urls[0]"},
 
 		{"experiment t_inject gap after baseline", experimentRef, func(c *Config) { c.Fault.TInjectOffsetS = 500 }, "fault.t_inject_offset_s"},
 		{"experiment phases shortened", experimentRef, func(c *Config) { c.Run.Phases.BaselineS = 60 }, "run.phases.baseline_s"},

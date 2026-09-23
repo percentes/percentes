@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"reflect"
 	"sort"
 	"strings"
@@ -226,6 +227,8 @@ func (c *Config) validateShareGate(v *validator) {
 func (c *Config) validateTarget(v *validator) {
 	if c.Target.BaseURL == "" {
 		v.errf("target.base_url: required")
+	} else if !parsesAsURL(c.Target.BaseURL) {
+		v.errf("target.base_url: not a URL with a scheme and a host")
 	}
 	if c.Profile == ProfileExperiment {
 		v.pinI("target.replicas", c.Target.Replicas, PinnedExperimentReplicas)
@@ -248,6 +251,11 @@ func (c *Config) validateTarget(v *validator) {
 		}
 		if n != c.Target.Replicas {
 			v.errf("target.metrics_urls: %d entries for %d replicas (one per replica, §10 G7)", n, c.Target.Replicas)
+		}
+		for i, u := range c.Target.MetricsURLs {
+			if !parsesAsURL(u) {
+				v.errf("target.metrics_urls[%d]: not a URL with a scheme and a host", i)
+			}
 		}
 		if c.Target.QueueGauge == "" {
 			v.errf("target.queue_gauge: required when target.metrics_urls is set (§10 G7)")
@@ -481,4 +489,10 @@ func (v *validator) result() error {
 		return nil
 	}
 	return errors.New("invalid config:\n  - " + strings.Join(v.errs, "\n  - "))
+}
+
+// parsesAsURL reports whether s parses with a scheme and a host.
+func parsesAsURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && u.Scheme != "" && u.Host != ""
 }

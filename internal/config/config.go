@@ -11,6 +11,8 @@
 // a pinned number does not load.
 package config
 
+import "github.com/percentes/percentes/internal/redact"
+
 // Profile selects which validation regime applies.
 //
 //   - "experiment": the Phase 1 real-run profile. Phase durations (§1),
@@ -159,6 +161,22 @@ type Config struct {
 	// Raw holds the configuration file bytes as parsed, so the report's
 	// config hash covers the published file.
 	Raw []byte `yaml:"-" json:"-"`
+}
+
+// Redacted returns a shallow copy for publication with userinfo, query and
+// fragment removed from the target and metrics endpoints. Raw, the hashed
+// file bytes, is not carried.
+func (c *Config) Redacted() *Config {
+	out := *c
+	out.Target.BaseURL = redact.URL(c.Target.BaseURL)
+	if len(c.Target.MetricsURLs) > 0 {
+		out.Target.MetricsURLs = make([]string, len(c.Target.MetricsURLs))
+		for i, u := range c.Target.MetricsURLs {
+			out.Target.MetricsURLs[i] = redact.URL(u)
+		}
+	}
+	out.Raw = nil
+	return &out
 }
 
 // Calibration is the recorded §10 calibration: lambda_max as measured,

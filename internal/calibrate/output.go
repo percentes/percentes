@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/redact"
 )
 
 // Output is the published calibration record: the full trace (§10), the
@@ -24,6 +25,15 @@ type Output struct {
 	Config           *config.Config `json:"config"`
 	Calibration      *Result        `json:"calibration"`
 	Error            string         `json:"error,omitempty"`
+}
+
+// Redact strips credentials from the endpoints the trace records.
+func (o *Output) Redact() {
+	o.TargetURL = redact.URL(o.TargetURL)
+	o.MetricsURL = redact.URL(o.MetricsURL)
+	if o.Config != nil {
+		o.Config = o.Config.Redacted()
+	}
 }
 
 const stepHeader = "  %10s %6s %9s %9s %9s %9s %8s %7s %6s  %s\n"

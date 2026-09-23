@@ -16,6 +16,8 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+
+	"github.com/percentes/percentes/internal/redact"
 )
 
 // Sample is one gauge reading from one endpoint.
@@ -35,18 +37,22 @@ type Mean struct {
 func fetch(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, redact.Wrap("serverstats: "+redact.URL(url), err, client.Timeout)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redact.Wrap("serverstats: "+redact.URL(url), err, client.Timeout)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		return nil, fmt.Errorf("serverstats: %s: status %d", url, resp.StatusCode)
+		return nil, fmt.Errorf("serverstats: %s: status %d", redact.URL(url), resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	page, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, redact.Wrap("serverstats: "+redact.URL(url), err, client.Timeout)
+	}
+	return page, nil
 }
 
 // extract returns the value of gauge in a text page, summed across label
@@ -54,11 +60,11 @@ func fetch(ctx context.Context, client *http.Client, url string) ([]byte, error)
 func extract(page []byte, gauge, url string) (float64, error) {
 	families, err := (&expfmt.TextParser{}).TextToMetricFamilies(bytes.NewReader(page))
 	if err != nil {
-		return 0, fmt.Errorf("serverstats: %s: parse: %w", url, err)
+		return 0, fmt.Errorf("serverstats: %s: metrics text did not parse", redact.URL(url))
 	}
 	mf, ok := families[gauge]
 	if !ok {
-		return 0, fmt.Errorf("serverstats: %s: gauge %q not exposed", url, gauge)
+		return 0, fmt.Errorf("serverstats: %s: gauge %q not exposed", redact.URL(url), gauge)
 	}
 	var total float64
 	for _, m := range mf.GetMetric() {
@@ -69,12 +75,12 @@ func extract(page []byte, gauge, url string) (float64, error) {
 		case dto.MetricType_UNTYPED:
 			v = m.GetUntyped().GetValue()
 		default:
-			return 0, fmt.Errorf("serverstats: %s: %q is a %s, not a gauge", url, gauge, mf.GetType())
+			return 0, fmt.Errorf("serverstats: %s: %q is a %s, not a gauge", redact.URL(url), gauge, mf.GetType())
 		}
 		// Per label set: a negative sample cancelling a positive one
 		// sums to a plausible total.
 		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-			return 0, fmt.Errorf("serverstats: %s: gauge %q read %v; a waiting count is finite and non-negative", url, gauge, v)
+			return 0, fmt.Errorf("serverstats: %s: gauge %q read %v; a waiting count is finite and non-negative", redact.URL(url), gauge, v)
 		}
 		total += v
 	}

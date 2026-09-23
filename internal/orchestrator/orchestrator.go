@@ -11,9 +11,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/percentes/percentes/internal/redact"
 )
 
 // Timestamps is the §2 audit record. Wall times cross process boundaries
@@ -107,7 +110,7 @@ func NewMockInjector(adminBaseURL, mode string, abortAfterTokens int) *MockInjec
 		AdminBaseURL:     adminBaseURL,
 		Mode:             mode,
 		AbortAfterTokens: abortAfterTokens,
-		client:           &http.Client{Timeout: 5 * time.Second},
+		client:           &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
 
@@ -123,12 +126,12 @@ func (m *MockInjector) Arm(ctx context.Context, fireIn time.Duration, durationS 
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.AdminBaseURL+"/admin/faults", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return redact.Wrap("mock injector", err, m.client.Timeout)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return err
+		return redact.Wrap("mock injector: arm", err, m.client.Timeout)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
@@ -138,7 +141,7 @@ func (m *MockInjector) Arm(ctx context.Context, fireIn time.Duration, durationS 
 		ID int `json:"id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rec); err != nil {
-		return err
+		return errors.New("mock injector: arm response did not decode")
 	}
 	m.faultID = rec.ID
 	return nil

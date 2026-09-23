@@ -79,6 +79,8 @@ func Generate(art *run.Artifacts, gates *validity.Report) ([]byte, string, error
 			return nil, "", fmt.Errorf("report: marshal config: %w", err)
 		}
 	}
+	pub := *art
+	pub.Config = art.Config.Redacted()
 	rep := &Report{
 		SchemaVersion:    2,
 		ConfigSHA256:     fmt.Sprintf("%x", sha256.Sum256(cfgRaw)),
@@ -86,7 +88,7 @@ func Generate(art *run.Artifacts, gates *validity.Report) ([]byte, string, error
 		Caveat:           Caveat,
 		Headline:         headline(art),
 		ValidityGates:    gates,
-		Artifacts:        art,
+		Artifacts:        &pub,
 	}
 	raw, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {

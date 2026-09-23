@@ -98,6 +98,7 @@ func main() {
 		StartedWall:      time.Now(),
 		Config:           cfg,
 	}
+	out.Redact()
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		log.Fatalf("percentes-calibrate: %v", err)
 	}
