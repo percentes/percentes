@@ -261,6 +261,11 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 // baseline-derived quantity, so no guard-window request enters it.
 func shareGate(cfg *config.Config, res *loadgen.Result, guardStartNs int64, victim string) ShareGateResult {
 	out := ShareGateResult{Shares: map[string]float64{}}
+	if cfg.Target.Hosted {
+		out.Note = "hosted target: §1 share gate not applicable (§6)"
+		out.Pass = true
+		return out
+	}
 	if cfg.Target.Replicas < 2 {
 		out.Note = "single-replica target: §1 share gate applies to multi-replica topologies"
 		out.Pass = true

@@ -141,3 +141,14 @@ func TestMissingReplicaFailsInEveryRegime(t *testing.T) {
 		}
 	}
 }
+
+// A hosted target has no replica attribution, so the §1 share gate is not
+// applicable and cannot fail the run (§6).
+func TestShareGateNotApplicableWhenHosted(t *testing.T) {
+	cfg := regimeCfg("l7-envoy-cilium-ingress")
+	cfg.Target.Hosted = true
+	sg := shareGate(cfg, baselineRequests(map[string]int{"": 1000}), nominalGuardStartNs, "")
+	if sg.Applicable || !sg.Pass {
+		t.Fatalf("applicable=%v pass=%v note=%q", sg.Applicable, sg.Pass, sg.Note)
+	}
+}
