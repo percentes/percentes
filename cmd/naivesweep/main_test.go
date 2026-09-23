@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +16,8 @@ import (
 	"testing/iotest"
 	"time"
 	"unsafe"
+
+	"github.com/percentes/percentes/internal/redact"
 )
 
 const goodEvent = `data: {"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"
@@ -118,30 +119,6 @@ func TestReasoningWithoutFinishReasonIsFlagged(t *testing.T) {
 			}
 			if flag != c.wantFlag {
 				t.Errorf("flagged=%v, want %v", flag, c.wantFlag)
-			}
-		})
-	}
-}
-
-func TestScanSSELinesTerminators(t *testing.T) {
-	for _, c := range []struct{ name, in string }{
-		{"lf", "a\nb\nc"},
-		{"crlf", "a\r\nb\r\nc"},
-		{"cr", "a\rb\rc"},
-		{"mixed", "a\r\nb\rc"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			var got []string
-			sc := bufio.NewScanner(strings.NewReader(c.in))
-			sc.Split(scanSSELines)
-			for sc.Scan() {
-				got = append(got, sc.Text())
-			}
-			if err := sc.Err(); err != nil {
-				t.Fatal(err)
-			}
-			if strings.Join(got, ",") != "a,b,c" {
-				t.Fatalf("got %q, want a,b,c", strings.Join(got, ","))
 			}
 		})
 	}
@@ -517,19 +494,6 @@ func TestCheckEndpoint(t *testing.T) {
 	}
 }
 
-func TestURLSecrets(t *testing.T) {
-	got := urlSecrets("https://user:" + urlSecret + "@host/v1?key=" + urlSecret + "x&v=1&api-version=2024-06-01")
-	want := map[string]bool{urlSecret: true, urlSecret + "x": true, "2024-06-01": true}
-	if len(got) != len(want) {
-		t.Fatalf("got %q, want %d values", got, len(want))
-	}
-	for _, s := range got {
-		if !want[s] {
-			t.Errorf("unexpected secret %q", s)
-		}
-	}
-}
-
 func TestEndpointCredentialsStayOutOfMessages(t *testing.T) {
 	for _, in := range []string{
 		"http://127.0.0.1:1/v1/chat/completions?key=" + urlSecret,
@@ -564,7 +528,7 @@ func TestEndpointCredentialsStayOutOfMessages(t *testing.T) {
 		defer srv.Close()
 		endpoint := srv.URL + "/v1?key=" + urlSecret
 		cfg := fixtureConfig(endpoint, "")
-		cfg.rd = newRedactor(urlSecrets(endpoint)...)
+		cfg.rd = newRedactor(redact.Secrets(endpoint)...)
 		o, _, _ := sweepOne(srv.Client().Transport, cfg, 0)
 		line := exhibitLine(o)
 		if strings.Contains(line, urlSecret) || !strings.Contains(line, "[REDACTED]") {

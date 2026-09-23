@@ -33,6 +33,34 @@ func URL(s string) string {
 	return u.String()
 }
 
+// SecretMin is the shortest endpoint value treated as a credential.
+const SecretMin = 8
+
+// Secrets returns the endpoint's username, password and query values of at
+// least SecretMin bytes, for a replacer.
+func Secrets(s string) []string {
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	add := func(v string) {
+		if len(v) >= SecretMin {
+			out = append(out, v)
+		}
+	}
+	add(u.User.Username())
+	if p, ok := u.User.Password(); ok {
+		add(p)
+	}
+	for _, vs := range u.Query() {
+		for _, v := range vs {
+			add(v)
+		}
+	}
+	return out
+}
+
 // ErrorText prints err in full only when its type cannot carry response
 // bytes; any other error is named by type. timeout is reported for a
 // deadline or a timing-out net.Error.

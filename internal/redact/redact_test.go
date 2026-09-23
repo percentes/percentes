@@ -33,6 +33,22 @@ func TestURLStripsCredentialsAndKeepsTheHost(t *testing.T) {
 	}
 }
 
+func TestSecretsHonoursTheFloor(t *testing.T) {
+	got := Secrets("https://user:" + secret + "@host/v1?key=" + secret + "x&n=1&api-version=2024-06-01")
+	want := map[string]bool{secret: true, secret + "x": true, "2024-06-01": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %d values", got, len(want))
+	}
+	for _, s := range got {
+		if !want[s] {
+			t.Errorf("unexpected secret %q", s)
+		}
+	}
+	if Secrets("https://user:"+secret+"@host/%zz") != nil {
+		t.Error("an unparseable endpoint yields secrets")
+	}
+}
+
 func TestErrorTextIsAllowlisted(t *testing.T) {
 	for _, c := range []struct {
 		name    string

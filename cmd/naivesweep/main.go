@@ -39,12 +39,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -54,6 +52,9 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/percentes/percentes/internal/redact"
+	"github.com/percentes/percentes/internal/sse"
 )
 
 // Bytes read after parsing stops, before the body is closed. 4 KiB.
@@ -78,10 +79,6 @@ const tailSep = " | "
 // Bytes kept of each retained event, so all of them and their separators
 // fill the tail rather than the first one filling it alone.
 const eventTailLimit = (tailLimit - (tailEvents-1)*len(tailSep)) / tailEvents
-
-// An endpoint value shorter than this is a parameter, and redacting it would
-// strike its characters out of unrelated report text.
-const secretMin = 8
 
 const clientTimeout = 45 * time.Second
 
@@ -190,7 +187,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	rd := newRedactor(append([]string{key}, urlSecrets(endpoint)...)...)
+	rd := newRedactor(append([]string{key}, redact.Secrets(endpoint)...)...)
 	if err := checkEndpoint(endpoint); err != nil {
 		fmt.Fprintf(os.Stderr, "SWEEP_ENDPOINT: %v\n", rd.redact(err.Error()))
 		os.Exit(1)
@@ -323,50 +320,6 @@ func checkEndpoint(s string) error {
 	return nil
 }
 
-// urlSecrets returns the endpoint's userinfo and query values of at least secretMin bytes.
-func urlSecrets(s string) []string {
-	u, err := url.Parse(s)
-	if err != nil {
-		return nil
-	}
-	var out []string
-	add := func(v string) {
-		if len(v) >= secretMin {
-			out = append(out, v)
-		}
-	}
-	add(u.User.Username())
-	if p, ok := u.User.Password(); ok {
-		add(p)
-	}
-	for _, vs := range u.Query() {
-		for _, v := range vs {
-			add(v)
-		}
-	}
-	return out
-}
-
-// errorText prints an error in full only when its type cannot carry response bytes.
-func errorText(err error, timeout time.Duration) string {
-	var op *net.OpError
-	var cert *tls.CertificateVerificationError
-	var ne net.Error
-	switch {
-	case errors.As(err, &op):
-		return op.Error()
-	case errors.As(err, &cert):
-		return cert.Error()
-	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Sprintf("timed out after %s", timeout)
-	case errors.As(err, &ne) && ne.Timeout():
-		return fmt.Sprintf("timed out after %s", timeout)
-	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return "connection closed"
-	}
-	return fmt.Sprintf("%T, text withheld", err)
-}
-
 // readHead reads at most limit bytes; a body cut there also loses the cut-1 bytes before it.
 func readHead(r io.Reader, limit, cut int) string {
 	b, _ := io.ReadAll(io.LimitReader(r, int64(limit)+1))
@@ -404,7 +357,7 @@ func sweepOne(rt http.RoundTripper, cfg config, idx int) (outcome, bool, bool) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.endpoint, bytes.NewReader(body))
 	if err != nil {
-		o.err = "build request: " + errorText(err, cfg.timeout)
+		o.err = "build request: " + redact.ErrorText(err, cfg.timeout)
 		return o, false, false
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -413,7 +366,7 @@ func sweepOne(rt http.RoundTripper, cfg config, idx int) (outcome, bool, bool) {
 	t0 := time.Now()
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
-		o.err = "transport: " + cfg.rd.redact(errorText(err, cfg.timeout))
+		o.err = "transport: " + cfg.rd.redact(redact.ErrorText(err, cfg.timeout))
 		return o, false, false
 	}
 	defer resp.Body.Close()
@@ -448,7 +401,7 @@ func sweepOne(rt http.RoundTripper, cfg config, idx int) (outcome, bool, bool) {
 func verdict(o *outcome, sawDone bool, head []string, scanErr error, cfg config) (bool, bool) {
 	switch {
 	case scanErr != nil:
-		msg := "stream: " + cfg.rd.redact(errorText(scanErr, cfg.timeout))
+		msg := "stream: " + cfg.rd.redact(redact.ErrorText(scanErr, cfg.timeout))
 		if errors.Is(scanErr, bufio.ErrTooLong) {
 			msg = "stream: line exceeded 1MB buffer"
 		}
@@ -475,35 +428,6 @@ func verdict(o *outcome, sawDone bool, head []string, scanErr error, cfg config)
 	}
 
 	return true, o.finishReason == "" && o.contentChunk == 0 && o.refusalChunk == 0
-}
-
-// Line feed, carriage return, or the pair ends a Server-Sent Events line.
-func scanSSELines(data []byte, atEOF bool) (int, []byte, error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-	for i := 0; i < len(data); i++ {
-		switch data[i] {
-		case '\n':
-			return i + 1, data[:i], nil
-		case '\r':
-			if i+1 < len(data) {
-				if data[i+1] == '\n' {
-					return i + 2, data[:i], nil
-				}
-				return i + 1, data[:i], nil
-			}
-			if atEOF {
-				return i + 1, data[:i], nil
-			}
-			// A trailing carriage return may yet be followed by a line feed.
-			return 0, nil, nil
-		}
-	}
-	if atEOF {
-		return len(data), data, nil
-	}
-	return 0, nil, nil
 }
 
 // parseStream reads one Server-Sent Events response into o. An event's data
@@ -592,8 +516,8 @@ func parseStream(r io.Reader, o *outcome, rd redactor) (sawDone bool, firstTok t
 	}
 
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, eventLimit), eventLimit)
-	sc.Split(scanSSELines)
+	sc.Buffer(make([]byte, 4096), eventLimit)
+	sc.Split(sse.SplitLines)
 	var event []byte
 	dropped, firstLine := false, true
 	for sc.Scan() {
