@@ -228,7 +228,7 @@ func (c *Config) validateTarget(v *validator) {
 	if c.Target.BaseURL == "" {
 		v.errf("target.base_url: required")
 	} else if !parsesAsURL(c.Target.BaseURL) {
-		v.errf("target.base_url: not a URL with a scheme and a host")
+		v.errf("target.base_url: not an http or https URL with a host")
 	}
 	if c.Profile == ProfileExperiment {
 		v.pinI("target.replicas", c.Target.Replicas, PinnedExperimentReplicas)
@@ -254,7 +254,7 @@ func (c *Config) validateTarget(v *validator) {
 		}
 		for i, u := range c.Target.MetricsURLs {
 			if !parsesAsURL(u) {
-				v.errf("target.metrics_urls[%d]: not a URL with a scheme and a host", i)
+				v.errf("target.metrics_urls[%d]: not an http or https URL with a host", i)
 			}
 		}
 		if c.Target.QueueGauge == "" {
@@ -491,8 +491,8 @@ func (v *validator) result() error {
 	return errors.New("invalid config:\n  - " + strings.Join(v.errs, "\n  - "))
 }
 
-// parsesAsURL reports whether s parses with a scheme and a host.
+// parsesAsURL reports whether s parses with an http or https scheme and a host.
 func parsesAsURL(s string) bool {
 	u, err := url.Parse(s)
-	return err == nil && u.Scheme != "" && u.Host != ""
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }

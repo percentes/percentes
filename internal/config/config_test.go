@@ -178,6 +178,7 @@ func TestPinnedValueEnforcement(t *testing.T) {
 		{"mock section missing", acRef, func(c *Config) { c.Mock = nil }, "mock: required"},
 		{"base_url does not parse", acRef, func(c *Config) { c.Target.BaseURL = "http://user:pw@host/%zz" }, "target.base_url"},
 		{"base_url without a host", acRef, func(c *Config) { c.Target.BaseURL = "host:8000" }, "target.base_url"},
+		{"base_url with another scheme", acRef, func(c *Config) { c.Target.BaseURL = "ftp://host:21/v1" }, "target.base_url"},
 		{"metrics_urls entry does not parse", acRef, func(c *Config) {
 			c.Target.MetricsURLs = []string{"http://m/%zz", "http://m:9090/metrics"}
 			c.Target.QueueGauge = "vllm:num_requests_waiting"
