@@ -91,7 +91,7 @@ cmd/percentes            single-run harness CLI
 cmd/percentes-campaign   N-run campaign runner (SPEC §5 repetition, §10 gates)
 cmd/percentes-calibrate  SPEC §10 capacity ramp and single-replica reference
 cmd/mockserver           fault-injectable mock inference server
-cmd/naivesweep           standalone reconnaissance probe, not instrument code
+cmd/naivesweep           standalone reconnaissance probe, outside the instrument
 internal/                loadgen, collect, detect, orchestrator, validity, ...
 configs/                 pinned reference configurations
 deploy/                  kind + mock manifests, reproduce scripts, Phase 1 vLLM manifest
@@ -101,7 +101,7 @@ deploy/                  kind + mock manifests, reproduce scripts, Phase 1 vLLM 
 
 `cmd/naivesweep` sweeps one OpenAI-compatible endpoint and reports what came
 back, including responses that returned 200 and carried nothing. It is
-reconnaissance and its numbers do not publish as a characterization. Its
+reconnaissance, and nothing it prints is a published measurement. Its
 configuration, its limits and what it redacts are in its own documentation:
 
 ```
