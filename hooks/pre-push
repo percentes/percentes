@@ -6,7 +6,7 @@
 set -u
 
 # The pinned linter is built with go1.21.6 and cannot read export data from
-# a newer toolchain. Unset GOTOOLCHAIN in the environment to override.
+# a newer toolchain. Set GOTOOLCHAIN to another value to override.
 GOTOOLCHAIN=${GOTOOLCHAIN:-go1.21.6}
 export GOTOOLCHAIN
 
