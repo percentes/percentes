@@ -1,6 +1,8 @@
 # Percentes Phase 1 experiment configuration. The §10 calibration block below
-# holds the capacity measured on the Phase 1 host on 16 September 2026, from
-# the trace hashed there. The characterization runs have not been performed.
+# holds the capacity measured on the Phase 1 host on 16 September 2026, against
+# a standalone container without Kubernetes, from the trace hashed there. §10
+# measures lambda_max inside the experiment's environment with its exact pins;
+# that run and the characterization runs have not been performed.
 # Run-validity gates G1-G7 (§10) verify the environment at run time.
 schema_version: 1
 profile: experiment

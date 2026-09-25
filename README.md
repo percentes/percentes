@@ -46,8 +46,10 @@ Phase 0 builds and certifies the measurement instrument against a mock
 OpenAI-compatible SSE server on a local kind cluster: passing the
 acceptance suite certifies the measurement machinery only;
 real-GPU claims wait for Phase 1, which characterizes real vLLM on GPU
-hardware with the same harness and gates. Phase 1's §10 calibration ran on
-16 September 2026; the characterization runs have not.
+hardware with the same harness and gates. Phase 1's §10 calibration procedure
+ran on one L40 on 16 September 2026 against a standalone container; the
+calibration inside the experiment's Kubernetes environment and the
+characterization runs have not.
 
 ## Quickstart (no GPU required)
 

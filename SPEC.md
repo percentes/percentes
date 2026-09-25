@@ -1,6 +1,6 @@
 # v0.2 Harness Spec: Replica-Loss Resilience Characterization for Kubernetes LLM Inference
 ### Project: Percentes. This document is the authoritative specification for the Percentes harness.
-### Status: Phase 0 (mock-only, zero GPU) implemented; §8 acceptance suite passed against this text on 15 September 2026. Phase 1: the §10 calibration ran on one NVIDIA L40 on 16 September 2026; characterization runs pending.
+### Status: Phase 0 (mock-only, zero GPU) implemented; §8 acceptance suite passed against this text on 15 September 2026. Phase 1: the §10 calibration procedure ran on one NVIDIA L40 on 16 September 2026 against a standalone container; the calibration inside the experiment's environment (§10) and the characterization runs are pending.
 
 ## 0. Scope and versions
 
