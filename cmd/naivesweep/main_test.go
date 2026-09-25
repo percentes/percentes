@@ -46,6 +46,7 @@ func TestParseStreamFramings(t *testing.T) {
 		// A line holding one space names a field and does not end the event.
 		{"space-named field inside an event", "data: {\"choices\":[\n \ndata: {\"delta\":{\"content\":\"Hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"},
 		{"trailing space on a data line", strings.Replace(goodEvent, "}]}\n", "}]} \n", 1)},
+		{"trailing space after [DONE]", strings.Replace(goodEvent, "[DONE]\n", "[DONE] \n", 1)},
 		// A final event without a trailing blank line is still dispatched.
 		{"no trailing blank line", strings.TrimRight(goodEvent, "\n")},
 	}

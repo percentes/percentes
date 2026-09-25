@@ -495,7 +495,8 @@ func parseStream(r io.Reader, o *outcome, rd redactor) (sawDone bool, firstTok t
 	}
 
 	handle := func(payload []byte) bool {
-		if string(payload) == "[DONE]" {
+		// [DONE] may carry trailing whitespace.
+		if string(bytes.TrimSpace(payload)) == "[DONE]" {
 			return true
 		}
 		lastLines = append(lastLines, tailOf(rd, string(payload), eventTailLimit))
