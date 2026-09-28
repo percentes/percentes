@@ -9,7 +9,8 @@ import (
 	"github.com/percentes/percentes/internal/loadgen"
 )
 
-// tol returns the AC1 tolerance: ±2% or ±1ms, whichever is greater (us).
+// tol returns the tolerance for acceptance criterion (AC) 1: ±2% or
+// ±1ms, whichever is greater (us).
 func tol(valueUs int64) int64 {
 	t := valueUs * 2 / 100
 	if t < 1000 {
@@ -26,8 +27,9 @@ func within(t *testing.T, name string, gotUs, wantUs int64) {
 }
 
 // TestAC1MeasurementCorrectness: reported p50/p95/p99 against a known
-// injected distribution — uniform TTFT on [400,600] ms, fixed ITL 10 ms,
-// so e2e = TTFT + 2550 ms and every percentile has a closed form.
+// injected distribution: uniform time to first token (TTFT) on
+// [400,600] ms, fixed inter-token latency (ITL) 10 ms, so end-to-end
+// latency (e2e) = TTFT + 2550 ms and every percentile has a closed form.
 func TestAC1MeasurementCorrectness(t *testing.T) {
 	if testing.Short() {
 		t.Skip("AC suite skipped in -short mode")

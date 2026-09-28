@@ -71,11 +71,11 @@ func TestShareBandEnforcedUnderPerRequestBalancing(t *testing.T) {
 	}
 }
 
-// Under per-connection routing the share is descriptive: it is still
-// measured and reported, but it cannot fail the run, because the quantity
-// is a binomial draw over the connection count rather than a property of
-// the system under test. A layer-4 dataplane written in eBPF binds the
-// connection the same way kube-proxy does (§1).
+// Under per-connection routing the share is descriptive: it is still measured
+// and reported, but it cannot fail the run, because the quantity is a
+// binomial draw over the connection count rather than a property of the
+// system under test. A layer-4 dataplane written in extended Berkeley Packet
+// Filter (eBPF) binds the connection the same way kube-proxy does (§1).
 func TestShareDescriptiveUnderPerConnectionRouting(t *testing.T) {
 	for _, dp := range []string{"kube-proxy-iptables", "ebpf-cilium"} {
 		res := baselineRequests(map[string]int{"pod-a": 580, "pod-b": 420}) // 58/42

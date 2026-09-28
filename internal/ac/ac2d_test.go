@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// TestAC2dClientValidityGateFires: under injected client CPU pressure
-// (busy-loops on 80% of cores for the whole run), the CPU gate fires on
-// the pinned thresholds (sustained > 70% over a 5 s window) rather than
-// silently degrading.
+// TestAC2dClientValidityGateFires: under injected client central
+// processing unit (CPU) pressure (busy-loops on 80% of cores for the
+// whole run), the CPU gate fires on the pinned thresholds (sustained >
+// 70% over a 5 s window) rather than silently degrading.
 func TestAC2dClientValidityGateFires(t *testing.T) {
 	if testing.Short() {
 		t.Skip("AC suite skipped in -short mode")

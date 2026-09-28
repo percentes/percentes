@@ -8,10 +8,11 @@ import (
 	"github.com/percentes/percentes/internal/config"
 )
 
-// TestStreamTimingFixed: configurable TTFT and per-token latency are the
-// mock's core contract (§2). Fixed distributions make nominal timings
-// exact lower bounds (sleeps never return early); upper bounds are
-// generous for CI scheduling noise.
+// TestStreamTimingFixed: configurable time to first token (TTFT) and
+// per-token latency are the mock's core contract (§2). Fixed
+// distributions make nominal timings exact lower bounds (sleeps never
+// return early); upper bounds are generous for continuous integration
+// (CI) scheduling noise.
 func TestStreamTimingFixed(t *testing.T) {
 	cfg := baseMockCfg()
 	cfg.TTFT = fixed(300)

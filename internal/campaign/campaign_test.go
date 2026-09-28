@@ -56,8 +56,10 @@ func baseCfg(t *testing.T) *config.Config {
 	return cfg
 }
 
-// N=5 clean-delete campaign: the equilibrium TTR is the PRIMARY endpoint,
-// heavy-tailed (median-led), and its CoV is surfaced as the noise floor.
+// A clean-delete campaign of N=5 runs (N, the repetition count): the
+// equilibrium time to recovery (TTR) is the PRIMARY endpoint, heavy-tailed
+// (median-led), and its coefficient of variation (CoV) is surfaced as the
+// noise floor.
 func TestCampaignPrimaryEndpoint(t *testing.T) {
 	cfg := baseCfg(t)
 	cfg.Fault.Variant = config.VariantCleanDelete

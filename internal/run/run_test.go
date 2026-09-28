@@ -157,7 +157,8 @@ func TestExecuteEndToEndUnderRace(t *testing.T) {
 	if art.Windows["fault"].ErrorRate == 0 {
 		t.Error("the armed error window must surface in the fault window's error rate")
 	}
-	// The artifacts must be JSON-serializable in full (report embedding).
+	// The artifacts must serialize in full as JavaScript Object Notation
+	// (JSON), which the report embeds.
 	if _, err := json.Marshal(art); err != nil {
 		t.Fatalf("artifacts must marshal: %v", err)
 	}

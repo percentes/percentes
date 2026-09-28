@@ -26,8 +26,9 @@ func runDetector(t *testing.T, sc scenario) (*detect.Result, *loadgen.Result, in
 	return detect.Run(cfg, buckets, res.WarmupEndNs, anchor, res.FaultEndNs), res, fireNs
 }
 
-// TestAC5ScriptedRecovery: a scripted 20 s outage yields TTR within +-R
-// (10 s) of the script; both baselines are reported distinctly.
+// TestAC5ScriptedRecovery: a scripted 20 s outage yields time to
+// recovery (TTR) within +-R (the detector window, 10 s) of the script;
+// both baselines are reported distinctly.
 func TestAC5ScriptedRecovery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("AC suite skipped in -short mode")

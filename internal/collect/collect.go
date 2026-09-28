@@ -7,7 +7,7 @@
 //   - Every scheduled request is a sample ending in exactly one of
 //     completed / errored / censored.
 //   - Completed-only latency distributions, always labeled conditional on
-//     completion. Errored and censored requests NEVER enter latency
+//     completion. Errored and censored requests never enter latency
 //     histograms.
 //   - Failure rates (error rate, censored rate) are first-class.
 //   - Aalen-Johansen completion-incidence curves over ALL scheduled
@@ -86,7 +86,7 @@ type Stats struct {
 
 	Incidence IncidenceCurve `json:"completion_incidence"`
 	// ConditionalCaveat: error+censored fraction exceeds 5%, so
-	// completed-only percentiles MUST be read against the incidence curve (§3).
+	// completed-only percentiles are read against the incidence curve (§3).
 	ConditionalCaveat bool `json:"conditional_caveat"`
 
 	ThroughputRPS float64 `json:"throughput_rps"` // completions per second
@@ -97,7 +97,7 @@ type Stats struct {
 	// recomputed over the pinned 3x3 threshold grid.
 	GoodputSweep []SweepPoint `json:"goodput_sweep"`
 
-	// Order-statistic confidence intervals for p95/p99 (§7 tail policy),
+	// Order-statistic confidence intervals (CIs) for p95/p99 (§7 tail policy),
 	// whose endpoints are order statistics of the raw completed samples
 	// (interval ranks via the normal approximation to the binomial),
 	// where the sample budget permits.

@@ -1,8 +1,9 @@
 // Package mock implements the Phase 0 mock inference server (SPEC.md §2
-// "Local-first"): an OpenAI-compatible SSE server with configurable TTFT
-// and per-token latency and scriptable fault modes: stall, error,
-// throttle (429), stream-abort, silent-hang (no RST), and
-// slow-reload-on-reschedule.
+// "Local-first"): an OpenAI-compatible Server-Sent Events (SSE) server
+// with configurable time to first token (TTFT) and inter-token latency
+// (ITL), and scriptable fault modes: stall, error, throttle (429),
+// stream-abort, silent-hang and slow-reload-on-reschedule. A silent hang
+// sends no Transmission Control Protocol (TCP) reset (RST).
 //
 // The data plane is /v1/chat/completions and /health. /admin and /metrics
 // are out-of-band harness instrumentation and stay reachable during
@@ -127,8 +128,8 @@ func (s *Server) Close() error {
 func (s *Server) ready() bool { return time.Now().After(s.readyAt) }
 
 // blackhole detaches the connection from net/http and never writes to it:
-// no bytes, no FIN, no RST — not even the implicit 200 that net/http
-// emits when a handler returns, and immune to Server.Close teardown
+// no bytes, no FIN, no RST, nor the implicit 200 that net/http emits
+// when a handler returns, and immune to Server.Close teardown
 // (hijacked connections are not tracked by the http.Server). It parks
 // until the CLIENT abandons the connection (its close makes the read
 // fail) and only then releases the fd. Silent-hang window expiry

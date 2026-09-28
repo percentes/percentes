@@ -10,7 +10,7 @@
 //   - For plausibly heavy-tailed scalars (the TTRs), the median and the
 //     min-max range lead; the t-interval carries a normality caveat and
 //     is NOT the headline. Callers pass Heavy=true for such scalars.
-//   - Bootstrap at N=5 is forbidden — there is no bootstrap anywhere.
+//   - Bootstrap at N=5 is forbidden (§7).
 //   - No MDE / power claim is made for the single-stack study.
 package stats
 

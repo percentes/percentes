@@ -29,8 +29,8 @@ func pinnedParams(t *testing.T) *config.Config {
 
 const sec = int64(1e9)
 
-// Clean scripted recovery: outage [40,60), full service after. Leading
-// windows put entry at the fault-clear boundary: TTR = 20 s.
+// Clean scripted recovery: outage [40,60), full service after. Leading windows
+// put entry at the fault-clear boundary: time to recovery (TTR) = 20 s.
 func TestDetectCleanRecovery(t *testing.T) {
 	cfg := pinnedParams(t)
 	buckets := mkBuckets(160, func(s int) int {

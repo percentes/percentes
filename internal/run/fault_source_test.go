@@ -11,9 +11,10 @@ import (
 
 // hostContended reports whether the §2 client-validity gate is the only
 // reason a run was invalid. That gate measures this machine: send skew,
-// client CPU, and GC pause p99 as wall time, which host load inflates
-// too. A parallel suite fails it with the code unchanged, so a test that
-// asserts validity yields here; the §8 suite, run alone, is where a real
+// client central processing unit (CPU), and garbage collection (GC)
+// pause p99 as wall time, which host load inflates too. A parallel
+// suite fails it with the code unchanged, so a test that asserts
+// validity yields here; the §8 suite, run alone, is where a real
 // client-gate regression shows. Any other invalid reason still fails.
 func hostContended(art *Artifacts) bool {
 	if art.RunValid || len(art.InvalidReasons) == 0 {

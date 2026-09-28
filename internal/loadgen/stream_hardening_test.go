@@ -2,8 +2,8 @@ package loadgen
 
 import "testing"
 
-// A non-JSON payload on a data: line is a malformed stream (§3), never
-// a countable token.
+// A data: line whose payload is not JavaScript Object Notation (JSON)
+// is a malformed stream (§3), never a countable token.
 func TestMalformedChunkErrored(t *testing.T) {
 	srv := sseServer(t, "data: {\"content\": not-json\n\n", "data: [DONE]\n\n")
 	defer srv.Close()

@@ -33,7 +33,8 @@ func TestStatus429Errored(t *testing.T) {
 	}
 }
 
-// SSE-looking bytes in a 429 body are not parsed as tokens.
+// Bytes shaped like Server-Sent Events (SSE) in a 429 body are not
+// parsed as tokens.
 func TestStatus429BodyIgnored(t *testing.T) {
 	srv := statusServer(http.StatusTooManyRequests,
 		"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n")

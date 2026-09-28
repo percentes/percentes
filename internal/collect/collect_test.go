@@ -24,7 +24,8 @@ func TestCollectThreeStateAccounting(t *testing.T) {
 	cfg := testCfg(t)
 	sec := int64(1e9)
 	reqs := []loadgen.Request{
-		// completed in-window: TTFT 0.5s, e2e 2s, meets SLO
+		// completed in-window: time to first token (TTFT) 0.5s, e2e 2s,
+		// meets the service-level objective (SLO)
 		{Index: 0, IntendedNs: 10 * sec, DispatchNs: 10*sec + 1e6, FirstTokNs: 10*sec + 5e8, DoneNs: 12 * sec, Outcome: loadgen.OutcomeCompleted, ITLsUs: []int64{5000, 5000}},
 		// completed but SLO-violating TTFT (1.5s)
 		{Index: 1, IntendedNs: 11 * sec, DispatchNs: 11*sec + 1e6, FirstTokNs: 11*sec + 15*1e8, DoneNs: 13 * sec, Outcome: loadgen.OutcomeCompleted},

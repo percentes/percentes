@@ -4,8 +4,8 @@
 // against the in-process mock; they are skipped in -short mode and run
 // without the race detector (timing fidelity).
 //
-// Printed by TestMain, per §8: passing AC1-AC7 certifies the instrument
-// against the mock.
+// Printed by TestMain, per §8: passing acceptance criteria (AC) 1
+// through 7 certifies the instrument against the mock.
 package ac
 
 import (
@@ -32,9 +32,10 @@ import (
 
 // hostContended reports whether the §2 client-validity gate is the only
 // reason a run was invalid. That gate measures this machine: send skew,
-// client CPU and GC pause p99 as wall time, all of which host load
-// inflates. A suite sharing the machine fails it with the code unchanged,
-// so a test that cannot measure yields rather than reporting a defect.
+// client central processing unit (CPU) and garbage collection (GC) pause
+// p99 as wall time, all of which host load inflates. A suite sharing the
+// machine fails it with the code unchanged, so a test that cannot
+// measure skips.
 func hostContended(art *run.Artifacts) bool {
 	if art.RunValid || len(art.InvalidReasons) == 0 {
 		return false
@@ -204,9 +205,10 @@ func fixed(ms float64) config.LatencyDist {
 }
 
 // ---------------------------------------------------------------------------
-// Shared reference stall run (used by AC2, AC2b, AC2c): fixed TTFT 500 ms,
-// ITL 10 ms (nominal e2e = 500 + 255*10 = 3050 ms), stall D = 10 s
-// starting 5 s into the fault window.
+// Shared reference stall run (used by AC2, AC2b, AC2c): fixed time to
+// first token (TTFT) 500 ms, inter-token latency (ITL) 10 ms (nominal
+// end-to-end latency 500 + 255*10 = 3050 ms), stall D = 10 s starting
+// 5 s into the fault window.
 // ---------------------------------------------------------------------------
 
 const (

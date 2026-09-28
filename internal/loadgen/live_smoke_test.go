@@ -12,7 +12,8 @@ import (
 // authenticated streaming completions against a hosted OpenAI-compatible
 // endpoint, through the unmodified open-loop pipeline.
 //
-// Opt-in only; `make test` and CI never touch the network:
+// Opt-in only; `make test` and continuous integration (CI) never touch
+// the network:
 //
 //	PERCENTES_LIVE_SMOKE=1 GROQ_API_KEY=... PERCENTES_SMOKE_MODEL=<model-id> \
 //		go test ./internal/loadgen -run TestLiveHostedSmoke -v

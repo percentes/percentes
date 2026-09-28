@@ -12,7 +12,7 @@ import (
 // The §10 pre-registered in_flight_loss_fraction is defined over the
 // killed replica (§3). A run without victim attribution contributes an
 // explicitly-unscoped all-replica ratio under its own name and is
-// DROPPED from the pre-registered endpoint — never silently merged.
+// dropped from the pre-registered endpoint.
 func TestLossFractionRequiresVictimAttribution(t *testing.T) {
 	cfg := baseCfg(t)
 	cfg.Run.Repetitions = 2

@@ -49,9 +49,9 @@ type chatChunk struct {
 }
 
 // handleChatCompletions is the OpenAI-compatible streaming endpoint. The
-// mock is streaming-only (the harness client is an SSE client, §2) and
-// always emits exactly max_tokens content tokens: ignore_eos semantics,
-// there is no early stop.
+// mock is streaming-only (the harness client reads Server-Sent Events,
+// §2) and always emits exactly max_tokens content tokens: ignore_eos
+// semantics, there is no early stop.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Silent-hang outranks everything, including the slow-reload 503 and
 	// request validation: during a full-node partition nothing on the

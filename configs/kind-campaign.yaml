@@ -1,7 +1,7 @@
 # Percentes kind CAMPAIGN config: the §5 repetition pipeline end to end
 # against the live 2-replica mock deployment. N=2 here (the ac profile
 # allows scenario-scale N; the experiment profile pins N=5) purely to
-# bound CI wall time — each run is ~2.5 min. Everything else matches
+# bound continuous integration (CI) wall time. Everything else matches
 # configs/kind-e2e.yaml; one file drives both the ConfigMap and the
 # host-side campaign runner.
 schema_version: 1

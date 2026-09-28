@@ -11,8 +11,7 @@ import (
 
 // Against the mock (whose /health and inference become ready together at
 // the end of slow_reload), the calibration reports both boundaries and a
-// near-zero gap — proving the instrument measures the relationship rather
-// than assuming it.
+// near-zero gap.
 func TestCalibrateHealthAgainstMock(t *testing.T) {
 	m := config.Mock{
 		ListenAddr: "127.0.0.1:0",

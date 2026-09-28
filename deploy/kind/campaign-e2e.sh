@@ -62,7 +62,7 @@ for _ in $(seq 30); do
 done
 [ -n "$admin_ready" ] || fail "admin port-forward never answered on 127.0.0.1:$ADMIN_PORT"
 
-say "running the N=2 campaign (fresh-path CGO_ENABLED=0 binary; ~5 min)"
+say "running the N=2 campaign (fresh-path CGO_ENABLED=0 binary)"
 BIN="$(mktemp -d)/percentes-campaign"
 CGO_ENABLED=0 go build -o "$BIN" ./cmd/percentes-campaign
 rm -rf "$OUT"

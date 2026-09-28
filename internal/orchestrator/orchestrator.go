@@ -2,7 +2,7 @@
 // (SPEC.md §2). Injection is always PRE-ARMED with automatic expiry: the
 // injector is told the fire time and duration in advance, because a
 // black-hole partition makes the victim unreachable the moment it fires
-// (§1) — nothing may depend on talking to the victim after T_inject.
+// (§1). Nothing may depend on talking to the victim after T_inject.
 // The orchestrator records armed/fire/expiry timestamps and is agnostic
 // to the injection mechanism beyond them.
 package orchestrator
@@ -93,7 +93,7 @@ func Execute(ctx context.Context, inj Injector, epoch time.Time, tInject time.Du
 }
 
 // MockInjector arms fault windows on a mock replica's out-of-band admin
-// API.
+// application programming interface (API).
 type MockInjector struct {
 	AdminBaseURL     string
 	Mode             string

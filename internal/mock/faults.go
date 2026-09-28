@@ -14,8 +14,8 @@ type action int
 
 const (
 	actProceed action = iota // keep serving
-	actAbort                 // RST the connection now (stream_abort)
-	actHang                  // blackhole: no bytes, no FIN, no RST, ever
+	actAbort                 // reset the connection now (stream_abort)
+	actHang                  // blackhole: no bytes, no close, no reset, ever
 	actAbandon               // client is gone; return quietly
 )
 
@@ -24,7 +24,7 @@ type admitVerdict struct {
 	act action
 	// httpError, when non-zero, means reject with this status (error mode).
 	httpError int
-	// abortAfterTokens >= 0 means RST after that many content tokens
+	// abortAfterTokens >= 0 means a reset after that many content tokens
 	// (stream_abort window); -1 means no scheduled abort.
 	abortAfterTokens int
 }

@@ -12,9 +12,10 @@ import (
 	"github.com/percentes/percentes/internal/validity"
 )
 
-// TestAC6Reporting: JSON plus human-readable report from one config,
-// including completion-incidence curves, failure rates, the sensitivity table, and the
-// conditional headline, with the instrument caveat in the output.
+// TestAC6Reporting: JavaScript Object Notation (JSON) plus human-readable
+// report from one config, including completion-incidence curves, failure
+// rates, the sensitivity table, and the conditional headline, with the
+// instrument caveat in the output.
 func TestAC6Reporting(t *testing.T) {
 	if testing.Short() {
 		t.Skip("AC suite skipped in -short mode")

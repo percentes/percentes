@@ -6,14 +6,14 @@
 //
 // Window semantics: the goodput value at time t is the ratio-of-sums over
 // requests SCHEDULED in the leading window [t, t+R). Leading windows make
-// the entry timestamp the start of sustained-good service (TTR is not
-// biased by +R as it would be with trailing windows). Recovery entry at
-// the first t whose window meets X% of the applicable baseline and whose
-// following H one-second window starts all stay >= the entry bar (a dip
-// below entry cancels the candidate; a dip below the exit bar after
-// confirmed recovery is a re-degradation). TTR = first surviving entry
-// minus the fire anchor (§3). Non-recovery past the fault-window timeout
-// is reported as such, never extrapolated.
+// the entry timestamp the start of sustained-good service, so time to
+// recovery (TTR) is not biased by +R as it would be with trailing
+// windows. Recovery entry at the first t whose window meets X% of the
+// applicable baseline and whose following H one-second window starts all
+// stay >= the entry bar (a dip below entry cancels the candidate; a dip
+// below the exit bar after confirmed recovery is a re-degradation). TTR =
+// first surviving entry minus the fire anchor (§3). Non-recovery past the
+// fault-window timeout is reported as such, never extrapolated.
 package detect
 
 import (
@@ -32,9 +32,9 @@ type Bucket struct {
 	Scheduled int
 	Completed int
 	Errored   int
-	Good      int // meets the full §4 SLO
-	GoodTTFT  int // completed and TTFT within SLO
-	GoodE2E   int // completed and e2e within SLO
+	Good      int // meets the full §4 service-level objective (SLO)
+	GoodTTFT  int // completed, time to first token (TTFT) within the SLO
+	GoodE2E   int // completed, end-to-end latency (e2e) within the SLO
 }
 
 // BuildSeries buckets requests into 1 s intervals over [startNs, endNs).

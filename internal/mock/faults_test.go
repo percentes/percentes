@@ -104,7 +104,7 @@ func TestFaultErrorWindow(t *testing.T) {
 	}
 }
 
-// TestFaultStreamAbort (admin-armed): in-flight streams are RST
+// TestFaultStreamAbort (admin-armed): in-flight streams are reset (RST)
 // immediately at fire time; new streams during the window are RST at
 // admit (abort_after_tokens=0); after expiry, service is normal.
 func TestFaultStreamAbort(t *testing.T) {
@@ -191,7 +191,7 @@ func TestFaultStreamAbortAfterTokens(t *testing.T) {
 }
 
 // TestFaultSilentHang (config-scripted) is the AC4b fault source: affected
-// requests receive no bytes, no FIN, and no RST — ever. No terminal event
+// requests receive no bytes, no FIN and no RST. No terminal event
 // arrives; the client's pinned 30 s timeout is where censoring is
 // recorded (§3).
 func TestFaultSilentHang(t *testing.T) {

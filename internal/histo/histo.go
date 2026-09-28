@@ -3,9 +3,10 @@
 // via plain RecordValue() ONLY: latencies are re-based to intended
 // dispatch time upstream, so the library's
 // coordinated-omission correction calls (the corrected-value recorder and
-// its expected-interval variants) are forbidden — they would
+// its expected-interval variants) are forbidden: they would
 // double-correct, and are invalid under Poisson arrivals. A lint test
-// fails the suite if a correction API appears anywhere in the tree.
+// fails the suite if a correction application programming interface
+// (API) appears anywhere in the tree.
 package histo
 
 import (

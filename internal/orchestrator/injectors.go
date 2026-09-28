@@ -119,9 +119,7 @@ func (n *nodePartitionInjector) Arm(ctx context.Context, fireIn time.Duration, d
 	if fireIn <= 0 {
 		return fmt.Errorf("node-partition injector: partition must be pre-armed (fireIn=%s)", fireIn)
 	}
-	// Defense in depth: config validation upstream already requires a
-	// positive duration, but a partition without automatic expiry
-	// permanently kills the node — the §1 MUST lives here too.
+	// A partition without automatic expiry permanently kills the node (§1).
 	if durationS <= 0 {
 		return fmt.Errorf("node-partition injector: automatic expiry is mandatory (§1), got duration %.3fs", durationS)
 	}
