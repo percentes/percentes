@@ -9,13 +9,16 @@ import (
 	"github.com/percentes/percentes/internal/config"
 )
 
+// sseServer serves the frames in order. A write error is not a test
+// failure: a client that abandons an oversized line closes the
+// connection while the server is still writing.
 func sseServer(t *testing.T, frames ...string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, f := range frames {
 			if _, err := w.Write([]byte(f)); err != nil {
-				t.Errorf("sse write: %v", err)
+				return
 			}
 		}
 	}))
@@ -51,7 +54,8 @@ func TestEmptyStreamErrored(t *testing.T) {
 	}
 }
 
-// One content event then [DONE] stays a completion with a positive TTFT.
+// One content event then [DONE] stays a completion with a
+// positive time to first token (TTFT).
 func TestContentThenDoneCompleted(t *testing.T) {
 	srv := sseServer(t,
 		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",

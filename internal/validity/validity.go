@@ -251,8 +251,8 @@ func gateG2(art *run.Artifacts) Gate {
 	g := Gate{ID: "G2", Name: "client-validity gate clean", Applicable: true, Observed: true}
 	cg := art.Loadgen.Gates
 	g.Pass = cg.Pass
-	g.Detail = fmt.Sprintf("skew p99=%dus/max=%dus, undispatched=%d, cpu_measured=%v worst=%.1f%%, gc p99=%.3fms",
-		cg.SendSkewP99Us, cg.SendSkewMaxUs, cg.Undispatched, cg.CPUMeasured, cg.CPUWorstWindowPct, cg.GCPauseP99Ms)
+	g.Detail = fmt.Sprintf("skew p99=%dus/max=%dus; undispatched=%d; cpu_measured=%v worst=%.1f%%; %s",
+		cg.SendSkewP99Us, cg.SendSkewMaxUs, cg.Undispatched, cg.CPUMeasured, cg.CPUWorstWindowPct, cg.GCPauseText())
 	return g
 }
 

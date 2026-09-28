@@ -65,7 +65,7 @@ type Request struct {
 	Tokens     int     `json:"tokens"`
 	Replica    string  `json:"replica,omitempty"`
 
-	// ITLsUs are inter-token gaps (us) for pooled per-window ITL
+	// ITLsUs are inter-token latency (ITL) gaps (us) for pooled per-window ITL
 	// histograms (§3: per-request p99 is forbidden; pooling happens in
 	// the collector). Excluded from JSON records for size; the pooled
 	// summaries appear in the report.
@@ -130,7 +130,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	// absorb every request blackholing simultaneously.
 	provision := int(cfg.Load.RateRPS*float64(config.PinnedClientTimeoutS)*2) + cfg.Load.Connections
 	transport := &http.Transport{
-		ForceAttemptHTTP2:   false, // N independent HTTP/1.1 connections (§1)
+		ForceAttemptHTTP2:   false, // one request per connection over plain HTTP; TLS may still negotiate HTTP/2
 		MaxIdleConns:        provision,
 		MaxIdleConnsPerHost: provision,
 		MaxConnsPerHost:     0, // never throttle dispatch on connection count
@@ -151,12 +151,8 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		}
 	}
 	g := &gen{
-		cfg: cfg,
-		client: &http.Client{
-			Transport: transport,
-			// Redirects are not followed (§3).
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		cfg:    cfg,
+		client: &http.Client{Transport: transport},
 		filler: buildFiller(cfg.Load.InputLengthTokens),
 		model:  model,
 		apiKey: apiKey,
@@ -228,9 +224,9 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	wg.Wait()
 
 	cpuSamples := cpuMon.stopAndCollect(g)
-	gcP99Ms := gcMon.stopAndP99Ms()
+	gcLoMs, gcHiMs := gcMon.stopAndP99Ms()
 	res.Requests = requests
-	res.Gates = evaluateGates(cfg, requests, cpuSamples, gcP99Ms, res.WarmupEndNs, res.FaultEndNs)
+	res.Gates = evaluateGates(cfg, requests, cpuSamples, gcLoMs, gcHiMs, res.WarmupEndNs, res.FaultEndNs)
 	if aborted || ctx.Err() != nil {
 		return res, fmt.Errorf("loadgen: run aborted by context: %w", ctx.Err())
 	}

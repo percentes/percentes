@@ -1,6 +1,7 @@
 package loadgen
 
 import (
+	"fmt"
 	"math"
 	"runtime/metrics"
 	"sort"
@@ -21,26 +22,39 @@ type GateReport struct {
 	Undispatched     int   `json:"undispatched"`
 	UndispatchedPass bool  `json:"undispatched_pass"`
 
-	// CPUMeasured is false when the platform provided no host CPU samples
-	// (e.g. darwin built without cgo) or fewer than cpu_window_s samples
-	// landed in the measurement span: the sustained-window criterion
-	// cannot be certified without at least one full window. An unmeasured
-	// gate therefore does NOT pass — the gate never silently degrades.
-	// Linux (/proc) measures without cgo; the AC suite on darwin runs
-	// under go test with cgo and measures.
+	// CPUMeasured is false when the platform provided no host central
+	// processing unit (CPU) samples (e.g. darwin built without cgo) or
+	// fewer than cpu_window_s samples landed in the measurement span: the
+	// sustained-window criterion cannot be certified without at least one
+	// full window. An unmeasured gate does not pass. Linux (/proc)
+	// measures without cgo; the acceptance-criteria (AC) suite on darwin
+	// runs under go test with cgo and measures.
 	CPUMeasured       bool    `json:"cpu_measured"`
 	CPUPeakPct        float64 `json:"cpu_peak_pct"`
 	CPUWorstWindowPct float64 `json:"cpu_worst_window_pct"`
 	CPUPass           bool    `json:"cpu_pass"`
 
-	GCPauseP99Ms float64 `json:"gc_pause_p99_ms"`
-	GCPass       bool    `json:"gc_pass"`
+	// GCPauseP99LoMs and GCPauseP99Ms are the lower and upper edges of
+	// the runtime histogram bucket holding the p99 pause; the gate reads
+	// the upper edge.
+	GCPauseP99LoMs float64 `json:"gc_pause_p99_lo_ms"`
+	GCPauseP99Ms   float64 `json:"gc_pause_p99_ms"`
+	GCPass         bool    `json:"gc_pass"`
 
 	Pass bool `json:"pass"`
 }
 
-func evaluateGates(cfg *config.Config, requests []Request, samples []cpuSample, gcP99Ms float64, measStartNs, measEndNs int64) GateReport {
-	rep := GateReport{GCPauseP99Ms: gcP99Ms}
+// GCPauseText renders the garbage collection (GC) pause p99 as the
+// runtime bucket that holds it, or says that no pause fell in the span.
+func (g GateReport) GCPauseText() string {
+	if g.GCPauseP99LoMs == 0 && g.GCPauseP99Ms == 0 {
+		return "gc pause p99: no pause in the span"
+	}
+	return fmt.Sprintf("gc pause p99 in [%.3f, %.3f) ms, runtime bucket edges, gate on the upper edge", g.GCPauseP99LoMs, g.GCPauseP99Ms)
+}
+
+func evaluateGates(cfg *config.Config, requests []Request, samples []cpuSample, gcLoMs, gcHiMs float64, measStartNs, measEndNs int64) GateReport {
+	rep := GateReport{GCPauseP99LoMs: gcLoMs, GCPauseP99Ms: gcHiMs}
 	v := cfg.ClientValidity
 
 	// Send skew (actual minus intended dispatch) over the measurement
@@ -57,12 +71,14 @@ func evaluateGates(cfg *config.Config, requests []Request, samples []cpuSample, 
 		}
 	}
 	sort.Slice(skews, func(a, b int) bool { return skews[a] < skews[b] })
+	var p99Ns, maxNs int64
 	if n := len(skews); n > 0 {
-		rep.SendSkewP99Us = skews[(n*99+99)/100-1] / 1000 // ceil index for p99
-		rep.SendSkewMaxUs = skews[n-1] / 1000
+		p99Ns, maxNs = skews[(n*99+99)/100-1], skews[n-1] // ceil index for p99
+		rep.SendSkewP99Us, rep.SendSkewMaxUs = p99Ns/1000, maxNs/1000
 	}
-	rep.SendSkewPass = rep.SendSkewP99Us <= int64(v.SendSkewP99Ms)*1000 &&
-		rep.SendSkewMaxUs <= int64(v.SendSkewMaxMs)*1000
+	// Compared in nanoseconds; the report fields round down to microseconds.
+	rep.SendSkewPass = p99Ns <= int64(v.SendSkewP99Ms)*1_000_000 &&
+		maxNs <= int64(v.SendSkewMaxMs)*1_000_000
 	rep.UndispatchedPass = rep.Undispatched == 0
 
 	// Client CPU: sustained mean over any window of cpu_window_s
@@ -93,7 +109,7 @@ func evaluateGates(cfg *config.Config, requests []Request, samples []cpuSample, 
 		}
 	}
 
-	rep.GCPass = gcP99Ms < float64(v.GoGCPauseP99Ms)
+	rep.GCPass = gcHiMs < float64(v.GoGCPauseP99Ms)
 	rep.Pass = rep.SendSkewPass && rep.UndispatchedPass && rep.CPUPass && rep.GCPass
 	return rep
 }
@@ -113,7 +129,7 @@ func SyntheticGateCheck() GateReport {
 		{Index: 0, IntendedNs: 1_000_000_000, DispatchNs: 1_000_100_000},
 		{Index: 1, IntendedNs: 2_000_000_000, DispatchNs: 0}, // never dispatched
 	}
-	return evaluateGates(cfg, reqs, nil, 0, 0, 10_000_000_000)
+	return evaluateGates(cfg, reqs, nil, 0, 0, 0, 10_000_000_000)
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +201,7 @@ func (m *cpuMonitor) stopAndCollect(g *gen) []cpuSample {
 
 // ---------------------------------------------------------------------------
 // GC pause monitor: /gc/pauses:seconds histogram snapshots at the
-// measurement-span boundaries; p99 of the diff is asserted < 1 ms (§2).
+// measurement-span boundaries; the p99 of the diff is asserted < 1 ms (§2).
 // ---------------------------------------------------------------------------
 
 type gcHist struct {
@@ -229,22 +245,25 @@ func startGCMonitor(startNs, endNs int64) *gcMonitor {
 	return m
 }
 
-// stopAndP99Ms returns the GC pause p99 in milliseconds over the
-// measurement span (0 if no GC pauses occurred).
-func (m *gcMonitor) stopAndP99Ms() float64 {
+// stopAndP99Ms returns the edges, in milliseconds, of the runtime
+// histogram bucket that holds the GC pause p99 over the measurement span
+// (0, 0 if no GC pause occurred). The runtime records pauses in fixed
+// buckets, so the p99 is known only to its bucket; the gate reads the
+// upper edge, which is +Inf for the last bucket.
+func (m *gcMonitor) stopAndP99Ms() (loMs, hiMs float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, t := range m.timers {
 		t.Stop()
 	}
 	if m.start == nil {
-		return 0
+		return 0, 0
 	}
 	if m.end == nil {
 		m.end = readGCHist()
 	}
 	if len(m.start.counts) != len(m.end.counts) {
-		return 0
+		return 0, 0
 	}
 	var total uint64
 	diff := make([]uint64, len(m.end.counts))
@@ -253,20 +272,16 @@ func (m *gcMonitor) stopAndP99Ms() float64 {
 		total += diff[i]
 	}
 	if total == 0 {
-		return 0
+		return 0, 0
 	}
 	target := uint64(math.Ceil(float64(total) * 0.99))
 	var cum uint64
 	for i, c := range diff {
 		cum += c
 		if cum >= target {
-			// Upper edge of this bucket (buckets has len(counts)+1 edges).
-			edge := m.end.buckets[i+1]
-			if math.IsInf(edge, 1) { // +Inf bucket: report the lower edge
-				edge = m.end.buckets[i]
-			}
-			return edge * 1000
+			// buckets has len(counts)+1 edges; the first is -Inf.
+			return math.Max(m.end.buckets[i], 0) * 1000, m.end.buckets[i+1] * 1000
 		}
 	}
-	return 0
+	return 0, 0
 }
