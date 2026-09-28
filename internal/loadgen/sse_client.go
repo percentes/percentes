@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"syscall"
 	"time"
@@ -30,7 +31,7 @@ func (g *gen) execute(r *Request) {
 		return
 	}
 
-	resp, err := g.client.Do(req)
+	resp, err := g.roundTrip(req)
 	if err != nil {
 		g.classifyTransportErr(r, err)
 		return
@@ -62,18 +63,12 @@ func (g *gen) execute(r *Request) {
 		// A chunk counts as a token only when its decoded delta carries
 		// nonempty content; an undecodable payload is a malformed
 		// stream (§3).
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-		if json.Unmarshal(payload, &chunk) != nil {
+		content, ok := ContentDelta(payload)
+		if !ok {
 			malformed = true
 			return true
 		}
-		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+		if content != "" {
 			r.Tokens++
 			now := g.now()
 			if r.FirstTokNs == 0 {
@@ -100,6 +95,30 @@ func (g *gen) execute(r *Request) {
 	default:
 		r.Outcome, r.DoneNs = OutcomeCompleted, g.now()
 	}
+	// The transport reuses the connection only once the body reads to
+	// its end, which [DONE] precedes.
+	if sawDone && err == nil {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, drainLimit)) //nolint:errcheck
+	}
+}
+
+// ContentDelta decodes one chat-completion chunk and returns the first
+// choice's delta content; ok is false for a payload that does not decode.
+func ContentDelta(payload []byte) (content string, ok bool) {
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(payload, &chunk) != nil {
+		return "", false
+	}
+	if len(chunk.Choices) == 0 {
+		return "", true
+	}
+	return chunk.Choices[0].Delta.Content, true
 }
 
 // requestBody builds the OpenAI-compatible chat-completion request.
@@ -127,6 +146,22 @@ func (g *gen) requestBody(r *Request) string {
 	return string(body)
 }
 
+// roundTrip sends the request through the client's transport, so a
+// delivered redirect is a status (§3) and its Location header is never
+// parsed. Userinfo in the base URL becomes basic authentication unless
+// the request already carries an Authorization header.
+func (g *gen) roundTrip(req *http.Request) (*http.Response, error) {
+	if u := req.URL.User; u != nil && req.Header.Get("Authorization") == "" {
+		p, _ := u.Password()
+		req.SetBasicAuth(u.Username(), p)
+	}
+	rt := g.client.Transport
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	return rt.RoundTrip(req)
+}
+
 // newRequest attaches the fixed headers. The bearer token is added only
 // when resolved (hosted targets); it exists nowhere but this header.
 func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error) {
@@ -146,6 +181,9 @@ func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error
 
 // Ceiling on one scanned line and on the data fields assembled into one event.
 const eventLimit = 1 << 20
+
+// Bytes read after [DONE] before the body is closed unread.
+const drainLimit = 4096
 
 func (g *gen) classifyTransportErr(r *Request, err error) {
 	r.DoneNs = g.now()

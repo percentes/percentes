@@ -2,9 +2,11 @@ package loadgen
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,5 +124,93 @@ func TestRequestBodyIsValidJSON(t *testing.T) {
 	}
 	if m := map[string]any{}; json.Unmarshal([]byte(testGen(false, "m", "").requestBody(&Request{})), &m) == nil && m["ignore_eos"] != true {
 		t.Error("mock body must carry ignore_eos: true")
+	}
+}
+
+// After [DONE] the body is drained, so a second request reuses the
+// connection even when the server's closing bytes arrive late.
+func TestCompletedStreamKeepsTheConnection(t *testing.T) {
+	var conns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"))
+		http.NewResponseController(w).Flush() //nolint:errcheck
+		time.Sleep(50 * time.Millisecond)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	cfg.Run.Seed = 1
+	cfg.Load.MaxTokens = 256
+	cfg.Target.BaseURL = srv.URL
+	g := &gen{cfg: cfg, client: &http.Client{Transport: &http.Transport{}}, epoch: time.Now(), filler: "xyz", model: "m"}
+	for i := 0; i < 3; i++ {
+		r := &Request{Index: int64(i)}
+		g.execute(r)
+		if r.Outcome != OutcomeCompleted {
+			t.Fatalf("request %d: %v/%q", i, r.Outcome, r.ErrClass)
+		}
+	}
+	if n := conns.Load(); n != 1 {
+		t.Fatalf("three completed requests opened %d connections, want 1", n)
+	}
+}
+
+// A delivered redirect is a non-200 status, whatever its Location header
+// holds, and it is never followed.
+func TestDeliveredRedirectIsAStatus(t *testing.T) {
+	for name, location := range map[string]string{"unparseable": "http://127.0.0.1/%zz", "well-formed": "http://127.0.0.1:1/elsewhere"} {
+		t.Run(name, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				w.Header().Set("Location", location)
+				w.WriteHeader(http.StatusFound)
+			}))
+			defer srv.Close()
+			r := executeAgainst(srv)
+			if r.Outcome != OutcomeErrored || r.ErrClass != ErrStatusOther {
+				t.Fatalf("got %v/%q, want errored/%s", r.Outcome, r.ErrClass, ErrStatusOther)
+			}
+			if hits.Load() != 1 {
+				t.Fatalf("server saw %d requests, want 1", hits.Load())
+			}
+		})
+	}
+}
+
+// Userinfo in the base URL reaches the server as basic authentication,
+// and a bearer token set by the request wins over it.
+func TestUserinfoBecomesBasicAuth(t *testing.T) {
+	var seen atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.Store(r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+	cfg := &config.Config{}
+	cfg.Run.Seed = 1
+	cfg.Load.MaxTokens = 256
+	cfg.Target.BaseURL = strings.Replace(srv.URL, "http://", "http://user:SYNTHETIC_PW_31ab@", 1)
+	g := &gen{cfg: cfg, client: srv.Client(), epoch: time.Now(), filler: "xyz", model: "m"}
+	r := &Request{Index: 1}
+	g.execute(r)
+	if r.Outcome != OutcomeCompleted {
+		t.Fatalf("got %v/%q", r.Outcome, r.ErrClass)
+	}
+	if got := seen.Load(); got != "Basic dXNlcjpTWU5USEVUSUNfUFdfMzFhYg==" {
+		t.Fatalf("server saw Authorization %q, want the basic credential from the URL", got)
+	}
+	g.apiKey = "SYNTHETIC_KEY_77c0"
+	g.execute(&Request{Index: 2})
+	if got := seen.Load(); got != "Bearer SYNTHETIC_KEY_77c0" {
+		t.Fatalf("server saw Authorization %q, want the bearer token", got)
 	}
 }
