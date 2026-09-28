@@ -31,7 +31,7 @@ type HealthCalibration struct {
 // assumed"), not a gate.
 func CalibrateHealth(ctx context.Context, baseURL string, interval time.Duration) (HealthCalibration, error) {
 	start := time.Now()
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := probeClient()
 
 	type result struct {
 		at time.Time
