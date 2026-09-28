@@ -842,3 +842,25 @@ func TestTrailerWithholdsTheCleanBill(t *testing.T) {
 		})
 	}
 }
+
+// Every exhibit carries a measured duration: a delayed non-200 answer
+// and a transport failure both stamp the attempt's e2e.
+func TestExhibitDurationOnEveryPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(120 * time.Millisecond)
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	o, ok, flag := sweepOne(http.DefaultTransport, fixtureConfig(srv.URL, echoKey), 1)
+	if ok || flag || o.status != http.StatusTooManyRequests {
+		t.Fatalf("status path: ok=%v flag=%v status=%d", ok, flag, o.status)
+	}
+	if o.e2eMs < 120 {
+		t.Fatalf("non-200 exhibit e2e=%.0fms, want at least the 120 ms the server held it", o.e2eMs)
+	}
+	srv.Close()
+	o, _, _ = sweepOne(http.DefaultTransport, fixtureConfig(srv.URL, echoKey), 2)
+	if o.err == "" || o.e2eMs <= 0 {
+		t.Fatalf("transport failure: err=%q e2e=%.3fms, want an error and a measured duration", o.err, o.e2eMs)
+	}
+}

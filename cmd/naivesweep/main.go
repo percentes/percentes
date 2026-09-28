@@ -29,6 +29,10 @@
 // gates SPEC.md requires, so it cannot show whether the client was the
 // bottleneck.
 //
+// The exit status says whether the sweep ran: 0 once every request has a
+// verdict, whatever the verdicts were; 1 when the configuration is missing
+// or invalid. A script reads endpoint health from the summary line.
+//
 //	SWEEP_ENDPOINT=https://<host>/v1/chat/completions \
 //	SWEEP_API_KEY=<key> SWEEP_MODEL=<model-id> go run ./cmd/naivesweep
 //
@@ -347,6 +351,10 @@ type request struct {
 
 func sweepOne(rt http.RoundTripper, cfg config, idx int) (outcome, bool, bool) {
 	o := outcome{idx: idx}
+	t0 := time.Now()
+	// Every return path stamps the attempt's duration, so an exhibit's e2e
+	// is measured whatever ended the request.
+	elapsed := func() { o.e2eMs = float64(time.Since(t0).Microseconds()) / 1000 }
 	body, _ := json.Marshal(request{
 		Model:     cfg.model,
 		Messages:  []message{{Role: "user", Content: fmt.Sprintf("Explain in detail how TCP congestion control works. Request %d.", idx)}},
@@ -358,15 +366,16 @@ func sweepOne(rt http.RoundTripper, cfg config, idx int) (outcome, bool, bool) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.endpoint, bytes.NewReader(body))
 	if err != nil {
 		o.err = "build request: " + redact.ErrorText(err, cfg.timeout)
+		elapsed()
 		return o, false, false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cfg.key)
 
-	t0 := time.Now()
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
 		o.err = "transport: " + cfg.rd.redact(redact.ErrorText(err, cfg.timeout))
+		elapsed()
 		return o, false, false
 	}
 	defer resp.Body.Close()
@@ -383,11 +392,12 @@ func sweepOne(rt http.RoundTripper, cfg config, idx int) (outcome, bool, bool) {
 	if resp.StatusCode != http.StatusOK {
 		o.err = "non-200"
 		o.rawTail = tailOf(cfg.rd, strings.TrimSpace(readHead(resp.Body, bodyLimit, cfg.rd.longest)), tailLimit)
+		elapsed()
 		return o, false, false
 	}
 
 	sawDone, firstTok, head, lastLines, scanErr := parseStream(resp.Body, &o, cfg.rd)
-	o.e2eMs = float64(time.Since(t0).Microseconds()) / 1000
+	elapsed()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, drainLimit)) //nolint:errcheck
 	if !firstTok.IsZero() {
 		o.ttftMs = float64(firstTok.Sub(t0).Microseconds()) / 1000
