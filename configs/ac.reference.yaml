@@ -76,7 +76,8 @@ target:
   # gauge; unset in Phase 0, so G7 reports not applicable. vLLM exposes
   # vllm:num_requests_waiting; the mock exposes percentes_mock_requests_waiting.
   # metrics_urls: [http://replica-0:8000/metrics, http://replica-1:8000/metrics]
-  # queue_gauge: vllm:num_requests_waiting
+  # queue_gauge: percentes_mock_requests_waiting
+  # metrics_families: [percentes_mock_active_streams, percentes_mock_tokens_emitted_total]
 
 fault:
   variant: mock

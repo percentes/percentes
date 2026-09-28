@@ -77,6 +77,20 @@ target:
   # version (§2).
   metrics_urls: [http://PIN-AT-PHASE1-replica-0:8000/metrics, http://PIN-AT-PHASE1-replica-1:8000/metrics]
   queue_gauge: vllm:num_requests_waiting   # pinned (§6)
+  # §2: families kept once a second beside the gauge and reduced per
+  # window, as vLLM 0.29.0 exposes them (docs.vllm.ai v0.29.0 metrics page
+  # and vllm/v1/metrics/loggers.py at v0.29.0, read 26 Sep 2026); checked
+  # against the endpoint before the first request. Counters carry the
+  # client library's _total suffix on the wire.
+  metrics_families:
+    - vllm:num_requests_running
+    - vllm:kv_cache_usage_perc
+    - vllm:time_to_first_token_seconds
+    - vllm:inter_token_latency_seconds
+    - vllm:e2e_request_latency_seconds
+    - vllm:generation_tokens_total
+    - vllm:num_preemptions_total
+  ttft_histogram: vllm:time_to_first_token_seconds   # §2 receive-path check (i)
 
 # §10, recorded once calibration has run (§6): lambda_r_rps must equal
 # 0.65 x lambda_max_rps and load.rate_rps must equal replicas x lambda_r_rps.

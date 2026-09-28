@@ -19,8 +19,9 @@ import "github.com/percentes/percentes/internal/redact"
 //     repetitions (§5), and topology (§1) are pinned exactly.
 //   - "ac": the Phase 0 acceptance-criteria profile against the mock
 //     (§8 reference conditions: lambda=20 rps). Phase durations may be
-//     scenario-scale, but every normative pin (client timeout, retries,
-//     max_tokens, SLO, detector numbers, validity gates) is still enforced.
+//     scenario-scale, but every normative pin is still enforced: client
+//     timeout, retries, max_tokens, the service-level objective (SLO),
+//     detector numbers and validity gates.
 type Profile string
 
 const (
@@ -325,6 +326,14 @@ type Target struct {
 	// vllm:num_requests_waiting; the mock exposes
 	// percentes_mock_requests_waiting.
 	QueueGauge string `yaml:"queue_gauge,omitempty" json:"queue_gauge,omitempty"`
+	// MetricsFamilies are the metric families kept from each endpoint
+	// beside the gauge, once a second, and reduced per window (§2),
+	// recorded with the run. Each command checks the names against every
+	// endpoint before its first request.
+	MetricsFamilies []string `yaml:"metrics_families,omitempty" json:"metrics_families,omitempty"`
+	// TTFTHistogram names the server-side time-to-first-token histogram,
+	// in seconds, among MetricsFamilies for the §2 receive-path comparison.
+	TTFTHistogram string `yaml:"ttft_histogram,omitempty" json:"ttft_histogram,omitempty"`
 }
 
 // Fault is the orchestrator plan (§1, §2). Timestamps for armed/fire/expiry

@@ -91,3 +91,20 @@ func TestWrapKeepsTheCauseAndHidesTheText(t *testing.T) {
 		t.Error("deadline cause lost")
 	}
 }
+
+// Scrub redacts every endpoint named inside free text.
+func TestScrubRedactsEndpointsInText(t *testing.T) {
+	in := "calibrate: dial http://user:SYNTHETIC_PW_9f1e@host:8000/metrics?token=SYNTHETIC_T_4c2a: refused; then https://h/v1 ok"
+	got := Scrub(in)
+	for _, secret := range []string{"SYNTHETIC_PW_9f1e", "SYNTHETIC_T_4c2a", "user:"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("%q survived: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, "http://host:8000/metrics") || !strings.Contains(got, "https://h/v1 ok") || !strings.Contains(got, "refused") {
+		t.Fatalf("hosts and prose must survive: %s", got)
+	}
+	if got := Scrub("no endpoint here"); got != "no endpoint here" {
+		t.Fatalf("text without a URL changed: %q", got)
+	}
+}

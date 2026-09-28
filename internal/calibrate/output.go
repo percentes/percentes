@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/redact"
 )
@@ -64,6 +65,8 @@ func Human(o *Output) string {
 		fmt.Fprintf(&b, stepHeader, "rate_rps", "seed", "scheduled", "completed", "errored", "censored", "goodput", "queue", "gate", "verdict")
 		for j := range r.Steps {
 			b.WriteString(stepRow(&r.Steps[j]))
+			b.WriteString(receivePathRow(r.Steps[j].ReceivePath))
+			b.WriteString(familyErrorsRow(&r.Steps[j]))
 		}
 		switch {
 		case r.Valid && r.Reason != "":
@@ -86,8 +89,50 @@ func Human(o *Output) string {
 		fmt.Fprintf(&b, "\nindependent reference (§5) at %d x lambda_r, %.4g s warm-up, %.4g s measured, judged by no gate\n", config.PinnedExperimentReplicas, s.SettleS, s.MeasureS)
 		fmt.Fprintf(&b, "  %10s %6s %9s %9s %9s %9s %8s %13s %7s\n", "rate_rps", "seed", "scheduled", "completed", "errored", "censored", "goodput", "censored_rate", "queue")
 		b.WriteString(referenceRow(s))
+		b.WriteString(receivePathRow(s.ReceivePath))
+		b.WriteString(familyErrorsRow(s))
 	}
 	return b.String()
+}
+
+// receivePathRow renders the §2 receive-path report under a step's row.
+func receivePathRow(rp *collect.ReceivePath) string {
+	if rp == nil {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "             receive path: client TTFT mean %.1f ms over %d", rp.ClientTTFTMeanMs, rp.ClientTTFTCount)
+	switch {
+	case rp.ServerTTFTFamily == "":
+		b.WriteString("; no server histogram named")
+	case rp.ServerTTFTCount == 0:
+		fmt.Fprintf(&b, "; %s: no observations in the window", rp.ServerTTFTFamily)
+	default:
+		fmt.Fprintf(&b, "; server %.1f ms over %d", rp.ServerTTFTMeanMs, rp.ServerTTFTCount)
+		if rp.DivergenceMs != nil {
+			fmt.Fprintf(&b, ", client minus server %+.1f ms", *rp.DivergenceMs)
+		}
+	}
+	if c := rp.Canary; c != nil {
+		fmt.Fprintf(&b, "; canary %d streams completed, TTFT deviation p50 %.2f ms max %.2f ms, ITL deviation p99 %.2f ms max %.2f ms",
+			c.Completed, float64(c.TTFTDevP50Us)/1000, float64(c.TTFTDevMaxUs)/1000, float64(c.ITLDevP99Us)/1000, float64(c.ITLDevMaxUs)/1000)
+	}
+	if rp.CanaryError != "" {
+		fmt.Fprintf(&b, "; canary did not run: %s", rp.CanaryError)
+	}
+	if len(rp.ServerReset) > 0 {
+		fmt.Fprintf(&b, "; server histogram reset on %s", strings.Join(rp.ServerReset, ", "))
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+// familyErrorsRow renders a step's failed kept-family reads, if any.
+func familyErrorsRow(s *Step) string {
+	if s.FamilyErrors == 0 {
+		return ""
+	}
+	return fmt.Sprintf("             kept-family reads that failed: %d\n", s.FamilyErrors)
 }
 
 func counts(s *Step) (sched, comp, errd, cens int, censRate float64) {

@@ -74,6 +74,11 @@ target:
   base_url: http://10.0.0.122:8000
   model_name: Qwen/Qwen2.5-7B-Instruct
   replicas: 2              # pinned topology (§1)
+  # §2, with metrics_urls set: the families kept per sample for vLLM 0.29.0
+  # (names read from docs.vllm.ai v0.29.0 and loggers.py at v0.29.0 on
+  # 26 Sep 2026; counters carry the _total suffix on the wire).
+  # metrics_families: [vllm:num_requests_running, vllm:kv_cache_usage_perc, vllm:time_to_first_token_seconds, vllm:inter_token_latency_seconds, vllm:e2e_request_latency_seconds, vllm:generation_tokens_total, vllm:num_preemptions_total]
+  # ttft_histogram: vllm:time_to_first_token_seconds
 
 # §10, measured 16 September 2026 on one NVIDIA L40, single replica. Both
 # ramps found the same lambda_max. lambda_r_rps is 0.65 x lambda_max_rps and

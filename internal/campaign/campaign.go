@@ -2,26 +2,29 @@
 // aggregates the per-run scalars under the SPEC.md §5/§7 statistics.
 //
 // Normative rules encoded here:
-//   - N=5 runs per (variant, config); all five per-run values are
-//     published verbatim (§5).
-//   - The pre-registered PRIMARY endpoint is TTR to single-replica
-//     equilibrium under the clean-delete variant (§7); everything else is
-//     labeled secondary or exploratory. A run that could not estimate the
-//     equilibrium contributes no equilibrium-TTR value, and that is
-//     reported (not imputed).
+//   - The repetition count N is 5 runs per (variant, config); all five
+//     per-run values are published verbatim (§5).
+//   - The pre-registered PRIMARY endpoint is time to recovery (TTR) to
+//     single-replica equilibrium under the clean-delete variant (§7);
+//     everything else is labeled secondary or exploratory. A run that
+//     could not estimate the equilibrium contributes no equilibrium-TTR
+//     value, and that is reported (not imputed).
 //   - The TTR scalars are heavy-tailed: median + range lead, the
 //     t-interval carries a normality caveat (§7).
-//   - No bootstrap, no MDE/power claim (§7).
-//   - The run-to-run coefficient of variation is surfaced as the measured
-//     noise floor for the deferred cross-stack comparison.
+//   - No bootstrap, no minimum detectable effect (MDE) or power
+//     claim (§7).
+//   - The run-to-run coefficient of variation (CoV) is surfaced as the
+//     measured noise floor for the deferred cross-stack comparison.
 package campaign
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/serverstats"
 	"github.com/percentes/percentes/internal/stats"
 )
 
@@ -45,6 +48,12 @@ type Scalars struct {
 	InFlightLossAllReplicasUnscoped *float64 `json:"in_flight_loss_all_replicas_unscoped,omitempty"`
 	SurvivorP95Ms                   *float64 `json:"survivor_p95_ms,omitempty"`
 	IntegratedDeficit               float64  `json:"integrated_goodput_deficit"`
+	// ReceivePath and ServerSide are the run's §2 per-window receive-path
+	// reports and kept-family reductions, carried verbatim; FamilyErrors
+	// counts the run's kept-family reads that failed.
+	ReceivePath  map[string]*collect.ReceivePath                        `json:"receive_path,omitempty"`
+	ServerSide   map[string]map[string]map[string]serverstats.Reduction `json:"server_side,omitempty"`
+	FamilyErrors int                                                    `json:"family_errors,omitempty"`
 }
 
 // ScalarSummary is a §7 summary of one scalar across the runs that
@@ -127,7 +136,7 @@ func Run(ctx context.Context, cfg *config.Config, opts run.Options, variantLabel
 }
 
 func extractScalars(runIdx int, art *run.Artifacts) Scalars {
-	s := Scalars{Run: runIdx, Valid: art.RunValid, InvalidReasons: art.InvalidReasons}
+	s := Scalars{Run: runIdx, Valid: art.RunValid, InvalidReasons: art.InvalidReasons, ReceivePath: art.ReceivePath, ServerSide: art.ServerSide, FamilyErrors: art.FamilyErrors}
 	if art.Detector != nil {
 		if art.Detector.EquilibriumEstimable {
 			s.TTREquilibriumS = art.Detector.ToEquilibrium.TTRSeconds

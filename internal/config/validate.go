@@ -10,9 +10,9 @@ import (
 	"strings"
 )
 
-// checkFinite refuses NaN and infinities anywhere in the configuration:
-// the relational validators below pass vacuously on NaN, so ordered
-// comparisons alone cannot hold the pins.
+// checkFinite refuses not-a-number (NaN) values and infinities anywhere
+// in the configuration: the relational validators below pass vacuously
+// on NaN, so ordered comparisons alone cannot hold the pins.
 func checkFinite(v *validator, val reflect.Value, path string) {
 	switch val.Kind() {
 	case reflect.Float32, reflect.Float64:
@@ -260,8 +260,29 @@ func (c *Config) validateTarget(v *validator) {
 		if c.Target.QueueGauge == "" {
 			v.errf("target.queue_gauge: required when target.metrics_urls is set (§10 G7)")
 		}
-	} else if c.Target.QueueGauge != "" {
-		v.errf("target.queue_gauge: set without target.metrics_urls")
+		seen := map[string]bool{}
+		for i, f := range c.Target.MetricsFamilies {
+			switch {
+			case strings.TrimSpace(f) == "":
+				v.errf("target.metrics_families[%d]: empty", i)
+			case seen[f]:
+				v.errf("target.metrics_families[%d]: %q listed twice", i, f)
+			}
+			seen[f] = true
+		}
+		if c.Target.TTFTHistogram != "" && !seen[c.Target.TTFTHistogram] {
+			v.errf("target.ttft_histogram: %q is not in target.metrics_families", c.Target.TTFTHistogram)
+		}
+	} else {
+		if c.Target.QueueGauge != "" {
+			v.errf("target.queue_gauge: set without target.metrics_urls")
+		}
+		if len(c.Target.MetricsFamilies) > 0 {
+			v.errf("target.metrics_families: set without target.metrics_urls")
+		}
+		if c.Target.TTFTHistogram != "" {
+			v.errf("target.ttft_histogram: set without target.metrics_urls")
+		}
 	}
 }
 
@@ -323,9 +344,10 @@ func (c *Config) validatePins(v *validator) {
 	req("model.name", p.Model.Name)
 	req("model.revision", p.Model.Revision)
 	req("model.quantization", p.Model.Quantization)
-	// The mock has no KV cache or scheduler: numeric engine pins take real
-	// values in the experiment profile and explicit zeros (recorded n/a)
-	// in the Phase 0 ac profile. The fields themselves are always carried.
+	// The mock has no key-value (KV) cache or scheduler: numeric engine
+	// pins take real values in the experiment profile and explicit zeros
+	// (recorded n/a) in the Phase 0 ac profile. The fields themselves are
+	// always carried.
 	if c.Profile == ProfileExperiment {
 		if p.Engine.KVCacheGB <= 0 {
 			v.errf("pins.engine.kv_cache_gb: must be > 0 (absolute gigabytes, §6), got %g", p.Engine.KVCacheGB)

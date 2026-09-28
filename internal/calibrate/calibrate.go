@@ -44,7 +44,14 @@ type Step struct {
 	QueueIntervalS float64              `json:"queue_interval_s"`
 	QueueSeries    []serverstats.Sample `json:"queue_series,omitempty"`
 	ScrapeErrors   int                  `json:"scrape_errors"`
-	Gates          loadgen.GateReport   `json:"gates"`
+	// FamilyErrors counts the kept-family reads that failed over the step.
+	FamilyErrors int `json:"family_errors,omitempty"`
+	// ServerWindow is each kept metric family reduced over the measured
+	// window (§2).
+	ServerWindow map[string]serverstats.Reduction `json:"server_window,omitempty"`
+	// ReceivePath is the §2 receive-path report over the measured window.
+	ReceivePath *collect.ReceivePath `json:"receive_path,omitempty"`
+	Gates       loadgen.GateReport   `json:"gates"`
 	// Pass is the §10 verdict, absent until Judge decides the step. The
 	// §5 reference and a step that ended in an error carry no verdict.
 	Pass    *bool    `json:"pass,omitempty"`

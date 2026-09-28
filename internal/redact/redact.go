@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"regexp"
 	"time"
 )
 
@@ -59,6 +60,15 @@ func Secrets(s string) []string {
 		}
 	}
 	return out
+}
+
+// urlToken matches a URL-shaped token in free text.
+var urlToken = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+`)
+
+// Scrub returns s with every URL-shaped token replaced by its redacted
+// form, for text assembled from errors that may name an endpoint.
+func Scrub(s string) string {
+	return urlToken.ReplaceAllStringFunc(s, URL)
 }
 
 // ErrorText prints err in full only when its type cannot carry response

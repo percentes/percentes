@@ -60,25 +60,24 @@ kubectl, python3 and curl. The Makefile and the git hooks select Go
 
 ```
 make hooks       # once per clone: run the CI fast gates on commit and push
-make test-unit   # fast path, a few minutes: unit/integration tests only
+make test-unit   # fast path: unit and integration tests only
 make reproduce   # AC7: one-command full harness run against the local cluster
 make test        # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
 ```
 
 In that order: `make hooks` before your first commit, `make test-unit` to see
-the tree is sound, then the cluster targets. `make test` runs all of them and
-takes tens of minutes.
+the tree is sound, then the cluster targets. `make test` runs all of them.
 
 `make hooks` points git at `hooks/`: gofmt, build and golangci-lint on
 commit, and the race unit suite on push, so a change fails locally before
 it fails CI. `hooks/commit-msg` requires a subject line of 55 characters
 or fewer in lowercase conventional style, with no body.
 
-The full gate takes tens of minutes and its last three stages build a
-Docker image and drive a kind cluster. `make test-unit` is the fast path.
-The AC suite measures this machine as well as the code, so on a busy host
-the tests that depend on the §2 client-validity gate report SKIP rather
-than a defect; a green run with skips has not certified those criteria.
+The full gate's last three stages build a Docker image and drive a kind
+cluster. The acceptance-criteria (AC) suite measures this machine as well
+as the code, so on a busy host the tests that depend on the §2
+client-validity gate report SKIP rather than a defect; a green run with
+skips has not certified those criteria.
 The cluster stages bind host ports 18080 to 18082, which `SVC_PORT`,
 `POD_PORT` and `ADMIN_PORT` override. On macOS the host CPU gate reports
 unmeasured, so every cluster run prints `RUN INVALID (run-failing gate)`
@@ -96,7 +95,7 @@ cmd/mockserver           fault-injectable mock inference server
 cmd/naivesweep           standalone reconnaissance probe, outside the instrument
 internal/                loadgen, collect, detect, orchestrator, validity, ...
 configs/                 pinned reference configurations
-deploy/                  kind + mock manifests, reproduce scripts, Phase 1 vLLM manifest
+deploy/                  kind, mock and Phase 1 manifests; reproduce and capture scripts
 ```
 
 ## Pointing the probe at an endpoint

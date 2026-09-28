@@ -16,8 +16,9 @@ Kubernetes-served LLM inference service loses a replica under sustained
 load: the three questions SPEC.md §1 pins. Phase 0 builds and certifies the *instrument*
 against a mock inference server on a local kind cluster; passing the
 acceptance suite says nothing about real-GPU behaviour.
-The Phase 1 groundwork (complete, GPU-untouched) adds everything
-for the real experiment that can be verified without hardware.
+The Phase 1 groundwork adds everything for the real experiment that
+can be verified without hardware; one calibration has run against a
+standalone container, and the in-cluster run is pending.
 
 The core methodological commitments:
 
@@ -91,9 +92,9 @@ spawn shortens only that worker's runway and never cascades.
 `spinNs` = 1.5 ms).** Each worker sleeps on a `time.Timer` until
 `t_i − 1.5 ms` (cheap, yields the CPU, but imprecise: `<-timer.C`
 wakeup has scheduler latency), then **busy-spins** `for now() < t_i {}`
-for the final 1.5 ms (precise, never yields, so zero wakeup latency;
-costs ~3% of one core at 20 rps). `spinNs` is sized to comfortably
-exceed timer wakeup jitter while keeping the CPU burn small.
+for the final 1.5 ms (precise: no timer wakeup stands between the spin
+and `t_i`). `spinNs` is sized to exceed timer wakeup jitter while keeping
+the CPU burn small.
 
 The send-skew gate (SPEC §2 client-validity; table in §6 below) is
 run-failing: p99 ≤ 5 ms, max ≤ 50 ms.
@@ -128,10 +129,10 @@ with median+range; drops are named, never imputed).
 
 | Package | Role | Spec anchors | Key entry points | Tests |
 |---|---|---|---|---|
-| `internal/config` | One YAML schema drives everything; §6 pins for the Phase 0 profiles; strict decode; each carried pin enforced as an equality at load | §1–§6, §8 | `LoadFile`, `Config.Validate` | mutation test per pin |
+| `internal/config` | One YAML schema drives everything; §6 pins for the Phase 0 profiles; strict decode; harness constants enforced as equalities at load, environment pins required present and compared at run time where a gate reads them | §1–§6, §8 | `LoadFile`, `Config.Validate` | mutation test per pin |
 | `internal/mock` + `cmd/mockserver` | OpenAI-compatible SSE mock with analytic TTFT/ITL distributions and five scriptable fault modes | §2 "Local-first" | `New`, `Server.Start`, `/admin/faults` | per-mode behaviour tests incl. raw-TCP no-RST |
 | `internal/histo` | Pinned HdrHistogram wrapper; `RecordValue()` only; lint bans correction APIs | §3 | `New`, `Record`, `Summarize` | lint (repo-wide correction-API ban); AC1 oracles via internal/ac |
-| `internal/loadgen` | Open-loop generator: pre-fixed schedule, pacer+spin dispatch, SSE client, three-state classification, client-validity gates | §2, §3 | `BuildSchedule`, `Run` | in-package body + opt-in live-smoke units; AC1–AC2d + `-race` via internal/run |
+| `internal/loadgen` | Open-loop generator: pre-fixed schedule, pacer+spin dispatch, SSE client, three-state classification, client-validity gates; the §2 loopback canary, one stream at a time against an in-process mock with fixed timing through the same read path | §2, §3 | `BuildSchedule`, `Run`, `StartCanary`, `SummarizeCanary` | in-package body + opt-in live-smoke units; AC1–AC2d + `-race` via internal/run; canary order-statistic oracle |
 | `internal/sse` | Server-Sent Events framing for the loadgen client and naivesweep: the three line terminators, data fields joined with newlines, a leading byte-order mark tolerated, an event over the bound dropped and counted | §3 | `SplitLines`, `Events` | framing units per grammar case |
 | `internal/orchestrator` | Pre-armed fault execution with armed/fire/expiry audit; injectors: mock admin, clean pod delete, node partition | §1, §2, AC3 | `Execute`, `NewMockInjector`, `NewCleanDeleteInjector`, `newNodePartitionInjector` (unexported pending Phase-1 NodeOps wiring) | AC3 + fake-ops tests |
 | `internal/collect` | Windowed three-state stats, Aalen-Johansen incidence estimator, in-flight accounting, §4 sweep + modal/SD, §7 tail CIs | §3, §4, §7 | `Collect`, `EstimateIncidence`, `AccountInFlight`, `AnalyzeThresholds` | hand-computed incidence oracles, AC4/4b |
@@ -142,17 +143,18 @@ with median+range; drops are named, never imputed).
 | `internal/stats` | §7 statistics: verbatim values, median, mean, df-correct t-interval, CoV/noise floor, Holm | §7 | `Summarize`, `holm` | hand-computed oracles |
 | `internal/campaign` | N-run repetition engine; per-run seeds; endpoint aggregation with named drops | §5, §7, §10 | `Run` | fake-runner units |
 | `internal/validity` | §10 run-validity gates G1–G7; applicable-but-unobserved ⇒ FAIL; a failed or unobserved G3/G4 strips the node-loss-representative label and the run stays valid | §10 | `Evaluate` | per-gate units |
-| `internal/serverstats` | Samples each replica's Prometheus text endpoint from the run epoch and reduces to per-replica baseline-window means for G7; an absent gauge or a counter is an error | §6, §10 | `ForRun`, `Sampler.Start`/`Reduce`, `BaselineMeans` | httptest gauge servers; epoch-window oracle |
-| `internal/calibrate` | §10 single-replica capacity calibration: coarse and fine ramps against a `Runner`, two ramps agreeing within the pinned fraction or a third deciding by median, lambda_r frozen, and the §5 reference run at 2 x lambda_r; every step is a §3 collection over its measured window with the queue-gauge series kept, and the trace is rewritten after every step | §10, §5, §3 | `RunRamp`, `Calibrate`, `Reference`, `LoadRunner` | capacity-model fake runner; one step against the mock with a stall inside the settle |
+| `internal/serverstats` | Samples each replica's Prometheus text endpoint from the run epoch, keeps the configured metric families per sample, and reduces to per-replica baseline-window means for G7 and to per-window changes per family (a gauge's mean, a counter's increase, a histogram's increase in count, sum and buckets, summed over consecutive samples with a fall marked as a reset); an absent gauge or a counter read as one is an error, and so is a non-finite family value | §2, §6, §10 | `ForRun`, `Sampler.Start`/`Stop`/`FamilyErrors`/`Reduce`, `BaselineMeans`, `ReduceWindow`, `Preflight` | httptest gauge and family servers; epoch-window, reduction and reset oracles |
+| `internal/calibrate` | §10 single-replica capacity calibration: coarse and fine ramps against a `Runner`, two ramps agreeing within the pinned fraction or a third deciding by median, lambda_r frozen, and the §5 reference run at 2 x lambda_r; every step is a §3 collection over its measured window with the queue-gauge series, the kept families' window reductions and the §2 receive-path report, and the trace is rewritten after every step | §10, §5, §3, §2 | `RunRamp`, `Calibrate`, `Reference`, `LoadRunner` | capacity-model fake runner; one step against the mock with a stall inside the settle |
 | `cmd/percentes-calibrate` | Calibration trace pair (calibration.json, calibration.txt); exit 0/2/1; `--check` validates a config and lists its placeholders | §10 | | |
 | `cmd/percentes` | One run → report pair; exit 0/2/1 | AC7 | | via reproduce.sh |
 | `cmd/percentes-campaign` | N-run campaign → campaign report pair; routes `fault.variant` to its injector (mock admin / clean-delete kubectl; black-hole refused pending the Phase-1 NodeOps wiring) | §5/§7/§10 | | via campaign-e2e.sh |
+| `cmd/naivesweep` | Standalone reconnaissance sweep of an OpenAI-compatible endpoint, outside the instrument: closed-loop, no client-validity gates; flags a 200 that reached `[DONE]` with no content, no refusal and no stop reason | none | | fixture cases in `main_test.go` |
 
 Deploy/test scaffolding: `deploy/kind/` (cluster config with pinned node
 image + NodePort mapping; `smoke.sh`, `reproduce.sh` = AC7,
 `campaign-e2e.sh`), `deploy/mock/` (2-replica mock Deployment, no
 liveness probe by design), `deploy/phase1/` (vLLM topology manifest with
-PIN-AT-PHASE1 pre-registration placeholders; deliberately not deployable as-is), `configs/` (all runnable configs; one file drives both
+PIN-AT-PHASE1 pre-registration placeholders, deliberately not deployable as-is; capture scripts for the host fingerprint, the GPU sample series and the server log), `configs/` (all runnable configs; one file drives both
 cluster ConfigMap and host runner), `internal/ac/` (the §8 acceptance
 suite; mock runs as a separate process per §6 placement pinning).
 
@@ -179,7 +181,8 @@ Single-run report (`report.json`):
 | `conditional_headline` | `report.headline` (victim-scoped) | Appendix template |
 
 Campaign report (`campaign.json`): `campaign.per_run[*]` from
-`campaign.extractScalars`; `campaign.endpoints[*]` from
+`campaign.extractScalars`, each run carrying its `receive_path`,
+`server_side` and `family_errors`; `campaign.endpoints[*]` from
 `stats.Summarize` with drop reasons from `campaign.summarize`;
 `noise_floor_cov` only for clean_delete (§7 primary endpoint);
 `validity_gates[*]` from `validity.Evaluate` per run.
@@ -188,14 +191,14 @@ Campaign report (`campaign.json`): `campaign.per_run[*]` from
 
 | Gate | Pinned numbers | Where enforced |
 |---|---|---|
-| Config pins | every §6/§4/§5 number | `config.Validate`: a weakened config won't load |
-| Client validity (§2) | skew p99≤5ms/max≤50ms; zero undispatched; CPU≤70%/5s; GC p99<1ms | `loadgen.evaluateGates` → run invalid |
+| Config pins | the §2, §4, §5 and §10 numbers as equalities; §6 environment values as required fields | `config.Validate`: a weakened config won't load |
+| Client validity (§2) | skew p99≤5ms/max≤50ms, compared in nanoseconds; zero undispatched; CPU≤70%/5s; GC p99<1ms on the upper edge of the runtime histogram bucket that holds it | `loadgen.evaluateGates` → run invalid |
 | Share gate (§1/G1) | 45–55% per replica pre-fault | `run.shareGate` |
 | Injection timing (AC3) | ±500 ms | `run.validity` via orchestrator records |
 | G1–G7 (§10) | per SPEC | `validity.Evaluate` per run in both binaries; unobserved-but-applicable ⇒ FAIL; failed or unobserved G3/G4 strips the label, run stays valid |
 
-G5 depends on the Phase 1 nvidia-smi fingerprint collector and carries a
-not-applicable row until it exists. G7 reads `internal/serverstats`: when
+G5 carries a not-applicable row: the gate does not read the nvidia-smi
+fingerprint that `deploy/phase1/fingerprint.sh` captures. G7 reads `internal/serverstats`: when
 `target.metrics_urls` names one Prometheus endpoint per replica, each is
 sampled at the pinned cadence from the run epoch and the pinned
 waiting-queue gauge (`target.queue_gauge`, `vllm:num_requests_waiting` on
@@ -203,8 +206,25 @@ vLLM, `percentes_mock_requests_waiting` on the mock) is averaged per
 replica over the §3 baseline window, guard excluded; a replica with fewer
 than 90 percent of the samples expected at the cadence over that window
 fails coverage (§10). Unset, G7 is a not-applicable row. The kind
-campaign does not yet set `metrics_urls`, since each pod's endpoint needs
-its own address behind the single NodePort service.
+campaign does not set `metrics_urls`, since each pod's endpoint needs its
+own address behind the single NodePort service.
+
+The same sampler keeps every family `target.metrics_families` names on
+each sample and reduces them per window and replica into the report's
+`server_side` block (§2). `target.ttft_histogram` names the server-side
+time-to-first-token histogram among them; each window's `receive_path`
+block sets the client-side TTFT mean against it and carries the loopback
+canary's deviation from its fixed timing (`internal/loadgen`), the two §2
+receive-path checks, neither run-failing. `percentes-calibrate` takes the
+same two settings as `--families` and `--ttft-histogram`. `percentes`,
+`percentes-campaign` and `percentes-calibrate` check every metric name and
+the histogram's type against each endpoint before the load; the run report
+keeps the sample series under `server_samples` and the count of failed
+family reads under `family_errors`. The §10 one-token-per-event check (a
+sample of requests' client content-event counts against the
+server-reported completion token counts) is not implemented, so for any
+target other than the mock `report.txt` labels the pooled inter-token
+latency (ITL) inter-chunk (§3).
 
 One consequence shows up on macOS under the CGO_ENABLED=0 builds the
 make targets pin. Both binaries evaluate the §10 gates per run via

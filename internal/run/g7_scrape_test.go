@@ -13,8 +13,8 @@ import (
 )
 
 // External test package: validity imports run, so the wiring from
-// target.metrics_urls through the sampler to the G7 verdict is exercised
-// from outside package run.
+// target.metrics_urls through the sampler to the verdict of G7, the §10
+// waiting-queue gauge gate, is exercised from outside package run.
 
 func g7Cfg(t *testing.T) *config.Config {
 	t.Helper()
@@ -68,7 +68,7 @@ func TestG7EvaluatesFromMockScrape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sampler := serverstats.ForRun(cfg.Target.MetricsURLs, cfg.Target.QueueGauge, 200*time.Millisecond)
+	sampler := serverstats.ForRun(cfg.Target.MetricsURLs, cfg.Target.QueueGauge, nil, 200*time.Millisecond)
 	opts := armed(base)
 	opts.OnEpoch = func(time.Time) { sampler.Start(context.Background()) }
 	art, err := run.Execute(context.Background(), cfg, opts)
@@ -82,8 +82,9 @@ func TestG7EvaluatesFromMockScrape(t *testing.T) {
 	rep := validity.Evaluate(art, obs)
 
 	// The §2 gate measures this machine and host load inflates every term,
-	// including the CPU gate, whose 5 s windowed mean can pass while the
-	// peak is near saturation. A failed gate cannot judge the sampler.
+	// including the central processing unit (CPU) gate, whose 5 s windowed
+	// mean can pass while the peak is near saturation. A failed gate cannot
+	// judge the sampler.
 	if g := art.Loadgen.Gates; !g.Pass {
 		t.Skipf("host contended the client: %+v", g)
 	}

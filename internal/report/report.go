@@ -1,9 +1,10 @@
-// Package report generates the full metric set as JSON plus a
-// human-readable report from one config (SPEC.md §2): completion-incidence
-// curves, failure rates, conditional-on-completion distributions, the recovery analysis
-// with its sensitivity table, the decomposition, gates, and the
-// conditional headline (appendix template). Distributional numbers come
-// from the merged histograms queried once, never averaged percentiles.
+// Package report generates the full metric set as JavaScript Object
+// Notation (JSON) plus a human-readable report from one config (SPEC.md
+// §2): completion-incidence curves, failure rates,
+// conditional-on-completion distributions, the recovery analysis with
+// its sensitivity table, the decomposition, gates, and the conditional
+// headline (appendix template). Distributional numbers come from the
+// merged histograms queried once, never averaged percentiles.
 package report
 
 import (
@@ -18,6 +19,7 @@ import (
 	"github.com/percentes/percentes/internal/detect"
 	"github.com/percentes/percentes/internal/histo"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/serverstats"
 	"github.com/percentes/percentes/internal/validity"
 )
 
@@ -188,9 +190,12 @@ func human(r *Report) string {
 	if !g.CPUMeasured {
 		cpuCell = "UNMEASURED on this platform build (gate cannot pass uncertified)"
 	}
-	w("client-validity gate: pass=%v (skew p99=%dus max=%dus; undispatched=%d; cpu %s; gc pause p99=%.3fms)",
-		g.Pass, g.SendSkewP99Us, g.SendSkewMaxUs, g.Undispatched, cpuCell, g.GCPauseP99Ms)
+	w("client-validity gate: pass=%v (skew p99=%dus max=%dus; undispatched=%d; cpu %s; %s)",
+		g.Pass, g.SendSkewP99Us, g.SendSkewMaxUs, g.Undispatched, cpuCell, g.GCPauseText())
 	w("share gate: applicable=%v pass=%v shares=%v", art.ShareGate.Applicable, art.ShareGate.Pass, art.ShareGate.Shares)
+	if art.FamilyErrors > 0 {
+		w("kept-family reads that failed: %d", art.FamilyErrors)
+	}
 	if art.VictimReplica != "" {
 		w("killed pod: %s (share at T_inject: %.3f), §1", art.VictimReplica, art.ShareGate.VictimShareAtInject)
 	}
@@ -239,7 +244,22 @@ func human(r *Report) string {
 		}
 		w("TTFT conditional on completion: %s%s", summary(st.TTFTConditional), ciText(st.TTFTTailCI))
 		w("e2e  conditional on completion: %s%s", summary(st.E2EConditional), ciText(st.E2ETailCI))
-		w("ITL pooled (per-window): %s", summary(st.ITLPooled))
+		if art.Config.Mock != nil {
+			w("ITL pooled (per-window): %s", summary(st.ITLPooled))
+		} else {
+			// One token per content event holds for the mock; nothing
+			// checks it on another target (§10).
+			w("ITL pooled (per-window), inter-chunk (§3): %s", summary(st.ITLPooled))
+		}
+		if rp := art.ReceivePath[name]; rp != nil {
+			w("receive path (§2, not run-failing): %s", receivePathText(rp))
+		}
+		for _, replica := range sortedKeys(art.ServerSide[name]) {
+			w("server-side %s: %s", replica, reductionText(art.ServerSide[name][replica]))
+		}
+		if art.Config.Target.Hosted {
+			w("the §4 thresholds below are the self-hosted objective applied descriptively; §6 defines no hosted objective")
+		}
 		w("throughput=%.2f rps goodput=%.2f rps goodput-frac=%.4f", st.ThroughputRPS, st.GoodputRPS, st.GoodputFrac)
 		w("goodput-versus-threshold sweep (§4):")
 		for _, sp := range st.GoodputSweep {
@@ -337,6 +357,70 @@ func human(r *Report) string {
 	}
 	w("%s", Caveat)
 	return b.String()
+}
+
+// receivePathText renders one window's §2 receive-path report.
+func receivePathText(rp *collect.ReceivePath) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "client TTFT mean %.1fms over %d", rp.ClientTTFTMeanMs, rp.ClientTTFTCount)
+	switch {
+	case rp.ServerTTFTFamily == "":
+		b.WriteString("; no server histogram named")
+	case rp.ServerTTFTCount == 0:
+		fmt.Fprintf(&b, "; %s: no observations in the window", rp.ServerTTFTFamily)
+	default:
+		fmt.Fprintf(&b, "; server %.1fms over %d", rp.ServerTTFTMeanMs, rp.ServerTTFTCount)
+		if rp.DivergenceMs != nil {
+			fmt.Fprintf(&b, ", client minus server %+.1fms", *rp.DivergenceMs)
+		}
+	}
+	if c := rp.Canary; c != nil {
+		fmt.Fprintf(&b, "; loopback canary (%d streams completed, %d tokens at %dms TTFT, %dms ITL): TTFT deviation p50 %.2fms max %.2fms, ITL deviation p50 %.2fms p99 %.2fms max %.2fms",
+			c.Completed, c.Tokens, c.TTFTMs, c.ITLMs, float64(c.TTFTDevP50Us)/1000, float64(c.TTFTDevMaxUs)/1000,
+			float64(c.ITLDevP50Us)/1000, float64(c.ITLDevP99Us)/1000, float64(c.ITLDevMaxUs)/1000)
+	}
+	if rp.CanaryError != "" {
+		fmt.Fprintf(&b, "; canary did not run: %s", rp.CanaryError)
+	}
+	if len(rp.ServerReset) > 0 {
+		fmt.Fprintf(&b, "; server histogram reset on %s", strings.Join(rp.ServerReset, ", "))
+	}
+	return b.String()
+}
+
+// reductionText renders one replica's kept families over a window.
+func reductionText(fams map[string]serverstats.Reduction) string {
+	parts := make([]string, 0, len(fams))
+	for _, name := range sortedKeys(fams) {
+		r := fams[name]
+		var part string
+		switch r.Type {
+		case "histogram":
+			mean := 0.0
+			if r.Count > 0 {
+				mean = r.Sum / float64(r.Count)
+			}
+			part = fmt.Sprintf("%s count %d mean %.4g", name, r.Count, mean)
+		case "counter":
+			part = fmt.Sprintf("%s +%.4g", name, r.Increase)
+		default:
+			part = fmt.Sprintf("%s mean %.4g over %d", name, r.Mean, r.Samples)
+		}
+		if r.Reset {
+			part += " (reset)"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func ciText(ci collect.TailCIs) string {

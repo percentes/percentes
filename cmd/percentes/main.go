@@ -1,6 +1,7 @@
 // percentes runs one full experiment from one config file and writes the
-// report pair (JSON + human-readable). Exit codes: 0 = run valid, 2 = run
-// completed but a run-failing gate marked it invalid, 1 = execution error.
+// JavaScript Object Notation (JSON) and human-readable report pair. Exit
+// codes: 0 = run valid, 2 = run completed but a run-failing gate marked
+// it invalid, 1 = execution error.
 package main
 
 import (
@@ -8,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/run"
 	"github.com/percentes/percentes/internal/serverstats"
@@ -47,12 +50,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// A wrong endpoint or metric name fails here, before the load.
+	for _, u := range cfg.Target.MetricsURLs {
+		if err := serverstats.Preflight(ctx, &http.Client{Timeout: 5 * time.Second}, u, cfg.Target.QueueGauge, cfg.Target.MetricsFamilies, cfg.Target.TTFTHistogram); err != nil {
+			log.Fatalf("percentes: %v", err)
+		}
+	}
 	// §10 G7: sample each replica's waiting-queue gauge from the run
 	// epoch when target.metrics_urls is configured.
-	sampler := serverstats.ForRun(cfg.Target.MetricsURLs, cfg.Target.QueueGauge, time.Duration(config.PinnedQueueSampleIntervalS)*time.Second)
-	var onEpoch func(time.Time)
-	if sampler != nil {
-		onEpoch = func(time.Time) { sampler.Start(ctx) }
+	sampler := serverstats.ForRun(cfg.Target.MetricsURLs, cfg.Target.QueueGauge, cfg.Target.MetricsFamilies, time.Duration(config.PinnedQueueSampleIntervalS)*time.Second)
+	// The §2 loopback canary runs through the same read path from the epoch.
+	var canary *loadgen.Canary
+	var canaryErr error
+	onEpoch := func(e time.Time) {
+		if sampler != nil {
+			sampler.Start(ctx)
+		}
+		canary, canaryErr = loadgen.StartCanary(ctx, e)
 	}
 	art, err := run.Execute(ctx, cfg, run.Options{
 		AdminURL:        *adminURL,
@@ -63,18 +77,29 @@ func main() {
 		ProbeServiceURL: *probeService,
 		OnEpoch:         onEpoch,
 	})
+	var streams []loadgen.CanaryStream
+	if canary != nil {
+		streams = canary.Stop()
+	}
 	if err != nil {
 		if sampler != nil {
 			sampler.Stop()
 		}
 		log.Fatalf("percentes: %v", err)
 	}
-	obs := validity.Observations{}
-	if sampler != nil {
-		startNs, endNs := art.BaselineNs()
-		means, scrapeErrs := sampler.Reduce(art.Loadgen.EpochWall, startNs, endNs)
-		obs.Queue = &validity.QueueObservation{Gauge: cfg.Target.QueueGauge, IntervalS: config.PinnedQueueSampleIntervalS, Means: means, ScrapeErrors: scrapeErrs}
+	if canaryErr != nil {
+		log.Printf("percentes: loopback canary did not run: %v", canaryErr)
 	}
+	obs := validity.Observations{}
+	observed := run.Observed{TTFTFamily: cfg.Target.TTFTHistogram, Canary: streams, CanaryErr: canaryErr}
+	if sampler != nil {
+		samples, errs := sampler.Stop()
+		observed.Samples, observed.FamilyErrors = samples, len(sampler.FamilyErrors())
+		startNs, endNs := art.BaselineNs()
+		means := serverstats.BaselineMeans(samples, art.Loadgen.EpochWall, startNs, endNs)
+		obs.Queue = &validity.QueueObservation{Gauge: cfg.Target.QueueGauge, IntervalS: config.PinnedQueueSampleIntervalS, Means: means, ScrapeErrors: len(errs)}
+	}
+	art.AttachObservations(observed)
 
 	// Run validity includes the §10 gate evaluation; a failed gate
 	// reaches the exit code and the report. G1 and G2 are skipped here

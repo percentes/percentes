@@ -26,6 +26,7 @@ import (
 
 	"github.com/percentes/percentes/internal/calibrate"
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/redact"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/serverstats"
 )
@@ -35,6 +36,8 @@ func main() {
 	target := flag.String("target", "", "the one replica's direct inference URL, no Service in front (required)")
 	metrics := flag.String("metrics", "", "the same replica's Prometheus endpoint (required)")
 	gauge := flag.String("gauge", "", "waiting-queue gauge name (default: target.queue_gauge from the config)")
+	families := flag.String("families", "", "comma-separated metric families kept per sample beside the gauge (default: target.metrics_families from the config)")
+	ttftHistogram := flag.String("ttft-histogram", "", "the server-side time-to-first-token histogram among the families, for the §2 receive-path comparison (default: target.ttft_histogram from the config)")
 	outDir := flag.String("out", "results", "output directory for calibration.json and calibration.txt")
 	maxRate := flag.Float64("max-rate", 0, "ceiling on the rate sent; a coarse candidate at or above it runs at the ceiling, and a ramp that reaches the ceiling without a failing step ends invalid (0 = no ceiling)")
 	skipReference := flag.Bool("skip-reference", false, "do not run the §5 reference step at 2 lambda_r")
@@ -68,6 +71,16 @@ func main() {
 	if *gauge == "" {
 		log.Fatal("percentes-calibrate: --gauge or target.queue_gauge must name the waiting-queue gauge (§6)")
 	}
+	kept := cfg.Target.MetricsFamilies
+	if *families != "" {
+		kept = strings.Split(*families, ",")
+	}
+	if *ttftHistogram == "" {
+		*ttftHistogram = cfg.Target.TTFTHistogram
+	}
+	if *ttftHistogram != "" && !contains(kept, *ttftHistogram) {
+		log.Fatalf("percentes-calibrate: --ttft-histogram %q is not among the kept families", *ttftHistogram)
+	}
 	if n := len(placeholders); n > 0 {
 		log.Fatalf("percentes-calibrate: the config still carries %d PIN-AT-PHASE1 placeholder(s) outside comments; fill them (--check lists them)", n)
 	}
@@ -75,9 +88,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// A wrong endpoint or gauge name fails here, in seconds; after a 150 s
+	// A wrong endpoint or metric name fails here, in seconds; after a 150 s
 	// step it would read as the replica failing at 2 rps.
-	if _, err := serverstats.Scrape(ctx, &http.Client{Timeout: 5 * time.Second}, *metrics, *gauge); err != nil {
+	if err := serverstats.Preflight(ctx, &http.Client{Timeout: 5 * time.Second}, *metrics, *gauge, kept, *ttftHistogram); err != nil {
 		log.Fatalf("percentes-calibrate: %v", err)
 	}
 	var rl syscall.Rlimit
@@ -125,7 +138,7 @@ func main() {
 		log.Fatalf("percentes-calibrate: output directory not writable: %v", err)
 	}
 
-	runner := &calibrate.LoadRunner{Base: cfg, TargetURL: *target, MetricsURL: *metrics, Gauge: *gauge}
+	runner := &calibrate.LoadRunner{Base: cfg, TargetURL: *target, MetricsURL: *metrics, Gauge: *gauge, Families: kept, TTFTFamily: *ttftHistogram}
 	opts := calibrate.Options{MaxRateRPS: *maxRate, Seed: cfg.Run.Seed, Progress: func(p *calibrate.Result) {
 		out.Calibration = p
 		write() //nolint:errcheck
@@ -136,7 +149,7 @@ func main() {
 	}
 	out.Calibration, out.FinishedWall = res, time.Now()
 	if err != nil {
-		out.Error = err.Error()
+		out.Error = redact.Scrub(err.Error())
 	}
 	werr := write()
 	fmt.Print(calibrate.Human(out))
@@ -149,6 +162,15 @@ func main() {
 	case !res.Valid:
 		os.Exit(2)
 	}
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // placeholderLines returns the config lines outside comments that still

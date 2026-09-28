@@ -57,6 +57,25 @@ func humanCampaign(cr *CampaignReport) string {
 	}
 	w("")
 
+	for _, r := range rep.PerRun {
+		if len(r.ReceivePath) == 0 && len(r.ServerSide) == 0 && r.FamilyErrors == 0 {
+			continue
+		}
+		w("== Run %d: receive path and server side per window (§2) ==", r.Run)
+		if r.FamilyErrors > 0 {
+			w("kept-family reads that failed: %d", r.FamilyErrors)
+		}
+		for _, name := range sortedKeys(r.ReceivePath) {
+			w("%s: %s", name, receivePathText(r.ReceivePath[name]))
+		}
+		for _, name := range sortedKeys(r.ServerSide) {
+			for _, replica := range sortedKeys(r.ServerSide[name]) {
+				w("%s server-side %s: %s", name, replica, reductionText(r.ServerSide[name][replica]))
+			}
+		}
+		w("")
+	}
+
 	w("== Endpoint summaries (§7) ==")
 	for _, e := range rep.Endpoints {
 		w("%s [%s]", e.Name, e.Endpoint)

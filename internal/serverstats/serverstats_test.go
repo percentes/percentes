@@ -2,9 +2,12 @@ package serverstats
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -134,10 +137,10 @@ func TestBaselineMeansWindowsOnEpoch(t *testing.T) {
 }
 
 func TestForRunKeysReplicasInOrder(t *testing.T) {
-	if ForRun(nil, "g", time.Second) != nil {
+	if ForRun(nil, "g", nil, time.Second) != nil {
 		t.Fatal("no URLs must mean no sampler")
 	}
-	s := ForRun([]string{"http://a/metrics", "http://b/metrics"}, "vllm:num_requests_waiting", time.Second)
+	s := ForRun([]string{"http://a/metrics", "http://b/metrics"}, "vllm:num_requests_waiting", nil, time.Second)
 	if s.Endpoints["r0"] != "http://a/metrics" || s.Endpoints["r1"] != "http://b/metrics" {
 		t.Fatalf("endpoints keyed out of order: %v", s.Endpoints)
 	}
@@ -151,7 +154,7 @@ func TestReduceStopsAndWindows(t *testing.T) {
 	v.Store(2)
 	srv := gaugeServer(t, &v)
 	defer srv.Close()
-	s := ForRun([]string{srv.URL}, "vllm:num_requests_waiting", 20*time.Millisecond)
+	s := ForRun([]string{srv.URL}, "vllm:num_requests_waiting", nil, 20*time.Millisecond)
 	epoch := time.Now()
 	s.Start(context.Background())
 	time.Sleep(150 * time.Millisecond)
@@ -179,5 +182,247 @@ vllm:num_requests_waiting{engine="1",model_name="b"} 2
 	}
 	if got != 3 {
 		t.Fatalf("got %v, want 3", got)
+	}
+}
+
+const familiesPage = `# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{model_name="m",engine="0"} 1
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="m",engine="0"} 4
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{model_name="m",engine="0"} 500
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_bucket{model_name="m",engine="0",le="0.1"} 2
+vllm:time_to_first_token_seconds_bucket{model_name="m",engine="0",le="1"} 3
+vllm:time_to_first_token_seconds_bucket{model_name="m",engine="0",le="+Inf"} 3
+vllm:time_to_first_token_seconds_sum{model_name="m",engine="0"} 0.6
+vllm:time_to_first_token_seconds_count{model_name="m",engine="0"} 3
+vllm:time_to_first_token_seconds_bucket{model_name="n",engine="0",le="0.1"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="n",engine="0",le="1"} 1
+vllm:time_to_first_token_seconds_bucket{model_name="n",engine="0",le="+Inf"} 1
+vllm:time_to_first_token_seconds_sum{model_name="n",engine="0"} 0.4
+vllm:time_to_first_token_seconds_count{model_name="n",engine="0"} 1
+# TYPE some_summary summary
+some_summary_sum 1
+some_summary_count 1
+`
+
+// Every kept family rides on the gauge's sample with its type, summed
+// across label sets; a histogram's buckets stay in memory for the window
+// reduction.
+func TestSamplerKeepsFamilies(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, familiesPage) }))
+	defer srv.Close()
+	names := []string{"vllm:num_requests_running", "vllm:generation_tokens_total", "vllm:time_to_first_token_seconds"}
+	s := ForRun([]string{srv.URL}, "vllm:num_requests_waiting", names, 20*time.Millisecond)
+	s.Start(context.Background())
+	time.Sleep(60 * time.Millisecond)
+	samples, errs := s.Stop()
+	if len(errs) != 0 || len(samples) == 0 {
+		t.Fatalf("samples %d errors %v", len(samples), errs)
+	}
+	f := samples[0].Families
+	if f["vllm:num_requests_running"].Type != "gauge" || f["vllm:num_requests_running"].Value != 4 {
+		t.Fatalf("running: %+v", f["vllm:num_requests_running"])
+	}
+	if f["vllm:generation_tokens_total"].Type != "counter" || f["vllm:generation_tokens_total"].Value != 500 {
+		t.Fatalf("tokens: %+v", f["vllm:generation_tokens_total"])
+	}
+	h := f["vllm:time_to_first_token_seconds"]
+	if h.Type != "histogram" || h.Count != 4 || h.Sum != 1.0 || len(h.buckets) != 3 || h.buckets[0] != 2 || h.buckets[1] != 4 || h.bounds[1] != 1 {
+		t.Fatalf("ttft: %+v buckets %v bounds %v", h, h.buckets, h.bounds)
+	}
+	if samples[0].Value != 1 {
+		t.Fatalf("gauge %v", samples[0].Value)
+	}
+}
+
+// A kept family the page does not expose is counted apart from the
+// scrape errors and the sample stays without it; the gauge still reads.
+func TestSamplerCountsAnAbsentFamilyApart(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, familiesPage) }))
+	defer srv.Close()
+	s := ForRun([]string{srv.URL}, "vllm:num_requests_waiting", []string{"vllm:num_requests_running", "no_such_family"}, 20*time.Millisecond)
+	s.Start(context.Background())
+	time.Sleep(60 * time.Millisecond)
+	samples, errs := s.Stop()
+	if len(samples) == 0 || len(errs) != 0 || len(s.FamilyErrors()) != len(samples) {
+		t.Fatalf("samples %d scrape errors %d family errors %d", len(samples), len(errs), len(s.FamilyErrors()))
+	}
+	if _, ok := samples[0].Families["no_such_family"]; ok || samples[0].Families["vllm:num_requests_running"].Value != 4 {
+		t.Fatalf("families: %+v", samples[0].Families)
+	}
+}
+
+// A non-finite value in a kept family is an error, as it is for the gauge.
+func TestFamilyValueRejectsNonFinite(t *testing.T) {
+	for _, page := range []string{
+		"# TYPE g gauge\ng NaN\n",
+		"# TYPE c counter\nc_total +Inf\n",
+		"# TYPE h histogram\nh_bucket{le=\"+Inf\"} 1\nh_sum NaN\nh_count 1\n",
+	} {
+		fams, err := parse([]byte(page), "http://x/metrics")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name := range fams {
+			if _, err := familyValue(fams, name, "http://x/metrics"); err == nil {
+				t.Fatalf("%q must be refused", page)
+			}
+		}
+	}
+}
+
+// Preflight refuses an unreadable gauge or family, and a histogram name
+// that is a family of another type.
+func TestPreflight(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, familiesPage) }))
+	defer srv.Close()
+	ok := func(gauge string, names []string, hist string) error {
+		return Preflight(context.Background(), srv.Client(), srv.URL, gauge, names, hist)
+	}
+	if err := ok("vllm:num_requests_waiting", []string{"vllm:num_requests_running", "vllm:time_to_first_token_seconds"}, "vllm:time_to_first_token_seconds"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ok("no_such_gauge", nil, ""); err == nil {
+		t.Fatal("an absent gauge must be refused")
+	}
+	err := ok("vllm:num_requests_waiting", []string{"vllm:num_requests_running", "absent_family"}, "")
+	if err == nil || !strings.Contains(err.Error(), "absent_family") {
+		t.Fatalf("absent family: %v", err)
+	}
+	if err := ok("vllm:num_requests_waiting", []string{"some_summary"}, ""); err == nil {
+		t.Fatal("a summary family must be refused")
+	}
+	err = ok("vllm:num_requests_waiting", []string{"vllm:num_requests_running"}, "vllm:num_requests_running")
+	if err == nil || !strings.Contains(err.Error(), "where a histogram is needed") {
+		t.Fatalf("a gauge named as the histogram: %v", err)
+	}
+}
+
+// A reduction from a live page carries no +Inf bucket and marshals.
+func TestReduceWindowMarshals(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, familiesPage) }))
+	defer srv.Close()
+	s := ForRun([]string{srv.URL}, "vllm:num_requests_waiting", []string{"vllm:time_to_first_token_seconds"}, 20*time.Millisecond)
+	epoch := time.Now()
+	s.Start(context.Background())
+	time.Sleep(60 * time.Millisecond)
+	samples, _ := s.Stop()
+	red := ReduceWindow(samples, epoch, 0, int64(time.Hour))
+	h := red["r0"]["vllm:time_to_first_token_seconds"]
+	if len(h.Buckets) != 2 || h.Buckets[1].LE != 1 {
+		t.Fatalf("buckets: %+v", h.Buckets)
+	}
+	if _, err := json.Marshal(red); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := json.Marshal(samples); err != nil {
+		t.Fatalf("marshal samples: %v", err)
+	}
+}
+
+// A counter or histogram that fell between two consecutive samples is a
+// reset: that pair contributes the later value, and the pairs either side
+// of it still count their increases.
+func TestReduceWindowReset(t *testing.T) {
+	epoch := time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC)
+	at := func(s float64) time.Time { return epoch.Add(time.Duration(s * float64(time.Second))) }
+	hist := func(count uint64, sum float64, b0, b1 uint64) Family {
+		return Family{Type: "histogram", Count: count, Sum: sum, bounds: []float64{0.1, math.Inf(1)}, buckets: []uint64{b0, b1}}
+	}
+	mk := func(s float64, counter float64, h Family) Sample {
+		return Sample{Replica: "r0", At: at(s), Families: map[string]Family{"c": {Type: "counter", Value: counter}, "h": h}}
+	}
+	samples := []Sample{
+		mk(1, 1000, hist(100, 9, 53, 100)), // the last before the window
+		mk(3, 1200, hist(120, 11, 60, 120)),
+		mk(4, 20, hist(5, 0.5, 3, 5)),        // restart
+		mk(9, 2150, hist(130, 6.5, 70, 130)), // above the earlier values again
+	}
+	got := ReduceWindow(samples, epoch, 2e9, 10e9)["r0"]
+	if c := got["c"]; !c.Reset || c.Increase != 200+20+2130 {
+		t.Fatalf("counter across a restart: %+v", c)
+	}
+	h := got["h"]
+	if !h.Reset || h.Count != 20+5+125 || h.Sum != 2+0.5+6 || len(h.Buckets) != 1 || h.Buckets[0] != (Bucket{LE: 0.1, Count: 7 + 3 + 67}) {
+		t.Fatalf("histogram across a restart: %+v", h)
+	}
+	// A restart that changes the bucket layout inside the window keeps
+	// Count and Sum and reports no buckets.
+	samples = append(samples, Sample{Replica: "r0", At: at(9.5), Families: map[string]Family{
+		"h": {Type: "histogram", Count: 131, Sum: 6.6, bounds: []float64{0.5, math.Inf(1)}, buckets: []uint64{131, 131}},
+	}})
+	h = ReduceWindow(samples, epoch, 2e9, 10e9)["r0"]["h"]
+	if !h.Reset || h.Count != 20+5+125+131 || h.Sum != 2+0.5+6+6.6 || len(h.Buckets) != 0 {
+		t.Fatalf("histogram across a layout change: %+v", h)
+	}
+}
+
+// The bucket layout follows the sample the increase is measured from, so
+// a layout change before the window leaves the in-window increases whole.
+func TestReduceWindowLayoutChangeBeforeTheWindow(t *testing.T) {
+	epoch := time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC)
+	at := func(s float64) time.Time { return epoch.Add(time.Duration(s * float64(time.Second))) }
+	old := func(count uint64, b0 uint64) Family {
+		return Family{Type: "histogram", Count: count, Sum: float64(count), bounds: []float64{0.1, 0.2, math.Inf(1)}, buckets: []uint64{b0, count, count}}
+	}
+	neu := func(count uint64, b0 uint64) Family {
+		return Family{Type: "histogram", Count: count, Sum: float64(count), bounds: []float64{0.5, math.Inf(1)}, buckets: []uint64{b0, count}}
+	}
+	samples := []Sample{
+		{Replica: "r0", At: at(0.5), Families: map[string]Family{"h": old(50, 10)}},
+		{Replica: "r0", At: at(1), Families: map[string]Family{"h": neu(7, 2)}}, // the last before the window, new layout
+		{Replica: "r0", At: at(3), Families: map[string]Family{"h": neu(17, 6)}},
+		{Replica: "r0", At: at(4), Families: map[string]Family{"h": neu(27, 9)}},
+	}
+	h := ReduceWindow(samples, epoch, 2e9, 10e9)["r0"]["h"]
+	if h.Reset || h.Count != 20 || h.Sum != 20 || len(h.Buckets) != 1 || h.Buckets[0] != (Bucket{LE: 0.5, Count: 7}) {
+		t.Fatalf("increase over the new layout: %+v", h)
+	}
+}
+
+// Over a window, a gauge reduces to its mean over the samples inside it,
+// a counter to its increase, and a histogram to the increase in count,
+// sum and every bucket, from the last sample before the window.
+func TestReduceWindowOracle(t *testing.T) {
+	epoch := time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC)
+	at := func(s float64) time.Time { return epoch.Add(time.Duration(s * float64(time.Second))) }
+	hist := func(count uint64, sum float64, b0, b1 uint64) Family {
+		return Family{Type: "histogram", Count: count, Sum: sum, bounds: []float64{0.1, math.Inf(1)}, buckets: []uint64{b0, b1}}
+	}
+	mk := func(s float64, gauge float64, counter float64, h Family) Sample {
+		return Sample{Replica: "r0", At: at(s), Value: 0, Families: map[string]Family{
+			"g": {Type: "gauge", Value: gauge}, "c": {Type: "counter", Value: counter}, "h": h,
+		}}
+	}
+	samples := []Sample{
+		mk(3, 9, 100, hist(10, 1.0, 5, 10)),                                                     // before the window: the histogram and counter baseline
+		mk(4, 9, 110, hist(12, 1.2, 6, 12)),                                                     // the last before the window
+		mk(5, 1, 120, hist(14, 1.5, 7, 14)),                                                     // inside
+		mk(6, 3, 130, hist(20, 2.5, 12, 20)),                                                    // inside, the last
+		mk(10, 99, 999, hist(99, 9, 99, 99)),                                                    // at the end: excluded
+		{Replica: "r1", At: at(1), Families: map[string]Family{"g": {Type: "gauge", Value: 5}}}, // never inside
+	}
+	got := ReduceWindow(samples, epoch, 5e9, 10e9)
+	if len(got) != 1 {
+		t.Fatalf("replicas: %v", got)
+	}
+	r := got["r0"]
+	if g := r["g"]; g.Type != "gauge" || g.Samples != 2 || g.Mean != 2 {
+		t.Fatalf("gauge: %+v", g)
+	}
+	if c := r["c"]; c.Type != "counter" || c.Increase != 20 || c.Samples != 2 {
+		t.Fatalf("counter: %+v", c)
+	}
+	h := r["h"]
+	if h.Type != "histogram" || h.Reset || h.Count != 8 || h.Sum != 1.3 || len(h.Buckets) != 1 || h.Buckets[0] != (Bucket{LE: 0.1, Count: 6}) {
+		t.Fatalf("histogram: %+v", h)
+	}
+
+	// No sample before the window: the first inside is the baseline.
+	got = ReduceWindow(samples[2:4], epoch, 5e9, 10e9)
+	if c := got["r0"]["c"]; c.Increase != 10 {
+		t.Fatalf("counter from the first inside sample: %+v", c)
 	}
 }

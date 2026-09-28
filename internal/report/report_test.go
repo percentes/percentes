@@ -12,12 +12,12 @@ import (
 	"github.com/percentes/percentes/internal/histo"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/serverstats"
 )
 
 // minimalArtifacts is the smallest well-formed run product: no windows,
 // no fault, gates zero-valued. Everything the renderer touches must
-// tolerate it — a report generator that panics on a sparse run would
-// also panic on a degenerate real one.
+// tolerate it.
 func minimalArtifacts() *run.Artifacts {
 	return &run.Artifacts{
 		Config:        &config.Config{},
@@ -28,9 +28,10 @@ func minimalArtifacts() *run.Artifacts {
 	}
 }
 
-// The JSON artifact carries the instrument commit so a published number
-// traces to the build that produced it. Test binaries lack VCS stamping,
-// so the field must degrade to "unknown", never to empty.
+// The JavaScript Object Notation (JSON) artifact carries the instrument
+// commit so a published number traces to the build that produced it. Test
+// binaries lack version control system (VCS) stamping, so the field must
+// degrade to "unknown", never to empty.
 func TestReportCarriesInstrumentCommit(t *testing.T) {
 	raw, _, err := Generate(minimalArtifacts(), nil)
 	if err != nil {
@@ -47,8 +48,8 @@ func TestReportCarriesInstrumentCommit(t *testing.T) {
 	}
 }
 
-// The caveat is the report's honesty banner. It must appear in the JSON
-// artifact and twice in the human report (header and footer).
+// The caveat must appear in the JSON artifact and twice in the human
+// report (header and footer).
 func TestGenerateCarriesCaveatAndValidJSON(t *testing.T) {
 	raw, humanText, err := Generate(minimalArtifacts(), nil)
 	if err != nil {
@@ -295,5 +296,36 @@ func TestCITextRefusalAndBounds(t *testing.T) {
 func TestSummaryZeroSamples(t *testing.T) {
 	if got := summary(histo.Summary{}); got != "no completed samples" {
 		t.Errorf("empty summary must say so in words, got %q", got)
+	}
+}
+
+// The receive-path line names what it lacks, and a replica's kept
+// families render by type in name order.
+func TestReceivePathAndReductionText(t *testing.T) {
+	d := 3.25
+	rp := &collect.ReceivePath{ClientTTFTMeanMs: 120.5, ClientTTFTCount: 40, ServerTTFTFamily: "vllm:ttft", ServerTTFTMeanMs: 117.25, ServerTTFTCount: 41, DivergenceMs: &d,
+		Canary: &loadgen.CanarySummary{TTFTMs: 20, ITLMs: 10, Tokens: 32, Completed: 7, TTFTDevP50Us: 1500, TTFTDevMaxUs: 4000, ITLDevP50Us: -10, ITLDevP99Us: 900, ITLDevMaxUs: 1200}}
+	got := receivePathText(rp)
+	for _, want := range []string{"client TTFT mean 120.5ms over 40", "server 117.2ms over 41", "client minus server +3.2ms", "7 streams completed, 32 tokens at 20ms TTFT, 10ms ITL", "TTFT deviation p50 1.50ms max 4.00ms", "ITL deviation p50 -0.01ms p99 0.90ms max 1.20ms"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("receive path text lacks %q:\n%s", want, got)
+		}
+	}
+	if got := receivePathText(&collect.ReceivePath{ClientTTFTCount: 1, ServerTTFTFamily: "vllm:ttft"}); !strings.Contains(got, "vllm:ttft: no observations in the window") {
+		t.Fatalf("unobserved histogram: %s", got)
+	}
+	if got := receivePathText(&collect.ReceivePath{}); !strings.Contains(got, "no server histogram named") || strings.Contains(got, "canary") {
+		t.Fatalf("nothing named: %s", got)
+	}
+	fams := map[string]serverstats.Reduction{
+		"z_gauge":   {Type: "gauge", Samples: 270, Mean: 3.5},
+		"a_counter": {Type: "counter", Samples: 270, Increase: 12345, Reset: true},
+		"m_hist":    {Type: "histogram", Samples: 270, Count: 200, Sum: 24},
+	}
+	if got, want := reductionText(fams), "a_counter +1.234e+04 (reset); m_hist count 200 mean 0.12; z_gauge mean 3.5 over 270"; got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	if got := receivePathText(&collect.ReceivePath{ClientTTFTCount: 1, ServerTTFTFamily: "vllm:ttft", ServerTTFTCount: 2, ServerTTFTMeanMs: 1, ServerReset: []string{"r1"}}); !strings.Contains(got, "server histogram reset on r1") {
+		t.Fatalf("reset: %s", got)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/percentes/percentes/internal/detect"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/orchestrator"
+	"github.com/percentes/percentes/internal/serverstats"
 )
 
 // Options wires the run to its environment.
@@ -78,6 +79,16 @@ type Artifacts struct {
 	ShareGate     ShareGateResult            `json:"share_gate"`
 	// ThresholdAnalysis is the §4 modal/baseline-SD statement.
 	ThresholdAnalysis collect.ThresholdAnalysis `json:"threshold_analysis"`
+	// ServerSamples is every server sample the run took (§2); absent when
+	// target.metrics_urls is unset. FamilyErrors counts the kept-family
+	// reads that failed.
+	ServerSamples []serverstats.Sample `json:"server_samples,omitempty"`
+	FamilyErrors  int                  `json:"family_errors,omitempty"`
+	// ServerSide is each kept metric family reduced per window and
+	// replica (§2); absent when no family is kept.
+	ServerSide map[string]map[string]map[string]serverstats.Reduction `json:"server_side,omitempty"`
+	// ReceivePath is the §2 receive-path report per window.
+	ReceivePath map[string]*collect.ReceivePath `json:"receive_path,omitempty"`
 	// ScheduleFired counts the mock's recorded fault fires, read back from
 	// /admin/faults after a schedule-driven run; nil means unattested.
 	ScheduleFired  *int     `json:"schedule_fired,omitempty"`
@@ -85,7 +96,6 @@ type Artifacts struct {
 	InvalidReasons []string `json:"invalid_reasons,omitempty"`
 }
 
-// Execute performs one full run.
 // BaselineNs returns the §3 baseline window, guard excluded, as monotonic
 // offsets from the run epoch.
 func (a *Artifacts) BaselineNs() (startNs, endNs int64) {
@@ -93,6 +103,52 @@ func (a *Artifacts) BaselineNs() (startNs, endNs int64) {
 	return w.StartNs, w.EndNs
 }
 
+// Observed is what the server sampler and the loopback canary produced
+// beside the load (§2).
+type Observed struct {
+	Samples      []serverstats.Sample
+	FamilyErrors int
+	TTFTFamily   string
+	Canary       []loadgen.CanaryStream
+	CanaryErr    error
+}
+
+// AttachObservations keeps the sample series and reduces it with the
+// canary streams over every collected window (§2).
+func (a *Artifacts) AttachObservations(o Observed) {
+	a.ServerSamples, a.FamilyErrors = o.Samples, o.FamilyErrors
+	a.ReceivePath = map[string]*collect.ReceivePath{}
+	families := false
+	for _, smp := range o.Samples {
+		if len(smp.Families) > 0 {
+			families = true
+			break
+		}
+	}
+	if families {
+		a.ServerSide = map[string]map[string]map[string]serverstats.Reduction{}
+	}
+	for name, st := range a.Windows {
+		w := st.Window
+		var server map[string]map[string]serverstats.Reduction
+		if families {
+			server = serverstats.ReduceWindow(o.Samples, a.Loadgen.EpochWall, w.StartNs, w.EndNs)
+			a.ServerSide[name] = server
+		}
+		var summary *loadgen.CanarySummary
+		if o.Canary != nil {
+			s := loadgen.SummarizeCanary(o.Canary, w.StartNs, w.EndNs)
+			summary = &s
+		}
+		rp := collect.ReceivePathFor(st, server, o.TTFTFamily, summary)
+		if o.CanaryErr != nil {
+			rp.CanaryError = o.CanaryErr.Error()
+		}
+		a.ReceivePath[name] = rp
+	}
+}
+
+// Execute performs one full run.
 func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts, error) {
 	art := &Artifacts{Config: cfg, Windows: map[string]*collect.Stats{}}
 

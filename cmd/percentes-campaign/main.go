@@ -1,10 +1,11 @@
-// percentes-campaign runs an N-run (variant, config) campaign: the
-// SPEC.md §5 repetition unit, N pinned to 5 by the experiment profile,
-// and writes the campaign report pair (§5/§7 statistics + §10 validity
-// gates). Phase 0 drives it against the mock; Phase 1 swaps in the
-// clean-delete or node-partition injector and supplies the GPU-cluster
-// observations. Exit codes: 0 = every run valid, 2 = campaign completed
-// but at least one run failed a run-validity gate, 1 = error.
+// percentes-campaign runs a campaign of N runs of one (variant, config),
+// the SPEC.md §5 repetition unit, where the repetition count N is pinned
+// to 5 by the experiment profile, and writes the campaign report pair
+// (§5/§7 statistics + §10 validity gates). Phase 0 drives it against the
+// mock; Phase 1 swaps in the clean-delete or node-partition injector and
+// supplies the graphics processing unit (GPU) cluster observations.
+// Exit codes: 0 = every run valid, 2 = campaign completed but at least
+// one run failed a run-validity gate, 1 = error.
 package main
 
 import (
@@ -12,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 
 	"github.com/percentes/percentes/internal/campaign"
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/orchestrator"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/run"
@@ -88,23 +91,39 @@ func main() {
 	var gates []validity.Report
 	runner := func(ctx context.Context, c *config.Config, o run.Options) (*run.Artifacts, error) {
 		// §10 G7: a fresh sampler per run, started on that run's epoch.
-		sampler := serverstats.ForRun(c.Target.MetricsURLs, c.Target.QueueGauge, time.Duration(config.PinnedQueueSampleIntervalS)*time.Second)
-		if sampler != nil {
-			o.OnEpoch = func(time.Time) { sampler.Start(ctx) }
+		sampler := serverstats.ForRun(c.Target.MetricsURLs, c.Target.QueueGauge, c.Target.MetricsFamilies, time.Duration(config.PinnedQueueSampleIntervalS)*time.Second)
+		var canary *loadgen.Canary
+		var canaryErr error
+		o.OnEpoch = func(e time.Time) {
+			if sampler != nil {
+				sampler.Start(ctx)
+			}
+			canary, canaryErr = loadgen.StartCanary(ctx, e)
 		}
 		art, err := run.Execute(ctx, c, o)
+		var streams []loadgen.CanaryStream
+		if canary != nil {
+			streams = canary.Stop()
+		}
 		if err != nil {
 			if sampler != nil {
 				sampler.Stop()
 			}
 			return nil, err
 		}
-		obs := validity.Observations{}
-		if sampler != nil {
-			startNs, endNs := art.BaselineNs()
-			means, scrapeErrs := sampler.Reduce(art.Loadgen.EpochWall, startNs, endNs)
-			obs.Queue = &validity.QueueObservation{Gauge: c.Target.QueueGauge, IntervalS: config.PinnedQueueSampleIntervalS, Means: means, ScrapeErrors: scrapeErrs}
+		if canaryErr != nil {
+			log.Printf("percentes-campaign: loopback canary did not run: %v", canaryErr)
 		}
+		obs := validity.Observations{}
+		observed := run.Observed{TTFTFamily: c.Target.TTFTHistogram, Canary: streams, CanaryErr: canaryErr}
+		if sampler != nil {
+			samples, errs := sampler.Stop()
+			observed.Samples, observed.FamilyErrors = samples, len(sampler.FamilyErrors())
+			startNs, endNs := art.BaselineNs()
+			means := serverstats.BaselineMeans(samples, art.Loadgen.EpochWall, startNs, endNs)
+			obs.Queue = &validity.QueueObservation{Gauge: c.Target.QueueGauge, IntervalS: config.PinnedQueueSampleIntervalS, Means: means, ScrapeErrors: len(errs)}
+		}
+		art.AttachObservations(observed)
 		rep := validity.Evaluate(art, obs)
 		gates = append(gates, rep)
 		if reasons := rep.FailReasons("G1", "G2"); len(reasons) > 0 {
@@ -121,6 +140,13 @@ func main() {
 	// failed run-validity gate).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// A wrong endpoint or metric name fails here, before the first run.
+	for _, u := range cfg.Target.MetricsURLs {
+		if err := serverstats.Preflight(ctx, &http.Client{Timeout: 5 * time.Second}, u, cfg.Target.QueueGauge, cfg.Target.MetricsFamilies, cfg.Target.TTFTHistogram); err != nil {
+			log.Fatalf("percentes-campaign: %v", err)
+		}
+	}
 
 	rep, err := campaign.Run(ctx, cfg, opts, cfg.Fault.Variant, runner)
 	if err != nil {

@@ -75,6 +75,9 @@ func TestSection6PinCoverage(t *testing.T) {
 	if len(c.Target.MetricsURLs) != c.Target.Replicas {
 		t.Error("§6 pin \"one metrics endpoint per replica (G7)\": not carried")
 	}
+	if len(c.Target.MetricsFamilies) == 0 || c.Target.TTFTHistogram == "" {
+		t.Error("§2 collector settings \"metrics_families\" and \"ttft_histogram\": not carried")
+	}
 	if c.Pins.Engine.MaxNumSeqs <= 0 {
 		t.Error("§6 pin \"max-num-seqs\": not carried")
 	}
@@ -216,6 +219,13 @@ func TestPinnedValueEnforcement(t *testing.T) {
 		{"experiment metrics endpoints short of replicas", experimentRef, func(c *Config) { c.Target.MetricsURLs = c.Target.MetricsURLs[:1] }, "target.metrics_urls"},
 		{"experiment queue gauge dropped", experimentRef, func(c *Config) { c.Target.QueueGauge = "" }, "target.queue_gauge"},
 		{"queue gauge without endpoints", acRef, func(c *Config) { c.Target.QueueGauge = "vllm:num_requests_waiting" }, "target.queue_gauge"},
+		{"metrics families without endpoints", acRef, func(c *Config) { c.Target.MetricsFamilies = []string{"vllm:num_requests_running"} }, "target.metrics_families"},
+		{"ttft histogram without endpoints", acRef, func(c *Config) { c.Target.TTFTHistogram = "vllm:time_to_first_token_seconds" }, "target.ttft_histogram"},
+		{"experiment metrics family empty", experimentRef, func(c *Config) { c.Target.MetricsFamilies = append(c.Target.MetricsFamilies, " ") }, "target.metrics_families"},
+		{"experiment metrics family listed twice", experimentRef, func(c *Config) {
+			c.Target.MetricsFamilies = append(c.Target.MetricsFamilies, c.Target.MetricsFamilies[0])
+		}, "listed twice"},
+		{"experiment ttft histogram not kept", experimentRef, func(c *Config) { c.Target.TTFTHistogram = "vllm:not_kept" }, "target.ttft_histogram"},
 		{"hosted target with metrics endpoints", acRef, func(c *Config) {
 			c.Target.Hosted, c.Target.ModelName, c.Target.APIKeyEnv, c.Load.IgnoreEOS = true, "llama-3.1-8b-instant", "SOME_KEY_ENV", false
 			c.Target.MetricsURLs, c.Target.QueueGauge = []string{"http://a/metrics", "http://b/metrics"}, "q"
@@ -340,8 +350,8 @@ func TestMockScheduleValidation(t *testing.T) {
 }
 
 // TestConfigJSONRecord: the report generator embeds the full config as
-// JSON (§2: "full metric set as JSON ... from one config"). Round-trip
-// must preserve every pin.
+// JavaScript Object Notation (JSON) (§2: "full metric set as JSON ...
+// from one config"). Round-trip must preserve every pin.
 func TestConfigJSONRecord(t *testing.T) {
 	c := loadRef(t, acRef)
 	raw, err := json.Marshal(c)

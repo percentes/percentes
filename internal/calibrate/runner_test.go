@@ -14,7 +14,7 @@ import (
 // the whole step and averaged over the measured window only. A stall
 // scheduled inside the settle raises the gauge there, so a mean taken
 // over the wrong window is not zero. The measured window exceeds the
-// pinned CPU window.
+// pinned central processing unit (CPU) window.
 func TestLoadRunnerStepAgainstMock(t *testing.T) {
 	cfg, err := config.LoadFile("../../configs/ac.reference.yaml")
 	if err != nil {
@@ -31,7 +31,8 @@ func TestLoadRunnerStepAgainstMock(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 	base := "http://" + srv.Addr()
 
-	r := &LoadRunner{Base: cfg, TargetURL: base, MetricsURL: base + "/metrics", Gauge: "percentes_mock_requests_waiting", SampleInterval: 200 * time.Millisecond}
+	r := &LoadRunner{Base: cfg, TargetURL: base, MetricsURL: base + "/metrics", Gauge: "percentes_mock_requests_waiting",
+		Families: []string{"percentes_mock_active_streams", "percentes_mock_tokens_emitted_total"}, SampleInterval: 200 * time.Millisecond}
 	s, err := r.RunStep(context.Background(), Spec{RateRPS: 5, SettleS: 4, MeasureS: 7, Seed: 3})
 	if err != nil {
 		t.Fatal(err)
@@ -69,5 +70,26 @@ func TestLoadRunnerStepAgainstMock(t *testing.T) {
 	}
 	if s.RateRPS != 5 || s.Seed != 3 {
 		t.Fatalf("step did not record its spec: %+v", s.Spec)
+	}
+	// The kept families reduce over the measured window. Streams straddle
+	// the window's edges and the last sample precedes its end, so the
+	// mock's token counter increase is judged against a band around the
+	// window's completions times the budget.
+	streams, tokens := s.ServerWindow["percentes_mock_active_streams"], s.ServerWindow["percentes_mock_tokens_emitted_total"]
+	if streams.Type != "gauge" || streams.Samples < 2 || streams.Mean <= 0 {
+		t.Fatalf("active streams over the window: %+v", streams)
+	}
+	budget := float64(s.Stats.Completed * cfg.Load.MaxTokens)
+	if tokens.Type != "counter" || tokens.Samples < 2 || tokens.Increase < 0.5*budget || tokens.Increase > 1.5*budget {
+		t.Fatalf("token counter increase %v outside half to one and a half of %d completions x %d tokens", tokens.Increase, s.Stats.Completed, cfg.Load.MaxTokens)
+	}
+	// The §2 receive-path report: the client mean over the window's
+	// completions, no server histogram named, and the canary's streams.
+	rp := s.ReceivePath
+	if rp == nil || rp.ClientTTFTCount != s.Stats.Completed || rp.ClientTTFTMeanMs < 20 || rp.ServerTTFTFamily != "" || rp.DivergenceMs != nil {
+		t.Fatalf("receive path: %+v", rp)
+	}
+	if rp.Canary == nil || rp.Canary.Completed < 5 || rp.Canary.TTFTDevP50Us < 0 {
+		t.Fatalf("canary over the measured window: %+v", rp.Canary)
 	}
 }
