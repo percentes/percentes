@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -64,6 +65,9 @@ func main() {
 	}
 	if *target == "" || *metrics == "" {
 		log.Fatal("percentes-calibrate: --target and --metrics are required")
+	}
+	if err := config.CheckBaseURL(*target); err != nil {
+		log.Fatalf("percentes-calibrate: --target: %v", err)
 	}
 	if *gauge == "" {
 		*gauge = cfg.Target.QueueGauge
@@ -173,8 +177,9 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// placeholderLines returns the config lines outside comments that still
-// carry a PIN-AT-PHASE1 placeholder, numbered.
+// placeholderLines names the config lines outside comments that still
+// carry a PIN-AT-PHASE1 placeholder, by line number and any key; a value
+// is never printed.
 func placeholderLines(raw []byte) []string {
 	var out []string
 	for i, l := range strings.Split(string(raw), "\n") {
@@ -182,7 +187,19 @@ func placeholderLines(raw []byte) []string {
 		if strings.HasPrefix(t, "#") || !strings.Contains(t, "PIN-AT-PHASE1") {
 			continue
 		}
-		out = append(out, fmt.Sprintf("line %d: %s", i+1, t))
+		if strings.HasPrefix(t, "- ") {
+			out = append(out, fmt.Sprintf("line %d: list item", i+1))
+			continue
+		}
+		if m := yamlKey.FindStringSubmatch(t); m != nil {
+			out = append(out, fmt.Sprintf("line %d: %s", i+1, m[1]))
+			continue
+		}
+		out = append(out, fmt.Sprintf("line %d", i+1))
 	}
 	return out
 }
+
+// yamlKey matches a mapping key at the start of a line; a scalar's
+// continuation line never matches it.
+var yamlKey = regexp.MustCompile(`^([a-z_][a-z0-9_]*):(\s|$)`)
