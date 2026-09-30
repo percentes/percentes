@@ -36,8 +36,11 @@ func main() {
 	adminURL := flag.String("admin-url", "", "victim replica admin endpoint (mock variant)")
 	injectMode := flag.String("inject-mode", config.MockFaultError, "mock fault mode to arm")
 	injectDuration := flag.Float64("inject-duration-s", 10, "armed fault window duration (mock injector only)")
-	victim := flag.String("victim", "", "victim replica identity (mock: hostname; clean_delete: pod name)")
+	victim := flag.String("victim", "", "victim replica identity (mock: hostname; clean_delete: a pod name fixed for every run, so only a pod recreated under the same name, such as a StatefulSet pod; a Deployment needs --victim-selector)")
+	victimSelector := flag.String("victim-selector", "", "label selector naming the clean_delete victim afresh on every run, its first Ready pod by name once every replica is Ready; not combined with --victim")
+	readyTimeout := flag.Duration("ready-timeout", 10*time.Minute, "how long a clean_delete run waits for its victim to be Ready before failing")
 	namespace := flag.String("namespace", "percentes", "victim pod namespace (clean_delete variant)")
+	kubeContext := flag.String("kube-context", "", "kubeconfig context for the clean_delete injector (required for that variant; kubectl's current context is not used)")
 	victimNode := flag.String("victim-node", "", "victim node name (black_hole variant)")
 	flag.Parse()
 
@@ -63,17 +66,35 @@ func main() {
 
 	// Route fault.variant to an injector: mock uses the admin injector at
 	// AdminURL (default); clean_delete does a grace=0 pod delete via
-	// kubectl; black_hole needs a real NodeOps and a multi-node cluster and
-	// is refused here (SPEC.md §10); none arms nothing (§6). The run engine
-	// stays agnostic beyond timestamps (§2).
+	// kubectl, one injector per run; black_hole needs a real NodeOps and a
+	// multi-node cluster and is refused here (SPEC.md §10); none arms
+	// nothing (§6). The run engine stays agnostic beyond timestamps (§2).
+	var cleanDelete orchestrator.KubectlPodOps
+	var plan victimPlan
 	switch cfg.Fault.Variant {
 	case config.VariantNone:
 		opts.AdminURL = ""
 	case config.VariantCleanDelete:
-		if *victim == "" {
-			log.Fatal("percentes-campaign: clean_delete requires --victim (pod name)")
+		if *victim == "" && *victimSelector == "" {
+			log.Fatal("percentes-campaign: clean_delete requires --victim (pod name) or --victim-selector")
 		}
-		opts.Injector = orchestrator.NewCleanDeleteInjector(orchestrator.KubectlPodOps{}, *namespace, *victim)
+		if *victim != "" && *victimSelector != "" {
+			log.Fatal("percentes-campaign: clean_delete takes exactly one of --victim and --victim-selector")
+		}
+		if *kubeContext == "" {
+			log.Fatal("percentes-campaign: clean_delete requires --kube-context")
+		}
+		if *victim != "" && cfg.Run.Repetitions > 1 {
+			log.Printf("percentes-campaign: --victim %s is fixed for %d runs; a Deployment replaces it under a new name after run 1 (use --victim-selector)", *victim, cfg.Run.Repetitions)
+		}
+		cleanDelete = orchestrator.KubectlPodOps{Context: *kubeContext}
+		plan = victimPlan{namespace: *namespace, victim: *victim, selector: *victimSelector, replicas: cfg.Target.Replicas, readyTimeout: *readyTimeout, poll: 2 * time.Second}
+		checkCtx, cancel := context.WithTimeout(context.Background(), *readyTimeout)
+		if _, err := resolveVictim(checkCtx, cleanDelete, plan); err != nil {
+			cancel()
+			log.Fatalf("percentes-campaign: victim not ready in context %s: %v", *kubeContext, err)
+		}
+		cancel()
 	case config.VariantBlackHole:
 		if *victimNode == "" {
 			log.Fatal("percentes-campaign: black_hole requires --victim-node")
@@ -148,6 +169,9 @@ func main() {
 		}
 	}
 
+	if cfg.Fault.Variant == config.VariantCleanDelete {
+		runner = cleanDeleteRunner(cleanDelete, plan, runner)
+	}
 	rep, err := campaign.Run(ctx, cfg, opts, cfg.Fault.Variant, runner)
 	if err != nil {
 		log.Fatalf("percentes-campaign: %v", err)
