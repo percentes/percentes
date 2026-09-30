@@ -51,6 +51,11 @@ type CanarySummary struct {
 	ITLDevP50Us  int64 `json:"itl_dev_p50_us"`
 	ITLDevP99Us  int64 `json:"itl_dev_p99_us"`
 	ITLDevMaxUs  int64 `json:"itl_dev_max_us"`
+	// EventLag is observed minus nominal event time, pooled over every
+	// event of the completed streams: the bound on read-loop lag (§2), since
+	// the mock never sends early.
+	EventLagP99Us int64 `json:"event_lag_p99_us"`
+	EventLagMaxUs int64 `json:"event_lag_max_us"`
 }
 
 // Canary drives the loopback streams from Start until Stop.
@@ -122,7 +127,7 @@ func (c *Canary) Stop() []CanaryStream {
 // SummarizeCanary reduces the streams dispatched in [startNs, endNs).
 func SummarizeCanary(streams []CanaryStream, startNs, endNs int64) CanarySummary {
 	sum := CanarySummary{TTFTMs: CanaryTTFTMs, ITLMs: CanaryITLMs, Tokens: CanaryTokens}
-	var ttft, itl []int64
+	var ttft, itl, lag []int64
 	for _, s := range streams {
 		if s.StartNs < startNs || s.StartNs >= endNs {
 			continue
@@ -133,17 +138,25 @@ func SummarizeCanary(streams []CanaryStream, startNs, endNs int64) CanarySummary
 		}
 		sum.Completed++
 		ttft = append(ttft, s.TTFTUs-CanaryTTFTMs*1000)
-		for _, gap := range s.ITLsUs {
+		lag = append(lag, s.TTFTUs-CanaryTTFTMs*1000)
+		at := s.TTFTUs
+		for i, gap := range s.ITLsUs {
 			itl = append(itl, gap-CanaryITLMs*1000)
+			at += gap
+			lag = append(lag, at-(CanaryTTFTMs+int64(i+1)*CanaryITLMs)*1000)
 		}
 	}
 	sort.Slice(ttft, func(a, b int) bool { return ttft[a] < ttft[b] })
 	sort.Slice(itl, func(a, b int) bool { return itl[a] < itl[b] })
+	sort.Slice(lag, func(a, b int) bool { return lag[a] < lag[b] })
 	if n := len(ttft); n > 0 {
 		sum.TTFTDevP50Us, sum.TTFTDevMaxUs = orderStat(ttft, 50), ttft[n-1]
 	}
 	if n := len(itl); n > 0 {
 		sum.ITLDevP50Us, sum.ITLDevP99Us, sum.ITLDevMaxUs = orderStat(itl, 50), orderStat(itl, 99), itl[n-1]
+	}
+	if n := len(lag); n > 0 {
+		sum.EventLagP99Us, sum.EventLagMaxUs = orderStat(lag, 99), lag[n-1]
 	}
 	return sum
 }

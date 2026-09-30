@@ -15,32 +15,72 @@ import (
 
 const reflected = "SYNTHETIC_BEARER_5f84e713"
 
-func executeWith(srv *httptest.Server, hosted bool) *Request {
-	cfg := &config.Config{}
+func executeCfg(srv *httptest.Server, cfg *config.Config, apiKey string) *Request {
 	cfg.Run.Seed = 1
 	cfg.Load.MaxTokens = 256
-	cfg.Target.BaseURL = srv.URL
-	cfg.Target.Hosted = hosted
-	g := &gen{cfg: cfg, client: srv.Client(), epoch: time.Now(), filler: "xyz", model: "m"}
+	if cfg.Target.BaseURL == "" {
+		cfg.Target.BaseURL = srv.URL
+	}
+	g := &gen{cfg: cfg, client: srv.Client(), epoch: time.Now(), filler: "xyz", model: "m", apiKey: apiKey}
 	r := &Request{Index: 1}
 	g.execute(r)
 	return r
 }
 
-// The replica header is recorded only from the mock.
-func TestHostedReplicaHeaderIsNotRecorded(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Percentes-Replica", reflected)
+// The replica header is recorded from a non-hosted mock target whose value
+// is hostname-shaped, and only while the client holds no credential.
+func TestReplicaHeaderIsRecordedOnlyFromTheMock(t *testing.T) {
+	serve := func(replica string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Percentes-Replica", replica)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"))
+		}))
+	}
+	mock := func() *config.Config { return &config.Config{Mock: &config.Mock{}} }
+	const pod = "percentes-mock-7d9f-abcde"
+	const password = "synthetic-password-29sep"
+
+	srv := serve(pod)
+	defer srv.Close()
+	if r := executeCfg(srv, &config.Config{Target: config.Target{Hosted: true}}, ""); r.Replica != "" {
+		t.Errorf("hosted target recorded the header: %q", r.Replica)
+	}
+	if r := executeCfg(srv, &config.Config{}, ""); r.Replica != "" {
+		t.Errorf("self-hosted target without a mock recorded the header: %q", r.Replica)
+	}
+	if r := executeCfg(srv, mock(), ""); r.Replica != pod {
+		t.Errorf("mock target dropped its replica identity: %q", r.Replica)
+	}
+	hostedMock := mock()
+	hostedMock.Target.Hosted = true
+	if r := executeCfg(srv, hostedMock, "key"); r.Replica != "" {
+		t.Errorf("a hosted target with a mock section recorded the header: %q", r.Replica)
+	}
+	if r := executeCfg(srv, mock(), "synthetic-bearer-29sep"); r.Replica != "" {
+		t.Errorf("a client holding a bearer token recorded the header: %q", r.Replica)
+	}
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		user, _, _ := req.BasicAuth()
+		w.Header().Set("X-Percentes-Replica", user)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"))
 	}))
-	defer srv.Close()
-
-	if r := executeWith(srv, true); r.Replica != "" {
-		t.Errorf("hosted target recorded the reflected header: %q", r.Replica)
+	defer echo.Close()
+	cfg := mock()
+	cfg.Target.BaseURL = strings.Replace(echo.URL, "http://", "http://synthetic-token-29sep@", 1)
+	if r := executeCfg(echo, cfg, ""); r.Replica != "" {
+		t.Errorf("a URL username sent as a credential was recorded: %q", r.Replica)
 	}
-	if r := executeWith(srv, false); r.Replica != reflected {
-		t.Errorf("mock target dropped its replica identity: %q", r.Replica)
+	cfg = mock()
+	cfg.Target.BaseURL = strings.Replace(echo.URL, "http://", "http://user:"+password+"@", 1)
+	if r := executeCfg(echo, cfg, ""); r.Replica != "" {
+		t.Errorf("a client holding a URL password recorded the header: %q", r.Replica)
+	}
+	tok := serve(reflected)
+	defer tok.Close()
+	if r := executeCfg(tok, mock(), ""); r.Replica != "" {
+		t.Errorf("a value that is not hostname-shaped was recorded from the mock: %q", r.Replica)
 	}
 }
 
@@ -212,5 +252,18 @@ func TestUserinfoBecomesBasicAuth(t *testing.T) {
 	g.execute(&Request{Index: 2})
 	if got := seen.Load(); got != "Bearer SYNTHETIC_KEY_77c0" {
 		t.Fatalf("server saw Authorization %q, want the bearer token", got)
+	}
+}
+
+// A chunk's usage object yields the completion token count; chunks
+// without one yield nothing.
+func TestUsageTokens(t *testing.T) {
+	if n, ok := usageTokens([]byte(`{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":17,"total_tokens":26}}`)); !ok || n != 17 {
+		t.Fatalf("usage chunk: %d %v", n, ok)
+	}
+	for _, p := range []string{`{"choices":[{"delta":{"content":"x"}}]}`, `{"usage":null}`, `not json`} {
+		if _, ok := usageTokens([]byte(p)); ok {
+			t.Fatalf("%s must carry no usage", p)
+		}
 	}
 }

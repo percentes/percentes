@@ -63,7 +63,11 @@ type Request struct {
 	Outcome    Outcome `json:"outcome"`
 	ErrClass   string  `json:"err_class,omitempty"`
 	Tokens     int     `json:"tokens"`
-	Replica    string  `json:"replica,omitempty"`
+	// CompletionTokens is the completion token count from a usage object
+	// in the stream; UsageSeen says one arrived.
+	CompletionTokens int    `json:"completion_tokens,omitempty"`
+	UsageSeen        bool   `json:"usage_seen,omitempty"`
+	Replica          string `json:"replica,omitempty"`
 
 	// ITLsUs are inter-token latency (ITL) gaps (us) for pooled per-window ITL
 	// histograms (§3: per-request p99 is forbidden; pooling happens in
@@ -112,7 +116,7 @@ func (g *gen) now() int64 { return time.Since(g.epoch).Nanoseconds() }
 // Hooks are optional run-lifecycle callbacks.
 type Hooks struct {
 	// OnEpoch fires once the run epoch is anchored, before the first
-	// dispatch — the orchestrator uses it to pre-arm T_inject.
+	// dispatch; the orchestrator uses it to pre-arm T_inject.
 	OnEpoch func(epoch time.Time)
 }
 
@@ -208,7 +212,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		go func(r *Request) {
 			defer wg.Done()
 			// Final precise wait: timer to within ~1.5 ms of t_i, then a
-			// short spin — dispatch precision must not depend on runtime
+			// short spin; dispatch precision must not depend on runtime
 			// timer wakeup latency under read-burst load. Cost: ~1.5 ms of
 			// one core per request at 20 rps ≈ 3% of one core.
 			const spinNs = int64(1_500_000)

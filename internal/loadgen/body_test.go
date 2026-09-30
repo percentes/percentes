@@ -18,8 +18,8 @@ func testGen(hosted bool, model, key string) *gen {
 }
 
 // The mock/self-hosted body keeps the vLLM output-forcing extension
-// (ignore_eos, SPEC.md §6); a hosted body must omit it — hosted
-// OpenAI-compatible endpoints reject or ignore vLLM extensions.
+// (ignore_eos, SPEC.md §6); a hosted body must omit it, since a
+// provider's handling of vLLM extensions is not pinned.
 func TestRequestBodyMockVsHosted(t *testing.T) {
 	r := &Request{Index: 7}
 
@@ -34,6 +34,9 @@ func TestRequestBodyMockVsHosted(t *testing.T) {
 	if m["max_tokens"].(float64) != 256 {
 		t.Fatalf("max_tokens must carry the pinned budget: %s", body)
 	}
+	if so, ok := m["stream_options"].(map[string]any); !ok || so["include_usage"] != true {
+		t.Fatalf("mock body must ask for the usage object: %s", body)
+	}
 
 	m = map[string]any{}
 	body = testGen(true, "llama-3.1-8b-instant", "k").requestBody(r)
@@ -45,6 +48,9 @@ func TestRequestBodyMockVsHosted(t *testing.T) {
 	}
 	if _, has := m["ignore_eos"]; has {
 		t.Fatalf("hosted body must omit ignore_eos: %s", body)
+	}
+	if _, has := m["stream_options"]; has {
+		t.Fatalf("hosted body must not ask for usage: %s", body)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"syscall"
 	"time"
 
@@ -37,10 +38,8 @@ func (g *gen) execute(r *Request) {
 		return
 	}
 	defer resp.Body.Close()
-	// A hosted endpoint controls the replica header, so only the mock's is recorded.
-	if !g.cfg.Target.Hosted {
-		r.Replica = resp.Header.Get("X-Percentes-Replica")
-	}
+	// Only the mock's replica header is recorded (§1); any other endpoint controls the value.
+	r.Replica = replicaFrom(resp.Header, g.cfg.Mock != nil && !g.cfg.Target.Hosted, g.cfg.Target.BaseURL, g.apiKey)
 
 	if resp.StatusCode != http.StatusOK {
 		class := ErrStatusOther
@@ -67,6 +66,9 @@ func (g *gen) execute(r *Request) {
 		if !ok {
 			malformed = true
 			return true
+		}
+		if n, ok := usageTokens(payload); ok {
+			r.CompletionTokens, r.UsageSeen = n, true
 		}
 		if content != "" {
 			r.Tokens++
@@ -121,27 +123,52 @@ func ContentDelta(payload []byte) (content string, ok bool) {
 	return chunk.Choices[0].Delta.Content, true
 }
 
+// usageTokens returns the completion token count of a chunk's usage
+// object, when the chunk carries one.
+func usageTokens(payload []byte) (n int, ok bool) {
+	var chunk struct {
+		Usage *struct {
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(payload, &chunk) != nil || chunk.Usage == nil {
+		return 0, false
+	}
+	return chunk.Usage.CompletionTokens, true
+}
+
 // requestBody builds the OpenAI-compatible chat-completion request.
 // ignore_eos is a vLLM extension forcing the full max_tokens output
-// budget (§6); hosted endpoints reject or ignore it, so a hosted target
-// omits it and accepts natural stops.
+// budget (§6); a hosted target omits it, since a provider's handling of
+// the field is not pinned, and accepts natural stops. A self-hosted target
+// is asked for the usage object in the stream's last chunk; the hosted
+// body carries no such request.
 func (g *gen) requestBody(r *Request) string {
 	type message struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}
+	type streamOptions struct {
+		IncludeUsage bool `json:"include_usage"`
+	}
+	var usage *streamOptions
+	if !g.cfg.Target.Hosted {
+		usage = &streamOptions{IncludeUsage: true}
+	}
 	body, _ := json.Marshal(struct {
-		Model     string    `json:"model"`
-		Messages  []message `json:"messages"`
-		Stream    bool      `json:"stream"`
-		MaxTokens int       `json:"max_tokens"`
-		IgnoreEOS bool      `json:"ignore_eos,omitempty"`
+		Model         string         `json:"model"`
+		Messages      []message      `json:"messages"`
+		Stream        bool           `json:"stream"`
+		MaxTokens     int            `json:"max_tokens"`
+		IgnoreEOS     bool           `json:"ignore_eos,omitempty"`
+		StreamOptions *streamOptions `json:"stream_options,omitempty"`
 	}{
-		Model:     g.model,
-		Messages:  []message{{Role: "user", Content: fmt.Sprintf("cs-%d-%d %s", g.cfg.Run.Seed, r.Index, g.filler)}},
-		Stream:    true,
-		MaxTokens: g.cfg.Load.MaxTokens,
-		IgnoreEOS: !g.cfg.Target.Hosted,
+		Model:         g.model,
+		Messages:      []message{{Role: "user", Content: fmt.Sprintf("cs-%d-%d %s", g.cfg.Run.Seed, r.Index, g.filler)}},
+		Stream:        true,
+		MaxTokens:     g.cfg.Load.MaxTokens,
+		IgnoreEOS:     !g.cfg.Target.Hosted,
+		StreamOptions: usage,
 	})
 	return string(body)
 }
@@ -173,8 +200,7 @@ func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error
 	if g.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.apiKey)
 	}
-	// POSTs are not replayable by net/http (non-idempotent, no idempotency
-	// key), so the transport never silently retries; belt-and-braces:
+	// A POST with no GetBody is never replayed by the transport.
 	req.GetBody = nil
 	return req, nil
 }
@@ -213,4 +239,31 @@ func (g *gen) classifyStreamErr(r *Request, err error) {
 
 func isReset(err error) bool {
 	return errors.Is(err, syscall.ECONNRESET)
+}
+
+// replicaFrom returns the mock's X-Percentes-Replica value when it is
+// hostname-shaped and the client holds no credential.
+func replicaFrom(h http.Header, mock bool, baseURL, apiKey string) string {
+	v := h.Get("X-Percentes-Replica")
+	if !mock || v == "" || !hostnameShaped(v) || apiKey != "" {
+		return ""
+	}
+	if u, err := url.Parse(baseURL); err != nil || u.User != nil {
+		return ""
+	}
+	return v
+}
+
+// hostnameShaped accepts 1 to 253 characters from a-z, A-Z, 0-9, hyphen and dot.
+func hostnameShaped(s string) bool {
+	if len(s) == 0 || len(s) > 253 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
 }

@@ -18,9 +18,9 @@ import (
 //	PERCENTES_LIVE_SMOKE=1 GROQ_API_KEY=... PERCENTES_SMOKE_MODEL=<model-id> \
 //		go test ./internal/loadgen -run TestLiveHostedSmoke -v
 //
-// The offered rate is deliberately tiny (0.25 rps, 3 requests, 32 output
-// tokens each) so the run sits far under any provider free-tier limit;
-// rate-limit discipline is out of scope for this smoke test.
+// The offered rate is small (0.25 requests per second, 3 requests, 32
+// output tokens each); rate-limit discipline is out of scope for this
+// smoke test.
 func TestLiveHostedSmoke(t *testing.T) {
 	if os.Getenv("PERCENTES_LIVE_SMOKE") != "1" {
 		t.Skip("live smoke is opt-in: set PERCENTES_LIVE_SMOKE=1")
@@ -69,12 +69,12 @@ func TestLiveHostedSmoke(t *testing.T) {
 		if r.Outcome == OutcomeCompleted {
 			completed++
 			if r.Tokens == 0 || r.FirstTokNs == 0 {
-				t.Errorf("req %d completed with no content tokens — the SSE parse did not see deltas", r.Index)
+				t.Errorf("req %d completed with no content tokens: the SSE parse did not see deltas", r.Index)
 			}
 		}
 	}
 	if completed < 1 {
-		t.Fatalf("no request completed against %s — auth or body path broken", model)
+		t.Fatalf("no request completed against %s: auth or body path broken", model)
 	}
 	t.Logf("send-skew gate: p99=%dus max=%dus pass=%v (client-validity on this host is informational for a smoke test)",
 		res.Gates.SendSkewP99Us, res.Gates.SendSkewMaxUs, res.Gates.SendSkewPass)

@@ -1,7 +1,9 @@
 package loadgen
 
 import (
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/percentes/percentes/internal/config"
@@ -72,6 +74,16 @@ func TestGCPauseP99BucketEdges(t *testing.T) {
 	m = &gcMonitor{start: hist(0, 0, 0, 0, 0), end: hist(0, 0, 0, 0, 3)}
 	if lo, hi = m.stopAndP99Ms(); lo != 2 || !math.IsInf(hi, 1) {
 		t.Fatalf("the last bucket: got [%v, %v)", lo, hi)
+	}
+	rep = evaluateGates(pinnedValidity(), nil, nil, lo, hi, 0, 10e9)
+	if rep.GCPass || !rep.GCPauseOpen || rep.GCPauseP99Ms != 0 || rep.GCPauseP99LoMs != 2 {
+		t.Fatalf("the open last bucket must fail and be marked: %+v", rep)
+	}
+	if _, err := json.Marshal(rep); err != nil {
+		t.Fatalf("a report with an open bucket must marshal: %v", err)
+	}
+	if !strings.Contains(rep.GCPauseText(), "no upper edge") {
+		t.Fatalf("text: %s", rep.GCPauseText())
 	}
 	m = &gcMonitor{start: hist(5, 0, 0, 0, 0), end: hist(5, 0, 0, 0, 0)}
 	if lo, hi = m.stopAndP99Ms(); lo != 0 || hi != 0 {

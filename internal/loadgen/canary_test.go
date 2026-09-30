@@ -50,8 +50,25 @@ func TestSummarizeCanaryOrderStatistics(t *testing.T) {
 	}
 	got := SummarizeCanary(streams, 0, 5e9)
 	want := CanarySummary{TTFTMs: CanaryTTFTMs, ITLMs: CanaryITLMs, Tokens: CanaryTokens, Streams: 3, Completed: 2,
-		TTFTDevP50Us: ms(1), TTFTDevMaxUs: ms(5), ITLDevP50Us: 0, ITLDevP99Us: ms(20), ITLDevMaxUs: ms(20)}
+		TTFTDevP50Us: ms(1), TTFTDevMaxUs: ms(5), ITLDevP50Us: 0, ITLDevP99Us: ms(20), ITLDevMaxUs: ms(20), EventLagP99Us: ms(25), EventLagMaxUs: ms(25)}
 	if got != want {
 		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}
+
+// Small positive gap errors accumulate into event lag that the per-gap
+// statistic cannot show.
+func TestSummarizeCanaryEventLagAccumulates(t *testing.T) {
+	gaps := make([]int64, 31)
+	for i := range gaps {
+		gaps[i] = (CanaryITLMs + 1) * 1000
+	}
+	streams := []CanaryStream{{StartNs: 1, Outcome: OutcomeCompleted, Tokens: 32, TTFTUs: CanaryTTFTMs * 1000, ITLsUs: gaps}}
+	sum := SummarizeCanary(streams, 0, 10e9)
+	if sum.ITLDevMaxUs != 1000 || sum.TTFTDevMaxUs != 0 {
+		t.Fatalf("per-gap deviation %d us, TTFT deviation %d us", sum.ITLDevMaxUs, sum.TTFTDevMaxUs)
+	}
+	if sum.EventLagMaxUs != 31000 || sum.EventLagP99Us < 30000 {
+		t.Fatalf("event lag max %d us p99 %d us, want the accumulated 31 ms", sum.EventLagMaxUs, sum.EventLagP99Us)
 	}
 }

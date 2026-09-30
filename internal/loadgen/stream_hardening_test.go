@@ -63,3 +63,23 @@ func TestMockShapedFramesStillComplete(t *testing.T) {
 		t.Fatalf("want completed with 3 tokens, got %v/%q tokens=%d", r.Outcome, r.ErrClass, r.Tokens)
 	}
 }
+
+// A usage chunk with no choices is neither a token nor a malformed frame;
+// its count is recorded and the stream still completes.
+func TestUsageChunkRecordedAndNotAToken(t *testing.T) {
+	srv := sseServer(t,
+		"data: {\"choices\":[{\"delta\":{\"content\":\"tok\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"content\":\"tok\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n",
+		"data: [DONE]\n\n")
+	defer srv.Close()
+
+	r := executeAgainst(srv)
+	if r.Outcome != OutcomeCompleted {
+		t.Fatalf("want completed, got %v/%q", r.Outcome, r.ErrClass)
+	}
+	if r.Tokens != 2 || !r.UsageSeen || r.CompletionTokens != 2 {
+		t.Fatalf("tokens %d usage seen %v completion tokens %d", r.Tokens, r.UsageSeen, r.CompletionTokens)
+	}
+}

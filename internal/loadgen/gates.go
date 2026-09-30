@@ -13,7 +13,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 )
 
-// GateReport is the §2 client-validity gate outcome — run-failing, with
+// GateReport is the §2 client-validity gate outcome, run-failing, with
 // every threshold pinned in config (enforced equal to SPEC.md values).
 type GateReport struct {
 	SendSkewP99Us    int64 `json:"send_skew_p99_us"`
@@ -39,7 +39,10 @@ type GateReport struct {
 	// the upper edge.
 	GCPauseP99LoMs float64 `json:"gc_pause_p99_lo_ms"`
 	GCPauseP99Ms   float64 `json:"gc_pause_p99_ms"`
-	GCPass         bool    `json:"gc_pass"`
+	// GCPauseOpen marks a p99 in the runtime's last bucket, which has no
+	// upper edge; GCPauseP99Ms is then 0 and the gate fails.
+	GCPauseOpen bool `json:"gc_pause_open,omitempty"`
+	GCPass      bool `json:"gc_pass"`
 
 	Pass bool `json:"pass"`
 }
@@ -47,6 +50,9 @@ type GateReport struct {
 // GCPauseText renders the garbage collection (GC) pause p99 as the
 // runtime bucket that holds it, or says that no pause fell in the span.
 func (g GateReport) GCPauseText() string {
+	if g.GCPauseOpen {
+		return fmt.Sprintf("gc pause p99 at or above %.3f ms, the runtime's last bucket with no upper edge; the gate fails", g.GCPauseP99LoMs)
+	}
 	if g.GCPauseP99LoMs == 0 && g.GCPauseP99Ms == 0 {
 		return "gc pause p99: no pause in the span"
 	}
@@ -55,6 +61,9 @@ func (g GateReport) GCPauseText() string {
 
 func evaluateGates(cfg *config.Config, requests []Request, samples []cpuSample, gcLoMs, gcHiMs float64, measStartNs, measEndNs int64) GateReport {
 	rep := GateReport{GCPauseP99LoMs: gcLoMs, GCPauseP99Ms: gcHiMs}
+	if math.IsInf(gcHiMs, 1) {
+		rep.GCPauseOpen, rep.GCPauseP99Ms = true, 0
+	}
 	v := cfg.ClientValidity
 
 	// Send skew (actual minus intended dispatch) over the measurement
@@ -109,7 +118,7 @@ func evaluateGates(cfg *config.Config, requests []Request, samples []cpuSample, 
 		}
 	}
 
-	rep.GCPass = gcHiMs < float64(v.GoGCPauseP99Ms)
+	rep.GCPass = !rep.GCPauseOpen && gcHiMs < float64(v.GoGCPauseP99Ms)
 	rep.Pass = rep.SendSkewPass && rep.UndispatchedPass && rep.CPUPass && rep.GCPass
 	return rep
 }
