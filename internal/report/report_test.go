@@ -90,8 +90,7 @@ func TestHeadlineRefusesWithoutWindows(t *testing.T) {
 }
 
 // The unmeasured-CPU wording is the documented macOS behavior (an
-// uncertified gate does not pass); the report must say it in exactly
-// those honest terms rather than printing a zero that looks measured.
+// uncertified gate does not pass); the report says so.
 func TestHumanReportNamesUnmeasuredCPU(t *testing.T) {
 	art := minimalArtifacts()
 	art.Loadgen.Gates.CPUMeasured = false
@@ -304,9 +303,9 @@ func TestSummaryZeroSamples(t *testing.T) {
 func TestReceivePathAndReductionText(t *testing.T) {
 	d := 3.25
 	rp := &collect.ReceivePath{ClientTTFTMeanMs: 120.5, ClientTTFTCount: 40, ServerTTFTFamily: "vllm:ttft", ServerTTFTMeanMs: 117.25, ServerTTFTCount: 41, DivergenceMs: &d,
-		Canary: &loadgen.CanarySummary{TTFTMs: 20, ITLMs: 10, Tokens: 32, Completed: 7, TTFTDevP50Us: 1500, TTFTDevMaxUs: 4000, ITLDevP50Us: -10, ITLDevP99Us: 900, ITLDevMaxUs: 1200}}
+		Canary: &loadgen.CanarySummary{TTFTMs: 20, ITLMs: 10, Tokens: 32, Completed: 7, TTFTDevP50Us: 1500, TTFTDevMaxUs: 4000, ITLDevP50Us: -10, ITLDevP99Us: 900, ITLDevMaxUs: 1200, EventLagP99Us: 2500, EventLagMaxUs: 7000}}
 	got := receivePathText(rp)
-	for _, want := range []string{"client TTFT mean 120.5ms over 40", "server 117.2ms over 41", "client minus server +3.2ms", "7 streams completed, 32 tokens at 20ms TTFT, 10ms ITL", "TTFT deviation p50 1.50ms max 4.00ms", "ITL deviation p50 -0.01ms p99 0.90ms max 1.20ms"} {
+	for _, want := range []string{"client TTFT mean 120.5ms over 40", "server 117.2ms over 41", "client minus server +3.2ms", "7 streams completed, 32 tokens at 20ms TTFT, 10ms ITL", "event lag p99 2.50ms max 7.00ms", "TTFT deviation p50 1.50ms max 4.00ms", "ITL deviation p50 -0.01ms p99 0.90ms max 1.20ms"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("receive path text lacks %q:\n%s", want, got)
 		}
@@ -327,5 +326,100 @@ func TestReceivePathAndReductionText(t *testing.T) {
 	}
 	if got := receivePathText(&collect.ReceivePath{ClientTTFTCount: 1, ServerTTFTFamily: "vllm:ttft", ServerTTFTCount: 2, ServerTTFTMeanMs: 1, ServerReset: []string{"r1"}}); !strings.Contains(got, "server histogram reset on r1") {
 		t.Fatalf("reset: %s", got)
+	}
+}
+
+// The recovery section names the raw crossing and the partition-heal
+// recovery under the black-hole variant, and an unobserved hold reads as
+// such in the line and the sweep cell.
+func TestPartitionHealAndUnobservedLines(t *testing.T) {
+	ttr, healTTR, healDeficit := 0.0, 134.0, 20.0
+	healAt := int64(220e9)
+	art := minimalArtifacts()
+	art.Windows["baseline"] = &collect.Stats{}
+	art.Windows["fault"] = &collect.Stats{}
+	art.Loadgen.TInjectNs, art.ActualFireNs = 100e9, 100e9
+	art.Detector = &detect.Result{
+		PreFaultBaseline:       1.0,
+		ToPreFault:             detect.Detection{Baseline: 1.0, TTRSeconds: &ttr},
+		PartitionHealRecovery:  &detect.Detection{Baseline: 1.0, TTRSeconds: &healTTR},
+		HealAnchorNs:           &healAt,
+		DeficitToPartitionHeal: &healDeficit,
+		Sensitivity:            []detect.SensitivityRow{{Params: detect.Params{WindowS: 10, EntryPct: 90, ExitPct: 85, HoldS: 30}, TTRToPreFault: &ttr, HoldUnobservedHeal: true}},
+	}
+	_, humanText, err := Generate(art, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"goodput-threshold crossing:   TTR 0.0s (baseline 1.0000, canceled entries 0, re-degradations 0) (raw; may precede the heal)",
+		"partition-heal recovery:      TTR 134.0s (baseline 1.0000, canceled entries 0, re-degradations 0) (first held entry at or after the heal anchor, +120s; §5)",
+		"integrated goodput deficit to partition-heal recovery: 20.00 goodput-seconds",
+		"crossing (raw)         partition-heal",
+		"90     10   30   | 0.0s                   unobserved",
+	} {
+		if !strings.Contains(humanText, want) {
+			t.Errorf("missing %q in:\n%s", want, humanText)
+		}
+	}
+	if strings.Contains(humanText, "TTR to pre-fault baseline:") {
+		t.Error("a black-hole report must not print the clean-delete recovery label")
+	}
+	art.Detector.PartitionHealRecovery = &detect.Detection{Baseline: 1.0, HoldUnobserved: true}
+	_, humanText, err = Generate(art, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(humanText, "partition-heal recovery:      UNOBSERVED: the series ends before a full hold could be seen (baseline 1.0000)") {
+		t.Errorf("unobserved hold not named:\n%s", humanText)
+	}
+}
+
+// The headline names the survivor only when the survivor cohort exists;
+// otherwise the fault-window figure is labelled pooled.
+func TestHeadlineLabelsTheSurvivorCohort(t *testing.T) {
+	art := minimalArtifacts()
+	art.Windows["baseline"] = &collect.Stats{Completed: 10, TTFTConditional: histo.Summary{Count: 10, P50Us: 100000}}
+	art.Windows["fault"] = &collect.Stats{Completed: 10, TTFTConditional: histo.Summary{Count: 10, P50Us: 900000}}
+	_, humanText, err := Generate(art, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(humanText, "(fault window, pooled across replicas)") || strings.Contains(humanText, "(survivor)") {
+		t.Fatalf("pooled figure not labelled:\n%s", humanText)
+	}
+	art.Windows["fault_survivor"] = &collect.Stats{Completed: 5, TTFTConditional: histo.Summary{Count: 5, P50Us: 300000}}
+	_, humanText, err = Generate(art, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(humanText, "to p50 300 ms (survivor)") {
+		t.Fatalf("survivor cohort not used:\n%s", humanText)
+	}
+}
+
+// The pooled ITL label follows the §10 check.
+func TestITLLabelFollowsTheTokenCheck(t *testing.T) {
+	for _, c := range []struct {
+		mock, hosted bool
+		tc           collect.TokenCheck
+		want         string
+	}{
+		{false, false, collect.TokenCheck{Sampled: 4, Matched: 4}, "inter-token (§10 check: 4 of 4 matched)"},
+		{false, false, collect.TokenCheck{Sampled: 4, Matched: 3}, "inter-chunk (§3; §10 check: 3 of 4 matched)"},
+		{true, false, collect.TokenCheck{}, "one token per content event by construction"},
+		{false, false, collect.TokenCheck{}, "inter-chunk (§3, no usage in the stream)"},
+		{false, true, collect.TokenCheck{Sampled: 4, Matched: 4}, "inter-chunk (§3; unrequested usage: 4 of 4 matched)"},
+		{false, true, collect.TokenCheck{}, "inter-chunk (§3, no usage in the stream)"},
+	} {
+		if got := itlLabel(c.mock, c.hosted, c.tc); got != c.want {
+			t.Fatalf("%+v: got %q", c, got)
+		}
+	}
+	if got := countText(collect.CountSummary{N: 3, Mean: 4, P50: 4, P95: 5, Max: 5}); got != "n=3 mean=4.0 p50=4 p95=5 max=5" {
+		t.Fatalf("count text: %q", got)
+	}
+	if got := usageCountText(collect.CountSummary{}); got != "not verifiable (no completed request carried a usage object)" {
+		t.Fatalf("usage count text without usage: %q", got)
 	}
 }

@@ -3,6 +3,7 @@ package report
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/percentes/percentes/internal/config"
 	"strings"
 
 	"github.com/percentes/percentes/internal/campaign"
@@ -33,7 +34,7 @@ func humanCampaign(cr *CampaignReport) string {
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	rep := cr.Campaign
 
-	w("Percentes campaign report — %s (variant %s)", rep.ConfigName, rep.Variant)
+	w("Percentes campaign report: %s (variant %s)", rep.ConfigName, rep.Variant)
 	w("")
 	w("%s", Caveat)
 	w("")
@@ -46,14 +47,18 @@ func humanCampaign(cr *CampaignReport) string {
 	w("")
 
 	w("== Per-run scalars (all values verbatim, §5) ==")
-	w("%-4s %-6s %-12s %-12s %-10s %-12s %-10s", "run", "valid", "ttr_equil", "ttr_prefault", "loss_frac", "survivor_p95", "deficit")
+	ttrCol := "ttr_prefault"
+	if rep.Variant == config.VariantBlackHole {
+		ttrCol = "heal_recov"
+	}
+	w("%-4s %-6s %-12s %-12s %-10s %-12s %-10s", "run", "valid", "ttr_equil", ttrCol, "loss_frac", "survivor_p95", "deficit")
 	for _, r := range rep.PerRun {
 		lossCell := ptrS(r.InFlightLossFraction)
 		if r.InFlightLossFraction == nil && r.InFlightLossAllReplicasUnscoped != nil {
 			lossCell = fmt.Sprintf("[unscoped %.4f]", *r.InFlightLossAllReplicasUnscoped)
 		}
 		w("%-4d %-6v %-12s %-12s %-10s %-12s %-10.2f",
-			r.Run, r.Valid, ptrS(r.TTREquilibriumS), ptrS(r.TTRPreFaultS), lossCell, ptrS(r.SurvivorP95Ms), r.IntegratedDeficit)
+			r.Run, r.Valid, ttrOrUnobserved(r.TTREquilibriumS, r.TTREquilibriumUnobserved), ttrOrUnobserved(r.TTRPreFaultS, r.TTRPreFaultUnobserved), lossCell, ptrS(r.SurvivorP95Ms), r.IntegratedDeficit)
 	}
 	w("")
 
@@ -88,7 +93,7 @@ func humanCampaign(cr *CampaignReport) string {
 		if e.Summary.N >= 2 {
 			df := fmt.Sprintf("t-interval [%.2f, %.2f] at t=%.3f df=%d", e.Summary.TIntervalLo, e.Summary.TIntervalHi, e.Summary.TMultiplier, e.Summary.DF)
 			if !e.Summary.AtPinnedDF {
-				df += " — NOT the pre-registered df=4 (§7 assumes N=5 contributing runs; dropped runs reduced df)"
+				df += ", below the pre-registered df=4 (§7 assumes N=5 contributing runs; dropped runs reduced df)"
 			}
 			w("  %s", df)
 		}
@@ -139,4 +144,12 @@ func ptrS(p *float64) string {
 		return "n/a"
 	}
 	return fmt.Sprintf("%.2f", *p)
+}
+
+// ttrOrUnobserved prints a TTR cell, naming an unobserved hold.
+func ttrOrUnobserved(t *float64, unobserved bool) string {
+	if t == nil && unobserved {
+		return "unobserved"
+	}
+	return ptrS(t)
 }

@@ -23,7 +23,8 @@ import (
 	"github.com/percentes/percentes/internal/validity"
 )
 
-// Caveat is printed in every report and in the AC output itself (§8).
+// Caveat is printed in every report and in the acceptance-criteria (AC)
+// output itself (§8).
 const Caveat = "CAVEAT: passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behaviour. Small N, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are scoped in the claims and named in the report."
 
 // Report is the JSON artifact: the parsed config plus every run
@@ -33,9 +34,9 @@ const Caveat = "CAVEAT: passing AC1-AC7 certifies the instrument against the moc
 type Report struct {
 	SchemaVersion int    `json:"schema_version"`
 	ConfigSHA256  string `json:"config_sha256"`
-	// InstrumentCommit is the VCS revision of the binary that produced
-	// the report ("<sha>", "<sha>-dirty", or "unknown" when the build
-	// carries no VCS stamp).
+	// InstrumentCommit is the version-control system (VCS) revision of
+	// the binary that produced the report ("<sha>", "<sha>-dirty", or
+	// "unknown" when the build carries no VCS stamp).
 	InstrumentCommit string `json:"instrument_commit"`
 	Caveat           string `json:"caveat"`
 	Headline         string `json:"conditional_headline"`
@@ -99,8 +100,8 @@ func Generate(art *run.Artifacts, gates *validity.Report) ([]byte, string, error
 	return raw, human(rep), nil
 }
 
-// p50Cell renders a conditional p50, refusing to fabricate a measured
-// zero when the window holds no completed samples.
+// p50Cell renders a conditional p50; a window with no completed samples
+// has none.
 func p50Cell(s histo.Summary) string {
 	if s.Count == 0 {
 		return "no completed samples"
@@ -109,7 +110,7 @@ func p50Cell(s histo.Summary) string {
 }
 
 // headline fills the appendix conditional-headline template with this
-// run's measured values, honestly labelled for the mock variant.
+// run's measured values, labelled for the mock variant.
 func headline(art *run.Artifacts) string {
 	fault, haveFault := art.Windows["fault"]
 	base, haveBase := art.Windows["baseline"]
@@ -136,20 +137,30 @@ func headline(art *run.Artifacts) string {
 	if art.Detector.EquilibriumEstimable {
 		if t := art.Detector.ToEquilibrium.TTRSeconds; t != nil {
 			ttr = fmt.Sprintf("%.1f s", *t)
+		} else if art.Detector.ToEquilibrium.HoldUnobserved {
+			ttr = "unobserved (the series ends before a full hold could be seen)"
 		}
 	} else {
 		ttr = "n/a (" + art.Detector.EquilibriumNote + ")"
 	}
+	deficit := art.Detector.DeficitToPreFault
+	if art.Detector.DeficitToPartitionHeal != nil {
+		deficit = *art.Detector.DeficitToPartitionHeal
+	}
+	faultTTFT, faultLabel := fault.TTFTConditional, "fault window, pooled across replicas"
+	if sv := art.Windows["fault_survivor"]; sv != nil && sv.Completed > 0 {
+		faultTTFT, faultLabel = sv.TTFTConditional, "survivor"
+	}
 	return fmt.Sprintf(
 		"Under %s fault injection (mock variant, Phase 0 instrument certification): %.1f%% of in-flight requests failed and %.1f%% timed out at 30 s (%d %s); "+
-			"survivor TTFT (conditional on completion) moved from %s (baseline) to %s (fault window); "+
+			"TTFT (conditional on completion) moved from %s (baseline) to %s (%s); "+
 			"cumulative incidence of completion within 1 s in the fault window was %.3f (Aalen-Johansen); "+
 			"recovery to single-replica equilibrium (a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout; §5): %s; "+
 			"goodput deficit %.1f goodput-seconds vs pre-fault; "+
 			"decomposed segments: %s. Single run against the mock; no real-GPU claim.",
 		art.Config.Fault.Variant, pctErr, pctCens, pop, popLabel,
-		p50Cell(base.TTFTConditional), p50Cell(fault.TTFTConditional),
-		cif1s, ttr, art.Detector.DeficitToPreFault, measuredSegments(art))
+		p50Cell(base.TTFTConditional), p50Cell(faultTTFT), faultLabel,
+		cif1s, ttr, deficit, measuredSegments(art))
 }
 
 func measuredSegments(art *run.Artifacts) string {
@@ -244,13 +255,8 @@ func human(r *Report) string {
 		}
 		w("TTFT conditional on completion: %s%s", summary(st.TTFTConditional), ciText(st.TTFTTailCI))
 		w("e2e  conditional on completion: %s%s", summary(st.E2EConditional), ciText(st.E2ETailCI))
-		if art.Config.Mock != nil {
-			w("ITL pooled (per-window): %s", summary(st.ITLPooled))
-		} else {
-			// One token per content event holds for the mock; nothing
-			// checks it on another target (§10).
-			w("ITL pooled (per-window), inter-chunk (§3): %s", summary(st.ITLPooled))
-		}
+		w("ITL pooled (per-window), %s: %s", itlLabel(art.Config.Mock != nil, art.Config.Target.Hosted, st.TokenCheck), summary(st.ITLPooled))
+		w("completion length: content events %s; completion tokens from usage %s", countText(st.ContentEvents), usageCountText(st.CompletionTokens))
 		if rp := art.ReceivePath[name]; rp != nil {
 			w("receive path (§2, not run-failing): %s", receivePathText(rp))
 		}
@@ -307,7 +313,15 @@ func human(r *Report) string {
 		eqTTR = ttrText(d.ToEquilibrium)
 		eqDeficit = fmt.Sprintf("%.2f", d.DeficitToEquilibrium)
 	}
-	w("TTR to pre-fault baseline:    %s", ttrText(d.ToPreFault))
+	if d.PartitionHealRecovery != nil {
+		w("goodput-threshold crossing:   %s (raw; may precede the heal)", ttrText(d.ToPreFault))
+		w("partition-heal recovery:      %s (first held entry at or after the heal anchor, +%.0fs; §5)", ttrText(*d.PartitionHealRecovery), float64(*d.HealAnchorNs-fireAnchorNs(art))/1e9)
+		if d.DeficitToPartitionHeal != nil {
+			w("integrated goodput deficit to partition-heal recovery: %.2f goodput-seconds", *d.DeficitToPartitionHeal)
+		}
+	} else {
+		w("TTR to pre-fault baseline:    %s", ttrText(d.ToPreFault))
+	}
 	w("TTR to equilibrium baseline:  %s; the baseline is a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout (§5)", eqTTR)
 	w("integrated goodput deficit: %.2f (vs pre-fault), %s (vs equilibrium) goodput-seconds", d.DeficitToPreFault, eqDeficit)
 	compNames := make([]string, 0, len(d.Components))
@@ -321,10 +335,19 @@ func human(r *Report) string {
 	w("backlog drain: measured=%v (%s)", d.BacklogDrainMeasured, d.BacklogDrainNote)
 	w("")
 	w("== Sensitivity table (X x R x H; §5) ==")
-	w("%-6s %-4s %-4s | %-22s %-22s", "entry", "R", "H", "TTR->prefault", "TTR->equilibrium")
+	if d.PartitionHealRecovery != nil {
+		w("%-6s %-4s %-4s | %-22s %-22s %-22s", "entry", "R", "H", "crossing (raw)", "partition-heal", "TTR->equilibrium")
+	} else {
+		w("%-6s %-4s %-4s | %-22s %-22s", "entry", "R", "H", "TTR->prefault", "TTR->equilibrium")
+	}
 	for _, row := range d.Sensitivity {
+		if d.PartitionHealRecovery != nil {
+			w("%-6d %-4d %-4d | %-22s %-22s %-22s", row.Params.EntryPct, row.Params.WindowS, row.Params.HoldS,
+				ttrCell(row.TTRToPreFault, row.NotRecoveredPre, row.HoldUnobservedPre), ttrCell(row.TTRPartitionHeal, row.NotRecoveredHeal, row.HoldUnobservedHeal), ttrCell(row.TTRToEquilibrium, row.NotRecoveredEq, row.HoldUnobservedEq))
+			continue
+		}
 		w("%-6d %-4d %-4d | %-22s %-22s", row.Params.EntryPct, row.Params.WindowS, row.Params.HoldS,
-			ttrCell(row.TTRToPreFault, row.NotRecoveredPre), ttrCell(row.TTRToEquilibrium, row.NotRecoveredEq))
+			ttrCell(row.TTRToPreFault, row.NotRecoveredPre, row.HoldUnobservedPre), ttrCell(row.TTRToEquilibrium, row.NotRecoveredEq, row.HoldUnobservedEq))
 	}
 	w("")
 
@@ -375,8 +398,8 @@ func receivePathText(rp *collect.ReceivePath) string {
 		}
 	}
 	if c := rp.Canary; c != nil {
-		fmt.Fprintf(&b, "; loopback canary (%d streams completed, %d tokens at %dms TTFT, %dms ITL): TTFT deviation p50 %.2fms max %.2fms, ITL deviation p50 %.2fms p99 %.2fms max %.2fms",
-			c.Completed, c.Tokens, c.TTFTMs, c.ITLMs, float64(c.TTFTDevP50Us)/1000, float64(c.TTFTDevMaxUs)/1000,
+		fmt.Fprintf(&b, "; loopback canary (%d streams completed, %d tokens at %dms TTFT, %dms ITL): event lag p99 %.2fms max %.2fms; TTFT deviation p50 %.2fms max %.2fms, ITL deviation p50 %.2fms p99 %.2fms max %.2fms",
+			c.Completed, c.Tokens, c.TTFTMs, c.ITLMs, float64(c.EventLagP99Us)/1000, float64(c.EventLagMaxUs)/1000, float64(c.TTFTDevP50Us)/1000, float64(c.TTFTDevMaxUs)/1000,
 			float64(c.ITLDevP50Us)/1000, float64(c.ITLDevP99Us)/1000, float64(c.ITLDevMaxUs)/1000)
 	}
 	if rp.CanaryError != "" {
@@ -436,6 +459,44 @@ func ciText(ci collect.TailCIs) string {
 	return one("p95", ci.P95) + one("p99", ci.P99)
 }
 
+// itlLabel names the pooled ITL after the §10 check: inter-token where
+// every completed request carrying usage matched one content event per
+// token, one token per content event by construction for a mock run
+// without usage, inter-chunk otherwise. A hosted run is inter-chunk
+// whatever the check says: its body requests no usage, and the count is
+// the provider's.
+func itlLabel(mock, hosted bool, tc collect.TokenCheck) string {
+	switch {
+	case hosted && tc.Sampled > 0:
+		return fmt.Sprintf("inter-chunk (§3; unrequested usage: %d of %d matched)", tc.Matched, tc.Sampled)
+	case hosted:
+		return "inter-chunk (§3, no usage in the stream)"
+	case tc.Sampled > 0 && tc.Matched == tc.Sampled:
+		return fmt.Sprintf("inter-token (§10 check: %d of %d matched)", tc.Matched, tc.Sampled)
+	case tc.Sampled > 0:
+		return fmt.Sprintf("inter-chunk (§3; §10 check: %d of %d matched)", tc.Matched, tc.Sampled)
+	case mock:
+		return "one token per content event by construction"
+	}
+	return "inter-chunk (§3, no usage in the stream)"
+}
+
+func countText(c collect.CountSummary) string {
+	if c.N == 0 {
+		return "none"
+	}
+	return fmt.Sprintf("n=%d mean=%.1f p50=%d p95=%d max=%d", c.N, c.Mean, c.P50, c.P95, c.Max)
+}
+
+// usageCountText renders the usage count, reported as not verifiable
+// where no completed request carried a usage object (§6).
+func usageCountText(c collect.CountSummary) string {
+	if c.N == 0 {
+		return "not verifiable (no completed request carried a usage object)"
+	}
+	return countText(c)
+}
+
 func summary(s histo.Summary) string {
 	if s.Count == 0 {
 		return "no completed samples"
@@ -476,6 +537,9 @@ func incidenceText(cif *collect.IncidenceCurve) string {
 }
 
 func ttrText(d detect.Detection) string {
+	if d.HoldUnobserved {
+		return fmt.Sprintf("UNOBSERVED: the series ends before a full hold could be seen (baseline %.4f)", d.Baseline)
+	}
 	if d.NotRecovered || d.TTRSeconds == nil {
 		return fmt.Sprintf("NOT RECOVERED within the fault-window timeout (baseline %.4f)", d.Baseline)
 	}
@@ -484,12 +548,19 @@ func ttrText(d detect.Detection) string {
 
 // A cell with neither a TTR nor a non-recovery verdict is the
 // non-estimable-equilibrium case: N/A (§5).
-func ttrCell(t *float64, notRecovered bool) string {
+func ttrCell(t *float64, notRecovered, unobserved bool) string {
 	switch {
+	case unobserved:
+		return "unobserved"
 	case notRecovered:
 		return "not recovered"
 	case t == nil:
 		return "n/a"
 	}
 	return fmt.Sprintf("%.1fs", *t)
+}
+
+// fireAnchorNs is the §3 fire anchor the detector measured from.
+func fireAnchorNs(art *run.Artifacts) int64 {
+	return collect.FireAnchorNs(art.Loadgen.TInjectNs, art.ActualFireNs)
 }

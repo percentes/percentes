@@ -25,7 +25,7 @@ func TestHeadlineRefusesZeroCompletionP50(t *testing.T) {
 	if strings.Contains(humanText, "to p50 0 ms") {
 		t.Fatal("headline fabricated a measured 0 ms from an empty window")
 	}
-	if !strings.Contains(humanText, "to no completed samples (fault window)") {
+	if !strings.Contains(humanText, "to no completed samples (fault window, pooled across replicas)") {
 		t.Fatalf("headline must name the empty window, got: %s", humanText[:300])
 	}
 }
