@@ -44,8 +44,8 @@ func TestSection6PinCoverage(t *testing.T) {
 		"scheduler settings":                c.Pins.Engine.SchedulerSettings,
 		"chunked-prefill setting":           string(c.Pins.Engine.ChunkedPrefill),
 		"CUDA-graph enablement":             string(c.Pins.Engine.CUDAGraphs),
-		"prefix caching (verified OFF)":     string(c.Pins.Engine.PrefixCaching),
-		"continuous batching (verified on)": string(c.Pins.Engine.ContinuousBatching),
+		"prefix caching (declared off)":     string(c.Pins.Engine.PrefixCaching),
+		"continuous batching (declared on)": string(c.Pins.Engine.ContinuousBatching),
 		"GPU SKU":                           c.Pins.GPU.SKU,
 		"GPU driver":                        c.Pins.GPU.Driver,
 		"CUDA":                              c.Pins.GPU.CUDA,
@@ -182,6 +182,11 @@ func TestPinnedValueEnforcement(t *testing.T) {
 		{"base_url does not parse", acRef, func(c *Config) { c.Target.BaseURL = "http://user:pw@host/%zz" }, "target.base_url"},
 		{"base_url without a host", acRef, func(c *Config) { c.Target.BaseURL = "host:8000" }, "target.base_url"},
 		{"base_url with another scheme", acRef, func(c *Config) { c.Target.BaseURL = "ftp://host:21/v1" }, "target.base_url"},
+		{"base_url with a query", acRef, func(c *Config) { c.Target.BaseURL = "http://host:8000/prefix?key=SYNTHETIC" }, "target.base_url"},
+		{"base_url with a fragment", acRef, func(c *Config) { c.Target.BaseURL = "http://host:8000/prefix#f" }, "target.base_url"},
+		{"base_url with a trailing slash", acRef, func(c *Config) { c.Target.BaseURL = "http://host:8000/" }, "target.base_url"},
+		{"base_url with a bare fragment", acRef, func(c *Config) { c.Target.BaseURL = "http://host:8000#" }, "target.base_url"},
+		{"base_url with a fragment after a path", acRef, func(c *Config) { c.Target.BaseURL = "http://host:8000/p#" }, "target.base_url"},
 		{"metrics_urls entry does not parse", acRef, func(c *Config) {
 			c.Target.MetricsURLs = []string{"http://m/%zz", "http://m:9090/metrics"}
 			c.Target.QueueGauge = "vllm:num_requests_waiting"

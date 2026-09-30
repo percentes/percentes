@@ -191,7 +191,7 @@ func (c *Config) validateHistogram(v *validator) {
 		v.errf("histogram.significant_figures: pinned %d, got %d", PinnedHistogramSigFigs, h.SignificantFigures)
 	}
 	// §3: highestTrackableValue at least the run timeout, one configuration
-	// across ALL runs and windows — so the bound is the pinned 600 s
+	// across ALL runs and windows, so the bound is the pinned 600 s
 	// experiment timeout regardless of profile (lossless merge requires
 	// identical configuration everywhere).
 	if h.HighestTrackableValue < PinnedHistogramMinHighest {
@@ -227,8 +227,8 @@ func (c *Config) validateShareGate(v *validator) {
 func (c *Config) validateTarget(v *validator) {
 	if c.Target.BaseURL == "" {
 		v.errf("target.base_url: required")
-	} else if !parsesAsURL(c.Target.BaseURL) {
-		v.errf("target.base_url: not an http or https URL with a host")
+	} else if err := CheckBaseURL(c.Target.BaseURL); err != nil {
+		v.errf("target.base_url: %v", err)
 	}
 	if c.Profile == ProfileExperiment {
 		v.pinI("target.replicas", c.Target.Replicas, PinnedExperimentReplicas)
@@ -511,6 +511,20 @@ func (v *validator) result() error {
 		return nil
 	}
 	return errors.New("invalid config:\n  - " + strings.Join(v.errs, "\n  - "))
+}
+
+// CheckBaseURL reports why s cannot take /v1/chat/completions appended:
+// it must parse as an http or https URL with a host and carry no query,
+// fragment or trailing slash.
+func CheckBaseURL(s string) error {
+	if !parsesAsURL(s) {
+		return errors.New("not an http or https URL with a host")
+	}
+	u, _ := url.Parse(s)
+	if strings.ContainsAny(s, "?#") || strings.HasSuffix(u.Path, "/") {
+		return errors.New("no query, fragment or trailing slash; /v1/chat/completions is appended to it")
+	}
+	return nil
 }
 
 // parsesAsURL reports whether s parses with an http or https scheme and a host.

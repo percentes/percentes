@@ -29,7 +29,7 @@ client:
   http_timeout_s: 30      # pinned (§6)
   retries: 0              # pinned (§6, §2)
   placement:
-    dedicated_node: false # experiment-profile pin; recorded honestly for local
+    dedicated_node: false # experiment-profile pin; false for a local run
     node_class: local
     zone: local
     subnet: local
@@ -137,7 +137,7 @@ mock:
     enabled: false
     duration_s: 0
   # false (the default) blackholes /health during silent_hang: the
-  # faithful full-node-partition behavior.
+  # full-node-partition behavior.
   serve_health_during_silent_hang: false
   # Config-scripted fault plan: offsets on the monotonic clock from server
   # start; windows must not overlap. AC reference: stall D = 10 s.

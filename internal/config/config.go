@@ -239,7 +239,8 @@ const (
 )
 
 // Placement records where the load generator runs (§6: dedicated non-spot
-// node, same zone and subnet, RTT recorded in the environment table).
+// node, same zone and subnet); RecordRTT declares that the round-trip time
+// is recorded in the environment table, which the harness does not measure.
 type Placement struct {
 	DedicatedNode bool      `yaml:"dedicated_node" json:"dedicated_node"`
 	NodeClass     NodeClass `yaml:"node_class" json:"node_class"` // "non-spot" in experiment profile
@@ -314,7 +315,7 @@ type Target struct {
 	// required via APIKeyEnv.
 	Hosted bool `yaml:"hosted" json:"hosted"`
 	// APIKeyEnv names the environment variable holding the bearer token.
-	// Only the variable NAME is configuration — configs stay publishable;
+	// Only the variable NAME is configuration, so configs stay publishable;
 	// the value is resolved at run start and never recorded.
 	APIKeyEnv string `yaml:"api_key_env" json:"api_key_env"`
 	// MetricsURLs are the replicas' Prometheus text endpoints, one per
@@ -384,9 +385,9 @@ type ModelPins struct {
 	Quantization string `yaml:"quantization" json:"quantization"`
 }
 
-// OnOff is an engine feature toggle carried in the §6 pin list. The recorded
-// value is verified against server metrics at run time, not merely trusted
-// from configuration, because vLLM defaults are version-dependent.
+// OnOff is an engine feature toggle carried in the §6 pin list as the
+// declared setting; the §6 check against server metrics is Phase 1 work the
+// harness does not yet make.
 type OnOff string
 
 const (
@@ -401,11 +402,10 @@ type EnginePins struct {
 	SchedulerSettings string  `yaml:"scheduler_settings" json:"scheduler_settings"`
 	ChunkedPrefill    OnOff   `yaml:"chunked_prefill" json:"chunked_prefill"` // "on" | "off"
 	CUDAGraphs        OnOff   `yaml:"cuda_graphs" json:"cuda_graphs"`         // "on" | "off"
-	// PrefixCaching must be "off" (§6: verified OFF via server metrics at
-	// run time; defaults are version-dependent, verify, do not assume).
+	// PrefixCaching must be declared "off" (§6); vLLM defaults are
+	// version-dependent, so the declaration is checked at load.
 	PrefixCaching OnOff `yaml:"prefix_caching" json:"prefix_caching"`
-	// ContinuousBatching must be "on" (§6: verified active from server
-	// metrics at run time).
+	// ContinuousBatching must be declared "on" (§6).
 	ContinuousBatching OnOff `yaml:"continuous_batching" json:"continuous_batching"`
 }
 
@@ -493,11 +493,11 @@ type Mock struct {
 	SlowReload SlowReload `yaml:"slow_reload" json:"slow_reload"`
 
 	// ServeHealthDuringSilentHang, when true, keeps /health answering
-	// during a silent_hang window. The zero value (false) is the faithful
-	// full-node-partition behavior — /health blackholes with the data
-	// plane — so an omitted field defaults to fidelity. The /admin and
-	// /metrics endpoints always stay reachable: they are out-of-band
-	// harness instrumentation, not the emulated data plane.
+	// during a silent_hang window. The zero value (false) is the
+	// full-node-partition behavior (/health blackholes with the data
+	// plane), so an omitted field defaults to it. The /admin and /metrics
+	// endpoints always stay reachable: they are harness instrumentation
+	// outside the emulated data plane.
 	ServeHealthDuringSilentHang bool `yaml:"serve_health_during_silent_hang" json:"serve_health_during_silent_hang"`
 
 	// FaultSchedule is the config-scripted fault plan, offsets measured

@@ -109,8 +109,8 @@ pins:
     scheduler_settings: max_num_seqs 256, max_num_batched_tokens 2048, chunked prefill on, policy fcfs, async scheduling on, cudagraph modes PIECEWISE and FULL (/server_info, 15 Sep 2026)
     chunked_prefill: "on"
     cuda_graphs: "on"
-    prefix_caching: "off"  # pinned off, verified from server metrics (§6)
-    continuous_batching: "on"  # pinned on, verified from server metrics (§6)
+    prefix_caching: "off"  # declared off (§6); the server-metrics check is Phase 1 work
+    continuous_batching: "on"  # declared on (§6); the server-metrics check is Phase 1 work
   gpu:
     sku: NVIDIA L40
     driver: 570.195.03
