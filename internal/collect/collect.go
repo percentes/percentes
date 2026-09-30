@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/histo"
@@ -41,6 +42,8 @@ type Window struct {
 	Name    string `json:"name"`
 	StartNs int64  `json:"start_ns"`
 	EndNs   int64  `json:"end_ns"`
+	// Replica, when set, keeps only requests attributed to that replica.
+	Replica string `json:"replica,omitempty"`
 }
 
 // FireAnchorNs is the §3 fire anchor: the earlier of the planned T_inject
@@ -83,6 +86,15 @@ type Stats struct {
 	TTFTConditional histo.Summary `json:"ttft_conditional_on_completion"`
 	E2EConditional  histo.Summary `json:"e2e_conditional_on_completion"`
 	ITLPooled       histo.Summary `json:"itl_pooled"`
+
+	// Completion length over completed requests: the client-side count of
+	// content events, and the completion token count from the usage
+	// object over the requests whose stream carried one (§6, §10).
+	ContentEvents    CountSummary `json:"content_events"`
+	CompletionTokens CountSummary `json:"completion_tokens"`
+	// TokenCheck compares the two counts on each completed request that
+	// carried usage (§10).
+	TokenCheck TokenCheck `json:"token_check"`
 
 	Incidence IncidenceCurve `json:"completion_incidence"`
 	// ConditionalCaveat: error+censored fraction exceeds 5%, so
@@ -144,11 +156,43 @@ func meetsSLO(cfg *config.Config, r *loadgen.Request) bool {
 		r.E2ENs() <= int64(cfg.SLO.E2EMs)*1_000_000
 }
 
+// CountSummary is the distribution of a per-request count.
+type CountSummary struct {
+	N    int     `json:"n"`
+	Mean float64 `json:"mean"`
+	P50  int     `json:"p50"`
+	P95  int     `json:"p95"`
+	Max  int     `json:"max"`
+}
+
+// TokenCheck counts the completed requests carrying a usage object and
+// those whose completion token count equalled their content event count.
+type TokenCheck struct {
+	Sampled int `json:"sampled"`
+	Matched int `json:"matched"`
+}
+
+// summarizeCounts orders xs and reads exact order statistics (ceil rank).
+func summarizeCounts(xs []int) CountSummary {
+	n := len(xs)
+	if n == 0 {
+		return CountSummary{}
+	}
+	sorted := append([]int(nil), xs...)
+	sort.Ints(sorted)
+	sum := 0
+	for _, x := range sorted {
+		sum += x
+	}
+	return CountSummary{N: n, Mean: float64(sum) / float64(n), P50: sorted[(n*50+99)/100-1], P95: sorted[(n*95+99)/100-1], Max: sorted[n-1]}
+}
+
 // Collect computes Stats for one window. Histograms use the pinned
 // configuration; recording is recordValue-only via internal/histo.
 func Collect(cfg *config.Config, requests []loadgen.Request, w Window) (*Stats, error) {
 	st := &Stats{Window: w, ErrClasses: map[string]int{}}
 	ttft, e2e, itl := histo.New(cfg.Histogram), histo.New(cfg.Histogram), histo.New(cfg.Histogram)
+	var events, tokens []int
 	horizonUs := int64(cfg.Client.HTTPTimeoutS) * 1_000_000
 	var curveObs []Obs
 	goodput := 0
@@ -157,6 +201,9 @@ func Collect(cfg *config.Config, requests []loadgen.Request, w Window) (*Stats, 
 	for i := range requests {
 		r := &requests[i]
 		if r.IntendedNs < w.StartNs || r.IntendedNs >= w.EndNs {
+			continue
+		}
+		if w.Replica != "" && r.Replica != w.Replica {
 			continue
 		}
 		st.Scheduled++
@@ -181,6 +228,14 @@ func Collect(cfg *config.Config, requests []loadgen.Request, w Window) (*Stats, 
 			curveObs = append(curveObs, Obs{TimeUs: r.E2ENs() / 1000, Kind: ObsCompletion})
 			if meetsSLO(cfg, r) {
 				goodput++
+			}
+			events = append(events, r.Tokens)
+			if r.UsageSeen {
+				tokens = append(tokens, r.CompletionTokens)
+				st.TokenCheck.Sampled++
+				if r.CompletionTokens == r.Tokens {
+					st.TokenCheck.Matched++
+				}
 			}
 			st.RawTTFTUs = append(st.RawTTFTUs, r.TTFTNs()/1000)
 			st.RawE2EUs = append(st.RawE2EUs, r.E2ENs()/1000)
@@ -216,6 +271,8 @@ func Collect(cfg *config.Config, requests []loadgen.Request, w Window) (*Stats, 
 	st.TTFTConditional = ttft.Summarize()
 	st.E2EConditional = e2e.Summarize()
 	st.ITLPooled = itl.Summarize()
+	st.ContentEvents = summarizeCounts(events)
+	st.CompletionTokens = summarizeCounts(tokens)
 	st.Incidence = EstimateIncidence(curveObs, horizonUs)
 	st.ConditionalCaveat = st.ErrorRate+st.CensoredRate > 0.05
 

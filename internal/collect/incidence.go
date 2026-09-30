@@ -11,10 +11,11 @@ import (
 // events, since an errored request can never complete and scoring it as
 // censored would count it as still waiting; only requests with no terminal
 // event by the pinned timeout (or run end) are censored observations. With
-// no competing events the estimator reduces exactly to 1-KM. A quantile is
-// reported only where the curve actually crosses it within the timeout
-// horizon; otherwise the refusal form is decided by the ceiling, final
-// incidence plus the final event-free survival (§3).
+// no competing events the estimator reduces exactly to one minus the
+// Kaplan-Meier (KM) survival estimate. A quantile is reported only where
+// the curve actually crosses it within the timeout horizon; otherwise the
+// refusal form is decided by the ceiling, final incidence plus the final
+// event-free survival (§3).
 
 // ObsKind classifies one scheduled request's terminal state for the curve.
 type ObsKind int
@@ -31,9 +32,10 @@ type Obs struct {
 	Kind   ObsKind
 }
 
-// IncidencePoint is one completion step of the curve: CIF(t) = P(completed
-// by t), estimated over all scheduled requests. AtRisk counts before any
-// removal at this time; Errors counts competing events tied at this time.
+// IncidencePoint is one completion step of the curve, the cumulative
+// incidence function CIF(t) = P(completed by t), estimated over all
+// scheduled requests. AtRisk counts before any removal at this time;
+// Errors counts competing events tied at this time.
 type IncidencePoint struct {
 	TimeUs    int64   `json:"t_us"`
 	Incidence float64 `json:"incidence"`
@@ -67,7 +69,7 @@ type IncidenceCurve struct {
 //
 // where S is overall event-free survival (completions AND errors both leave
 // it) and n is the at-risk count. Ties at the same time follow the standard
-// convention: terminal events first — censored observations at t are still
+// convention: terminal events first, so censored observations at t are still
 // at risk for events at t, and tied completions and errors share one n.
 // An observation with an undefined Kind is a programming error, not a data
 // condition: EstimateIncidence panics.
@@ -157,7 +159,7 @@ func (c *IncidenceCurve) Ceiling() float64 {
 	return c.FinalIncidence() + c.FinalSurvival
 }
 
-// IncidenceAt returns CIF(tUs) = P(completed by tUs) — the headline uses
+// IncidenceAt returns CIF(tUs) = P(completed by tUs); the headline uses
 // "cumulative incidence of completion within 1 s".
 func (c *IncidenceCurve) IncidenceAt(tUs int64) float64 {
 	cif := 0.0

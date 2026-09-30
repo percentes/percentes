@@ -8,11 +8,12 @@ import (
 )
 
 // ReceivePath is the §2 receive-path report for one window, neither check
-// run-failing: the client-side TTFT mean over completed requests against
-// the server-side histogram's mean over the same window, pooled across
-// replicas, and the loopback canary's deviation from its known timing.
-// The divergence also holds the network round trip and any difference in
-// where the server starts its clock.
+// run-failing: the client-side time-to-first-token (TTFT) mean over
+// completed requests against the server-side histogram's mean over the
+// same window, pooled across replicas, and the loopback canary's event
+// lag behind its known timing. The divergence also holds the network
+// round trip and any difference in where the server starts its clock. A
+// window filtered to one replica carries no receive-path report.
 type ReceivePath struct {
 	ClientTTFTMeanMs float64 `json:"client_ttft_mean_ms"`
 	ClientTTFTCount  int     `json:"client_ttft_count"`

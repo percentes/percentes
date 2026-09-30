@@ -16,7 +16,7 @@ func testCfg(t *testing.T) *config.Config {
 	return cfg
 }
 
-// Synthetic three-state accounting: the normative exclusions hold —
+// Synthetic three-state accounting: the normative exclusions hold;
 // errored and censored never enter latency histograms, every scheduled
 // request lands in exactly one state, window assignment is by intended
 // time.
@@ -143,5 +143,53 @@ func TestAccountInFlight(t *testing.T) {
 	acc := AccountInFlight(reqs, tInject, "pod-a")
 	if acc.Total != 2 || acc.Errored != 1 || acc.Completed != 1 || acc.OnVictim != 1 {
 		t.Fatalf("in-flight accounting: %+v", acc)
+	}
+}
+
+// A window naming a replica keeps only the requests attributed to it.
+func TestWindowReplicaFilter(t *testing.T) {
+	cfg := testCfg(t)
+	reqs := []loadgen.Request{
+		{Index: 0, IntendedNs: 1e9, DispatchNs: 1e9, FirstTokNs: 1.1e9, DoneNs: 2e9, Outcome: loadgen.OutcomeCompleted, Replica: "a"},
+		{Index: 1, IntendedNs: 2e9, DispatchNs: 2e9, FirstTokNs: 2.1e9, DoneNs: 3e9, Outcome: loadgen.OutcomeCompleted, Replica: "b"},
+		{Index: 2, IntendedNs: 3e9, DispatchNs: 3e9, DoneNs: 4e9, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrReset, Replica: "b"},
+	}
+	all, err := Collect(cfg, reqs, Window{Name: "fault", StartNs: 0, EndNs: 10e9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	only, err := Collect(cfg, reqs, Window{Name: "fault_survivor", StartNs: 0, EndNs: 10e9, Replica: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all.Scheduled != 3 || only.Scheduled != 2 || only.Completed != 1 || only.Errored != 1 {
+		t.Fatalf("pooled %+v, replica b %+v", all.Scheduled, only)
+	}
+}
+
+// Completion length is reported as the content event count over every
+// completed request and the usage count over those that carried one; the
+// §10 check compares the two where both exist.
+func TestCollectCompletionLengthAndTokenCheck(t *testing.T) {
+	cfg := testCfg(t)
+	sec := int64(1e9)
+	done := func(i int64, tokens int, usage int, seen bool) loadgen.Request {
+		return loadgen.Request{Index: i, IntendedNs: (10 + i) * sec, DispatchNs: (10+i)*sec + 1e6, FirstTokNs: (10+i)*sec + 5e8, DoneNs: (12 + i) * sec,
+			Outcome: loadgen.OutcomeCompleted, Tokens: tokens, CompletionTokens: usage, UsageSeen: seen}
+	}
+	reqs := []loadgen.Request{done(0, 3, 3, true), done(1, 5, 6, true), done(2, 4, 4, true), done(3, 2, 0, false),
+		{Index: 4, IntendedNs: 14 * sec, DispatchNs: 14*sec + 1e6, DoneNs: 14*sec + 3e8, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrReset, Tokens: 1}}
+	st, err := Collect(cfg, reqs, Window{Name: "w", StartNs: 10 * sec, EndNs: 20 * sec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ContentEvents != (CountSummary{N: 4, Mean: 3.5, P50: 3, P95: 5, Max: 5}) {
+		t.Fatalf("content events over completed requests: %+v", st.ContentEvents)
+	}
+	if st.CompletionTokens != (CountSummary{N: 3, Mean: 13.0 / 3, P50: 4, P95: 6, Max: 6}) {
+		t.Fatalf("completion tokens over requests with usage: %+v", st.CompletionTokens)
+	}
+	if st.TokenCheck != (TokenCheck{Sampled: 3, Matched: 2}) {
+		t.Fatalf("token check: %+v", st.TokenCheck)
 	}
 }
