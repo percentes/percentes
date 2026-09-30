@@ -81,12 +81,9 @@ func TestG7EvaluatesFromMockScrape(t *testing.T) {
 	obs := validity.Observations{Queue: &validity.QueueObservation{Gauge: cfg.Target.QueueGauge, IntervalS: 0.2, Means: means, ScrapeErrors: scrapeErrs}}
 	rep := validity.Evaluate(art, obs)
 
-	// The §2 gate measures this machine and host load inflates every term,
-	// including the central processing unit (CPU) gate, whose 5 s windowed
-	// mean can pass while the peak is near saturation. A failed gate cannot
-	// judge the sampler.
+	skipIfGateOnly(t, art)
 	if g := art.Loadgen.Gates; !g.Pass {
-		t.Skipf("host contended the client: %+v", g)
+		t.Fatalf("client-validity gate failed: %+v", g)
 	}
 	var g7 validity.Gate
 	for _, g := range rep.Gates {

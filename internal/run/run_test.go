@@ -37,7 +37,7 @@ func (f *fakeInjector) Observed(ctx context.Context) (fired, expired *time.Time,
 }
 
 // A caller-supplied Options.Injector must actually be armed and drive the
-// orchestration — the seam the Phase 1 injectors reach the run through.
+// orchestration, the seam the Phase 1 injectors reach the run through.
 // Without this the clean-delete/node-partition injectors would be
 // unreachable from any binary.
 func TestExecuteUsesSuppliedInjector(t *testing.T) {
@@ -76,9 +76,9 @@ func TestExecuteUsesSuppliedInjector(t *testing.T) {
 	}
 }
 
-// TestExecuteEndToEndUnderRace runs the complete pipeline — load
+// TestExecuteEndToEndUnderRace runs the complete pipeline (load
 // generator (pacer, workers, monitors), orchestrator (pre-armed fault),
-// collector, detector, probes — in-process at a small scale, so the
+// collector, detector, probes) in-process at a small scale, so the
 // concurrency runs under -race in the unit suite. The AC suite runs
 // without -race, for timing fidelity.
 func TestExecuteEndToEndUnderRace(t *testing.T) {
