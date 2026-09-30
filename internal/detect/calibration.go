@@ -29,7 +29,7 @@ type HealthCalibration struct {
 // from the same start and reports when each first succeeds. It is a
 // documentation instrument (§5: "the relationship is documented, not
 // assumed"), not a gate.
-func CalibrateHealth(ctx context.Context, baseURL string, interval time.Duration) (HealthCalibration, error) {
+func CalibrateHealth(ctx context.Context, baseURL string, interval time.Duration, target ProbeTarget) (HealthCalibration, error) {
 	start := time.Now()
 	client := probeClient()
 
@@ -59,13 +59,13 @@ func CalibrateHealth(ctx context.Context, baseURL string, interval time.Duration
 		}
 	}()
 	go func() {
-		body := `{"model":"cal","messages":[{"role":"user","content":"cal"}],"stream":true,"max_tokens":1,"ignore_eos":true}`
+		body := target.body()
 		for {
 			if ctx.Err() != nil {
 				infCh <- result{}
 				return
 			}
-			if ok, _ := probeOnce(ctx, client, baseURL, body); ok {
+			if ok, _ := probeOnce(ctx, client, baseURL, body, target.APIKey); ok {
 				infCh <- result{at: time.Now(), ok: true}
 				return
 			}

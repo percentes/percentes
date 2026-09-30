@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/percentes/percentes/internal/collect"
@@ -22,7 +23,7 @@ import (
 // Options wires the run to its environment.
 type Options struct {
 	// Injector, when set, is the fault mechanism the orchestrator
-	// pre-arms at T_inject — the Phase 1 clean-delete or node-partition
+	// pre-arms at T_inject; the Phase 1 clean-delete or node-partition
 	// injector, or any test double. When nil, AdminURL selects the mock
 	// admin injector (Phase 0). The run stays agnostic beyond timestamps
 	// (§2): it never inspects which mechanism this is.
@@ -130,6 +131,10 @@ func (a *Artifacts) AttachObservations(o Observed) {
 	}
 	for name, st := range a.Windows {
 		w := st.Window
+		// A replica-filtered window has no server counterpart.
+		if w.Replica != "" {
+			continue
+		}
 		var server map[string]map[string]serverstats.Reduction
 		if families {
 			server = serverstats.ReduceWindow(o.Samples, a.Loadgen.EpochWall, w.StartNs, w.EndNs)
@@ -187,6 +192,7 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	}
 	probeCh := make(chan probeOutcome, 2)
 	probes := 0
+	probeTarget := probeTargetFor(cfg)
 	launchProbe := func(name, url, requireReplica string) {
 		if url == "" {
 			return
@@ -200,13 +206,13 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 			}
 			probeCtx, cancel := context.WithDeadline(ctx, epoch.Add(time.Duration((cfg.Run.Phases.WarmupS+cfg.Run.Phases.BaselineS+cfg.Run.Phases.FaultWindowTimeoutS)*float64(time.Second))))
 			defer cancel()
-			at, err := detect.ProbeRecovery(probeCtx, url, 500*time.Millisecond, requireReplica)
+			at, err := detect.ProbeRecovery(probeCtx, url, 500*time.Millisecond, requireReplica, probeTarget)
 			probeCh <- probeOutcome{name: name, at: at, err: err}
 		}()
 	}
 	// replica_ready polls the victim directly (every response is the
 	// victim's); traffic_restored polls the Service but only counts a
-	// success served BY the recovered victim — the surviving replica
+	// success served BY the recovered victim; the surviving replica
 	// answering the Service does not restore the victim's traffic (§5's
 	// routing-propagation segment would otherwise be meaningless).
 	launchProbe("replica_ready", opts.ProbeDirectURL, "")
@@ -245,17 +251,47 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 		{Name: "guard", StartNs: guardStartNs, EndNs: res.TInjectNs},
 		{Name: "fault", StartNs: res.TInjectNs, EndNs: res.FaultEndNs},
 	}
-	buckets := detect.BuildSeries(cfg, res.Requests, res.WarmupEndNs, res.RunEndNs)
-	art.Detector = detect.Run(cfg, buckets, res.WarmupEndNs, fireAnchorNs, res.FaultEndNs)
+	for _, w := range windows {
+		st, err := collect.Collect(cfg, res.Requests, w)
+		if err != nil {
+			return nil, fmt.Errorf("run: collect %s: %w", w.Name, err)
+		}
+		art.Windows[w.Name] = st
+	}
+
+	// The detector reads the collector's exact-window baseline (§3) and,
+	// for the black-hole variant, the partition-heal anchor (§5).
+	in := detect.Input{Buckets: detect.BuildSeries(cfg, res.Requests, res.WarmupEndNs, res.RunEndNs), WarmupEndNs: res.WarmupEndNs, FireAnchorNs: fireAnchorNs, TimeoutNs: res.FaultEndNs}
+	if b := art.Windows["baseline"]; b != nil && b.Scheduled > 0 {
+		in.PreFaultBaseline = &b.GoodputFrac
+	}
+	if cfg.Fault.Variant == config.VariantBlackHole {
+		heal := fireAnchorNs + int64(cfg.Fault.PartitionDurationS)*int64(time.Second)
+		if orch != nil && orch.ObservedExpiry != nil {
+			heal = orch.ObservedExpiry.Sub(res.EpochWall).Nanoseconds()
+		}
+		in.HealNs = &heal
+	}
+	art.Detector = detect.RunWith(cfg, in)
 
 	// The recovery point splits the fault window into degraded and
-	// recovered sub-windows for reporting.
-	if at := art.Detector.ToPreFault.RecoveredAtNs; at != nil && *at > res.TInjectNs && *at < res.FaultEndNs {
-		windows = append(windows,
+	// recovered sub-windows for reporting; under the black-hole variant
+	// the labelled recovery is the partition-heal one (§5).
+	recovery := art.Detector.ToPreFault
+	if art.Detector.PartitionHealRecovery != nil {
+		recovery = *art.Detector.PartitionHealRecovery
+	}
+	var split []collect.Window
+	// The §3 survivor cohort.
+	if survivor := survivorOf(res.Requests, res.WarmupEndNs, guardStartNs, opts.VictimReplica); survivor != "" {
+		split = append(split, collect.Window{Name: "fault_survivor", StartNs: res.TInjectNs, EndNs: res.FaultEndNs, Replica: survivor})
+	}
+	if at := recovery.RecoveredAtNs; at != nil && *at > res.TInjectNs && *at < res.FaultEndNs {
+		split = append(split,
 			collect.Window{Name: "fault_degraded", StartNs: res.TInjectNs, EndNs: *at},
 			collect.Window{Name: "fault_recovered", StartNs: *at, EndNs: res.FaultEndNs})
 	}
-	for _, w := range windows {
+	for _, w := range split {
 		st, err := collect.Collect(cfg, res.Requests, w)
 		if err != nil {
 			return nil, fmt.Errorf("run: collect %s: %w", w.Name, err)
@@ -276,15 +312,13 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	for i := 0; i < probes; i++ {
 		select {
 		case p := <-probeCh:
-			if p.err == nil {
-				art.Decomposition.SetMeasured(p.name, fireWall, p.at)
-			}
+			recordProbe(art.Decomposition, p.name, fireWall, p.at, p.err)
 		case <-time.After(10 * time.Second):
 			// Probe goroutines are deadline-bounded before run end; this
 			// is a defensive backstop only.
 		}
 	}
-	if at := art.Detector.ToPreFault.RecoveredAtNs; at != nil {
+	if at := recovery.RecoveredAtNs; at != nil {
 		art.Decomposition.SetMeasured("goodput_restored", fireWall, res.EpochWall.Add(time.Duration(*at)))
 	}
 	// Routing propagation = traffic_restored minus replica_ready, its own
@@ -435,4 +469,46 @@ func scheduleFires(ctx context.Context, adminURL string, since time.Time) (int, 
 		}
 	}
 	return n, nil
+}
+
+// probeTargetFor is what the §5 probes request: the configured model and
+// the run's bearer token, resolved from the environment like loadgen's.
+func probeTargetFor(cfg *config.Config) detect.ProbeTarget {
+	t := detect.ProbeTarget{Model: cfg.Target.ModelName, Hosted: cfg.Target.Hosted}
+	if cfg.Target.APIKeyEnv != "" {
+		t.APIKey = os.Getenv(cfg.Target.APIKeyEnv)
+	}
+	return t
+}
+
+// recordProbe marks a probe segment measured, or notes why it is not.
+func recordProbe(d *detect.Decomposition, name string, fire, at time.Time, err error) {
+	if err == nil {
+		d.SetMeasured(name, fire, at)
+		return
+	}
+	d.SetNote(name, "unmeasured: "+err.Error())
+}
+
+// survivorOf names the replica that served the baseline beside the victim,
+// or "" when attribution is absent, ambiguous or the victim is unknown.
+func survivorOf(requests []loadgen.Request, warmupEndNs, guardStartNs int64, victim string) string {
+	if victim == "" {
+		return ""
+	}
+	seen := map[string]bool{}
+	for i := range requests {
+		r := &requests[i]
+		if r.IntendedNs < warmupEndNs || r.IntendedNs >= guardStartNs || r.Replica == "" || r.Replica == victim {
+			continue
+		}
+		seen[r.Replica] = true
+	}
+	if len(seen) != 1 {
+		return ""
+	}
+	for name := range seen {
+		return name
+	}
+	return ""
 }

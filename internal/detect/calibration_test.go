@@ -29,7 +29,7 @@ func TestCalibrateHealthAgainstMock(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	cal, err := CalibrateHealth(ctx, base, 100*time.Millisecond)
+	cal, err := CalibrateHealth(ctx, base, 100*time.Millisecond, ProbeTarget{})
 	if err != nil {
 		t.Fatalf("calibration: %v", err)
 	}

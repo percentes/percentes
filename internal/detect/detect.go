@@ -89,16 +89,44 @@ func compNonError(b *Bucket) (int, int) { return b.Scheduled - b.Errored, b.Sche
 // windowRatio computes the ratio-of-sums over the leading window
 // [fromIdx, fromIdx+windowS).
 func windowRatio(buckets []Bucket, fromIdx, windowS int, comp component) (float64, bool) {
-	num, den := 0, 0
-	for i := fromIdx; i < fromIdx+windowS && i < len(buckets); i++ {
-		n, d := comp(&buckets[i])
-		num += n
-		den += d
-	}
+	num, den, _ := windowSums(buckets, fromIdx, windowS, comp)
 	if den == 0 {
 		return 0, false
 	}
 	return float64(num) / float64(den), true
+}
+
+// windowSums returns the numerator, denominator and observed bucket count
+// of the leading window [fromIdx, fromIdx+windowS) within the series.
+func windowSums(buckets []Bucket, fromIdx, windowS int, comp component) (num, den, observed int) {
+	for i := fromIdx; i < fromIdx+windowS && i < len(buckets); i++ {
+		n, d := comp(&buckets[i])
+		num += n
+		den += d
+		observed++
+	}
+	return num, den, observed
+}
+
+// entryVerdict judges the leading window at fromIdx: a candidate when the
+// observed ratio meets the bar, unobserved when the series cuts the window
+// and its unobserved part could still lift the ratio to the bar, and
+// otherwise not a candidate.
+func entryVerdict(buckets []Bucket, fromIdx, windowS int, comp component, bar float64) (candidate, unobserved bool) {
+	num, den, observed := windowSums(buckets, fromIdx, windowS, comp)
+	if observed == 0 {
+		return false, true
+	}
+	if den > 0 && float64(num)/float64(den) >= bar {
+		return observed == windowS, observed < windowS
+	}
+	if observed == windowS || den == 0 {
+		return false, false
+	}
+	// Best case: the unobserved buckets each carry the observed mean load,
+	// all of it good.
+	m := float64(windowS-observed) * float64(den) / float64(observed)
+	return false, (float64(num)+m)/(float64(den)+m) >= bar
 }
 
 // Params are detector parameters (pre-registered values live in config;
@@ -112,18 +140,27 @@ type Params struct {
 
 // Detection is one detector outcome against one baseline.
 type Detection struct {
-	Baseline        float64  `json:"baseline"`
-	Params          Params   `json:"params"`
-	TTRSeconds      *float64 `json:"ttr_seconds,omitempty"`
-	RecoveredAtNs   *int64   `json:"recovered_at_ns,omitempty"`
-	NotRecovered    bool     `json:"not_recovered"`
-	CanceledEntries int      `json:"canceled_entries"` // hysteresis: candidates killed during hold
-	ReDegradations  int      `json:"re_degradations"`  // post-recovery dips below exit
+	Baseline      float64  `json:"baseline"`
+	Params        Params   `json:"params"`
+	TTRSeconds    *float64 `json:"ttr_seconds,omitempty"`
+	RecoveredAtNs *int64   `json:"recovered_at_ns,omitempty"`
+	NotRecovered  bool     `json:"not_recovered"`
+	// HoldUnobserved is set when the series ends before a candidate's hold
+	// could be seen in full; NotRecovered is then false.
+	HoldUnobserved  bool `json:"hold_unobserved,omitempty"`
+	CanceledEntries int  `json:"canceled_entries"` // hysteresis: candidates killed during hold
+	ReDegradations  int  `json:"re_degradations"`  // post-recovery dips below exit
 }
 
 // detect runs the hysteresis state machine over buckets, scanning entry
 // candidates from the fire anchor; windows must start before timeoutNs.
 func detect(buckets []Bucket, comp component, baseline float64, fireAnchorNs, timeoutNs int64, p Params) Detection {
+	return detectFrom(buckets, comp, baseline, fireAnchorNs, fireAnchorNs, timeoutNs, p)
+}
+
+// detectFrom is detect with the scan starting at scanFromNs; TTR is still
+// measured from the fire anchor.
+func detectFrom(buckets []Bucket, comp component, baseline float64, fireAnchorNs, scanFromNs, timeoutNs int64, p Params) Detection {
 	det := Detection{Baseline: baseline, Params: p}
 	if len(buckets) == 0 || baseline <= 0 {
 		det.NotRecovered = true
@@ -133,9 +170,9 @@ func detect(buckets []Bucket, comp component, baseline float64, fireAnchorNs, ti
 	exitBar := baseline * float64(p.ExitPct) / 100
 	origin := buckets[0].StartNs
 
-	// Scan starts at the first bucket fully AFTER the fire anchor: the
+	// Scan starts at the first bucket fully AFTER the scan anchor: the
 	// straddling bucket belongs to no window (§3).
-	firstIdx := int((fireAnchorNs - origin + nsPerSec - 1) / nsPerSec)
+	firstIdx := int((scanFromNs - origin + nsPerSec - 1) / nsPerSec)
 	if firstIdx < 0 {
 		firstIdx = 0
 	}
@@ -145,14 +182,23 @@ func detect(buckets []Bucket, comp component, baseline float64, fireAnchorNs, ti
 	}
 
 	for i := firstIdx; i < lastIdx; i++ {
-		w, ok := windowRatio(buckets, i, p.WindowS, comp)
-		if !ok || w < entryBar {
+		candidate, unobserved := entryVerdict(buckets, i, p.WindowS, comp, entryBar)
+		if unobserved {
+			det.HoldUnobserved = true
+			return det
+		}
+		if !candidate {
 			continue
 		}
 		// Candidate entry at bucket i: hold requires every window
 		// starting in [i, i+HoldS] to stay at or above the entry bar.
 		held := true
 		for j := i + 1; j <= i+p.HoldS && held; j++ {
+			// The hold's last window starts at i+HoldS and must end inside the series.
+			if j+p.WindowS > len(buckets) {
+				det.HoldUnobserved = true
+				return det
+			}
 			hw, hok := windowRatio(buckets, j, p.WindowS, comp)
 			if !hok || hw < entryBar {
 				held = false
@@ -169,7 +215,7 @@ func detect(buckets []Bucket, comp component, baseline float64, fireAnchorNs, ti
 
 		// Post-recovery re-degradation with the full hysteresis band: an
 		// episode starts below the EXIT bar and ends only when the
-		// window climbs back to the ENTRY bar — oscillation inside
+		// window climbs back to the ENTRY bar; oscillation inside
 		// [exit, entry) neither starts nor ends an episode.
 		below := false
 		for j := i + p.HoldS + 1; j < lastIdx; j++ {
@@ -234,11 +280,17 @@ func deficit(buckets []Bucket, comp component, baseline float64, fireAnchorNs, u
 // equilibrium fields carry no verdict when the equilibrium is not
 // estimable.
 type SensitivityRow struct {
-	Params           Params   `json:"params"`
-	TTRToPreFault    *float64 `json:"ttr_to_prefault_s,omitempty"`
-	TTRToEquilibrium *float64 `json:"ttr_to_equilibrium_s,omitempty"`
-	NotRecoveredPre  bool     `json:"not_recovered_prefault"`
-	NotRecoveredEq   bool     `json:"not_recovered_equilibrium"`
+	Params            Params   `json:"params"`
+	TTRToPreFault     *float64 `json:"ttr_to_prefault_s,omitempty"`
+	TTRToEquilibrium  *float64 `json:"ttr_to_equilibrium_s,omitempty"`
+	NotRecoveredPre   bool     `json:"not_recovered_prefault"`
+	NotRecoveredEq    bool     `json:"not_recovered_equilibrium"`
+	HoldUnobservedPre bool     `json:"hold_unobserved_prefault,omitempty"`
+	HoldUnobservedEq  bool     `json:"hold_unobserved_equilibrium,omitempty"`
+	// The partition-heal columns exist only for the black-hole variant.
+	TTRPartitionHeal   *float64 `json:"ttr_partition_heal_s,omitempty"`
+	NotRecoveredHeal   bool     `json:"not_recovered_partition_heal,omitempty"`
+	HoldUnobservedHeal bool     `json:"hold_unobserved_partition_heal,omitempty"`
 }
 
 // Result is the full §5 detector output for one run.
@@ -263,6 +315,15 @@ type Result struct {
 	ToPreFault    Detection `json:"to_pre_fault"`
 	ToEquilibrium Detection `json:"to_equilibrium"`
 
+	// PartitionHealRecovery is the black-hole variant's labelled quantity
+	// (§5): the first held entry at or after the heal anchor, TTR from
+	// the fire anchor. ToPreFault stays the raw threshold crossing.
+	PartitionHealRecovery *Detection `json:"partition_heal_recovery,omitempty"`
+	HealAnchorNs          *int64     `json:"heal_anchor_ns,omitempty"`
+	// DeficitToPartitionHeal integrates to the partition-heal recovery, or
+	// to the timeout when none is observed.
+	DeficitToPartitionHeal *float64 `json:"integrated_goodput_deficit_to_partition_heal,omitempty"`
+
 	DeficitToPreFault    float64 `json:"integrated_goodput_deficit_to_prefault"`
 	DeficitToEquilibrium float64 `json:"integrated_goodput_deficit_to_equilibrium"`
 
@@ -278,10 +339,29 @@ type Result struct {
 	BacklogDrainNote     string `json:"backlog_drain_note"`
 }
 
-// Run executes the full §5 analysis. buckets must cover
-// [warmupEnd, runEnd); fireAnchorNs is the §3 fire anchor (the earlier of
-// T_inject and the recorded actual fire) and timeoutNs ends the fault window.
+// Input is what RunWith analyses. Buckets must cover [warmupEnd, runEnd);
+// FireAnchorNs is the §3 fire anchor (the earlier of T_inject and the
+// recorded actual fire) and TimeoutNs ends the fault window.
+// PreFaultBaseline, when set, is the collector's exact-window goodput
+// (§3) and is used as the baseline; HealNs, when set, is the black-hole
+// heal anchor and adds the partition-heal recovery.
+type Input struct {
+	Buckets          []Bucket
+	WarmupEndNs      int64
+	FireAnchorNs     int64
+	TimeoutNs        int64
+	PreFaultBaseline *float64
+	HealNs           *int64
+}
+
+// Run executes the full §5 analysis from buckets alone.
 func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, fireAnchorNs, timeoutNs int64) *Result {
+	return RunWith(cfg, Input{Buckets: buckets, WarmupEndNs: warmupEndNs, FireAnchorNs: fireAnchorNs, TimeoutNs: timeoutNs})
+}
+
+// RunWith executes the full §5 analysis.
+func RunWith(cfg *config.Config, in Input) *Result {
+	buckets, warmupEndNs, fireAnchorNs, timeoutNs := in.Buckets, in.WarmupEndNs, in.FireAnchorNs, in.TimeoutNs
 	p := Params{
 		WindowS:  cfg.RecoveryDetector.WindowS,
 		EntryPct: cfg.RecoveryDetector.EntryPct,
@@ -294,21 +374,41 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, fireAnchorNs, timeou
 		Components:           map[string]Detection{},
 	}
 
-	// Pre-fault baseline ends at the guard start, one pinned client
-	// timeout before the fire anchor (§3), aligned down to a bucket
-	// boundary: a bucket straddling that end belongs to no window (§3).
-	// The guard window never enters this baseline.
+	// Pre-fault baseline: the collector's exact-window goodput when
+	// supplied; from buckets otherwise, ending at the guard start aligned
+	// down to a bucket boundary, so the straddling bucket belongs to no
+	// window (§3). The guard window never enters this baseline.
 	origin := int64(0)
 	if len(buckets) > 0 {
 		origin = buckets[0].StartNs
 	}
 	guardStartNs := collect.GuardStartNs(cfg, fireAnchorNs, warmupEndNs)
 	alignedGuardStart := origin + ((guardStartNs - origin) / nsPerSec * nsPerSec)
-	res.PreFaultBaseline = baselineOver(buckets, compGoodput, warmupEndNs, alignedGuardStart)
+	if in.PreFaultBaseline != nil {
+		res.PreFaultBaseline = *in.PreFaultBaseline
+	} else {
+		res.PreFaultBaseline = baselineOver(buckets, compGoodput, warmupEndNs, alignedGuardStart)
+	}
 
 	res.ToPreFault = detect(buckets, compGoodput, res.PreFaultBaseline, fireAnchorNs, timeoutNs, p)
+	var healNs *int64
+	if in.HealNs != nil {
+		heal := *in.HealNs
+		if heal < fireAnchorNs {
+			heal = fireAnchorNs
+		}
+		healNs = &heal
+		d := detectFrom(buckets, compGoodput, res.PreFaultBaseline, fireAnchorNs, heal, timeoutNs, p)
+		res.PartitionHealRecovery, res.HealAnchorNs = &d, &heal
+		untilHeal := timeoutNs
+		if d.RecoveredAtNs != nil {
+			untilHeal = *d.RecoveredAtNs
+		}
+		v := deficit(buckets, compGoodput, res.PreFaultBaseline, fireAnchorNs, untilHeal)
+		res.DeficitToPartitionHeal = &v
+	}
 
-	// Single-replica equilibrium: estimated over the DEGRADED plateau —
+	// Single-replica equilibrium: estimated over the DEGRADED plateau,
 	// from R seconds after fire (settle) until recovery-to-pre-fault, or
 	// the timeout when unrecovered. The fault-window tail would collapse
 	// into the post-recovery state in any recovered run (§5).
@@ -355,11 +455,15 @@ func Run(cfg *config.Config, buckets []Bucket, warmupEndNs, fireAnchorNs, timeou
 				dp := detect(buckets, compGoodput, res.PreFaultBaseline, fireAnchorNs, timeoutNs, sp)
 				row := SensitivityRow{
 					Params:        sp,
-					TTRToPreFault: dp.TTRSeconds, NotRecoveredPre: dp.NotRecovered,
+					TTRToPreFault: dp.TTRSeconds, NotRecoveredPre: dp.NotRecovered, HoldUnobservedPre: dp.HoldUnobserved,
 				}
 				if res.EquilibriumEstimable {
 					de := detect(buckets, compGoodput, res.EquilibriumBaseline, fireAnchorNs, timeoutNs, sp)
-					row.TTRToEquilibrium, row.NotRecoveredEq = de.TTRSeconds, de.NotRecovered
+					row.TTRToEquilibrium, row.NotRecoveredEq, row.HoldUnobservedEq = de.TTRSeconds, de.NotRecovered, de.HoldUnobserved
+				}
+				if healNs != nil {
+					dh := detectFrom(buckets, compGoodput, res.PreFaultBaseline, fireAnchorNs, *healNs, timeoutNs, sp)
+					row.TTRPartitionHeal, row.NotRecoveredHeal, row.HoldUnobservedHeal = dh.TTRSeconds, dh.NotRecovered, dh.HoldUnobserved
 				}
 				res.Sensitivity = append(res.Sensitivity, row)
 			}
@@ -428,6 +532,16 @@ func NewPhase0Decomposition() *Decomposition {
 		{Name: "routing_propagation", Source: "probe", Measured: false, Note: "traffic_restored minus replica_ready (§5: reported as its own segment)"},
 		{Name: "goodput_restored", Source: "client", Measured: false, Note: "from the client stream per the detector"},
 	}}
+}
+
+// SetNote records why a segment stayed unmeasured.
+func (d *Decomposition) SetNote(name, note string) {
+	for i := range d.Segments {
+		if d.Segments[i].Name == name && !d.Segments[i].Measured {
+			d.Segments[i].Note = note
+			return
+		}
+	}
 }
 
 // SetMeasured fills in a segment's boundaries.
