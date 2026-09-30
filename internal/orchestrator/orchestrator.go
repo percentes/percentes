@@ -49,8 +49,8 @@ type Injector interface {
 	// Observed reports the injector-side fired/expired wall timestamps,
 	// nil until they happen. A non-nil error is TERMINAL: the injector
 	// could not carry out or track the injection (e.g. a failed grace=0
-	// delete), and Execute aborts the run with it. Transient conditions —
-	// the fault not observed yet, a retryable poll failure — return
+	// delete), and Execute aborts the run with it. Transient conditions
+	// (the fault not observed yet, a retryable poll failure) return
 	// (nil, nil, nil), never an error.
 	Observed(ctx context.Context) (fired, expired *time.Time, err error)
 }
@@ -148,8 +148,8 @@ func (m *MockInjector) Arm(ctx context.Context, fireIn time.Duration, durationS 
 }
 
 // Observed polls the mock's /admin/faults for this fault's recorded
-// fire/expiry. A poll failure — transport, decode, or the fault not yet
-// listed — is transient, not a terminal injection failure, so it returns
+// fire/expiry. A poll failure (transport, decode, or the fault not yet
+// listed) is transient, so it returns
 // (nil, nil, nil) and lets Execute retry; the mock injector has no
 // terminal observe-time failure (arming already validated the fault) and
 // so never returns a non-nil error.

@@ -166,3 +166,23 @@ var (
 	_ Injector = (*nodePartitionInjector)(nil)
 	_ PodOps   = KubectlPodOps{}
 )
+
+// A second Execute on the same injector reports its own fire, never the
+// earlier run's.
+func TestArmClearsThePreviousRun(t *testing.T) {
+	ops := &fakePodOps{}
+	inj := NewCleanDeleteInjector(ops, "percentes", "victim-pod")
+	for i := 0; i < 2; i++ {
+		epoch := time.Now()
+		ts, err := Execute(context.Background(), inj, epoch, 200*time.Millisecond, 0)
+		if err != nil {
+			t.Fatalf("run %d: %v", i+1, err)
+		}
+		if ts.ObservedFire == nil || ts.ObservedFire.Before(epoch) {
+			t.Fatalf("run %d reported a fire from before its own epoch: %v", i+1, ts.ObservedFire)
+		}
+	}
+	if len(ops.deleted) != 2 {
+		t.Fatalf("each run must delete once, got %v", ops.deleted)
+	}
+}

@@ -17,16 +17,15 @@ import (
 // PodOps is the cluster operation the clean-delete injector needs.
 type PodOps interface {
 	// DeletePodGrace0 deletes the pod with grace period 0 (abrupt
-	// deletion: endpoint withdrawn near-instantly, kernel RSTs in-flight
-	// connections, §1). Returns the observed deletion time.
+	// deletion: the endpoint is withdrawn and in-flight connections to
+	// the pod fail, §1). Returns the observed deletion time.
 	DeletePodGrace0(ctx context.Context, namespace, pod string) (time.Time, error)
 }
 
 // CleanDeleteInjector fires a grace=0 pod deletion at T_inject (§1
 // "abrupt replica deletion", never called node loss). A clean delete is a
-// point event: the fault window is effectively zero (the endpoint is
-// withdrawn near-instantly), so expiry is reported at fire — recovery is
-// measured by the detector and probes, not by the orchestrator.
+// point event, so expiry is reported at fire; recovery is measured by the
+// detector and probes.
 type CleanDeleteInjector struct {
 	Ops       PodOps
 	Namespace string
@@ -36,6 +35,8 @@ type CleanDeleteInjector struct {
 	fired  *time.Time
 	expiry *time.Time
 	armErr error
+	gen    int
+	cancel context.CancelFunc
 }
 
 // NewCleanDeleteInjector constructs a CleanDeleteInjector that deletes pod in
@@ -44,31 +45,51 @@ func NewCleanDeleteInjector(ops PodOps, namespace, pod string) *CleanDeleteInjec
 	return &CleanDeleteInjector{Ops: ops, Namespace: namespace, Pod: pod}
 }
 
+// Arm starts a fresh injection: state from an earlier Arm is cleared and
+// its goroutine cancelled, so a reused injector never reports a previous
+// run's fire.
 func (c *CleanDeleteInjector) Arm(ctx context.Context, fireIn time.Duration, _ float64) error {
 	if c.Pod == "" {
 		return fmt.Errorf("clean-delete injector: no victim pod")
 	}
+	c.mu.Lock()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	armCtx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+	c.gen++
+	gen := c.gen
+	c.fired, c.expiry, c.armErr = nil, nil, nil
+	c.mu.Unlock()
 	go func() {
 		timer := time.NewTimer(fireIn)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-		case <-ctx.Done():
-			c.mu.Lock()
-			c.armErr = ctx.Err()
-			c.mu.Unlock()
+		case <-armCtx.Done():
+			c.record(gen, nil, armCtx.Err())
 			return
 		}
-		at, err := c.Ops.DeletePodGrace0(ctx, c.Namespace, c.Pod)
-		c.mu.Lock()
-		if err != nil {
-			c.armErr = err
-		} else {
-			c.fired, c.expiry = &at, &at // point event: expiry == fire
-		}
-		c.mu.Unlock()
+		at, err := c.Ops.DeletePodGrace0(armCtx, c.Namespace, c.Pod)
+		c.record(gen, &at, err)
 	}()
 	return nil
+}
+
+// record stores the outcome of the arm generation gen, or drops it when a
+// later Arm has superseded it.
+func (c *CleanDeleteInjector) record(gen int, at *time.Time, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if gen != c.gen {
+		return
+	}
+	if err != nil {
+		c.armErr = err
+		return
+	}
+	c.fired, c.expiry = at, at // point event: expiry == fire
 }
 
 func (c *CleanDeleteInjector) Observed(context.Context) (fired, expired *time.Time, err error) {
@@ -84,7 +105,7 @@ type nodeOps interface {
 	// NetworkChaos with a duration, or an iptables DROP-all installed by
 	// a pre-armed job with a scheduled removal, §1). Because the node
 	// becomes unreachable the instant it fires, arming MUST complete
-	// before the fire time — nothing may depend on reaching the node
+	// before the fire time; nothing may depend on reaching the node
 	// after fire.
 	ArmNodePartition(ctx context.Context, node string, fireIn time.Duration, durationS float64) error
 	// PartitionStatus reports the observed fire/expiry of a previously
