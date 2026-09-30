@@ -318,7 +318,7 @@ func gateG5(art *run.Artifacts, obs Observations) Gate {
 		// exist the gate reports not applicable, as G7 does when
 		// target.metrics_urls is unset.
 		g.Applicable, g.Observed, g.Pass = false, false, false
-		g.Detail = "nvidia-smi fingerprint collector not wired (Phase 1); reported not applicable until it exists"
+		g.Detail = "fingerprints from the deploy/phase1 capture scripts not wired into the gate (Phase 1); reported not applicable"
 		return g
 	}
 	// Coverage before equality: §10 requires equality ACROSS replicas and
@@ -401,16 +401,17 @@ func gateG7(art *run.Artifacts, obs Observations) Gate {
 	return g
 }
 
-// G6: baseline goodput at least the pinned minimum (§10 G6). Derived
-// from the detector's pre-fault baseline, which ends at the guard start (§3):
-// the guard window never enters this gate.
+// G6: baseline goodput at least the pinned minimum (§10 G6), read from the
+// collector's baseline window, which ends at the guard start (§3).
 func gateG6(art *run.Artifacts) Gate {
-	g := Gate{ID: "G6", Name: fmt.Sprintf("baseline goodput >= %.2f", config.PinnedBaselineGoodputMin), Applicable: true, Observed: true}
-	base := 0.0
-	if art.Detector != nil {
-		base = art.Detector.PreFaultBaseline
+	g := Gate{ID: "G6", Name: fmt.Sprintf("baseline goodput >= %.2f", config.PinnedBaselineGoodputMin), Applicable: true}
+	w := art.Windows["baseline"]
+	if w == nil || w.Scheduled == 0 {
+		g.Detail = "baseline window unobserved: no scheduled requests"
+		return g
 	}
-	g.Pass = base >= config.PinnedBaselineGoodputMin
-	g.Detail = fmt.Sprintf("baseline goodput %.4f (pinned minimum %.2f, §10 G6; below it the load calibration is wrong and is redone)", base, config.PinnedBaselineGoodputMin)
+	g.Observed = true
+	g.Pass = w.GoodputFrac >= config.PinnedBaselineGoodputMin
+	g.Detail = fmt.Sprintf("baseline goodput %.4f (pinned minimum %.2f, §10 G6; below it the load calibration is wrong and is redone)", w.GoodputFrac, config.PinnedBaselineGoodputMin)
 	return g
 }

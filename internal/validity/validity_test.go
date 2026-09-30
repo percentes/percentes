@@ -23,7 +23,7 @@ func cleanArt(variant string) *run.Artifacts {
 		Loadgen:   &loadgen.Result{Gates: loadgen.GateReport{Pass: true, CPUMeasured: true}},
 		ShareGate: run.ShareGateResult{Applicable: true, Pass: true, Shares: map[string]float64{"a": 0.5, "b": 0.5}},
 		Detector:  &detect.Result{PreFaultBaseline: 0.999},
-		Windows:   map[string]*collect.Stats{},
+		Windows:   map[string]*collect.Stats{"baseline": {Scheduled: 6000, GoodputFrac: 0.999}},
 	}
 }
 
@@ -47,8 +47,28 @@ func bothReplicaFingerprints() []GPUFingerprint {
 // withBaseline gives the artifact a 300 s §3 baseline window, guard
 // excluded, so G7 can count the samples it expects.
 func withBaseline(art *run.Artifacts) *run.Artifacts {
-	art.Windows["baseline"] = &collect.Stats{Window: collect.Window{Name: "baseline", StartNs: 60e9, EndNs: 360e9}}
+	art.Windows["baseline"].Window = collect.Window{Name: "baseline", StartNs: 60e9, EndNs: 360e9}
 	return art
+}
+
+// G6 reads the collector's exact-window goodput, the number the report
+// publishes; the detector's bucket-aligned baseline never decides it.
+func TestG6ReadsTheCollectorBaseline(t *testing.T) {
+	art := cleanArt(config.VariantCleanDelete)
+	art.Detector.PreFaultBaseline = 1.0
+	art.Windows["baseline"].GoodputFrac = 0.987
+	g := gateByID(Evaluate(art, Observations{}), "G6")
+	if g.Pass || !g.Observed || !strings.Contains(g.Detail, "0.9870") {
+		t.Fatalf("G6 must fail on the collector's 0.987: %+v", g)
+	}
+	art.Windows["baseline"].GoodputFrac = 0.991
+	if g := gateByID(Evaluate(art, Observations{}), "G6"); !g.Pass {
+		t.Fatalf("G6 must pass on the collector's 0.991: %+v", g)
+	}
+	delete(art.Windows, "baseline")
+	if g := gateByID(Evaluate(art, Observations{}), "G6"); g.Observed || g.Pass {
+		t.Fatalf("G6 without a baseline window must be unobserved: %+v", g)
+	}
 }
 
 func gateByID(rep Report, id string) Gate {
@@ -208,7 +228,7 @@ func TestG5FingerprintMismatch(t *testing.T) {
 // G6 fails below the pinned minimum baseline goodput.
 func TestG6BaselineCalibration(t *testing.T) {
 	art := cleanArt(config.VariantCleanDelete)
-	art.Detector.PreFaultBaseline = 0.94
+	art.Windows["baseline"].GoodputFrac = 0.94
 	if gateByID(Evaluate(art, Observations{}), "G6").Pass {
 		t.Error("G6 must fail below the pinned 0.99 (load miscalibration, §10 G6)")
 	}
@@ -218,7 +238,7 @@ func TestG6BaselineCalibration(t *testing.T) {
 // even on a black-hole run whose assertions both hold (§10).
 func TestNonLabelGateFailureInvalidatesRun(t *testing.T) {
 	art := blackHoleArt(collect.InFlightAccounting{OnVictim: 6, OnVictimCensored: 6})
-	art.Detector.PreFaultBaseline = 0.94
+	art.Windows["baseline"].GoodputFrac = 0.94
 	obs := Observations{
 		EndpointStaleness: &StalenessResult{Observed: true, StalenessWindowS: 24, VictimTrafficObserved: true},
 		GPUFingerprints:   bothReplicaFingerprints(),
@@ -315,7 +335,9 @@ func TestG7UnknownCoverageCannotPass(t *testing.T) {
 		t.Fatalf("an unrecorded cadence must be unobserved, got %+v", g)
 	}
 	noWindow := Observations{Queue: &QueueObservation{Gauge: "x", IntervalS: 1, Means: means}}
-	if g := gateByID(Evaluate(cleanArt(config.VariantCleanDelete), noWindow), "G7"); g.Observed || g.Pass {
+	unrecorded := cleanArt(config.VariantCleanDelete)
+	delete(unrecorded.Windows, "baseline")
+	if g := gateByID(Evaluate(unrecorded, noWindow), "G7"); g.Observed || g.Pass {
 		t.Fatalf("an unrecorded baseline window must be unobserved, got %+v", g)
 	}
 }

@@ -8,7 +8,7 @@ import (
 )
 
 // G5 requires equality ACROSS replicas (§10): a fingerprint set covering
-// only one of two replicas is an incomplete observation and must fail —
+// only one of two replicas is an incomplete observation and must fail;
 // never pass vacuously because the present values happen to match.
 func TestG5RequiresReplicaCoverage(t *testing.T) {
 	obs := Observations{GPUFingerprints: []GPUFingerprint{
