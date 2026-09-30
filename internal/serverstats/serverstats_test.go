@@ -426,3 +426,119 @@ func TestReduceWindowOracle(t *testing.T) {
 		t.Fatalf("counter from the first inside sample: %+v", c)
 	}
 }
+
+// Label sets are measured apart: one that resets while the family's sum
+// still grows is a reset with its own increase, one absent from a sample
+// adds nothing there and steps from its last sample when it returns.
+func TestReduceWindowPerLabelSet(t *testing.T) {
+	epoch := time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)
+	at := func(s float64) time.Time { return epoch.Add(time.Duration(s * float64(time.Second))) }
+	ctr := func(a float64, b *float64) Family {
+		f := Family{Type: "counter", Value: a, series: []series{{labels: "engine=a", value: a}}}
+		if b != nil {
+			f.Value += *b
+			f.series = append(f.series, series{labels: "engine=b", value: *b})
+		}
+		return f
+	}
+	v := func(x float64) *float64 { return &x }
+	samples := []Sample{
+		{Replica: "r0", At: at(1), Families: map[string]Family{"c": ctr(100, v(100))}},
+		{Replica: "r0", At: at(3), Families: map[string]Family{"c": ctr(1, v(201))}},  // a reset, b grew
+		{Replica: "r0", At: at(5), Families: map[string]Family{"c": ctr(11, nil)}},    // b absent
+		{Replica: "r0", At: at(7), Families: map[string]Family{"c": ctr(21, v(211))}}, // b back, measured from 201
+	}
+	c := ReduceWindow(samples, epoch, 2e9, 10e9)["r0"]["c"]
+	if !c.Reset || c.Increase != 1+101+10+10+10 {
+		t.Fatalf("counter per label set: %+v", c)
+	}
+
+	hist := func(count uint64, sum float64, b0 uint64) series {
+		return series{count: count, sum: sum, buckets: []uint64{b0, count}}
+	}
+	hf := func(sa, sb series) Family {
+		sa.labels, sb.labels = "m=a", "m=b"
+		return Family{Type: "histogram", Count: sa.count + sb.count, Sum: sa.sum + sb.sum,
+			bounds: []float64{0.1, math.Inf(1)}, buckets: []uint64{sa.buckets[0] + sb.buckets[0], sa.count + sb.count},
+			series: []series{sa, sb}}
+	}
+	samples = []Sample{
+		{Replica: "r0", At: at(1), Families: map[string]Family{"h": hf(hist(100, 9, 50), hist(100, 9, 50))}},
+		{Replica: "r0", At: at(3), Families: map[string]Family{"h": hf(hist(2, 0.2, 1), hist(130, 12, 65))}}, // a restarted
+	}
+	h := ReduceWindow(samples, epoch, 2e9, 10e9)["r0"]["h"]
+	if !h.Reset || h.Count != 2+30 || h.Sum != 0.2+3 || len(h.Buckets) != 1 || h.Buckets[0] != (Bucket{LE: 0.1, Count: 1 + 15}) {
+		t.Fatalf("histogram per label set: %+v", h)
+	}
+}
+
+// The parser keeps each label set, so a page's series reach the window
+// reduction apart.
+func TestFamilyValueKeepsLabelSets(t *testing.T) {
+	fams, err := parse([]byte("# TYPE c counter\nc{engine=\"b\"} 5\nc{engine=\"a\"} 7\n"), "http://m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := familyValue(fams, "c", "http://m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Value != 12 || len(f.series) != 2 || f.series[0].labels != `engine="b"` || f.series[1].labels != `engine="a"` || f.series[1].value != 7 {
+		t.Fatalf("series: %+v", f.series)
+	}
+}
+
+// Two finite label sets whose sum overflows are an error.
+func TestFamilyValueRejectsAnOverflowingSum(t *testing.T) {
+	fams, err := parse([]byte("# TYPE c counter\nc{a=\"x\"} 1e308\nc{a=\"y\"} 1e308\n"), "http://m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := familyValue(fams, "c", "http://m"); err == nil {
+		t.Fatal("an overflowing sum must be an error")
+	}
+}
+
+// A label set missing from the last sample before the window keeps its
+// earlier sample, so its return inside the window is a step, and two
+// label sets whose values would collide unquoted stay apart.
+func TestReduceWindowKeepsLabelSetsAcrossAbsence(t *testing.T) {
+	epoch := time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)
+	at := func(s float64) time.Time { return epoch.Add(time.Duration(s * float64(time.Second))) }
+	ctr := func(pairs ...any) Family {
+		f := Family{Type: "counter"}
+		for i := 0; i < len(pairs); i += 2 {
+			v := pairs[i+1].(float64)
+			f.Value += v
+			f.series = append(f.series, series{labels: pairs[i].(string), value: v})
+		}
+		return f
+	}
+	samples := []Sample{
+		{Replica: "r0", At: at(0.5), Families: map[string]Family{"c": ctr("m=a", 100.0, "m=b", 500.0)}},
+		{Replica: "r0", At: at(1.5), Families: map[string]Family{"c": ctr("m=a", 110.0)}}, // last before the window, b absent
+		{Replica: "r0", At: at(3), Families: map[string]Family{"c": ctr("m=a", 120.0, "m=b", 520.0)}},
+	}
+	c := ReduceWindow(samples, epoch, 2e9, 10e9)["r0"]["c"]
+	if c.Reset || c.Increase != 10+20 {
+		t.Fatalf("b must step from its 0.5 s sample: %+v", c)
+	}
+	fams, err := parse([]byte("# TYPE c counter\nc{a=\"x,b=y\"} 1\nc{a=\"x\",b=\"y\"} 2\n"), "http://m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := familyValue(fams, "c", "http://m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.series) != 2 || f.series[0].labels == f.series[1].labels {
+		t.Fatalf("label sets must not share a key: %+v", f.series)
+	}
+}
+
+// Two finite gauge label sets whose sum overflows are an error.
+func TestExtractRejectsAnOverflowingGaugeSum(t *testing.T) {
+	if _, err := extract([]byte("# TYPE q gauge\nq{a=\"x\"} 1e308\nq{a=\"y\"} 1e308\n"), "q", "http://m"); err == nil {
+		t.Fatal("an overflowing gauge sum must be an error")
+	}
+}

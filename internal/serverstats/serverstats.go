@@ -13,6 +13,8 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +44,28 @@ type Family struct {
 	Sum     float64 `json:"sum,omitempty"`
 	bounds  []float64
 	buckets []uint64
+	series  []series
+}
+
+// series is one label set of a family at a sample; the family's fields
+// are the sum over its label sets.
+type series struct {
+	labels  string
+	value   float64
+	count   uint64
+	sum     float64
+	buckets []uint64
+}
+
+// labelKey names a label set by its pairs in name order, values quoted
+// so no two label sets share a key.
+func labelKey(ls []*dto.LabelPair) string {
+	parts := make([]string, 0, len(ls))
+	for _, l := range ls {
+		parts = append(parts, l.GetName()+"="+strconv.Quote(l.GetValue()))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // Bucket is one histogram bucket: the cumulative count at or below LE.
@@ -52,14 +76,16 @@ type Bucket struct {
 
 // Reduction is one family over a window: a gauge's or untyped family's
 // mean over the samples inside it; a counter's increase, and a histogram's
-// increase in count, sum and buckets, summed over consecutive samples from
-// the last one before the window (or the first inside it) to the last
-// inside it. The +Inf bucket is left out, since its count is Count. Reset
-// marks a counter or histogram that fell between two consecutive samples,
-// which a replica restart does, or a histogram whose bucket layout
-// changed; that pair contributes the later value, and after a layout
-// change no buckets are reported, since Count and Sum span the whole
-// window and the buckets would not.
+// increase in count, sum and buckets, measured per label set from that
+// set's last sample before the window (or its first inside it) to its
+// last inside it, and summed over the sets. A set missing from a sample
+// adds nothing for that sample; a set first seen inside the window adds
+// its whole value. The +Inf bucket is left out, since its count is Count.
+// Reset marks a label set that fell between two of its consecutive
+// samples, which a replica restart does, or a histogram whose bucket
+// layout changed; that pair contributes the later value, and after a
+// layout change no buckets are reported, since Count and Sum span the
+// whole window and the buckets would not.
 type Reduction struct {
 	Type     string   `json:"type"`
 	Samples  int      `json:"samples"`
@@ -134,6 +160,9 @@ func gaugeValue(fams families, gauge, url string) (float64, error) {
 		}
 		total += v
 	}
+	if !finite(total) {
+		return 0, fmt.Errorf("serverstats: %s: gauge %q sums to %v over its label sets", redact.URL(url), gauge, total)
+	}
 	return total, nil
 }
 
@@ -148,32 +177,33 @@ func familyValue(fams families, name, url string) (Family, error) {
 		return Family{}, fmt.Errorf("serverstats: %s: family %q not exposed", redact.URL(url), name)
 	}
 	var f Family
-	add := func(v float64) error {
+	add := func(m *dto.Metric, v float64) error {
 		if !finite(v) {
 			return fmt.Errorf("serverstats: %s: family %q read %v", redact.URL(url), name, v)
 		}
 		f.Value += v
+		f.series = append(f.series, series{labels: labelKey(m.GetLabel()), value: v})
 		return nil
 	}
 	switch mf.GetType() {
 	case dto.MetricType_GAUGE:
 		f.Type = "gauge"
 		for _, m := range mf.GetMetric() {
-			if err := add(m.GetGauge().GetValue()); err != nil {
+			if err := add(m, m.GetGauge().GetValue()); err != nil {
 				return Family{}, err
 			}
 		}
 	case dto.MetricType_UNTYPED:
 		f.Type = "untyped"
 		for _, m := range mf.GetMetric() {
-			if err := add(m.GetUntyped().GetValue()); err != nil {
+			if err := add(m, m.GetUntyped().GetValue()); err != nil {
 				return Family{}, err
 			}
 		}
 	case dto.MetricType_COUNTER:
 		f.Type = "counter"
 		for _, m := range mf.GetMetric() {
-			if err := add(m.GetCounter().GetValue()); err != nil {
+			if err := add(m, m.GetCounter().GetValue()); err != nil {
 				return Family{}, err
 			}
 		}
@@ -197,15 +227,21 @@ func familyValue(fams families, name, url string) (Family, error) {
 			if len(bs) != len(f.bounds) {
 				return Family{}, fmt.Errorf("serverstats: %s: histogram %q: label sets with different buckets", redact.URL(url), name)
 			}
+			bk := make([]uint64, len(bs))
 			for i, b := range bs {
 				if b.GetUpperBound() != f.bounds[i] {
 					return Family{}, fmt.Errorf("serverstats: %s: histogram %q: label sets with different buckets", redact.URL(url), name)
 				}
-				f.buckets[i] += b.GetCumulativeCount()
+				bk[i] = b.GetCumulativeCount()
+				f.buckets[i] += bk[i]
 			}
+			f.series = append(f.series, series{labels: labelKey(m.GetLabel()), count: h.GetSampleCount(), sum: h.GetSampleSum(), buckets: bk})
 		}
 	default:
 		return Family{}, fmt.Errorf("serverstats: %s: %q is a %s", redact.URL(url), name, mf.GetType())
+	}
+	if !finite(f.Value) || !finite(f.Sum) {
+		return Family{}, fmt.Errorf("serverstats: %s: family %q sums to %v over its label sets", redact.URL(url), name, f.Value+f.Sum)
 	}
 	return f, nil
 }
@@ -396,11 +432,17 @@ func BaselineMeans(samples []Sample, epoch time.Time, warmupEndNs, baselineEndNs
 	return out
 }
 
-// accumulator sums one family's increases over consecutive samples. The
-// bucket layout follows prev, so a step compares like with like.
+// accumulator sums one family's samples over a window: gauge values for
+// the mean, and for a counter or histogram the increase between
+// consecutive samples, measured per label set and summed. A label set is
+// measured from its own last sample, before or inside the window: one
+// absent from a sample adds nothing there, and one first seen inside the
+// window adds its whole value. The bucket layout follows the sample a
+// step measures from, so a step compares like with like.
 type accumulator struct {
 	typ     string
-	prev    *Family
+	started bool
+	prev    map[string]series
 	n       int
 	sum     float64
 	inc     float64
@@ -412,55 +454,86 @@ type accumulator struct {
 	relaid  bool
 }
 
-// start sets the sample the next step measures from.
+// seriesOf returns the family's label sets, or the family itself as one
+// unlabelled set when none were kept.
+func seriesOf(f *Family) []series {
+	if len(f.series) > 0 {
+		return f.series
+	}
+	return []series{{value: f.Value, count: f.Count, sum: f.Sum, buckets: f.buckets}}
+}
+
+// start sets the sample the next step measures from. Label sets seen
+// earlier keep their last sample unless the bucket layout changed.
 func (a *accumulator) start(f *Family) {
-	a.prev = f
-	if !sameBounds(a.bounds, f.bounds) {
+	if !a.started || !sameBounds(a.bounds, f.bounds) {
+		a.prev = map[string]series{}
 		a.bounds, a.buckets = f.bounds, make([]uint64, len(f.buckets))
+	}
+	a.started = true
+	for _, s := range seriesOf(f) {
+		a.prev[s.labels] = s
 	}
 }
 
-// step adds the increase from the previous sample to cur. A value that
-// fell, or a histogram whose bucket layout changed, is a reset, and the
-// whole of cur's value is added.
+// step adds each label set's increase since its previous sample. A value
+// that fell, or a histogram whose bucket layout changed, is a reset, and
+// the whole of the value is added.
 func (a *accumulator) step(cur *Family) {
-	prev := a.prev
-	if prev == nil {
+	if !a.started {
 		a.start(cur)
 		return
 	}
 	switch cur.Type {
 	case "counter":
-		if cur.Value < prev.Value {
-			a.reset = true
-			a.inc += cur.Value
-		} else {
-			a.inc += cur.Value - prev.Value
+		for _, s := range seriesOf(cur) {
+			p, seen := a.prev[s.labels]
+			switch {
+			case seen && s.value < p.value:
+				a.reset = true
+				a.inc += s.value
+			case seen:
+				a.inc += s.value - p.value
+			default:
+				a.inc += s.value
+			}
+			a.prev[s.labels] = s
 		}
 	case "histogram":
-		sameLayout := sameBounds(cur.bounds, prev.bounds)
+		sameLayout := sameBounds(cur.bounds, a.bounds)
 		if !sameLayout {
-			a.relaid = true
+			a.relaid, a.reset = true, true
 		}
-		if !sameLayout || cur.Count < prev.Count || cur.Sum < prev.Sum || bucketsFell(cur.buckets, prev.buckets) {
-			a.reset = true
-			a.count += cur.Count
-			a.hsum += cur.Sum
-			if sameLayout {
-				for i := range cur.buckets {
-					a.buckets[i] += cur.buckets[i]
-				}
+		for _, s := range seriesOf(cur) {
+			p, seen := a.prev[s.labels]
+			fell := seen && sameLayout && (s.count < p.count || s.sum < p.sum || bucketsFell(s.buckets, p.buckets))
+			if fell {
+				a.reset = true
 			}
+			if !seen || !sameLayout || fell {
+				a.count += s.count
+				a.hsum += s.sum
+				if sameLayout {
+					for i := range s.buckets {
+						a.buckets[i] += s.buckets[i]
+					}
+				}
+				continue
+			}
+			a.count += s.count - p.count
+			a.hsum += s.sum - p.sum
+			for i := range s.buckets {
+				a.buckets[i] += s.buckets[i] - p.buckets[i]
+			}
+		}
+		if !sameLayout {
 			a.start(cur)
 			return
 		}
-		a.count += cur.Count - prev.Count
-		a.hsum += cur.Sum - prev.Sum
-		for i := range cur.buckets {
-			a.buckets[i] += cur.buckets[i] - prev.buckets[i]
+		for _, s := range seriesOf(cur) {
+			a.prev[s.labels] = s
 		}
 	}
-	a.prev = cur
 }
 
 func sameBounds(a, b []float64) bool {
