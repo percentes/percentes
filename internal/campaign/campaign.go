@@ -38,6 +38,10 @@ type Scalars struct {
 	InvalidReasons  []string `json:"invalid_reasons,omitempty"`
 	TTREquilibriumS *float64 `json:"ttr_equilibrium_s,omitempty"`
 	TTRPreFaultS    *float64 `json:"ttr_pre_fault_s,omitempty"`
+	// The unobserved flags mark a nil TTR whose hold the series ended
+	// before, apart from a run that never recovered (§5).
+	TTREquilibriumUnobserved bool `json:"ttr_equilibrium_unobserved,omitempty"`
+	TTRPreFaultUnobserved    bool `json:"ttr_pre_fault_unobserved,omitempty"`
 	// InFlightLossFraction is the §10 pre-registered equivalence quantity
 	// and is defined over the KILLED replica's in-flight requests (§3).
 	// It is nil when no victim was attributed: an all-replica fraction is
@@ -46,8 +50,16 @@ type Scalars struct {
 	// separately and labeled.
 	InFlightLossFraction            *float64 `json:"in_flight_loss_fraction,omitempty"`
 	InFlightLossAllReplicasUnscoped *float64 `json:"in_flight_loss_all_replicas_unscoped,omitempty"`
-	SurvivorP95Ms                   *float64 `json:"survivor_p95_ms,omitempty"`
-	IntegratedDeficit               float64  `json:"integrated_goodput_deficit"`
+	// SurvivorP95Ms is the e2e p95 over the survivor cohort (§3: the
+	// fault-window completions served by the replica that is not the
+	// victim); FaultWindowE2EP95Ms is the same percentile pooled over every
+	// replica.
+	SurvivorP95Ms       *float64 `json:"survivor_p95_ms,omitempty"`
+	FaultWindowE2EP95Ms *float64 `json:"fault_window_e2e_p95_ms,omitempty"`
+	// SurvivorCohortAbsent marks a run whose attribution named no survivor
+	// cohort (§3), apart from a cohort with no completed samples.
+	SurvivorCohortAbsent bool    `json:"survivor_cohort_absent,omitempty"`
+	IntegratedDeficit    float64 `json:"integrated_goodput_deficit"`
 	// ReceivePath and ServerSide are the run's §2 per-window receive-path
 	// reports and kept-family reductions, carried verbatim; FamilyErrors
 	// counts the run's kept-family reads that failed.
@@ -140,13 +152,21 @@ func extractScalars(runIdx int, art *run.Artifacts) Scalars {
 	if art.Detector != nil {
 		if art.Detector.EquilibriumEstimable {
 			s.TTREquilibriumS = art.Detector.ToEquilibrium.TTRSeconds
+			s.TTREquilibriumUnobserved = art.Detector.ToEquilibrium.HoldUnobserved
 		}
-		s.TTRPreFaultS = art.Detector.ToPreFault.TTRSeconds
+		labelled := art.Detector.ToPreFault
 		s.IntegratedDeficit = art.Detector.DeficitToPreFault
+		if art.Detector.PartitionHealRecovery != nil {
+			labelled = *art.Detector.PartitionHealRecovery
+			if art.Detector.DeficitToPartitionHeal != nil {
+				s.IntegratedDeficit = *art.Detector.DeficitToPartitionHeal
+			}
+		}
+		s.TTRPreFaultS, s.TTRPreFaultUnobserved = labelled.TTRSeconds, labelled.HoldUnobserved
 	}
 	// In-flight loss fraction: §3 defines it over the killed replica's
 	// in-flight requests, and §10 pre-registers it by name. Without a
-	// victim attribution the quantity does not exist for this run — the
+	// victim attribution the quantity does not exist for this run; the
 	// all-replica ratio is recorded under its own explicitly-unscoped
 	// name and never merged into the pre-registered endpoint.
 	inf := art.InFlight
@@ -157,11 +177,16 @@ func extractScalars(runIdx int, art *run.Artifacts) Scalars {
 		frac := float64(inf.Errored+inf.Censored) / float64(inf.Total)
 		s.InFlightLossAllReplicasUnscoped = &frac
 	}
-	// A window with no completed samples has no survivor percentile; the
-	// scalar stays nil.
+	// A missing cohort is recorded; a window with no completed samples has
+	// no percentile and the scalar stays nil.
+	s.SurvivorCohortAbsent = art.Windows["fault_survivor"] == nil
+	if sv, ok := art.Windows["fault_survivor"]; ok && sv.E2EConditional.Count > 0 {
+		v := float64(sv.E2EConditional.P95Us) / 1000
+		s.SurvivorP95Ms = &v
+	}
 	if fault, ok := art.Windows["fault"]; ok && fault.E2EConditional.Count > 0 {
 		v := float64(fault.E2EConditional.P95Us) / 1000
-		s.SurvivorP95Ms = &v
+		s.FaultWindowE2EP95Ms = &v
 	}
 	return s
 }
@@ -208,11 +233,34 @@ func summarize(runs []Scalars, variant string) ([]ScalarSummary, int) {
 
 	var out []ScalarSummary
 
+	unobservedEq, unobservedPre, absentCohort := 0, 0, 0
+	for _, r := range valid {
+		if r.TTREquilibriumS == nil && r.TTREquilibriumUnobserved {
+			unobservedEq++
+		}
+		if r.TTRPreFaultS == nil && r.TTRPreFaultUnobserved {
+			unobservedPre++
+		}
+		if r.SurvivorP95Ms == nil && r.SurvivorCohortAbsent {
+			absentCohort++
+		}
+	}
+	withUnobserved := func(reason string, unobserved int) string {
+		if unobserved == 0 {
+			return reason
+		}
+		return fmt.Sprintf("%s; %d ended before the hold could be observed (unobserved)", reason, unobserved)
+	}
+	preFaultName := "ttr_pre_fault_s"
+	if variant == config.VariantBlackHole {
+		preFaultName = "partition_heal_recovery_s"
+	}
+
 	if eq, dropped := collectPtr(func(r Scalars) *float64 { return r.TTREquilibriumS }); len(eq) > 0 {
 		out = append(out, ScalarSummary{
 			Name: "ttr_equilibrium_s", Endpoint: equilibriumEndpoint,
 			Summary: stats.Summarize(eq, true), ContributingN: len(eq), DroppedRuns: dropped,
-			DroppedReason: reasonIfDropped(dropped, "runs with no estimable single-replica equilibrium (total outage or instant recovery); not imputed"),
+			DroppedReason: reasonIfDropped(dropped, withUnobserved("runs with no estimable single-replica equilibrium (total outage or instant recovery); not imputed", unobservedEq)),
 		})
 	} else {
 		out = append(out, ScalarSummary{
@@ -224,9 +272,9 @@ func summarize(runs []Scalars, variant string) ([]ScalarSummary, int) {
 
 	if pf, dropped := collectPtr(func(r Scalars) *float64 { return r.TTRPreFaultS }); len(pf) > 0 {
 		out = append(out, ScalarSummary{
-			Name: "ttr_pre_fault_s", Endpoint: "secondary",
+			Name: preFaultName, Endpoint: "secondary",
 			Summary: stats.Summarize(pf, true), ContributingN: len(pf), DroppedRuns: dropped,
-			DroppedReason: reasonIfDropped(dropped, "runs that never recovered to the pre-fault baseline"),
+			DroppedReason: reasonIfDropped(dropped, withUnobserved(fmt.Sprintf("%d runs never recovered to the pre-fault baseline", dropped-unobservedPre), unobservedPre)),
 		})
 	}
 
@@ -248,7 +296,7 @@ func summarize(runs []Scalars, variant string) ([]ScalarSummary, int) {
 		Name: "survivor_p95_ms", Endpoint: "secondary",
 		ContributingN: len(sp),
 		DroppedRuns:   spDropped,
-		DroppedReason: droppedReason(spDropped, "no completed samples in the fault window"),
+		DroppedReason: droppedReason(spDropped, fmt.Sprintf("%d runs had no survivor cohort (§3: no victim attribution naming exactly one other baseline replica); %d had no completed cohort samples in the fault window; the pooled figure is fault_window_e2e_p95_ms per run", absentCohort, spDropped-absentCohort)),
 	}
 	if len(sp) > 0 {
 		survivor.Summary = stats.Summarize(sp, true)

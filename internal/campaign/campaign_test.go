@@ -2,19 +2,21 @@ package campaign
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/detect"
+	"github.com/percentes/percentes/internal/histo"
 	"github.com/percentes/percentes/internal/run"
 )
 
 func f64(v float64) *float64 { return &v }
 
 // fakeRunner returns pre-scripted artifacts per run index, so campaign
-// aggregation is tested without a cluster. The seed offset per run is
-// asserted to prove repetitions are independent-but-reproducible.
+// aggregation is tested without a cluster; the seed offset per run is
+// asserted.
 func fakeRunner(scripts []*run.Artifacts, seenSeeds *[]int64) Runner {
 	i := 0
 	return func(ctx context.Context, cfg *config.Config, opts run.Options) (*run.Artifacts, error) {
@@ -138,7 +140,7 @@ func TestCampaignSecondaryUnderBlackHole(t *testing.T) {
 	}
 }
 
-// A run with no estimable equilibrium contributes no equilibrium value —
+// A run with no estimable equilibrium contributes no equilibrium value;
 // it is dropped and reported, never imputed (§7).
 func TestCampaignDropsNonEstimable(t *testing.T) {
 	cfg := baseCfg(t)
@@ -167,4 +169,75 @@ func TestCampaignDropsNonEstimable(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A black-hole run publishes the partition-heal recovery and its deficit
+// as one pair. Without that field the crossing is published.
+func TestBlackHoleScalarIsThePartitionHealRecovery(t *testing.T) {
+	crossing, heal, healDeficit := 0.0, 135.0, 20.0
+	art := &run.Artifacts{Detector: &detect.Result{ToPreFault: detect.Detection{TTRSeconds: &crossing}, PartitionHealRecovery: &detect.Detection{TTRSeconds: &heal}, DeficitToPartitionHeal: &healDeficit}}
+	if s := extractScalars(1, art); s.TTRPreFaultS == nil || *s.TTRPreFaultS != heal || s.IntegratedDeficit != healDeficit {
+		t.Fatalf("got %v deficit %v, want the partition-heal pair", s.TTRPreFaultS, s.IntegratedDeficit)
+	}
+	art.Detector.PartitionHealRecovery = nil
+	if s := extractScalars(1, art); s.TTRPreFaultS == nil || *s.TTRPreFaultS != crossing || s.IntegratedDeficit != 0 {
+		t.Fatalf("got %v, want the crossing when no heal field exists", s.TTRPreFaultS)
+	}
+}
+
+// An unobserved hold is carried into the scalars and named apart from a
+// run that never recovered.
+func TestUnobservedHoldIsNamedInTheSummary(t *testing.T) {
+	unobserved := &run.Artifacts{RunValid: true, Detector: &detect.Result{ToPreFault: detect.Detection{HoldUnobserved: true}}}
+	never := &run.Artifacts{RunValid: true, Detector: &detect.Result{ToPreFault: detect.Detection{NotRecovered: true}}}
+	ttr := 12.0
+	recovered := &run.Artifacts{RunValid: true, Detector: &detect.Result{ToPreFault: detect.Detection{TTRSeconds: &ttr}}}
+	rows := []Scalars{extractScalars(1, unobserved), extractScalars(2, never), extractScalars(3, recovered)}
+	if !rows[0].TTRPreFaultUnobserved || rows[1].TTRPreFaultUnobserved {
+		t.Fatalf("unobserved flag misplaced: %+v", rows[:2])
+	}
+	summaries, _ := summarize(rows, config.VariantCleanDelete)
+	for _, s := range summaries {
+		if s.Name == "ttr_pre_fault_s" {
+			if s.DroppedRuns != 2 || !strings.Contains(s.DroppedReason, "1 runs never recovered") || !strings.Contains(s.DroppedReason, "1 ended before the hold could be observed") {
+				t.Fatalf("drop reason must name both groups: %+v", s)
+			}
+			return
+		}
+	}
+	t.Fatal("no ttr_pre_fault_s summary")
+}
+
+// The survivor percentile comes from the survivor cohort's window; the
+// pooled fault-window percentile carries its own name.
+func TestSurvivorP95IsTheCohortFigure(t *testing.T) {
+	art := &run.Artifacts{Windows: map[string]*collect.Stats{
+		"fault":          {E2EConditional: histo.Summary{Count: 20, P95Us: 2000895}},
+		"fault_survivor": {E2EConditional: histo.Summary{Count: 10, P95Us: 100031}},
+	}}
+	s := extractScalars(1, art)
+	if s.SurvivorP95Ms == nil || *s.SurvivorP95Ms != 100.031 || s.FaultWindowE2EP95Ms == nil || *s.FaultWindowE2EP95Ms != 2000.895 || s.SurvivorCohortAbsent {
+		t.Fatalf("survivor %v pooled %v absent %v", s.SurvivorP95Ms, s.FaultWindowE2EP95Ms, s.SurvivorCohortAbsent)
+	}
+	delete(art.Windows, "fault_survivor")
+	if s := extractScalars(1, art); s.SurvivorP95Ms != nil || !s.SurvivorCohortAbsent {
+		t.Fatalf("without a cohort no survivor figure is published and the absence is recorded: %v %v", s.SurvivorP95Ms, s.SurvivorCohortAbsent)
+	}
+}
+
+// A run without a survivor cohort is named as such in the survivor
+// summary, apart from a cohort with no completed samples.
+func TestSurvivorSummaryNamesTheMissingCohort(t *testing.T) {
+	pooled := 12.5
+	rows := []Scalars{{Run: 1, Valid: true, FaultWindowE2EP95Ms: &pooled, SurvivorCohortAbsent: true}}
+	summaries, _ := summarize(rows, config.VariantCleanDelete)
+	for _, s := range summaries {
+		if s.Name == "survivor_p95_ms" {
+			if s.DroppedRuns != 1 || !strings.Contains(s.DroppedReason, "1 runs had no survivor cohort") || !strings.Contains(s.DroppedReason, "fault_window_e2e_p95_ms") {
+				t.Fatalf("reason must name the missing cohort and the pooled figure: %+v", s)
+			}
+			return
+		}
+	}
+	t.Fatal("no survivor_p95_ms summary")
 }
