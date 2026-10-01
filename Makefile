@@ -2,8 +2,10 @@
 # the SPEC.md §8 AC suite, the kind smoke suite, the AC7 reproduce, and
 # the campaign e2e.
 # The pinned golangci-lint is built with go1.21.6 and cannot read export
-# data from a newer toolchain, so every go command here selects that one.
-export GOTOOLCHAIN = go1.21.6
+# data from a newer toolchain, so the go commands here select that one
+# unless GOTOOLCHAIN is already set.
+export GOTOOLCHAIN ?= go1.21.6
+SHELL   := /bin/bash
 GO      ?= go
 KIND    ?= $(shell command -v kind 2>/dev/null || echo $(HOME)/go/bin/kind)
 CLUSTER ?= percentes
@@ -23,7 +25,8 @@ build:
 	$(GO) build ./...
 
 # Build the CLIs as static CGO_ENABLED=0 binaries to fresh output paths:
-# rebuilding over a running binary can wedge macOS dyld with a stale image.
+# rebuilding over a running binary wedged dyld on the development Mac
+# (recorded 2026-06-10).
 bins:
 	CGO_ENABLED=0 $(GO) build -o bin/percentes ./cmd/percentes
 	CGO_ENABLED=0 $(GO) build -o bin/percentes-campaign ./cmd/percentes-campaign
@@ -36,9 +39,15 @@ test-unit:
 # The AC suite runs real load with timing-precise gates, so it runs
 # without the race detector (which distorts scheduling). The full
 # pipeline's concurrency still runs under -race in the unit suite via
-# internal/run's in-process end-to-end test.
+# internal/run's in-process end-to-end test. The target fails on any
+# skipped test unless PERCENTES_AC_ALLOW_SKIPS=1.
 test-ac:
-	$(GO) test ./internal/ac/ -count=1 -timeout 45m
+	@log=$$(mktemp -t percentes-ac.XXXXXX); \
+	$(GO) test -v ./internal/ac/ -count=1 -timeout 45m 2>&1 | tee "$$log"; status=$${PIPESTATUS[0]}; \
+	if [ $$status -ne 0 ]; then rm -f "$$log"; exit $$status; fi; \
+	if [ "$${PERCENTES_AC_ALLOW_SKIPS:-0}" != 1 ] && grep -q -- '--- SKIP' "$$log"; then \
+		echo "test-ac: acceptance criteria skipped; PERCENTES_AC_ALLOW_SKIPS=1 accepts skips" >&2; rm -f "$$log"; exit 1; fi; \
+	rm -f "$$log"
 
 # The full gate: unit tests, the SPEC.md §8 AC suite, the in-cluster
 # smoke suite, the AC7 one-command reproduce, and the campaign e2e,

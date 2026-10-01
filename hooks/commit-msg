@@ -1,6 +1,6 @@
 #!/bin/sh
 # Subject-line rules: one line, 55 characters or fewer, lowercase
-# conventional prefix, plain ASCII, no body.
+# conventional prefix, plain ASCII (7-bit characters), no body.
 # Bypass once with `git commit --no-verify`.
 set -u
 

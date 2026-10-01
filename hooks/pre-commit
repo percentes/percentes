@@ -1,6 +1,7 @@
 #!/bin/sh
-# Fast gates, mirroring the CI lint job minus the race suite (pre-push runs
-# that). Install with `make hooks`; bypass once with `git commit --no-verify`.
+# Fast gates, mirroring the continuous-integration (CI) lint job minus the
+# race suite (pre-push runs that). Install with `make hooks`; bypass
+# once with `git commit --no-verify`.
 set -u
 
 # The pinned linter is built with go1.21.6 and cannot read export data from
@@ -10,9 +11,9 @@ export GOTOOLCHAIN
 
 die() { printf '\npre-commit: %s\n\n' "$1" >&2; exit 1; }
 
-# gofmt checks the STAGED Go files only, so an unrelated dirty file in the
-# working tree cannot block an otherwise clean commit. CI gates on the whole
-# repo, which pre-push and CI both cover.
+# gofmt reads the working-tree copies of the STAGED Go files only, so an
+# unrelated dirty file cannot block an otherwise clean commit; a partially
+# staged file is checked as it sits on disk. CI gates on the whole repo.
 staged_go=$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')
 if [ -n "$staged_go" ]; then
 	unformatted=$(printf '%s\n' "$staged_go" | xargs gofmt -l)
