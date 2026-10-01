@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/percentes/percentes/internal/collect"
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/detect"
 	"github.com/percentes/percentes/internal/histo"
 	"github.com/percentes/percentes/internal/run"
@@ -26,6 +27,18 @@ import (
 // Caveat is printed in every report and in the acceptance-criteria (AC)
 // output itself (§8).
 const Caveat = "CAVEAT: passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behaviour. Small N, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are scoped in the claims and named in the report."
+
+// CaveatProcessKill is the caveat of a process-kill experiment run.
+const CaveatProcessKill = "CAVEAT: one vLLM replica on one GPU, killed and restarted in place; no two-replica or Kubernetes claim. N=5 runs on rented hardware; the acceptance criteria (§8) certified the instrument against the mock; injected-fault-versus-reality gaps are named in the report."
+
+// CaveatFor is CaveatProcessKill for process_kill under the experiment
+// profile and Caveat otherwise.
+func CaveatFor(variant string, profile config.Profile) string {
+	if variant == config.VariantProcessKill && profile == config.ProfileExperiment {
+		return CaveatProcessKill
+	}
+	return Caveat
+}
 
 // Report is the JSON artifact: the parsed config plus every run
 // product. ConfigSHA256 covers the configuration file bytes where the
@@ -88,7 +101,7 @@ func Generate(art *run.Artifacts, gates *validity.Report) ([]byte, string, error
 		SchemaVersion:    2,
 		ConfigSHA256:     fmt.Sprintf("%x", sha256.Sum256(cfgRaw)),
 		InstrumentCommit: instrumentCommit(),
-		Caveat:           Caveat,
+		Caveat:           CaveatFor(art.Config.Fault.Variant, art.Config.Profile),
 		Headline:         headline(art),
 		ValidityGates:    gates,
 		Artifacts:        &pub,
@@ -110,12 +123,21 @@ func p50Cell(s histo.Summary) string {
 }
 
 // headline fills the appendix conditional-headline template with this
-// run's measured values, labelled for the mock variant.
+// run's measured values, labelled for the mock variant, or for the
+// process-kill variant under the experiment profile; process kill fills
+// its own template.
 func headline(art *run.Artifacts) string {
 	fault, haveFault := art.Windows["fault"]
 	base, haveBase := art.Windows["baseline"]
 	if !haveFault || !haveBase {
 		return "no fault/baseline windows collected; headline not applicable"
+	}
+	label, closing := "mock variant, Phase 0 instrument certification", "Single run against the mock; no real-GPU claim."
+	if art.Config.Fault.Variant == config.VariantProcessKill && art.Config.Profile == config.ProfileExperiment {
+		label, closing = "single-replica process kill, restart in place", "One replica on one GPU; no two-replica or Kubernetes claim."
+	}
+	if art.Config.Fault.Variant == config.VariantProcessKill {
+		return processKillHeadline(art, label, closing)
 	}
 	// §3's headline class is the KILLED replica's in-flight requests;
 	// fall back to all-replica accounting (labelled) when no victim is
@@ -123,6 +145,9 @@ func headline(art *run.Artifacts) string {
 	inFl := art.InFlight
 	pop, errored, censored := inFl.Total, inFl.Errored, inFl.Censored
 	popLabel := "in flight on all replicas at fire, no victim attributed"
+	if art.Config.Target.Replicas == 1 {
+		popLabel = "in flight on the only replica at fire"
+	}
 	if art.VictimReplica != "" {
 		pop, errored, censored = inFl.OnVictim, inFl.OnVictimErrored, inFl.OnVictimCensored
 		popLabel = fmt.Sprintf("in flight on killed replica %s at fire", art.VictimReplica)
@@ -152,15 +177,54 @@ func headline(art *run.Artifacts) string {
 		faultTTFT, faultLabel = sv.TTFTConditional, "survivor"
 	}
 	return fmt.Sprintf(
-		"Under %s fault injection (mock variant, Phase 0 instrument certification): %.1f%% of in-flight requests failed and %.1f%% timed out at 30 s (%d %s); "+
+		"Under %s fault injection (%s): %.1f%% of in-flight requests failed and %.1f%% timed out at 30 s (%d %s); "+
 			"TTFT (conditional on completion) moved from %s (baseline) to %s (%s); "+
 			"cumulative incidence of completion within 1 s in the fault window was %.3f (Aalen-Johansen); "+
 			"recovery to single-replica equilibrium (a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout; §5): %s; "+
 			"goodput deficit %.1f goodput-seconds vs pre-fault; "+
-			"decomposed segments: %s. Single run against the mock; no real-GPU claim.",
-		art.Config.Fault.Variant, pctErr, pctCens, pop, popLabel,
+			"decomposed segments: %s. %s",
+		art.Config.Fault.Variant, label, pctErr, pctCens, pop, popLabel,
 		p50Cell(base.TTFTConditional), p50Cell(faultTTFT), faultLabel,
-		cif1s, ttr, deficit, measuredSegments(art))
+		cif1s, ttr, deficit, measuredSegments(art), closing)
+}
+
+// processKillHeadline fills the process-kill template: the in-flight
+// outcomes, the outage's outcome split, the outage, the segments and TTR
+// to the pre-fault baseline.
+func processKillHeadline(art *run.Artifacts, label, closing string) string {
+	inFl := art.InFlight
+	pop, errored, censored := inFl.Total, inFl.Errored, inFl.Censored
+	popText := fmt.Sprintf("%d in flight on the only replica at fire", pop)
+	if inFl.Determinate != nil {
+		popText += fmt.Sprintf(", %d of them indeterminate", inFl.IndeterminateAtFire)
+	}
+	pctErr, pctCens := 0.0, 0.0
+	if pop > 0 {
+		pctErr = 100 * float64(errored) / float64(pop)
+		pctCens = 100 * float64(censored) / float64(pop)
+	}
+	outage := "the outage was not measured (replica_ready N/A)"
+	for _, seg := range art.Decomposition.Segments {
+		if d := seg.DurationS(); seg.Name == "replica_ready" && d != nil {
+			outage = fmt.Sprintf("the replica served again %.1f s after the kill (replica_ready)", *d)
+			if o := art.Windows["outage"]; o != nil {
+				outage = fmt.Sprintf("of the %d requests scheduled in the %.1f s outage, %d completed, %d errored and %d were censored; %s",
+					o.Scheduled, *d, o.Completed, o.Errored, o.Censored, outage)
+			}
+		}
+	}
+	ttr := "not recovered within the fault-window timeout"
+	if t := art.Detector.ToPreFault.TTRSeconds; t != nil {
+		ttr = fmt.Sprintf("%.1f s", *t)
+	} else if art.Detector.ToPreFault.HoldUnobserved {
+		ttr = "unobserved (the series ends before a full hold could be seen)"
+	}
+	return fmt.Sprintf(
+		"Under %s fault injection (%s): %.1f%% of in-flight requests failed and %.1f%% timed out at 30 s (%s); "+
+			"%s; decomposed segments: %s; recovery to the pre-fault baseline: %s; "+
+			"goodput deficit %.1f goodput-seconds vs pre-fault. %s",
+		art.Config.Fault.Variant, label, pctErr, pctCens, popText,
+		outage, measuredSegments(art), ttr, art.Detector.DeficitToPreFault, closing)
 }
 
 func measuredSegments(art *run.Artifacts) string {
@@ -185,7 +249,7 @@ func human(r *Report) string {
 	w("instrument commit: %s", r.InstrumentCommit)
 	w("config sha256: %s", r.ConfigSHA256)
 	w("")
-	w("%s", Caveat)
+	w("%s", r.Caveat)
 	w("")
 	w("== Conditional headline (appendix template) ==")
 	w("%s", r.Headline)
@@ -285,6 +349,19 @@ func human(r *Report) string {
 		w("on killed replica %s: total=%d completed=%d errored=%d censored=%d (§3 headline class)",
 			art.VictimReplica, art.InFlight.OnVictim, art.InFlight.OnVictimCompleted, art.InFlight.OnVictimErrored, art.InFlight.OnVictimCensored)
 	}
+	if len(art.InFlight.ErroredByClass) > 0 {
+		w("errored by class: %s", classText(art.InFlight.ErroredByClass))
+	}
+	if art.Container != nil {
+		w("indeterminate (in flight, terminal time within %.1fms after the fire: the fire uncertainty %.1fms plus the delivery allowance): %d",
+			float64(art.Container.IndeterminateZoneNs)/1e6, float64(art.Container.FireUncertaintyNs)/1e6, art.InFlight.IndeterminateAtFire)
+	}
+	if det := art.InFlight.Determinate; det != nil {
+		w("determinate: total=%d completed=%d errored=%d censored=%d", det.Total, det.Completed, det.Errored, det.Censored)
+		if len(det.ErroredByClass) > 0 {
+			w("determinate errored by class: %s", classText(det.ErroredByClass))
+		}
+	}
 	w("")
 
 	ta := art.ThresholdAnalysis
@@ -322,7 +399,11 @@ func human(r *Report) string {
 	} else {
 		w("TTR to pre-fault baseline:    %s", ttrText(d.ToPreFault))
 	}
-	w("TTR to equilibrium baseline:  %s; the baseline is a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout (§5)", eqTTR)
+	if art.Config.Fault.Variant == config.VariantProcessKill {
+		w("TTR to equilibrium baseline:  not applicable under process kill, which has no survivor (§5)")
+	} else {
+		w("TTR to equilibrium baseline:  %s; the baseline is a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout (§5)", eqTTR)
+	}
 	w("integrated goodput deficit: %.2f (vs pre-fault), %s (vs equilibrium) goodput-seconds", d.DeficitToPreFault, eqDeficit)
 	compNames := make([]string, 0, len(d.Components))
 	for n := range d.Components {
@@ -359,6 +440,9 @@ func human(r *Report) string {
 			w("%-20s [%s] N/A: %s", seg.Name, seg.Source, seg.Note)
 		}
 	}
+	if len(art.Decomposition.LogFigures) > 0 {
+		w("figures printed in the server log: %s", figuresText(art.Decomposition.LogFigures))
+	}
 	w("")
 	if r.ValidityGates != nil {
 		w("== Run-validity gates (§10 G1-G7) ==")
@@ -378,8 +462,26 @@ func human(r *Report) string {
 		w("all pass: %v; node-loss-representative: %v", r.ValidityGates.AllPass, r.ValidityGates.NodeLossRepresentative)
 		w("")
 	}
-	w("%s", Caveat)
+	w("%s", r.Caveat)
 	return b.String()
+}
+
+// classText renders an error-class split in key order.
+func classText(m map[string]int) string {
+	parts := make([]string, 0, len(m))
+	for _, k := range sortedKeys(m) {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, m[k]))
+	}
+	return strings.Join(parts, " ")
+}
+
+// figuresText renders the log figures verbatim in key order.
+func figuresText(m map[string]float64) string {
+	parts := make([]string, 0, len(m))
+	for _, k := range sortedKeys(m) {
+		parts = append(parts, fmt.Sprintf("%s=%g", k, m[k]))
+	}
+	return strings.Join(parts, " ")
 }
 
 // receivePathText renders one window's §2 receive-path report.

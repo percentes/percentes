@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/percentes/percentes/internal/campaign"
 	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/detect"
@@ -421,5 +423,155 @@ func TestITLLabelFollowsTheTokenCheck(t *testing.T) {
 	}
 	if got := usageCountText(collect.CountSummary{}); got != "not verifiable (no completed request carried a usage object)" {
 		t.Fatalf("usage count text without usage: %q", got)
+	}
+}
+
+// A process-kill experiment run carries its own label, closing sentence
+// and population; the mock label stays for every other run.
+func TestHeadlineLabelsProcessKill(t *testing.T) {
+	art := minimalArtifacts()
+	art.Windows["baseline"] = &collect.Stats{Completed: 10, TTFTConditional: histo.Summary{Count: 10, P50Us: 100000}}
+	art.Windows["fault"] = &collect.Stats{Completed: 10, TTFTConditional: histo.Summary{Count: 10, P50Us: 900000}}
+	art.Config.Fault.Variant = config.VariantProcessKill
+	art.Config.Profile = config.ProfileExperiment
+	art.Config.Target.Replicas = 1
+	art.InFlight = collect.InFlightAccounting{Total: 11, Errored: 10, Completed: 1, IndeterminateAtFire: 1, Determinate: &collect.Outcomes{Total: 10, Errored: 9, Censored: 1}}
+	art.Windows["outage"] = &collect.Stats{Scheduled: 160, Errored: 160}
+	fire := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	art.Decomposition = detect.NewDecomposition(config.VariantProcessKill)
+	art.Decomposition.SetMeasured("replica_ready", fire, fire.Add(52500*time.Millisecond))
+	h := headline(art)
+	for _, want := range []string{"(single-replica process kill, restart in place)", "One replica on one GPU; no two-replica or Kubernetes claim.",
+		"90.9% of in-flight requests failed and 0.0% timed out at 30 s (11 in flight on the only replica at fire, 1 of them indeterminate)",
+		"of the 160 requests scheduled in the 52.5 s outage, 0 completed, 160 errored and 0 were censored; the replica served again 52.5 s after the kill (replica_ready)",
+		"recovery to the pre-fault baseline:"} {
+		if !strings.Contains(h, want) {
+			t.Fatalf("headline lacks %q:\n%s", want, h)
+		}
+	}
+	for _, not := range []string{"mock variant", "no real-GPU claim", "deliberate overload", "pooled across replicas", "equilibrium"} {
+		if strings.Contains(h, not) {
+			t.Fatalf("headline under process kill carries %q:\n%s", not, h)
+		}
+	}
+	_, humanText, err := Generate(art, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(humanText, CaveatProcessKill) != 2 || strings.Contains(humanText, Caveat) {
+		t.Fatalf("run report caveat:\n%s", humanText)
+	}
+	if strings.Contains(humanText, "deliberate overload") || !strings.Contains(humanText, "not applicable under process kill, which has no survivor (§5)") {
+		t.Fatalf("run report equilibrium line under process kill:\n%s", humanText)
+	}
+	art.Config.Profile = config.ProfileAC
+	if h := headline(art); !strings.Contains(h, "(mock variant, Phase 0 instrument certification)") || !strings.HasSuffix(h, "no real-GPU claim.") {
+		t.Fatalf("ac profile headline:\n%s", h)
+	}
+}
+
+// The process-kill caveat applies to that variant under the experiment
+// profile only.
+func TestCaveatForVariant(t *testing.T) {
+	for _, c := range []struct {
+		variant string
+		profile config.Profile
+		want    string
+	}{
+		{config.VariantProcessKill, config.ProfileExperiment, CaveatProcessKill},
+		{config.VariantProcessKill, config.ProfileAC, Caveat},
+		{config.VariantCleanDelete, config.ProfileExperiment, Caveat},
+		{config.VariantMock, config.ProfileAC, Caveat},
+		{config.VariantProcessKill, "", Caveat},
+	} {
+		if got := CaveatFor(c.variant, c.profile); got != c.want {
+			t.Errorf("%s/%s: got %q", c.variant, c.profile, got)
+		}
+	}
+}
+
+// The campaign report records the build, the config hash and the
+// command-line overrides, and its caveat follows the variant and profile.
+func TestCampaignReportCarriesCommitAndHash(t *testing.T) {
+	rep := &campaign.Report{Variant: config.VariantProcessKill, ConfigName: "pk", Repetitions: 5, Halted: true, HaltedAfterRun: 2, PerRun: []campaign.Scalars{{Run: 1, Valid: true}, {Run: 2}}}
+	meta := CampaignMeta{InstrumentCommit: "abc123", ConfigSHA256: "deadbeef", Profile: config.ProfileExperiment, Overrides: []string{"target.base_url=http://10.0.0.5:8000"}}
+	raw, humanText, err := GenerateCampaignWith(rep, nil, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		InstrumentCommit string   `json:"instrument_commit"`
+		ConfigSHA256     string   `json:"config_sha256"`
+		Overrides        []string `json:"overrides"`
+		Caveat           string   `json:"caveat"`
+		Campaign         struct {
+			Halted         bool `json:"halted"`
+			HaltedAfterRun int  `json:"halted_after_run"`
+		} `json:"campaign"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.InstrumentCommit != "abc123" || got.ConfigSHA256 != "deadbeef" || len(got.Overrides) != 1 || got.Caveat != CaveatProcessKill || !got.Campaign.Halted || got.Campaign.HaltedAfterRun != 2 {
+		t.Fatalf("campaign JSON %+v", got)
+	}
+	for _, want := range []string{"instrument commit: abc123", "config sha256: deadbeef", "override: target.base_url=http://10.0.0.5:8000", "HALTED after run 2", "primary endpoint (§7): " + campaign.PrimaryEndpointProcessKill} {
+		if !strings.Contains(humanText, want) {
+			t.Fatalf("campaign text lacks %q:\n%s", want, humanText)
+		}
+	}
+	if strings.Count(humanText, CaveatProcessKill) != 2 {
+		t.Fatalf("the caveat heads and closes the text:\n%s", humanText)
+	}
+	raw, _, err = GenerateCampaign(rep, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.InstrumentCommit == "" || got.Caveat != Caveat {
+		t.Fatalf("GenerateCampaign without meta: commit %q caveat %q", got.InstrumentCommit, got.Caveat)
+	}
+}
+
+// Each run's decomposition rows, the log figures, the in-flight class
+// split and the indeterminate count follow the per-run table.
+func TestCampaignReportPrintsDecompositionRows(t *testing.T) {
+	d := detect.NewDecomposition(config.VariantProcessKill)
+	fire := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	d.SetMeasured("replica_ready", fire, fire.Add(52500*time.Millisecond))
+	d.SetNote("weight_download", "no download line after the fire: weights served from the mounted cache")
+	d.LogFigures = map[string]float64{"graph_capture_s": 5, "init_engine_s": 14.2}
+	outage := 52.5
+	rep := &campaign.Report{Variant: config.VariantProcessKill, ConfigName: "pk", Repetitions: 1, PerRun: []campaign.Scalars{{
+		Run: 1, Valid: true, OutageS: &outage, Decomposition: d,
+		InFlightErroredByClass: map[string]int{"connect": 3, "reset": 4}, InFlightIndeterminate: 1,
+		InFlightDeterminate: &collect.Outcomes{Total: 7, Errored: 7, ErroredByClass: map[string]int{"connect": 3, "reset": 4}},
+		Outage:              &collect.Outcomes{Total: 160, Errored: 160, ErroredByClass: map[string]int{"connect": 160}},
+		Container:           &run.ContainerRestart{FireUncertaintyNs: 2_000_000},
+	}}}
+	_, humanText, err := GenerateCampaignWith(rep, nil, CampaignMeta{Profile: config.ProfileExperiment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"== Run 1: recovery decomposition (§5) ==",
+		"replica_ready        [probe] measured: 52.50s",
+		"weight_download      [log] N/A: no download line after the fire: weights served from the mounted cache",
+		"traffic_restored     [probe] N/A: one replica addressed directly: no Service",
+		"figures printed in the server log: graph_capture_s=5 init_engine_s=14.2",
+		"in-flight errored by class: connect=3 reset=4",
+		"in flight at fire, indeterminate (terminal time within the fire uncertainty plus the delivery allowance after the fire): 1",
+		"in flight at fire, determinate: total=7 completed=0 errored=7 censored=0",
+		"scheduled in the outage: total=160 completed=0 errored=160 censored=0",
+		"outage errored by class: connect=160",
+	} {
+		if !strings.Contains(humanText, want) {
+			t.Fatalf("campaign text lacks %q:\n%s", want, humanText)
+		}
+	}
+	if !strings.Contains(humanText, "outage") || !strings.Contains(humanText, "52.50") {
+		t.Fatalf("per-run table lacks the outage column:\n%s", humanText)
 	}
 }
