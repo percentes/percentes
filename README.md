@@ -38,8 +38,8 @@ every gate, tolerance, and detector parameter carries a pinned number,
 enforced at config-load time: a configuration that weakens one refuses
 to load. [CHANGELOG.md](CHANGELOG.md) lists every change to those rules
 since first publication, dated. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-maps each package to the spec clause it serves and shows how to trace any
-reported number to its source in the code.
+maps each package to the spec clauses it serves and traces the report
+fields to the code that computes them, with diagrams.
 
 ## Scope
 
@@ -99,12 +99,13 @@ this platform cannot supply one of their inputs. Reports are written to
 ```
 cmd/percentes            single-run harness command-line interface (CLI)
 cmd/percentes-campaign   N-run campaign runner (SPEC §5 repetition, §10 gates)
-cmd/percentes-calibrate  SPEC §10 capacity ramp and single-replica reference
+cmd/percentes-calibrate  SPEC §10 capacity ramp and §5 single-replica reference
 cmd/mockserver           fault-injectable mock inference server
 cmd/naivesweep           standalone reconnaissance probe, outside the instrument
 internal/                loadgen, collect, detect, orchestrator, validity, ...
 configs/                 pinned reference configurations
 deploy/                  kind, mock and Phase 1 manifests; reproduce and capture scripts
+docs/                    ARCHITECTURE.md and the draw.io diagrams under docs/diagrams/
 ```
 
 ## Pointing the probe at an endpoint
