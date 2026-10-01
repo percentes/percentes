@@ -2,7 +2,7 @@
 
 *Pronounced per-SEN-teez. The measure, not the metric.*
 
-Percentes measures what happens to a hosted large language model (LLM)
+Percentes measures what happens to a large language model (LLM)
 inference service under sustained load and failure: the requests a
 replica loss kills or strands, the degradation the surviving replica
 takes on, and how long recovery takes, decomposed into measured
