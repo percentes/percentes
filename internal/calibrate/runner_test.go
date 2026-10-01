@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/hostqual"
 	"github.com/percentes/percentes/internal/mock"
 )
 
@@ -42,7 +43,8 @@ func TestLoadRunnerStepAgainstMock(t *testing.T) {
 	}
 	Judge(&s)
 	if !s.Passed() && !s.Gates.Pass && s.Goodput >= config.PinnedCalibrationGoodputMin && s.QueueSamples > 0 {
-		t.Skipf("host contended the client: %+v", s.Gates)
+		_, _, obs := hostqual.Qualified()
+		t.Skipf("client-validity gate the only failure under the race suite: %+v; host probe %+v", s.Gates, obs)
 	}
 	if !s.Passed() {
 		t.Fatalf("step must pass on a quiet host: reasons %v gates %+v", s.Reasons, s.Gates)

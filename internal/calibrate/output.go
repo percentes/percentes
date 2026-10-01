@@ -114,8 +114,8 @@ func receivePathRow(rp *collect.ReceivePath) string {
 		}
 	}
 	if c := rp.Canary; c != nil {
-		fmt.Fprintf(&b, "; canary %d streams completed, TTFT deviation p50 %.2f ms max %.2f ms, ITL deviation p99 %.2f ms max %.2f ms",
-			c.Completed, float64(c.TTFTDevP50Us)/1000, float64(c.TTFTDevMaxUs)/1000, float64(c.ITLDevP99Us)/1000, float64(c.ITLDevMaxUs)/1000)
+		fmt.Fprintf(&b, "; canary %d streams completed, event lag p99 %.2f ms max %.2f ms, TTFT deviation p50 %.2f ms max %.2f ms, ITL deviation p99 %.2f ms max %.2f ms",
+			c.Completed, float64(c.EventLagP99Us)/1000, float64(c.EventLagMaxUs)/1000, float64(c.TTFTDevP50Us)/1000, float64(c.TTFTDevMaxUs)/1000, float64(c.ITLDevP99Us)/1000, float64(c.ITLDevMaxUs)/1000)
 	}
 	if rp.CanaryError != "" {
 		fmt.Fprintf(&b, "; canary did not run: %s", rp.CanaryError)
