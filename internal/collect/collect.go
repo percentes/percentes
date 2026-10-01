@@ -453,6 +453,39 @@ type InFlightAccounting struct {
 	OnVictimCompleted int `json:"on_victim_completed"`
 	OnVictimErrored   int `json:"on_victim_errored"`
 	OnVictimCensored  int `json:"on_victim_censored"`
+
+	// ErroredByClass splits Errored by §3 error class.
+	ErroredByClass map[string]int `json:"errored_by_class,omitempty"`
+	// IndeterminateAtFire counts the in-flight requests whose terminal time
+	// lies inside the zone after the fire, and Determinate classifies the
+	// rest (SplitAtFire); the caller fills both once the zone is known.
+	IndeterminateAtFire int       `json:"indeterminate_at_fire,omitempty"`
+	Determinate         *Outcomes `json:"determinate,omitempty"`
+}
+
+// Outcomes is a request population classified by outcome.
+type Outcomes struct {
+	Total          int            `json:"total"`
+	Completed      int            `json:"completed"`
+	Errored        int            `json:"errored"`
+	Censored       int            `json:"censored"`
+	ErroredByClass map[string]int `json:"errored_by_class,omitempty"`
+}
+
+func (o *Outcomes) add(r *loadgen.Request) {
+	o.Total++
+	switch r.Outcome {
+	case loadgen.OutcomeCompleted:
+		o.Completed++
+	case loadgen.OutcomeErrored:
+		o.Errored++
+		if o.ErroredByClass == nil {
+			o.ErroredByClass = map[string]int{}
+		}
+		o.ErroredByClass[r.ErrClass]++
+	case loadgen.OutcomeCensored:
+		o.Censored++
+	}
 }
 
 // AccountInFlight performs the §3 in-flight loss accounting: it selects the
@@ -481,6 +514,10 @@ func AccountInFlight(requests []loadgen.Request, fireNs int64, victimReplica str
 			}
 		case loadgen.OutcomeErrored:
 			acc.Errored++
+			if acc.ErroredByClass == nil {
+				acc.ErroredByClass = map[string]int{}
+			}
+			acc.ErroredByClass[r.ErrClass]++
 			if onVictim {
 				acc.OnVictimErrored++
 			}
@@ -492,4 +529,24 @@ func AccountInFlight(requests []loadgen.Request, fireNs int64, victimReplica str
 		}
 	}
 	return acc
+}
+
+// SplitAtFire takes the AccountInFlight selection and counts the requests
+// whose DoneNs lies in [fireNs, fireNs+zoneNs] as indeterminate; it
+// classifies the others by outcome.
+func SplitAtFire(requests []loadgen.Request, fireNs, zoneNs int64) (int, Outcomes) {
+	n := 0
+	var det Outcomes
+	for i := range requests {
+		r := &requests[i]
+		if r.DispatchNs == 0 || r.DispatchNs >= fireNs || r.DoneNs < fireNs {
+			continue
+		}
+		if r.DoneNs-fireNs <= zoneNs {
+			n++
+			continue
+		}
+		det.add(r)
+	}
+	return n, det
 }

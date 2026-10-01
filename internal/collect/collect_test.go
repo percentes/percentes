@@ -193,3 +193,60 @@ func TestCollectCompletionLengthAndTokenCheck(t *testing.T) {
 		t.Fatalf("token check: %+v", st.TokenCheck)
 	}
 }
+
+// Errored in-flight requests are split by error class; completed and
+// censored ones are not.
+func TestInFlightErroredByClass(t *testing.T) {
+	sec := int64(1e9)
+	fire := 20 * sec
+	reqs := []loadgen.Request{
+		{Index: 0, DispatchNs: 19 * sec, DoneNs: fire + 1e8, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrReset},
+		{Index: 1, DispatchNs: 19 * sec, DoneNs: fire + 2e8, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrReset},
+		{Index: 2, DispatchNs: 19 * sec, DoneNs: fire + 3e8, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrConnect},
+		{Index: 3, DispatchNs: 19 * sec, DoneNs: fire + 30*sec, Outcome: loadgen.OutcomeCensored},
+		{Index: 4, DispatchNs: 19 * sec, DoneNs: 21 * sec, Outcome: loadgen.OutcomeCompleted},
+		{Index: 5, DispatchNs: 18 * sec, DoneNs: 19 * sec, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrConnect},
+	}
+	acc := AccountInFlight(reqs, fire, "")
+	if acc.Errored != 3 || len(acc.ErroredByClass) != 2 || acc.ErroredByClass[loadgen.ErrReset] != 2 || acc.ErroredByClass[loadgen.ErrConnect] != 1 {
+		t.Fatalf("class split: %+v", acc)
+	}
+	if acc := AccountInFlight(reqs[3:5], fire, ""); acc.ErroredByClass != nil {
+		t.Fatalf("no errored request produced a split: %v", acc.ErroredByClass)
+	}
+}
+
+// A request dispatched before the fire whose terminal time lies inside
+// the uncertainty interval on either side is indeterminate.
+func TestSplitAtFire(t *testing.T) {
+	ms := int64(1e6)
+	fire := 20_000 * ms
+	reqs := []loadgen.Request{
+		{Index: 0, DispatchNs: fire - 500*ms, DoneNs: fire - 4*ms, Outcome: loadgen.OutcomeErrored},   // ended before the fire
+		{Index: 1, DispatchNs: fire - 500*ms, DoneNs: fire + 1*ms, Outcome: loadgen.OutcomeCompleted}, // inside the zone
+		{Index: 2, DispatchNs: fire - 500*ms, DoneNs: fire + 5*ms, Outcome: loadgen.OutcomeCompleted}, // on the zone's edge
+		{Index: 3, DispatchNs: fire - 500*ms, DoneNs: fire + 6*ms, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrReset},
+		{Index: 4, DispatchNs: fire - 500*ms, DoneNs: fire + 30_000*ms, Outcome: loadgen.OutcomeCensored},
+		{Index: 5, DispatchNs: fire + 1*ms, DoneNs: fire + 2*ms, Outcome: loadgen.OutcomeErrored}, // dispatched after the fire
+		{Index: 6, DoneNs: fire}, // never dispatched
+	}
+	n, det := SplitAtFire(reqs, fire, 5*ms)
+	if n != 2 || det.Total != 2 || det.Completed != 0 || det.Errored != 1 || det.Censored != 1 || det.ErroredByClass[loadgen.ErrReset] != 1 {
+		t.Fatalf("indeterminate %d, determinate %+v", n, det)
+	}
+	if inf := AccountInFlight(reqs, fire, ""); n+det.Total != inf.Total {
+		t.Fatalf("indeterminate %d plus determinate %d must partition the %d in flight", n, det.Total, inf.Total)
+	}
+	// One completion just after the fire and one request ending just before
+	// it: no determinate completion, one indeterminate.
+	pair := []loadgen.Request{
+		{Index: 0, DispatchNs: fire - 500*ms, DoneNs: fire - 1*ms, Outcome: loadgen.OutcomeCompleted},
+		{Index: 1, DispatchNs: fire - 500*ms, DoneNs: fire + 1*ms, Outcome: loadgen.OutcomeCompleted},
+	}
+	if n, det := SplitAtFire(pair, fire, 2*ms); n != 1 || det.Completed != 0 || det.Total != 0 {
+		t.Fatalf("indeterminate %d, determinate %+v", n, det)
+	}
+	if n, det := SplitAtFire(reqs, fire, 0); n != 0 || det.Total != 4 {
+		t.Fatalf("zero zone: indeterminate %d, determinate %+v", n, det)
+	}
+}
