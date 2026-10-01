@@ -1,6 +1,6 @@
 # Percentes Phase 0 harness. `make test` is the single gate: unit tests,
-# the SPEC.md §8 AC suite, the kind smoke suite, the AC7 reproduce, and
-# the campaign e2e.
+# the SPEC.md §8 AC suite, the kind smoke suite, the AC7 reproduce, the
+# campaign e2e and the process-kill e2e.
 # The pinned golangci-lint is built with go1.21.6 and cannot read export
 # data from a newer toolchain, so the go commands here select that one
 # unless GOTOOLCHAIN is already set.
@@ -11,7 +11,7 @@ KIND    ?= $(shell command -v kind 2>/dev/null || echo $(HOME)/go/bin/kind)
 CLUSTER ?= percentes
 IMAGE   ?= percentes/mockserver:dev
 
-.PHONY: all build bins test test-unit test-ac docker-build kind-up kind-down kind-smoke reproduce campaign-e2e clean hooks
+.PHONY: all build bins test test-unit test-ac docker-build kind-up kind-down kind-smoke reproduce campaign-e2e process-kill-e2e clean hooks
 
 all: build
 
@@ -50,9 +50,9 @@ test-ac:
 	rm -f "$$log"
 
 # The full gate: unit tests, the SPEC.md §8 AC suite, the in-cluster
-# smoke suite, the AC7 one-command reproduce, and the campaign e2e,
-# all against kind.
-test: test-unit test-ac kind-smoke reproduce campaign-e2e
+# smoke suite, the AC7 one-command reproduce and the campaign e2e against
+# kind, then the process-kill e2e against local Docker.
+test: test-unit test-ac kind-smoke reproduce campaign-e2e process-kill-e2e
 
 # AC7: one-command reproduce from a clean checkout against kind.
 reproduce:
@@ -62,6 +62,11 @@ reproduce:
 # live 2-replica deployment, per-run §10 gates, §7 aggregation.
 campaign-e2e:
 	KIND=$(KIND) CLUSTER=$(CLUSTER) IMAGE=$(IMAGE) deploy/kind/campaign-e2e.sh
+
+# The process-kill variant end to end: an N=2 percentes-campaign that kills
+# the mock container's init process from the host and reads its restart.
+process-kill-e2e: docker-build
+	IMAGE=$(IMAGE) deploy/process-kill-e2e.sh
 
 docker-build:
 	docker build -t $(IMAGE) .
