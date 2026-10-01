@@ -34,6 +34,14 @@ func main() {
 	probeDirect := flag.String("probe-direct", "", "victim-direct inference URL for the replica-ready probe")
 	probeService := flag.String("probe-service", "", "service inference URL for the traffic-restored probe")
 	flag.Parse()
+	for name, u := range map[string]string{"--probe-direct": *probeDirect, "--probe-service": *probeService} {
+		if u == "" {
+			continue
+		}
+		if err := config.CheckBaseURL(u); err != nil {
+			log.Fatalf("percentes: %s: %v", name, err)
+		}
+	}
 
 	if *configPath == "" {
 		log.Fatal("percentes: --config is required")

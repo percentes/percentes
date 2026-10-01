@@ -29,6 +29,9 @@
 // gates SPEC.md requires, so it cannot show whether the client was the
 // bottleneck.
 //
+// Every request asks "Explain in detail how TCP congestion control works.
+// Request N." with max_tokens 128 and a 45 s client timeout.
+//
 // The exit status says whether the sweep ran: 0 once every request has a
 // verdict, whatever the verdicts were; 1 when the configuration is missing
 // or invalid. A script reads endpoint health from the summary line.
