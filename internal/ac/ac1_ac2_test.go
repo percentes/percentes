@@ -34,6 +34,7 @@ func TestAC1MeasurementCorrectness(t *testing.T) {
 	if testing.Short() {
 		t.Skip("AC suite skipped in -short mode")
 	}
+	requireQualifiedHost(t)
 	cfg := buildConfig(t, scenario{
 		warmupS: 5, baselineS: 30, windowS: 8, cooldownS: 2, tInjectS: 30,
 		ttft: config.LatencyDist{Distribution: "uniform", MinMs: 400, MaxMs: 600},
@@ -56,10 +57,8 @@ func TestAC1MeasurementCorrectness(t *testing.T) {
 		t.Fatalf("baseline window too thin: %d samples", ttftH.Count())
 	}
 
-	// Latency recorded on a contended client carries that machine's delay,
-	// so the percentiles below are read only when the gate says they can be.
 	if !res.Gates.Pass {
-		t.Skipf("host contended the client, latency not measured: %+v", res.Gates)
+		timingFailure(t, "AC1: client-validity gate failed on a qualified host: %+v", res.Gates)
 	}
 
 	// Uniform[400,600]: p50=500, p95=590, p99=598 (ms).
@@ -112,7 +111,7 @@ func TestAC2CoordinatedOmissionPlumbing(t *testing.T) {
 // TestAC2bTailSampleCount: recorded samples attributable to the stall
 // within +-10% of D x lambda. Attributable = completed with excess-over-
 // nominal >= 250 ms; with intended-time re-basing the expected count is
-// lambda x (D - 0.25) ~= 195 for D=10, lambda=20 — an open-loop schedule
+// lambda x (D - 0.25) ~= 195 for D=10, lambda=20; an open-loop schedule
 // keeps arrivals flowing through the freeze, so the stalled period
 // contributes its full complement of samples.
 func TestAC2bTailSampleCount(t *testing.T) {
@@ -163,18 +162,18 @@ func TestAC2cZeroUndispatched(t *testing.T) {
 		t.Error("AC2c: send-skew numbers not reported")
 	}
 	t.Logf("AC2c: skew p99=%dus max=%dus over %d requests", g.SendSkewP99Us, g.SendSkewMaxUs, len(sr.res.Requests))
-	// Skew is wall time between intended and actual dispatch, so one
-	// scheduler delay on a shared machine carries the max past the pin
-	// while the distribution stays well inside it. The dispatch count
-	// above is checked either way; this reading is not.
+	t.Logf("host qualification before the stall run: %+v", sr.qualObs)
+	if !sr.qualified {
+		t.Skipf("host not qualified for timing-coupled criteria: %s", sr.qualReason)
+	}
 	if !g.SendSkewPass {
-		t.Skipf("AC2c: host contended the client, send skew not measured: p99=%dus (limit %dms), max=%dus (limit %dms)",
+		timingFailure(t, "AC2c: send skew past the pin on a qualified host: p99=%dus (limit %dms), max=%dus (limit %dms)",
 			g.SendSkewP99Us, sr.cfg.ClientValidity.SendSkewP99Ms, g.SendSkewMaxUs, sr.cfg.ClientValidity.SendSkewMaxMs)
 	}
 }
 
 // TestAC2cGateFiresOnSyntheticUndispatched: the gate itself is exercised
-// with a synthetic result (a run abort mid-schedule) — an undispatched
+// with a synthetic result (a run abort mid-schedule); an undispatched
 // request must fail the run, not vanish.
 func TestAC2cGateFiresOnSyntheticUndispatched(t *testing.T) {
 	if testing.Short() {

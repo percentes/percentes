@@ -1,8 +1,10 @@
 // Package ac is the SPEC.md §8 acceptance-criteria suite. Reference
 // conditions: lambda = 20 rps (pinned by the ac profile), stall D = 10 s
 // where used. These tests run real load through the real generator
-// against the in-process mock; they are skipped in -short mode and run
-// without the race detector (timing fidelity).
+// against the mock, run as a separate process; they are skipped in -short
+// mode, the timing-coupled ones also on a host that fails the
+// internal/hostqual probe, and run without the race detector (timing
+// fidelity).
 //
 // Printed by TestMain, per §8: passing acceptance criteria (AC) 1
 // through 7 certifies the instrument against the mock.
@@ -16,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -25,34 +26,38 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/hostqual"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/mock"
-	"github.com/percentes/percentes/internal/run"
 )
 
-// hostContended reports whether the §2 client-validity gate is the only
-// reason a run was invalid. That gate measures this machine: send skew,
-// client central processing unit (CPU) and garbage collection (GC) pause
-// p99 as wall time, all of which host load inflates. A suite sharing the
-// machine fails it with the code unchanged, so a test that cannot
-// measure skips.
-func hostContended(art *run.Artifacts) bool {
-	if art.RunValid || len(art.InvalidReasons) == 0 {
-		return false
+// requireQualifiedHost measures the host before a timing-coupled
+// criterion and skips it on a host that fails the probe (internal/hostqual).
+func requireQualifiedHost(t *testing.T) {
+	t.Helper()
+	ok, reason, obs := hostqual.Qualified()
+	t.Logf("host qualification: %+v", obs)
+	if !ok {
+		t.Skipf("host not qualified for timing-coupled criteria: %s", reason)
 	}
-	for _, r := range art.InvalidReasons {
-		if !strings.HasPrefix(r, "client-validity gate failed") {
-			return false
-		}
-	}
-	return true
 }
 
-// mockBin is the mockserver binary, built once per suite run. AC
-// scenarios run the mock as a SEPARATE PROCESS: §6 pins the client to a
-// dedicated node precisely so the generator and the system under test
-// never share a scheduler, and the AC setup honors that boundary — a
-// server-side burst must not be able to contaminate client send skew.
+// timingFailure records a failed timing-coupled assertion: the host is
+// probed again, a host that lost qualification during the run skips the
+// criterion, and a host that kept it fails.
+func timingFailure(t *testing.T, format string, args ...any) {
+	t.Helper()
+	ok, reason, obs := hostqual.Qualified()
+	t.Logf("host qualification after the run: %+v", obs)
+	if !ok {
+		t.Skipf("host lost qualification during the run (%s); unmeasured: "+format, append([]any{reason}, args...)...)
+	}
+	t.Fatalf(format, args...)
+}
+
+// mockBin is the mockserver binary, built once per suite run and run as
+// a separate process, so the generator and the mock never share one Go
+// scheduler.
 var mockBin string
 
 func TestMain(m *testing.M) {
@@ -222,6 +227,11 @@ type stallRun struct {
 	res     *loadgen.Result
 	fireNs  int64  // stall fire, run-relative ns (from mock's own record)
 	invalid string // non-empty reason if the shared setup failed (checked by every consumer)
+	// The host probe taken before the run, for the consumer that reads a
+	// timing gate.
+	qualified  bool
+	qualReason string
+	qualObs    hostqual.Observation
 }
 
 var (
@@ -234,7 +244,11 @@ var (
 // recorded into stallRun.invalid so EVERY consumer fails deterministically
 // via t.Fatal, rather than only the test that first triggered the sync.Once.
 func getStallRun(t *testing.T) *stallRun {
-	stallOnce.Do(func() { theStall = buildStallRun() })
+	stallOnce.Do(func() {
+		ok, reason, obs := hostqual.Qualified()
+		theStall = buildStallRun()
+		theStall.qualified, theStall.qualReason, theStall.qualObs = ok, reason, obs
+	})
 	if theStall.invalid != "" {
 		t.Fatal(theStall.invalid)
 	}

@@ -25,7 +25,7 @@ func TestAC6Reporting(t *testing.T) {
 	// phase must exceed the pinned 30 s timeout so the baseline window
 	// carries traffic alongside the guard.
 	cfg := buildConfig(t, scenario{
-		warmupS: 1, baselineS: 38, windowS: 45, cooldownS: 1, tInjectS: 38,
+		warmupS: 1, baselineS: 38, windowS: 45, cooldownS: 10, tInjectS: 38,
 		ttft: fixed(100), itl: fixed(5),
 		schedule: []config.MockFault{{Mode: config.MockFaultError, StartOffsetS: 39, DurationS: 5}},
 	})
@@ -118,11 +118,9 @@ func TestAC6Reporting(t *testing.T) {
 	if art.Detector.ToPreFault.TTRSeconds == nil {
 		t.Error("AC6: scenario should recover within the window")
 	}
-	if hostContended(art) {
-		t.Skipf("AC6: host contended the client, validity not measured: %v", art.InvalidReasons)
-	}
+	requireQualifiedHost(t)
 	if !art.RunValid {
-		t.Errorf("AC6: clean scenario must be a valid run: %v", art.InvalidReasons)
+		timingFailure(t, "AC6: clean scenario must be a valid run: %v; gates %+v", art.InvalidReasons, art.Loadgen.Gates)
 	}
 	t.Logf("AC6: report.json %d bytes, report.txt %d bytes", len(rawJSON), len(humanText))
 }

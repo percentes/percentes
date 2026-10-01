@@ -91,12 +91,7 @@ func assertBaselineResolvedAtFire(t *testing.T, r ac4Run) {
 		}
 	}
 	if unresolved > 0 {
-		// The allowance is the pinned send skew, which is wall time, so a
-		// contended client pushes completions past it without any fault.
-		if !r.res.Gates.Pass {
-			t.Skipf("AC4: host contended the client, %d baseline requests unresolved at fire: %+v", unresolved, r.res.Gates)
-		}
-		t.Errorf("AC4: %d of %d baseline requests were still unresolved at fire (worst by %.3fs, allowance %dms): a fault-caused outcome would be booked to the baseline",
+		timingFailure(t, "AC4: %d of %d baseline requests were still unresolved at fire (worst by %.3fs, allowance %dms): a fault-caused outcome would be booked to the baseline",
 			unresolved, r.baseline.Scheduled, float64(worstNs)/1e9, r.cfg.ClientValidity.SendSkewMaxMs)
 	}
 }
@@ -110,13 +105,11 @@ func TestAC4LossAccounting(t *testing.T) {
 		t.Skip("AC suite skipped in -short mode")
 	}
 	r := ac4Scenario(t, config.MockFaultStreamAbort)
+	requireQualifiedHost(t)
 
 	acc := collect.AccountInFlight(r.res.Requests, r.fireNs, "")
 	if acc.Total < 15 {
-		if !r.res.Gates.Pass {
-			t.Skipf("AC4: host contended the client, in-flight population %d: %+v", acc.Total, r.res.Gates)
-		}
-		t.Fatalf("AC4: expected a meaningful in-flight population at T_inject, got %d", acc.Total)
+		timingFailure(t, "AC4: expected a meaningful in-flight population at T_inject, got %d", acc.Total)
 	}
 	// At most one request may straddle the fire boundary (its [DONE] was
 	// written server-side just before fire and read just after); every
@@ -167,11 +160,15 @@ func TestAC4bCensoringAccounting(t *testing.T) {
 		t.Skip("AC suite skipped in -short mode")
 	}
 	r := ac4Scenario(t, config.MockFaultSilentHang)
+	requireQualifiedHost(t)
 
 	// Every in-flight request at fire time hangs to the timeout.
 	acc := collect.AccountInFlight(r.res.Requests, r.fireNs, "")
-	if acc.Censored != acc.Total || acc.Total < 15 {
+	if acc.Censored != acc.Total {
 		t.Errorf("AC4b: in-flight requests at fire must be censored, got %+v", acc)
+	}
+	if acc.Total < 15 {
+		timingFailure(t, "AC4b: expected a meaningful in-flight population at T_inject, got %+v", acc)
 	}
 
 	// Censoring time is the pinned 30 s client timeout, measured from
@@ -209,7 +206,7 @@ func TestAC4bCensoringAccounting(t *testing.T) {
 	}
 
 	// Incidence curve: censored requests are censored observations at the
-	// timeout — the fault-window curve must not cross high quantiles inside
+	// timeout: the fault-window curve must not cross high quantiles inside
 	// the horizon ("p_q > 30 s"), while the median still exists.
 	if _, ok := r.fault.Incidence.Quantile(0.5); !ok {
 		t.Error("AC4b: fault-window incidence median should exist (most requests complete)")

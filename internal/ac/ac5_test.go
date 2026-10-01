@@ -35,7 +35,7 @@ func TestAC5ScriptedRecovery(t *testing.T) {
 	}
 	const outageS = 20.0
 	res, _, _ := runDetector(t, scenario{
-		warmupS: 3, baselineS: 40, windowS: 60, cooldownS: 2, tInjectS: 40,
+		warmupS: 3, baselineS: 40, windowS: 60, cooldownS: 10, tInjectS: 40,
 		ttft: fixed(100), itl: fixed(5),
 		schedule: []config.MockFault{{Mode: config.MockFaultError, StartOffsetS: 43, DurationS: outageS}},
 	})
@@ -49,7 +49,7 @@ func TestAC5ScriptedRecovery(t *testing.T) {
 	}
 	// Both baselines reported DISTINCTLY: a total outage has no degraded
 	// plateau, so the single-replica equilibrium is explicitly
-	// not-estimable with its reason — never silently collapsed into the
+	// not-estimable with its reason, never silently collapsed into the
 	// post-recovery (= pre-fault) level, which is the §5 conflation. The
 	// estimable path is covered by the detector's plateau unit test and
 	// the two-replica kind e2e.
@@ -79,12 +79,12 @@ func TestAC5HysteresisPreventsFlappingRecovery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("AC suite skipped in -short mode")
 	}
-	// Outage [43,53), then 15 clean seconds — long enough for an entry
-	// candidate to form — then a flap at [68,70) INSIDE that candidate's
+	// Outage [43,53), then 15 clean seconds (long enough for an entry
+	// candidate to form), then a flap at [68,70) INSIDE that candidate's
 	// 30 s hold. The hold must cancel the candidate (the oscillation-
 	// induced early recovery), and only the post-flap entry survives.
 	res, _, _ := runDetector(t, scenario{
-		warmupS: 3, baselineS: 40, windowS: 60, cooldownS: 2, tInjectS: 40,
+		warmupS: 3, baselineS: 40, windowS: 60, cooldownS: 10, tInjectS: 40,
 		ttft: fixed(100), itl: fixed(5),
 		schedule: []config.MockFault{
 			{Mode: config.MockFaultError, StartOffsetS: 43, DurationS: 10}, // main outage
@@ -101,7 +101,7 @@ func TestAC5HysteresisPreventsFlappingRecovery(t *testing.T) {
 	}
 	// Naive first-crossing claims ~10s; the flap clears at +27s.
 	if *d.TTRSeconds < 20 {
-		t.Errorf("AC5: hysteresis failed — TTR %.1fs is the oscillation-induced early value (naive ~10s; scripted stable point ~27s)", *d.TTRSeconds)
+		t.Errorf("AC5: hysteresis failed: TTR %.1fs is the oscillation-induced early value (naive ~10s; scripted stable point ~27s)", *d.TTRSeconds)
 	}
 	if *d.TTRSeconds > 32 {
 		t.Errorf("AC5: TTR %.1fs is far beyond the scripted stable point ~27s", *d.TTRSeconds)
