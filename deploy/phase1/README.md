@@ -38,5 +38,6 @@ context is reachable.
 
 - `serverlog.sh OUT docker CONTAINER [SINCE]` or
   `serverlog.sh OUT kube CONTEXT NAMESPACE POD [SINCE]`: the server log
-  with timestamps (§5), from SINCE (an RFC 3339 time) or from the start.
+  with timestamps (§5), from SINCE (a timestamp such as
+  2026-09-29T12:00:00Z) or from the start.
   Run after the run.

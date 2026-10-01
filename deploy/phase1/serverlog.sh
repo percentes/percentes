@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # The server log for a run window, with timestamps, to OUT: a Docker
 # container's log, or a pod's log through kubectl with the context named
-# (SPEC.md §5: the weight-load and CUDA-graph boundaries are log-derived).
+# (SPEC.md §5: the weight-load and CUDA (Compute Unified Device
+# Architecture, the NVIDIA GPU runtime) graph boundaries are log-derived).
 set -euo pipefail
 
 usage() {
   cat >&2 <<USAGE
 usage: $0 OUT docker CONTAINER [SINCE]
        $0 OUT kube CONTEXT NAMESPACE POD [SINCE]
-SINCE is an RFC 3339 time; without it the whole log is saved.
+SINCE is a timestamp such as 2026-09-29T12:00:00Z; without it the whole log is saved.
 USAGE
   exit 2
 }

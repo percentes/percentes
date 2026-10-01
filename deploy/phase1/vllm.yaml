@@ -1,5 +1,5 @@
 # Phase 1 vLLM deployment (SPEC.md §10 topology): two replicas, one per
-# GPU worker node, behind one Service. NOT RUNNABLE IN PHASE 0 — requires
+# GPU worker node, behind one Service. NOT RUNNABLE IN PHASE 0: requires
 # a real GPU cluster. Every PIN-AT-PHASE1 marker must be replaced with the
 # measured value and recorded in the run config's §6 pin list before use;
 # the run-validity gates (internal/validity, G1-G7) are run-failing
@@ -50,7 +50,7 @@ spec:
             - "--max-num-seqs=PIN-AT-PHASE1"
             - "--max-model-len=PIN-AT-PHASE1"
             - "--gpu-memory-utilization=PIN-AT-PHASE1"  # -> KV-cache GB pinned in §6
-            - "--enable-prefix-caching=false"           # §6: verified OFF via metrics
+            - "--enable-prefix-caching=false"           # declared off (§6); the metrics check is Phase 1 work
             # chunked-prefill and CUDA-graph settings PIN-AT-PHASE1, recorded in §6
           ports:
             - containerPort: 8000
@@ -78,8 +78,9 @@ spec:
       targetPort: 8000
 ---
 # Prometheus scrape target for the server-side vLLM metrics (§2, §6):
-# per-replica request counters for the G1 share gate, continuous-batching
-# verification, prefix-caching-OFF verification, and KV-cache occupancy.
+# per-replica request counters for the G1 share gate, the kept metric
+# families, and the continuous-batching and prefix-caching readings the
+# §6 check will compare with the declared pins.
 apiVersion: v1
 kind: Service
 metadata:
