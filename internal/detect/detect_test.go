@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/percentes/percentes/internal/config"
@@ -427,5 +428,58 @@ func TestEntryVerdictOnPartialWindows(t *testing.T) {
 	}
 	if c, u := entryVerdict(mkBuckets(10, func(int) int { return 20 }), 0, 10, compGoodput, 0.9); !c || u {
 		t.Fatalf("a full window above the bar is a candidate: candidate=%v unobserved=%v", c, u)
+	}
+}
+
+func TestNewDecompositionProcessKillRows(t *testing.T) {
+	d := NewDecomposition(config.VariantProcessKill)
+	noService := "one replica addressed directly: no Service"
+	want := []struct{ name, source, note string }{
+		{"reschedule", "api", "no scheduler: the container runtime restarts in place"},
+		{"container_start", "api", "docker inspect unavailable"},
+		{"log_bringup", "log", ""},
+		{"engine_init", "log", ""},
+		{"weight_download", "log", ""},
+		{"weight_load", "log", ""},
+		{"torch_compile", "log", ""},
+		{"profile_kv_capture", "log", ""},
+		{"engine_ready", "log", ""},
+		{"server_ready", "log", ""},
+		{"replica_ready", "probe", ""},
+		{"traffic_restored", "probe", noService},
+		{"routing_propagation", "probe", noService},
+		{"goodput_restored", "client", ""},
+	}
+	if len(d.Segments) != len(want) {
+		t.Fatalf("%d segments, want %d", len(d.Segments), len(want))
+	}
+	for i, w := range want {
+		s := d.Segments[i]
+		if s.Name != w.name || s.Source != w.source || s.Measured || s.Note == "" || (w.note != "" && s.Note != w.note) {
+			t.Errorf("row %d = %+v, want %s from %s, unmeasured, note %q", i, s, w.name, w.source, w.note)
+		}
+	}
+	if d.LogFigures != nil {
+		t.Errorf("LogFigures = %v, want nil", d.LogFigures)
+	}
+}
+
+func TestNewDecompositionKeepsPhase0Rows(t *testing.T) {
+	names := []string{"reschedule", "container_start", "weight_load", "cuda_graph_capture", "replica_ready", "traffic_restored", "routing_propagation", "goodput_restored"}
+	sources := []string{"api", "api", "log", "log", "probe", "probe", "probe", "client"}
+	phase0 := NewPhase0Decomposition()
+	for _, v := range []string{config.VariantMock, config.VariantCleanDelete, config.VariantBlackHole, config.VariantNone} {
+		d := NewDecomposition(v)
+		if !reflect.DeepEqual(d, phase0) {
+			t.Errorf("%s: %+v differs from the Phase 0 table", v, d.Segments)
+		}
+		if len(d.Segments) != len(names) {
+			t.Fatalf("%s: %d segments, want %d", v, len(d.Segments), len(names))
+		}
+		for i, s := range d.Segments {
+			if s.Name != names[i] || s.Source != sources[i] || s.Measured || s.Note == "" {
+				t.Errorf("%s row %d = %+v, want %s from %s, unmeasured with a note", v, i, s, names[i], sources[i])
+			}
+		}
 	}
 }

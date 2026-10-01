@@ -511,16 +511,39 @@ func (s Segment) DurationS() *float64 {
 // replica-ready and traffic-restored via harness probes and
 // goodput-restored from the client stream; the Kubernetes- and log-
 // derived segments are N/A against the mock and are reported as such,
-// never inferred.
+// never inferred. Under process kill the log-derived segments come from
+// the restarted server's log, and LogFigures holds the durations and sizes
+// vLLM printed, verbatim.
 type Decomposition struct {
-	Segments []Segment `json:"segments"`
+	Segments   []Segment          `json:"segments"`
+	LogFigures map[string]float64 `json:"log_figures,omitempty"`
 }
 
-// NewPhase0Decomposition returns the §5 segment table with every boundary
-// marked N/A until measured.
-func NewPhase0Decomposition() *Decomposition {
+// NewDecomposition returns the §5 segment table for the fault variant with
+// every boundary marked N/A until measured.
+func NewDecomposition(variant string) *Decomposition {
 	na := func(name, source, note string) Segment {
 		return Segment{Name: name, Source: source, Measured: false, Note: note}
+	}
+	if variant == config.VariantProcessKill {
+		const noLog = "no server log parsed after the fire"
+		const noService = "one replica addressed directly: no Service"
+		return &Decomposition{Segments: []Segment{
+			na("reschedule", "api", "no scheduler: the container runtime restarts in place"),
+			na("container_start", "api", "docker inspect unavailable"),
+			na("log_bringup", "log", noLog),
+			na("engine_init", "log", noLog),
+			na("weight_download", "log", noLog),
+			na("weight_load", "log", noLog),
+			na("torch_compile", "log", noLog),
+			na("profile_kv_capture", "log", noLog),
+			na("engine_ready", "log", noLog),
+			na("server_ready", "log", noLog),
+			na("replica_ready", "probe", "first successful inference against the replica directly, after the fault was visible on that path"),
+			na("traffic_restored", "probe", noService),
+			na("routing_propagation", "probe", noService),
+			na("goodput_restored", "client", "from the client stream per the detector"),
+		}}
 	}
 	return &Decomposition{Segments: []Segment{
 		na("reschedule", "api", "N/A in Phase 0: mock faults do not delete the pod, so there is no kill-to-scheduled event pair"),
@@ -532,6 +555,11 @@ func NewPhase0Decomposition() *Decomposition {
 		{Name: "routing_propagation", Source: "probe", Measured: false, Note: "traffic_restored minus replica_ready (§5: reported as its own segment)"},
 		{Name: "goodput_restored", Source: "client", Measured: false, Note: "from the client stream per the detector"},
 	}}
+}
+
+// NewPhase0Decomposition returns the mock variant's segment table.
+func NewPhase0Decomposition() *Decomposition {
+	return NewDecomposition(config.VariantMock)
 }
 
 // SetNote records why a segment stayed unmeasured.
