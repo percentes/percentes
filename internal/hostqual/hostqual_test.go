@@ -2,6 +2,7 @@ package hostqual
 
 import (
 	"math"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,7 @@ func TestQualifyAppliesTheAllocation(t *testing.T) {
 		want string
 	}{
 		{"inside", Observation{WakeP99Us: 900, WakeMaxUs: 9000, GCPauseP99Ms: 0.5}, true, ""},
-		{"wake p99", Observation{WakeP99Us: 1001, WakeMaxUs: 9000, GCPauseP99Ms: 0.5}, false, "wake lateness p99"},
+		{"wake p99", Observation{WakeP99Us: l.WakeP99Us + 1, WakeMaxUs: 9000, GCPauseP99Ms: 0.5}, false, "wake lateness p99"},
 		{"wake max", Observation{WakeP99Us: 900, WakeMaxUs: 10001, GCPauseP99Ms: 0.5}, false, "wake lateness max"},
 		{"gc pause", Observation{WakeP99Us: 900, WakeMaxUs: 9000, GCPauseP99Ms: 1.01}, false, "GC pause p99 bucket edge"},
 		{"gc open", Observation{WakeP99Us: 900, WakeMaxUs: 9000, GCPauseP99Ms: 0.5, GCPauseOpen: true}, false, "open-ended"},
@@ -26,6 +27,17 @@ func TestQualifyAppliesTheAllocation(t *testing.T) {
 		if ok != c.ok || !strings.Contains(reason, c.want) {
 			t.Errorf("%s: got ok=%v reason=%q", c.name, ok, reason)
 		}
+	}
+}
+
+// The wake p99 limit carries the poller quantum on Linux only.
+func TestWakeAllocationAddsThePollerQuantum(t *testing.T) {
+	want := int64(1000)
+	if runtime.GOOS == "linux" {
+		want = 2000
+	}
+	if Allocation.WakeP99Us != want || Allocation.WakeMaxUs != 10000 {
+		t.Fatalf("on %s got wake p99 %d us and max %d us, want %d and 10000", runtime.GOOS, Allocation.WakeP99Us, Allocation.WakeMaxUs, want)
 	}
 }
 

@@ -35,11 +35,16 @@ type Limits struct {
 	GCPauseP99Ms float64
 }
 
-// Allocation is the pre-registered qualification threshold, dated
-// 29 September 2026: one fifth of the §2 send-skew budget (5 ms p99,
-// 50 ms max) for wake lateness, and the §2 GC pause pin itself, since the
-// same runtime serves the client. It is an allocation of the budget.
-var Allocation = Limits{WakeP99Us: 1000, WakeMaxUs: 10000, GCPauseP99Ms: 1.0}
+// pollerQuantumUs is the runtime's timer wait step: on Linux the netpoller
+// waits in whole milliseconds (runtime/netpoll_epoll.go), so an idle
+// process wakes up to 1 ms after its timer.
+var pollerQuantumUs = map[string]int64{"linux": 1000}[runtime.GOOS]
+
+// Allocation is the qualification threshold: one fifth of the §2 send-skew
+// budget (5 ms p99, 50 ms max) for wake lateness, plus the poller quantum
+// at p99, and the §2 GC pause pin itself, since the same runtime serves
+// the client. It is an allocation of the budget.
+var Allocation = Limits{WakeP99Us: 1000 + pollerQuantumUs, WakeMaxUs: 10000, GCPauseP99Ms: 1.0}
 
 const (
 	wakes       = 400

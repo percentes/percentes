@@ -400,8 +400,9 @@ object, and the bearer token comes from the environment variable that
 
 **Timing-coupled tests.** Before each timing-coupled acceptance test,
 `internal/hostqual` probes the host against limits set in
-`hostqual.Allocation` from the §2 budget: timer wake lateness p99 ≤ 1 ms
-and max ≤ 10 ms, and a GC pause p99 bucket edge of at most 1 ms. A test
+`hostqual.Allocation` from the §2 budget: timer wake lateness p99 ≤ 1 ms,
+plus 1 ms on Linux, where Go's poller waits in whole milliseconds, and
+max ≤ 10 ms, and a GC pause p99 bucket edge of at most 1 ms. A test
 skips only on a host that fails the probe, and re-probes after a failed
 timing assertion before it fails. `make test-ac` fails on any skip unless
 `PERCENTES_AC_ALLOW_SKIPS=1`.
