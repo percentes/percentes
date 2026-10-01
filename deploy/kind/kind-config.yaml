@@ -1,8 +1,7 @@
-# Phase 0 local cluster: single node, sized for laptop Docker VMs (a
-# multi-node kind cluster destabilizes the control plane under 2 CPUs).
-# The two replicas colocate here; the §1 two-worker topology is the
-# Phase 1 GPU cluster. Pod anti-affinity in the Deployment is "preferred",
-# so on any multi-node cluster the replicas spread one per node.
+# Phase 0 local cluster: one node. The two replicas colocate here; the §1
+# two-worker topology is the Phase 1 GPU cluster. Pod anti-affinity in
+# the Deployment is "preferred", so a multi-node cluster may spread the
+# replicas.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: percentes

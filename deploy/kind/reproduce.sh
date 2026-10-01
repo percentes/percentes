@@ -4,8 +4,8 @@
 # runs the full harness (load generation, pre-armed fault on a victim
 # replica, collection, recovery detection, decomposition probes), and
 # verifies the report pair. A run marked invalid by a run-failing gate
-# (exit 2) is still a successful REPRODUCTION — the gates are part of the
-# instrument — but the reports must exist and be complete.
+# (exit 2) is still a successful REPRODUCTION, since the gates are part of
+# the instrument, but the reports must exist and be complete.
 set -euo pipefail
 
 KIND=${KIND:-kind}
@@ -31,7 +31,7 @@ trap cleanup EXIT
 
 say "ensuring kind cluster with the NodePort mapping"
 if grep -qxF "$CLUSTER" <<<"$("$KIND" get clusters 2>/dev/null)"; then
-  if ! grep -q 30800 <<<"$(docker port "$CLUSTER-control-plane" 2>/dev/null)"; then
+  if ! grep -qE '^30800/tcp -> [^ ]+:18000$' <<<"$(docker port "$CLUSTER-control-plane" 2>/dev/null)"; then
     echo "   existing cluster lacks the 30800->18000 mapping; recreating"
     "$KIND" delete cluster --name "$CLUSTER"
     "$KIND" create cluster --name "$CLUSTER" --config deploy/kind/kind-config.yaml --wait 120s
@@ -55,11 +55,18 @@ kc -n "$NS" create configmap percentes-run-config \
 kc -n "$NS" rollout status deploy/percentes-mock --timeout=180s
 
 say "waiting for the NodePort data path"
+PODS=$(kc -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[*].metadata.name}')
+# The responder must be one of the deployment's pods: /health names the pod.
+replica_ok() {
+  local r
+  r=$(curl -si --max-time 2 http://127.0.0.1:18000/health 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="x-percentes-replica:"{print $2}')
+  [ -n "$r" ] && tr ' ' '\n' <<<"$PODS" | grep -qxF -- "$r"
+}
 for _ in $(seq 60); do
-  curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health && break
+  replica_ok && break
   sleep 1
 done
-curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health || fail "service not reachable on host port 18000"
+replica_ok || fail "host port 18000 did not answer with a percentes-mock pod's X-Percentes-Replica header (pods: $PODS)"
 
 VICTIM=$(kc -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
 say "victim replica: $VICTIM (admin via port-forward :$ADMIN_PORT)"
@@ -77,13 +84,13 @@ done
 [ -n "$admin_ready" ] || fail "admin port-forward never answered on 127.0.0.1:$ADMIN_PORT"
 
 say "building and running the harness (one config drives the run)"
-# Build static (CGO_ENABLED=0) to a FRESH path every run. Two macOS
-# failure modes motivate this: (a) rebuilding onto a reused path can wedge
-# execs in dyld (uninterruptible, unkillable); (b) cgo-linked binaries
-# (gopsutil -> IOKit/CoreFoundation) can hit the same dyld wedge on a
-# degraded system. CGO_ENABLED=0 keeps Linux CPU-gate sampling fully
-# functional (/proc needs no cgo); on darwin the host-CPU gate reports
-# unmeasured and therefore does not pass.
+# Build static (CGO_ENABLED=0) to a FRESH path every run. On the
+# development Mac (recorded 2026-06-10) rebuilding onto a reused path
+# wedged execs in dyld (uninterruptible, unkillable), and cgo-linked
+# binaries (gopsutil -> IOKit/CoreFoundation) hit the same wedge on a
+# degraded system. CGO_ENABLED=0 keeps Linux CPU-gate sampling functional
+# (/proc needs no cgo); on darwin the host-CPU gate reports unmeasured and
+# does not pass.
 BIN="$(mktemp -d)/percentes"
 CGO_ENABLED=0 go build -o "$BIN" ./cmd/percentes
 mkdir -p results

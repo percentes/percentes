@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Campaign e2e on kind: the §5 repetition pipeline (percentes-campaign) against
-# the live 2-replica mock deployment — N runs, per-run §10 validity gates,
+# the live 2-replica mock deployment: N runs, per-run §10 validity gates,
 # §7 aggregation, campaign report pair. Exits 2 when a run-invalidating
 # gate fails (on darwin the client CPU gate is unmeasured); this script
 # asserts report completeness, not run validity.
@@ -28,7 +28,9 @@ cleanup() { for pid in "${PF_PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; do
 trap cleanup EXIT
 
 say "ensuring cluster, image, and deployment (config from configs/kind-campaign.yaml)"
-if ! grep -qxF "$CLUSTER" <<<"$("$KIND" get clusters 2>/dev/null)"; then
+if grep -qxF "$CLUSTER" <<<"$("$KIND" get clusters 2>/dev/null)"; then
+  grep -qE '^30800/tcp -> [^ ]+:18000$' <<<"$(docker port "$CLUSTER-control-plane" 2>/dev/null)" || fail "existing cluster $CLUSTER lacks the 30800->18000 mapping; recreate it (deploy/kind/reproduce.sh does)"
+else
   "$KIND" create cluster --name "$CLUSTER" --config deploy/kind/kind-config.yaml --wait 120s
 fi
 docker build -t "$IMAGE" . >/dev/null
@@ -41,11 +43,18 @@ kc apply -f deploy/mock/mock.yaml
 kc -n "$NS" create configmap percentes-run-config \
   --from-file=run.yaml=configs/kind-campaign.yaml --dry-run=client -o yaml | kc apply -f -
 kc -n "$NS" rollout status deploy/percentes-mock --timeout=180s
+PODS=$(kc -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[*].metadata.name}')
+# The responder must be one of the deployment's pods: /health names the pod.
+replica_ok() {
+  local r
+  r=$(curl -si --max-time 2 http://127.0.0.1:18000/health 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="x-percentes-replica:"{print $2}')
+  [ -n "$r" ] && tr ' ' '\n' <<<"$PODS" | grep -qxF -- "$r"
+}
 for _ in $(seq 60); do
-  curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health && break
+  replica_ok && break
   sleep 1
 done
-curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18000/health || fail "NodePort data path not reachable"
+replica_ok || fail "host port 18000 did not answer with a percentes-mock pod's X-Percentes-Replica header (pods: $PODS)"
 
 VICTIM=$(kc -n "$NS" get pods -l app=percentes-mock -o jsonpath='{.items[0].metadata.name}')
 say "victim replica: $VICTIM"
