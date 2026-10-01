@@ -2,13 +2,16 @@ package campaign
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/detect"
 	"github.com/percentes/percentes/internal/histo"
+	"github.com/percentes/percentes/internal/orchestrator"
 	"github.com/percentes/percentes/internal/run"
 )
 
@@ -240,4 +243,182 @@ func TestSurvivorSummaryNamesTheMissingCohort(t *testing.T) {
 		}
 	}
 	t.Fatal("no survivor_p95_ms summary")
+}
+
+// pkArt is one process-kill run on one replica: replica_ready and
+// container_start measured, a non-estimable equilibrium, 10 in flight at
+// fire of which lost are errored.
+func pkArt(t *testing.T, outageS, startS float64, lost int, valid bool) *run.Artifacts {
+	t.Helper()
+	cfg := baseCfg(t)
+	cfg.Fault.Variant = config.VariantProcessKill
+	cfg.Target.Replicas = 1
+	d := detect.NewDecomposition(config.VariantProcessKill)
+	fire := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	d.SetMeasured("replica_ready", fire, fire.Add(time.Duration(outageS*float64(time.Second))))
+	d.SetMeasured("container_start", fire, fire.Add(time.Duration(startS*float64(time.Second))))
+	return &run.Artifacts{
+		Config:        cfg,
+		Detector:      &detect.Result{EquilibriumNote: "plateau goodput is zero: not estimable"},
+		Decomposition: d,
+		InFlight: collect.InFlightAccounting{Total: 10, Errored: lost, Completed: 10 - lost, ErroredByClass: map[string]int{"connect": lost},
+			IndeterminateAtFire: 2, Determinate: &collect.Outcomes{Total: 8, Errored: lost - 2, Completed: 10 - lost, ErroredByClass: map[string]int{"connect": lost - 2}}},
+		Windows:   map[string]*collect.Stats{"outage": {Scheduled: 5, Errored: 5, ErrClasses: map[string]int{"connect": 5}}},
+		Container: &run.ContainerRestart{Kill: &orchestrator.KillRecord{Pid: 42, Signal: 9}, FireUncertaintyNs: 3_000_000},
+		RunValid:  valid,
+	}
+}
+
+func endpoint(rep *Report, name string) *ScalarSummary {
+	for i := range rep.Endpoints {
+		if rep.Endpoints[i].Name == name {
+			return &rep.Endpoints[i]
+		}
+	}
+	return nil
+}
+
+// A runner error returns the runs so far, summarized and marked failed,
+// with the error.
+func TestRunWithReturnsPartialReportOnError(t *testing.T) {
+	cfg := baseCfg(t)
+	cfg.Run.Repetitions = 5
+	i := 0
+	runner := func(context.Context, *config.Config, run.Options) (*run.Artifacts, error) {
+		i++
+		if i == 3 {
+			return nil, errors.New("ssh: connection timed out")
+		}
+		return pkArt(t, 50, 1, 10, true), nil
+	}
+	rep, err := RunWith(context.Background(), cfg, run.Options{}, config.VariantProcessKill, runner, Policy{})
+	if err == nil || !strings.Contains(err.Error(), "run 3") {
+		t.Fatalf("error %v", err)
+	}
+	if rep == nil || !rep.Failed || rep.FailedRun != 3 || !strings.Contains(rep.FailedReason, "connection timed out") {
+		t.Fatalf("partial report %+v", rep)
+	}
+	if len(rep.PerRun) != 2 || rep.ValidRuns != 2 || len(rep.Endpoints) == 0 {
+		t.Fatalf("runs so far not summarized: %d runs, %d valid, %d endpoints", len(rep.PerRun), rep.ValidRuns, len(rep.Endpoints))
+	}
+	if o := endpoint(rep, "outage_s"); o == nil || o.ContributingN != 2 {
+		t.Fatalf("outage over the runs so far: %+v", o)
+	}
+	if rep.Halted {
+		t.Fatal("a failed campaign was marked halted")
+	}
+}
+
+// An invalid run under the halt policy ends the campaign after it; without
+// the policy every run executes.
+func TestRunWithHaltsAfterInvalidRun(t *testing.T) {
+	cfg := baseCfg(t)
+	cfg.Run.Repetitions = 5
+	scripts := func() []*run.Artifacts {
+		return []*run.Artifacts{pkArt(t, 50, 1, 10, true), pkArt(t, 50, 1, 10, false), pkArt(t, 50, 1, 10, true), pkArt(t, 50, 1, 10, true), pkArt(t, 50, 1, 10, true)}
+	}
+	var seeds []int64
+	rep, err := RunWith(context.Background(), cfg, run.Options{}, config.VariantProcessKill, fakeRunner(scripts(), &seeds), Policy{HaltAfterInvalidRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Halted || rep.HaltedAfterRun != 2 || len(rep.PerRun) != 2 || len(seeds) != 2 || rep.InvalidRuns != 1 || rep.Failed {
+		t.Fatalf("halted %v after %d with %d runs, %d invalid", rep.Halted, rep.HaltedAfterRun, len(rep.PerRun), rep.InvalidRuns)
+	}
+	seeds = nil
+	rep, err = Run(context.Background(), cfg, run.Options{}, config.VariantProcessKill, fakeRunner(scripts(), &seeds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Halted || len(rep.PerRun) != 5 || rep.ValidRuns != 4 {
+		t.Fatalf("Run without a policy: halted %v, %d runs, %d valid", rep.Halted, len(rep.PerRun), rep.ValidRuns)
+	}
+}
+
+// With one replica every request in flight at fire was on the killed
+// replica, so the fraction is defined without a victim name; with two it
+// stays unscoped.
+func TestProcessKillInFlightLossIsDefinedForOneReplica(t *testing.T) {
+	art := pkArt(t, 50, 1, 7, true)
+	s := extractScalars(1, art)
+	if s.InFlightLossFraction == nil || *s.InFlightLossFraction != 0.7 || s.InFlightLossAllReplicasUnscoped != nil {
+		t.Fatalf("one replica: %v unscoped %v", s.InFlightLossFraction, s.InFlightLossAllReplicasUnscoped)
+	}
+	if s.InFlightErroredByClass["connect"] != 7 {
+		t.Fatalf("class split not carried: %v", s.InFlightErroredByClass)
+	}
+	if s.InFlightIndeterminate != 2 || s.InFlightDeterminate == nil || s.InFlightDeterminate.Total != 8 {
+		t.Fatalf("indeterminate %d, determinate %+v", s.InFlightIndeterminate, s.InFlightDeterminate)
+	}
+	if o := s.Outage; o == nil || o.Total != 5 || o.Errored != 5 || o.Censored != 0 || o.ErroredByClass["connect"] != 5 {
+		t.Fatalf("outage outcomes %+v", s.Outage)
+	}
+	art.Config.Target.Replicas = 2
+	if s := extractScalars(1, art); s.InFlightLossFraction != nil || s.InFlightLossAllReplicasUnscoped == nil {
+		t.Fatalf("two replicas without attribution: %v", s.InFlightLossFraction)
+	}
+	art.Config.Target.Replicas = 1
+	art.Config.Fault.Variant = config.VariantMock
+	if s := extractScalars(1, art); s.InFlightLossFraction != nil {
+		t.Fatalf("a mock run without attribution published %v", *s.InFlightLossFraction)
+	}
+}
+
+// Under process kill the outage is the primary endpoint, container start
+// and TTR to the pre-fault baseline are secondary, and no noise floor is
+// labelled.
+func TestProcessKillOutageIsThePrimaryEndpoint(t *testing.T) {
+	cfg := baseCfg(t)
+	cfg.Run.Repetitions = 3
+	var seeds []int64
+	scripts := []*run.Artifacts{pkArt(t, 40, 1, 10, true), pkArt(t, 45, 2, 10, true), pkArt(t, 60, 3, 10, true)}
+	rep, err := Run(context.Background(), cfg, run.Options{}, config.VariantProcessKill, fakeRunner(scripts, &seeds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := endpoint(rep, "outage_s")
+	if o == nil || o.Endpoint != "primary" || o.ContributingN != 3 || o.Summary.Median != 45 {
+		t.Fatalf("outage endpoint %+v", o)
+	}
+	if c := endpoint(rep, "container_start_s"); c == nil || c.Endpoint != "secondary" || c.Summary.Median != 2 {
+		t.Fatalf("container start endpoint %+v", c)
+	}
+	for _, e := range rep.Endpoints {
+		if e.Endpoint == "primary" && e.Name != "outage_s" {
+			t.Fatalf("second primary endpoint %s", e.Name)
+		}
+	}
+	if rep.NoiseFloorCoV != nil {
+		t.Fatal("the noise floor label is clean_delete only")
+	}
+	if PrimaryEndpointFor(config.VariantProcessKill) != PrimaryEndpointProcessKill || PrimaryEndpointFor(config.VariantCleanDelete) != PrimaryEndpoint {
+		t.Fatal("primary endpoint label per variant")
+	}
+	s := rep.PerRun[0]
+	if s.OutageS == nil || *s.OutageS != 40 || s.ContainerStartS == nil || *s.ContainerStartS != 1 || s.FireUncertaintyS == nil || *s.FireUncertaintyS != 0.003 {
+		t.Fatalf("per-run scalars %+v", s)
+	}
+}
+
+// The equilibrium TTR and the survivor percentile are not applicable with
+// one replica; each run carries the detector's note verbatim.
+func TestProcessKillEquilibriumNotApplicable(t *testing.T) {
+	cfg := baseCfg(t)
+	cfg.Run.Repetitions = 2
+	var seeds []int64
+	rep, err := Run(context.Background(), cfg, run.Options{}, config.VariantProcessKill, fakeRunner([]*run.Artifacts{pkArt(t, 40, 1, 10, true), pkArt(t, 41, 1, 10, true)}, &seeds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq := endpoint(rep, "ttr_equilibrium_s")
+	if eq == nil || eq.Endpoint != "not_applicable" || eq.DroppedReason != "one replica: the single-replica equilibrium is a survivor quantity (§5)" {
+		t.Fatalf("equilibrium endpoint %+v", eq)
+	}
+	sv := endpoint(rep, "survivor_p95_ms")
+	if sv == nil || sv.Endpoint != "not_applicable" || sv.DroppedReason != "one replica: no survivor cohort (§3)" {
+		t.Fatalf("survivor endpoint %+v", sv)
+	}
+	if rep.PerRun[0].EquilibriumNote != "plateau goodput is zero: not estimable" {
+		t.Fatalf("note %q", rep.PerRun[0].EquilibriumNote)
+	}
 }

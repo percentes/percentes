@@ -5,8 +5,10 @@
 //   - The repetition count N is 5 runs per (variant, config); all five
 //     per-run values are published verbatim (§5).
 //   - The pre-registered PRIMARY endpoint is time to recovery (TTR) to
-//     single-replica equilibrium under the clean-delete variant (§7);
-//     everything else is labeled secondary or exploratory. A run that
+//     single-replica equilibrium under the clean-delete variant, and the
+//     outage (fire to replica-ready) under the process-kill variant (§7);
+//     everything else is labeled secondary, exploratory or not
+//     applicable. A run that
 //     could not estimate the equilibrium contributes no equilibrium-TTR
 //     value, and that is reported (not imputed).
 //   - The TTR scalars are heavy-tailed: median + range lead, the
@@ -23,6 +25,7 @@ import (
 
 	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/detect"
 	"github.com/percentes/percentes/internal/run"
 	"github.com/percentes/percentes/internal/serverstats"
 	"github.com/percentes/percentes/internal/stats"
@@ -30,6 +33,21 @@ import (
 
 // PrimaryEndpoint is the §7 pre-registered primary endpoint label.
 const PrimaryEndpoint = "ttr_single_replica_equilibrium_s (clean_delete)"
+
+// PrimaryEndpointProcessKill is the §7 primary endpoint label of the
+// process-kill variant.
+const PrimaryEndpointProcessKill = "outage_s: fire to replica_ready (process_kill)"
+
+// PrimaryEndpointFor returns the primary endpoint label for the variant.
+func PrimaryEndpointFor(variant string) string {
+	if variant == config.VariantProcessKill {
+		return PrimaryEndpointProcessKill
+	}
+	return PrimaryEndpoint
+}
+
+// Policy is how the campaign treats an invalid run.
+type Policy struct{ HaltAfterInvalidRun bool }
 
 // Scalars is one run's published run-level scalars.
 type Scalars struct {
@@ -47,7 +65,9 @@ type Scalars struct {
 	// It is nil when no victim was attributed: an all-replica fraction is
 	// a different (understated) quantity and must never publish under the
 	// pre-registered name. The unattributed value, when computed, appears
-	// separately and labeled.
+	// separately and labeled. Under process kill with one replica every
+	// in-flight request is on the killed replica, and the fraction is
+	// taken over all of them.
 	InFlightLossFraction            *float64 `json:"in_flight_loss_fraction,omitempty"`
 	InFlightLossAllReplicasUnscoped *float64 `json:"in_flight_loss_all_replicas_unscoped,omitempty"`
 	// SurvivorP95Ms is the e2e p95 over the survivor cohort (§3: the
@@ -66,6 +86,25 @@ type Scalars struct {
 	ReceivePath  map[string]*collect.ReceivePath                        `json:"receive_path,omitempty"`
 	ServerSide   map[string]map[string]map[string]serverstats.Reduction `json:"server_side,omitempty"`
 	FamilyErrors int                                                    `json:"family_errors,omitempty"`
+	// OutageS and ContainerStartS are the replica_ready and container_start
+	// decomposition rows (process kill, §5); FireUncertaintyS is the run's
+	// fire uncertainty and EquilibriumNote the detector's not-estimable
+	// reason, verbatim.
+	OutageS          *float64 `json:"outage_s,omitempty"`
+	ContainerStartS  *float64 `json:"container_start_s,omitempty"`
+	FireUncertaintyS *float64 `json:"fire_uncertainty_s,omitempty"`
+	EquilibriumNote  string   `json:"equilibrium_note,omitempty"`
+	// InFlightErroredByClass and InFlightIndeterminate carry the run's
+	// in-flight class split and the in-flight requests ending inside the
+	// indeterminate zone after the fire; InFlightDeterminate classifies
+	// the other in-flight requests (§1, §3). Outage classifies the requests
+	// scheduled in [fire, replica_ready).
+	InFlightErroredByClass map[string]int        `json:"in_flight_errored_by_class,omitempty"`
+	InFlightIndeterminate  int                   `json:"in_flight_indeterminate,omitempty"`
+	InFlightDeterminate    *collect.Outcomes     `json:"in_flight_determinate,omitempty"`
+	Outage                 *collect.Outcomes     `json:"outage_outcomes,omitempty"`
+	Decomposition          *detect.Decomposition `json:"decomposition,omitempty"`
+	Container              *run.ContainerRestart `json:"container,omitempty"`
 }
 
 // ScalarSummary is a §7 summary of one scalar across the runs that
@@ -95,6 +134,13 @@ type Report struct {
 	// measured noise floor for the cross-stack comparison's MDE (§7).
 	NoiseFloorCoV *float64 `json:"noise_floor_cov,omitempty"`
 	Caveat        string   `json:"caveat"`
+	// Halted marks a campaign ended by Policy.HaltAfterInvalidRun after
+	// run HaltedAfterRun; Failed marks one ended by the runner's error.
+	Halted         bool   `json:"halted,omitempty"`
+	HaltedAfterRun int    `json:"halted_after_run,omitempty"`
+	Failed         bool   `json:"failed,omitempty"`
+	FailedRun      int    `json:"failed_run,omitempty"`
+	FailedReason   string `json:"failed_reason,omitempty"`
 }
 
 // Runner executes one run and returns its artifacts. run.Execute
@@ -106,6 +152,13 @@ type Runner func(ctx context.Context, cfg *config.Config, opts run.Options) (*ru
 // so repetitions are independent yet reproducible) and aggregates them.
 // opts is applied to every run; variantLabel names the fault regime.
 func Run(ctx context.Context, cfg *config.Config, opts run.Options, variantLabel string, runner Runner) (*Report, error) {
+	return RunWith(ctx, cfg, opts, variantLabel, runner, Policy{})
+}
+
+// RunWith is Run with a policy. On a runner error it returns the report
+// of the runs so far, marked Failed, with the error; an invalid run under
+// HaltAfterInvalidRun ends the campaign, marked Halted.
+func RunWith(ctx context.Context, cfg *config.Config, opts run.Options, variantLabel string, runner Runner, pol Policy) (*Report, error) {
 	n := cfg.Run.Repetitions
 	if n < 1 {
 		return nil, fmt.Errorf("campaign: repetitions must be >= 1, got %d", n)
@@ -117,16 +170,22 @@ func Run(ctx context.Context, cfg *config.Config, opts run.Options, variantLabel
 		Caveat:      "Single-stack study: no MDE/power claim, no bootstrap (§7). Per-run values published verbatim; TTR scalars lead with median and range.",
 	}
 
+	var runErr error
 	for i := 0; i < n; i++ {
 		runCfg := *cfg
 		runCfg.Run.Seed = cfg.Run.Seed + int64(i)
 		art, err := runner(ctx, &runCfg, opts)
 		if err != nil {
-			return nil, fmt.Errorf("campaign: run %d: %w", i+1, err)
+			runErr = fmt.Errorf("campaign: run %d: %w", i+1, err)
+			rep.Failed, rep.FailedRun, rep.FailedReason = true, i+1, err.Error()
+			break
 		}
 		rep.PerRun = append(rep.PerRun, extractScalars(i+1, art))
 		if art.RunValid {
 			rep.ValidRuns++
+		} else if pol.HaltAfterInvalidRun {
+			rep.Halted, rep.HaltedAfterRun = true, i+1
+			break
 		}
 	}
 
@@ -144,11 +203,14 @@ func Run(ctx context.Context, cfg *config.Config, opts run.Options, variantLabel
 			rep.Endpoints[i].NoiseFloorNote = "run-to-run CoV of the primary endpoint: the measured noise floor for the deferred cross-stack comparison's pre-registered two-sample MDE (§7)"
 		}
 	}
-	return rep, nil
+	return rep, runErr
 }
 
 func extractScalars(runIdx int, art *run.Artifacts) Scalars {
-	s := Scalars{Run: runIdx, Valid: art.RunValid, InvalidReasons: art.InvalidReasons, ReceivePath: art.ReceivePath, ServerSide: art.ServerSide, FamilyErrors: art.FamilyErrors}
+	s := Scalars{Run: runIdx, Valid: art.RunValid, InvalidReasons: art.InvalidReasons, ReceivePath: art.ReceivePath, ServerSide: art.ServerSide, FamilyErrors: art.FamilyErrors,
+		InFlightErroredByClass: art.InFlight.ErroredByClass, InFlightIndeterminate: art.InFlight.IndeterminateAtFire, InFlightDeterminate: art.InFlight.Determinate,
+		Decomposition: art.Decomposition, Container: art.Container}
+	processKill := art.Config != nil && art.Config.Fault.Variant == config.VariantProcessKill
 	if art.Detector != nil {
 		if art.Detector.EquilibriumEstimable {
 			s.TTREquilibriumS = art.Detector.ToEquilibrium.TTRSeconds
@@ -163,15 +225,34 @@ func extractScalars(runIdx int, art *run.Artifacts) Scalars {
 			}
 		}
 		s.TTRPreFaultS, s.TTRPreFaultUnobserved = labelled.TTRSeconds, labelled.HoldUnobserved
+		if processKill && !art.Detector.EquilibriumEstimable {
+			s.EquilibriumNote = art.Detector.EquilibriumNote
+		}
+	}
+	if processKill {
+		s.OutageS = segmentS(art.Decomposition, "replica_ready")
+		s.ContainerStartS = segmentS(art.Decomposition, "container_start")
+		if art.Container != nil && art.Container.Kill != nil {
+			u := float64(art.Container.FireUncertaintyNs) / 1e9
+			s.FireUncertaintyS = &u
+		}
+		if o := art.Windows["outage"]; o != nil {
+			s.Outage = &collect.Outcomes{Total: o.Scheduled, Completed: o.Completed, Errored: o.Errored, Censored: o.Censored, ErroredByClass: o.ErrClasses}
+		}
 	}
 	// In-flight loss fraction: §3 defines it over the killed replica's
 	// in-flight requests, and §10 pre-registers it by name. Without a
-	// victim attribution the quantity does not exist for this run; the
-	// all-replica ratio is recorded under its own explicitly-unscoped
-	// name and never merged into the pre-registered endpoint.
+	// victim attribution the quantity does not exist for this run, unless
+	// one replica was killed in place (every in-flight request was on it);
+	// otherwise the all-replica ratio is recorded under its own
+	// explicitly-unscoped name and never merged into the pre-registered
+	// endpoint.
 	inf := art.InFlight
 	if art.VictimReplica != "" && inf.OnVictim > 0 {
 		frac := float64(inf.OnVictimErrored+inf.OnVictimCensored) / float64(inf.OnVictim)
+		s.InFlightLossFraction = &frac
+	} else if processKill && art.Config.Target.Replicas == 1 && inf.Total > 0 {
+		frac := float64(inf.Errored+inf.Censored) / float64(inf.Total)
 		s.InFlightLossFraction = &frac
 	} else if inf.Total > 0 {
 		frac := float64(inf.Errored+inf.Censored) / float64(inf.Total)
@@ -191,9 +272,24 @@ func extractScalars(runIdx int, art *run.Artifacts) Scalars {
 	return s
 }
 
+// segmentS is the named decomposition row's duration, nil when unmeasured.
+func segmentS(d *detect.Decomposition, name string) *float64 {
+	if d == nil {
+		return nil
+	}
+	for _, seg := range d.Segments {
+		if seg.Name == name {
+			return seg.DurationS()
+		}
+	}
+	return nil
+}
+
 // summarize builds the §7 scalar summaries. The equilibrium TTR is the
-// primary endpoint only for the clean-delete variant; otherwise it is
-// secondary. TTRs are heavy-tailed.
+// primary endpoint only for the clean-delete variant and secondary
+// otherwise; under process kill the outage is primary and the
+// equilibrium TTR and survivor percentile are not applicable. TTRs are
+// heavy-tailed.
 func summarize(runs []Scalars, variant string) ([]ScalarSummary, int) {
 	// §5 publishes every per-run value verbatim in the table; the §7
 	// endpoint summaries hold valid runs only.
@@ -232,6 +328,14 @@ func summarize(runs []Scalars, variant string) ([]ScalarSummary, int) {
 	}
 
 	var out []ScalarSummary
+	processKill := variant == config.VariantProcessKill
+	if processKill {
+		outage, outageDropped := collectPtr(func(r Scalars) *float64 { return r.OutageS })
+		start, startDropped := collectPtr(func(r Scalars) *float64 { return r.ContainerStartS })
+		out = append(out,
+			durationSummary("outage_s", "primary", "runs with no replica_ready measurement", outage, outageDropped),
+			durationSummary("container_start_s", "secondary", "runs with no container_start measurement", start, startDropped))
+	}
 
 	unobservedEq, unobservedPre, absentCohort := 0, 0, 0
 	for _, r := range valid {
@@ -256,7 +360,10 @@ func summarize(runs []Scalars, variant string) ([]ScalarSummary, int) {
 		preFaultName = "partition_heal_recovery_s"
 	}
 
-	if eq, dropped := collectPtr(func(r Scalars) *float64 { return r.TTREquilibriumS }); len(eq) > 0 {
+	if processKill {
+		out = append(out, ScalarSummary{Name: "ttr_equilibrium_s", Endpoint: "not_applicable",
+			DroppedReason: "one replica: the single-replica equilibrium is a survivor quantity (§5)"})
+	} else if eq, dropped := collectPtr(func(r Scalars) *float64 { return r.TTREquilibriumS }); len(eq) > 0 {
 		out = append(out, ScalarSummary{
 			Name: "ttr_equilibrium_s", Endpoint: equilibriumEndpoint,
 			Summary: stats.Summarize(eq, true), ContributingN: len(eq), DroppedRuns: dropped,
@@ -278,17 +385,25 @@ func summarize(runs []Scalars, variant string) ([]ScalarSummary, int) {
 		})
 	}
 
+	lossDropReason := "runs without victim attribution: §3 defines this quantity over the killed replica only; the unscoped all-replica ratio is recorded separately, never merged"
+	if processKill {
+		lossDropReason = "runs with no request in flight at fire, or more than one replica"
+	}
 	if lf, dropped := collectPtr(func(r Scalars) *float64 { return r.InFlightLossFraction }); len(lf) > 0 {
 		out = append(out, ScalarSummary{
 			Name: "in_flight_loss_fraction", Endpoint: "secondary",
 			Summary: stats.Summarize(lf, false), ContributingN: len(lf), DroppedRuns: dropped,
-			DroppedReason: reasonIfDropped(dropped, "runs without victim attribution: §3 defines this quantity over the killed replica only; the unscoped all-replica ratio is recorded separately, never merged"),
+			DroppedReason: reasonIfDropped(dropped, lossDropReason),
 		})
 	} else {
+		none := "no run had victim attribution; the §10 pre-registered quantity is unavailable (see in_flight_loss_all_replicas_unscoped per run)"
+		if processKill {
+			none = "no valid run had a request in flight at fire on one replica"
+		}
 		out = append(out, ScalarSummary{
 			Name: "in_flight_loss_fraction", Endpoint: "secondary",
 			ContributingN: 0, DroppedRuns: dropped,
-			DroppedReason: "no run had victim attribution; the §10 pre-registered quantity is unavailable (see in_flight_loss_all_replicas_unscoped per run)",
+			DroppedReason: none,
 		})
 	}
 	sp, spDropped := collectPtr(func(r Scalars) *float64 { return r.SurvivorP95Ms })
@@ -301,13 +416,29 @@ func summarize(runs []Scalars, variant string) ([]ScalarSummary, int) {
 	if len(sp) > 0 {
 		survivor.Summary = stats.Summarize(sp, true)
 	}
+	if processKill {
+		survivor = ScalarSummary{Name: "survivor_p95_ms", Endpoint: "not_applicable", DroppedReason: "one replica: no survivor cohort (§3)"}
+	}
 	out = append(out, survivor)
 	deficit := ScalarSummary{Name: "integrated_goodput_deficit", Endpoint: "exploratory", ContributingN: len(runs)}
 	if len(runs) > 0 {
 		deficit.Summary = stats.Summarize(collectVal(func(r Scalars) float64 { return r.IntegratedDeficit }), false)
+	} else {
+		deficit.DroppedReason = "no valid run"
 	}
 	out = append(out, deficit)
 	return out, excluded
+}
+
+// durationSummary is a heavy-tailed summary of one per-run duration.
+func durationSummary(name, endpoint, why string, vals []float64, dropped int) ScalarSummary {
+	s := ScalarSummary{Name: name, Endpoint: endpoint, ContributingN: len(vals), DroppedRuns: dropped, DroppedReason: reasonIfDropped(dropped, why)}
+	if len(vals) > 0 {
+		s.Summary = stats.Summarize(vals, true)
+	} else {
+		s.DroppedReason = "no valid run produced a measurement: " + why
+	}
+	return s
 }
 
 // droppedReason labels a nonzero drop count.
