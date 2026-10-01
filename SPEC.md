@@ -100,6 +100,8 @@ The six error classes, by the stage at which the failure occurs:
 | | reset | an error for which errors.Is(err, syscall.ECONNRESET) holds |
 | | malformed_stream | the residual: any other termination before [DONE], including a non-SSE body, an undecodable event payload and a clean end |
 
+![How one scheduled request ends: the three failure stages with their tests, the six error classes, the censored and completed outcomes, the precedence rule, and what each state feeds per window](docs/diagrams/outcomes.drawio.svg)
+
 Reporting per window:
 - **Completed-only distributions:** TTFT and end-to-end percentiles from merged HdrHistograms over completed requests, always labelled "conditional on completion."
 - **Failure rates as first-class headline metrics:** error rate and censored rate per window, alongside in-flight loss accounting (requests active on the killed replica at fire, classified by outcome).
@@ -122,6 +124,8 @@ Reporting per window:
 - **Conditional-percentile rule:** any window with error-plus-censored fraction above 5 percent must present the completion-incidence curve alongside any completed-only percentiles, with the caveat explicit.
 
 The fire anchor is the earlier of T_inject and the recorded actual fire time (acceptance criterion AC3, §8, permits firing within 500 ms of T_inject). The baseline window ends one pinned client timeout (30 s) before it: a request intended later can still be unresolved when the fault fires, and its outcome would be fault-caused but baseline-attributed.
+
+![One run on the pinned experiment profile to scale: warm-up, baseline phase, fault phase and cooldown; the baseline, guard and fault windows; the detector's settling interval and equilibrium plateau; and, magnified, the guard window under an on-time and an early fire](docs/diagrams/run-timeline-spec.drawio.svg)
 
 Also normative:
 - intended dispatch times fixed in advance;
@@ -167,6 +171,8 @@ A request meets SLO iff TTFT at most 1000 ms, end-to-end at most 14 s (1000 ms p
 - The pre-fault baseline goodput is computed over the §3 baseline window; the guard window never enters it.
 - Companion metric: integrated goodput deficit (area between baseline and observed goodput from the fire anchor to recovery), less threshold-fragile than any crossing time.
 
+![The recovery detector on a schematic goodput curve: the pre-fault level with its 90 percent entry and 85 percent exit lines, a candidate entry cancelled inside its hold, the held entry that gives the TTR, the settling interval and the equilibrium plateau, the integrated goodput deficit, and re-degradation after recovery](docs/diagrams/recovery-detector.drawio.svg)
+
 **Single-replica equilibrium (operational definition):**
 - **Quantity:** SLO-goodput per §3, the fraction of scheduled requests that complete within the §4 SLO, computed as a ratio of sums over 1 s buckets assigned by intended dispatch time.
 - **Window (the degraded plateau):** from the fire anchor per §3 plus R (the first R seconds after fire are settling and are excluded) to the earlier of the run's recovery-to-pre-fault entry time or the 600 s fault-window timeout.
@@ -195,6 +201,8 @@ A request meets SLO iff TTFT at most 1000 ms, end-to-end at most 14 s (1000 ms p
 - Goodput restored: from the client stream per the detector.
 - Phase 1 setup includes a one-off calibration comparing /health 200 timing against direct first-inference success on the pinned vLLM version; the relationship is documented.
 - Variant applicability: under black-hole on this topology no reschedule occurs (§1), so Reschedule, Container start, Weight load, and CUDA-graph capture are reported N/A for that variant; Replica-ready and Traffic-restored are reported relative to the recorded partition expiry and labelled partition-heal segments. Time to single-replica equilibrium concerns the survivor only and is reported for both variants.
+
+![Recovery decomposition: the clean-delete boundaries (reschedule, container start, weight load, CUDA-graph capture, replica-ready, traffic-restored, goodput restored) with the source of each, and the black-hole lane in which the first four are not applicable and recovery is partition heal](docs/diagrams/recovery-decomposition.drawio.svg)
 
 **Repetition:** N=5 runs per (variant, config). All five per-run values are published verbatim alongside the statistics.
 
@@ -286,6 +294,8 @@ lambda_max is measured once per Phase 1 environment, before any characterization
 - **The full trace** (every step's rate, goodput, and queue-gauge series) is published with the report.
 - **lambda_r** is frozen at 0.65 times lambda_max, recorded in the run configuration, and unchanged for all N=5 runs of both variants.
   - **Recalibration** occurs only if a §6 pin changes, and is recorded.
+
+![The §10 capacity calibration as a flowchart: the coarse ramp from 2 requests per second doubling, the fine ramp in fixed steps of 10 percent of the last passing rate, the two-ramp agreement rule with a third ramp by median, the step pass criteria and sample coverage, and lambda_r frozen at 0.65 lambda_max](docs/diagrams/calibration.drawio.svg)
 
 The post-fault survivor load of 2 times lambda_r operates the survivor at 130 percent of measured single-replica capacity.
 
