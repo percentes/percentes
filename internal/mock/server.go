@@ -154,7 +154,7 @@ func (s *Server) blackhole(w http.ResponseWriter) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.ServeHealthDuringSilentHang && s.engine.silentHangActive() {
-		// Faithful to a full-node partition: health does not answer.
+		// Full-node partition: health does not answer.
 		s.blackhole(w)
 		return
 	}
@@ -162,6 +162,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reloading", http.StatusServiceUnavailable)
 		return
 	}
+	w.Header().Set("X-Percentes-Replica", hostname())
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
 }

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,11 @@ type chatRequest struct {
 	Stream    bool          `json:"stream"`
 	MaxTokens int           `json:"max_tokens"`
 	IgnoreEOS bool          `json:"ignore_eos"`
+	// StreamOptions.IncludeUsage asks for a usage chunk after the finish
+	// chunk.
+	StreamOptions struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options"`
 }
 
 type chunkChoice struct {
@@ -46,6 +52,15 @@ type chatChunk struct {
 	Created int64         `json:"created"`
 	Model   string        `json:"model"`
 	Choices []chunkChoice `json:"choices"`
+	Usage   *chatUsage    `json:"usage,omitempty"`
+}
+
+// chatUsage is the usage object of the stream's last chunk; the mock's
+// completion count is the content chunks it emitted.
+type chatUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // handleChatCompletions is the OpenAI-compatible streaming endpoint. The
@@ -150,8 +165,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	for token := 1; token <= req.MaxTokens; token++ {
 		if token > 1 {
-			// Overdue targets (post-stall flush) skip the timer entirely —
-			// the gateEmit below still checks fault state — so a released
+			// Overdue targets (post-stall flush) skip the timer entirely
+			// (the gateEmit below still checks fault state), so a released
 			// backlog does not thrash the runtime timer subsystem.
 			if remaining := targets[token-1] - time.Since(admitAt); remaining > 0 {
 				switch s.engine.sleep(ctx, remaining, exempt) {
@@ -170,7 +185,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// Gate at the write: a stall holds the stream here (in-flight and
-		// new streams both), then emission resumes — staggered by a
+		// new streams both), then emission resumes, staggered by a
 		// deterministic per-stream jitter (0-100 ms) so a released
 		// backlog does not flush in one burst.
 		act, stalled := s.engine.gateEmit(ctx, exempt)
@@ -228,6 +243,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.requestsTotal.WithLabelValues("abandoned").Inc()
 		return
 	}
+	if req.StreamOptions.IncludeUsage {
+		prompt := len(strings.Fields(req.Messages[len(req.Messages)-1].Content))
+		if err := writeChunk(w, rc, chatChunk{
+			ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
+			Choices: []chunkChoice{}, Usage: &chatUsage{PromptTokens: prompt, CompletionTokens: req.MaxTokens, TotalTokens: prompt + req.MaxTokens},
+		}); err != nil {
+			s.requestsTotal.WithLabelValues("abandoned").Inc()
+			return
+		}
+	}
 	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
 		s.requestsTotal.WithLabelValues("abandoned").Inc()
 		return
@@ -260,9 +285,8 @@ func sample(d config.LatencyDist, rng *rand.Rand) time.Duration {
 }
 
 // rst force-closes the client connection with SO_LINGER=0 so the kernel
-// sends a TCP RST — the stream_abort signature (abrupt replica deletion
-// RSTs in-flight connections, §1). Contrast silent_hang, which never
-// closes at all.
+// sends a TCP RST, the stream_abort signature for the §1 clean delete.
+// Contrast silent_hang, which never closes at all.
 func rst(w http.ResponseWriter) {
 	conn, _, err := http.NewResponseController(w).Hijack()
 	if err != nil {

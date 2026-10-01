@@ -24,8 +24,8 @@ func baseMockCfg() config.Mock {
 		Seed:       42,
 		TTFT:       fixed(20),
 		ITL:        fixed(5),
-		// ServeHealthDuringSilentHang deliberately left at its zero value:
-		// the default must be the faithful blackhole.
+		// ServeHealthDuringSilentHang left at its zero value: the default
+		// blackholes /health.
 	}
 }
 

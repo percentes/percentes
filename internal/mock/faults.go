@@ -219,7 +219,7 @@ func (e *engine) silentHangActive() bool {
 // before every write to the stream. Streams admitted DURING a
 // stream_abort window set exemptFromAbort: they abort via their own
 // token counter and must otherwise be served with normal pacing.
-// The second return reports whether the call blocked on a stall — the
+// The second return reports whether the call blocked on a stall; the
 // handler staggers resume by a small per-stream jitter so hundreds of
 // frozen streams do not release their backlogs in the same instant.
 func (e *engine) gateEmit(ctx context.Context, exemptFromAbort bool) (action, bool) {

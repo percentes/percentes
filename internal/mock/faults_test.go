@@ -17,8 +17,8 @@ import (
 
 // TestFaultStall (config-scripted): a mid-run stall freezes token
 // emission server-wide for D, then emission resumes and the stream
-// completes — the delay lands in the completion time. This is the fault
-// AC2 later drives at D=10 s; here the mechanism is proven at test scale.
+// completes, and the delay lands in the completion time. This is the fault
+// AC2 later drives at D=10 s, here at test scale.
 func TestFaultStall(t *testing.T) {
 	const stallD = 1200 * time.Millisecond
 	cfg := baseMockCfg()
@@ -143,7 +143,7 @@ func TestFaultStreamAbort(t *testing.T) {
 	}
 
 	// New request during the window: RST at admit, zero bytes. The error
-	// must specifically be a connection reset — a FIN/EOF or timeout is a
+	// must specifically be a connection reset; a FIN/EOF or timeout is a
 	// different terminal event and must fail this test (§1 makes
 	// RST-vs-no-RST load-bearing for outcome classification).
 	res := doStream(t, base, 4)
@@ -274,7 +274,7 @@ func TestFaultSilentHangMidStream(t *testing.T) {
 	s := startServer(t, cfg)
 	base := "http://" + s.Addr()
 
-	// Nominal stream: 10ms + 49*100ms ≈ 4.9s — mid-flight at fire time.
+	// Nominal stream: 10ms + 49*100ms ≈ 4.9s, mid-flight at fire time.
 	// The client gives up after 2.0s, well past the window's 1.2s expiry,
 	// proving a captured stream is not resurrected by expiry.
 	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
@@ -341,7 +341,7 @@ func TestServeHealthDuringSilentHang(t *testing.T) {
 	}
 }
 
-// TestSlowReload: slow-reload-on-reschedule is a startup property — for
+// TestSlowReload: slow-reload-on-reschedule is a startup property; for
 // the configured duration after process start, health and inference are
 // 503; afterwards the replica serves normally.
 func TestSlowReload(t *testing.T) {

@@ -1,6 +1,10 @@
 package mock
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -127,4 +131,69 @@ func grepMetrics(text string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// With stream_options.include_usage the last chunk before [DONE] carries
+// a usage object whose completion count is the content chunks emitted;
+// without it no chunk carries usage.
+func TestUsageChunkOnRequest(t *testing.T) {
+	cfg := baseMockCfg()
+	cfg.TTFT = fixed(1)
+	cfg.ITL = fixed(1)
+	s := startServer(t, cfg)
+	post := func(body map[string]any) (usage []int, chunks int) {
+		raw, _ := json.Marshal(body)
+		resp, err := http.Post("http://"+s.Addr()+"/v1/chat/completions", "application/json", bytes.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadString('\n')
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "data: ") && line != "data: [DONE]" {
+				chunks++
+				var c struct {
+					Choices []json.RawMessage `json:"choices"`
+					Usage   *struct {
+						CompletionTokens int `json:"completion_tokens"`
+					} `json:"usage"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &c); err != nil {
+					t.Fatalf("chunk %q: %v", line, err)
+				}
+				if c.Usage != nil {
+					if len(c.Choices) != 0 {
+						t.Fatalf("the usage chunk carries choices: %s", line)
+					}
+					usage = append(usage, c.Usage.CompletionTokens)
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+	body := map[string]any{"model": "percentes-mock", "messages": []map[string]string{{"role": "user", "content": "one two three"}}, "stream": true, "max_tokens": 4, "ignore_eos": true}
+	if usage, chunks := post(body); len(usage) != 0 || chunks != 5 {
+		t.Fatalf("without the option: usage %v over %d chunks", usage, chunks)
+	}
+	body["stream_options"] = map[string]any{"include_usage": true}
+	if usage, chunks := post(body); len(usage) != 1 || usage[0] != 4 || chunks != 6 {
+		t.Fatalf("with the option: usage %v over %d chunks", usage, chunks)
+	}
+}
+
+// /health names the pod that answered.
+func TestHealthNamesTheReplica(t *testing.T) {
+	s := startServer(t, baseMockCfg())
+	resp, err := http.Get("http://" + s.Addr() + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("X-Percentes-Replica"); got == "" || got != hostname() {
+		t.Fatalf("replica header %q, hostname %q", got, hostname())
+	}
 }
