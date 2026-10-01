@@ -2,12 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/detect"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/orchestrator"
 	"github.com/percentes/percentes/internal/run"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 // fakeResolver answers readiness from a script of per-call Ready lists.
@@ -113,5 +121,70 @@ func TestCleanDeleteRunnerWaitsForTheFixedName(t *testing.T) {
 	}
 	if victims[0] != "mock-a" || ops.calls != 2 {
 		t.Fatalf("victim %v after %d reads", victims, ops.calls)
+	}
+}
+
+// writeRun writes the run's JSON and text reports under its number.
+func TestWriteRunWritesReportPair(t *testing.T) {
+	dir := t.TempDir()
+	art := &run.Artifacts{Config: &config.Config{}, Loadgen: &loadgen.Result{}, Windows: map[string]*collect.Stats{}, Detector: &detect.Result{}, Decomposition: detect.NewDecomposition(config.VariantProcessKill)}
+	gate := &validity.Report{Gates: []validity.Gate{{ID: "G1", Detail: "single-replica target"}}}
+	if err := writeRun(dir, 3, art, gate); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "run-3.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		InstrumentCommit string           `json:"instrument_commit"`
+		ConfigSHA256     string           `json:"config_sha256"`
+		ValidityGates    *validity.Report `json:"validity_gates"`
+	}
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.InstrumentCommit == "" || rep.ConfigSHA256 == "" || rep.ValidityGates == nil || len(rep.ValidityGates.Gates) != 1 {
+		t.Fatalf("run-3.json %+v", rep)
+	}
+	txt, err := os.ReadFile(filepath.Join(dir, "run-3.txt"))
+	if err != nil || !strings.Contains(string(txt), "Percentes run report") || !strings.Contains(string(txt), "single-replica target") {
+		t.Fatalf("run-3.txt: %v\n%s", err, txt)
+	}
+}
+
+// The halt policy is on for process_kill unless the flag says otherwise,
+// and off for every other variant unless the flag turns it on.
+func TestHaltPolicyDefaultsOnForProcessKill(t *testing.T) {
+	if !haltPolicy(false, false, config.VariantProcessKill) || haltPolicy(true, false, config.VariantProcessKill) {
+		t.Fatal("process_kill default on, explicit =false off")
+	}
+	if haltPolicy(false, false, config.VariantCleanDelete) || !haltPolicy(true, true, config.VariantCleanDelete) {
+		t.Fatal("other variants default off, explicit =true on")
+	}
+}
+
+// The base and metrics overrides replace the file's values, are recorded,
+// and a malformed base URL is refused.
+func TestApplyOverridesRecordsReplacements(t *testing.T) {
+	cfg, err := config.LoadFile("../../configs/process-kill-mock.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := applyOverrides(cfg, "http://10.0.0.7:8000", "http://10.0.0.7:8000/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Target.BaseURL != "http://10.0.0.7:8000" || len(cfg.Target.MetricsURLs) != 1 || cfg.Target.MetricsURLs[0] != "http://10.0.0.7:8000/metrics" {
+		t.Fatalf("config not replaced: %+v", cfg.Target)
+	}
+	if strings.Join(got, ",") != "target.base_url=http://10.0.0.7:8000,target.metrics_urls=http://10.0.0.7:8000/metrics" {
+		t.Fatalf("recorded %v", got)
+	}
+	if got, err := applyOverrides(cfg, "", ""); err != nil || got != nil {
+		t.Fatalf("no flags: %v %v", got, err)
+	}
+	if _, err := applyOverrides(cfg, "http://10.0.0.7:8000/", ""); err == nil {
+		t.Fatal("a trailing slash was accepted")
 	}
 }

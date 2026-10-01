@@ -318,7 +318,7 @@ func gateG5(art *run.Artifacts, obs Observations) Gate {
 		// exist the gate reports not applicable, as G7 does when
 		// target.metrics_urls is unset.
 		g.Applicable, g.Observed, g.Pass = false, false, false
-		g.Detail = "fingerprints from the deploy/phase1 capture scripts not wired into the gate (Phase 1); reported not applicable"
+		g.Detail = "fingerprints are not fed into the gate; percentes-campaign writes them per run under process kill; reported not applicable"
 		return g
 	}
 	// Coverage before equality: §10 requires equality ACROSS replicas and
