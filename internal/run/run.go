@@ -92,9 +92,11 @@ type Artifacts struct {
 	ReceivePath map[string]*collect.ReceivePath `json:"receive_path,omitempty"`
 	// ScheduleFired counts the mock's recorded fault fires, read back from
 	// /admin/faults after a schedule-driven run; nil means unattested.
-	ScheduleFired  *int     `json:"schedule_fired,omitempty"`
-	RunValid       bool     `json:"run_valid"`
-	InvalidReasons []string `json:"invalid_reasons,omitempty"`
+	ScheduleFired *int `json:"schedule_fired,omitempty"`
+	// Container is the process-kill restart record; nil for other variants.
+	Container      *ContainerRestart `json:"container,omitempty"`
+	RunValid       bool              `json:"run_valid"`
+	InvalidReasons []string          `json:"invalid_reasons,omitempty"`
 }
 
 // BaselineNs returns the §3 baseline window, guard excluded, as monotonic
@@ -307,7 +309,7 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	// §5 decomposition: the probes launched at fire time report their
 	// first-success timestamps (or their failure, leaving the segment
 	// N/A); goodput-restored comes from the detector.
-	art.Decomposition = detect.NewPhase0Decomposition()
+	art.Decomposition = detect.NewDecomposition(cfg.Fault.Variant)
 	fireWall := res.EpochWall.Add(time.Duration(art.ActualFireNs))
 	for i := 0; i < probes; i++ {
 		select {

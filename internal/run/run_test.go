@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/detect"
 	"github.com/percentes/percentes/internal/mock"
 )
 
@@ -162,4 +164,60 @@ func TestExecuteEndToEndUnderRace(t *testing.T) {
 	if _, err := json.Marshal(art); err != nil {
 		t.Fatalf("artifacts must marshal: %v", err)
 	}
+}
+
+// The decomposition table follows the fault variant: the Phase 0 rows for
+// the mock, the fourteen process-kill rows for process_kill.
+func TestExecuteKeepsDecompositionPerVariant(t *testing.T) {
+	cfg, err := config.LoadFile("../../configs/ac.reference.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Run.Phases = config.Phases{WarmupS: 1, BaselineS: 2, FaultWindowTimeoutS: 2, CooldownS: 0}
+	cfg.Fault.TInjectOffsetS = 2
+	cfg.Load.ArrivalProcess = "deterministic"
+	cfg.Target.Replicas = 1
+	cfg.Mock.ListenAddr = "127.0.0.1:0"
+	cfg.Mock.TTFT = config.LatencyDist{Distribution: "fixed", FixedMs: 20}
+	cfg.Mock.ITL = config.LatencyDist{Distribution: "fixed", FixedMs: 2}
+	cfg.Mock.FaultSchedule = nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	srv := mock.New(*cfg.Mock)
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	cfg.Target.BaseURL = "http://" + srv.Addr()
+
+	for variant, want := range map[string][]string{
+		config.VariantMock:        detectRows(config.VariantMock),
+		config.VariantProcessKill: detectRows(config.VariantProcessKill),
+	} {
+		c := *cfg
+		c.Fault.Variant = variant
+		art, err := Execute(context.Background(), &c, Options{Injector: &fakeInjector{}})
+		if err != nil {
+			t.Fatalf("%s: execute: %v", variant, err)
+		}
+		var got []string
+		for _, s := range art.Decomposition.Segments {
+			got = append(got, s.Name)
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s: rows %v, want %v", variant, got, want)
+		}
+	}
+	if n := len(detectRows(config.VariantProcessKill)); n != 14 {
+		t.Fatalf("process_kill has %d rows, want 14", n)
+	}
+}
+
+func detectRows(variant string) []string {
+	var names []string
+	for _, s := range detect.NewDecomposition(variant).Segments {
+		names = append(names, s.Name)
+	}
+	return names
 }
