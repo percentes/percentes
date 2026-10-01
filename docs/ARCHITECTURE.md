@@ -1,7 +1,7 @@
 # Percentes architecture
 
 Percentes is a measurement instrument. It drives open-loop load at a large
-language model (LLM) inference service on Kubernetes while one replica is
+language model (LLM) inference service while one replica is
 lost, and reports what the loss cost and how recovery unfolded. This page
 describes how the code implements [SPEC.md](../SPEC.md), which is
 authoritative. A § number always refers to a SPEC.md section.
@@ -26,23 +26,28 @@ authoritative. A § number always refers to a SPEC.md section.
 §1 poses one question in three parts: when one replica of vLLM, the
 open-source inference server the experiment targets, is lost under
 sustained load, how many in-flight and queued requests fail or time out,
-how the surviving replica degrades, and how long recovery takes, split into
-measured segments.
+how the surviving replica degrades where there is one, and how long
+recovery takes, split into measured segments.
 
 Phase 0 builds the instrument and certifies it against a mock inference
 server on a local kind (Kubernetes in Docker) cluster. Passing the
 acceptance criteria (AC, §8) says nothing about behaviour on a real
 graphics processing unit (GPU). Phase 1 runs the same harness against vLLM
-on GPU nodes. One calibration has run against a standalone container; the
-calibration inside the experiment's cluster and the characterization runs
-are pending.
+on GPU nodes. One calibration has run against a standalone container.
+The process-kill variant runs a new standalone container under the same
+engine, model and GPU pins; its runs, and the two-replica Kubernetes
+calibration and characterization runs, are pending.
 
-§1 defines two fault variants. A clean delete removes the victim pod with
+§1 defines three fault variants. A clean delete removes the victim pod with
 grace period 0. A black-hole fault partitions the victim's node for a
 pinned 120 s and expires on its own; its recovery is partition heal, and a
 run that passes the §1 runtime assertions carries the
 node-loss-representative label. In Phase 0 the mock's fault modes stand in
-for these ([Fault modes](#fault-modes)).
+for these two ([Fault modes](#fault-modes)). A process kill sends SIGKILL
+(signal 9, which a process cannot catch) from the host to the vLLM
+application programming interface (API) server process of one standalone
+container, and the container runtime's restart policy starts the same
+container again; with one replica there is no survivor and no Service.
 
 The instrument can also drive a managed provider endpoint
 (`target.hosted`). Hosted runs sit outside the §1 experiment; §6 lists what
@@ -79,7 +84,7 @@ they carry.
 | Binary | What it does | Output | Exit codes |
 |---|---|---|---|
 | `cmd/percentes` | one run | `report.json`, `report.txt` | 0 valid, 2 a gate invalidated the run, 1 error |
-| `cmd/percentes-campaign` | N runs of one fault variant, gates per run, §7 aggregation | `campaign.json`, `campaign.txt` | 0 every run valid, 2 at least one invalid run, 1 error |
+| `cmd/percentes-campaign` | N runs of one fault variant, gates per run, §7 aggregation; `--dry-kill` makes one process kill with no load | `run-N.json` and `run-N.txt` as each run ends; `campaign.json`, `campaign.txt`, partial after an error or a halt; under process kill `run-N-server.log`, `run-N-fingerprint-before.txt` and `run-N-fingerprint-after.txt`; `dry-kill.json` and `dry-kill-server.log` from `--dry-kill` | 0 every run valid, 2 at least one invalid run or a halted campaign, 1 error |
 | `cmd/percentes-calibrate` | the §10 capacity calibration and the §5 single-replica reference; `--check` validates a configuration and lists its placeholders | `calibration.json`, `calibration.txt` | 0 valid, 2 calibration invalid, 1 error |
 | `cmd/mockserver` | the mock inference server | | |
 | `cmd/naivesweep` | a reconnaissance sweep of an OpenAI-compatible endpoint, outside the instrument: closed loop, no client-validity gates | | |
@@ -217,8 +222,10 @@ the sections below expand each part.
    traffic-restored. A probe starts at the planned fire and polls every
    500 ms until its first counted success or the end of the fault phase; a
    success counts only after the fault was visible on that path.
-   `percentes-campaign` passes no probe URLs, so its runs report the three
-   probe-sourced segments N/A.
+   `percentes-campaign` takes `--probe-direct`, required under the
+   process-kill variant, and passes it to every run; it passes no service
+   probe URL, so traffic-restored and routing propagation are N/A in its
+   runs.
 3. The load runs open loop through warm-up, baseline, the fault phase and
    cooldown. Monitors sample client central processing unit (CPU) use at
    1 Hz and the Go garbage-collection (GC) pause histogram for the §2 gate.
@@ -253,7 +260,8 @@ evaluates G1 to G7 per run and aggregates the per-run scalars under §7
 t-interval whose degrees of freedom follow the contributing runs, with
 heavy-tailed scalars led by the median and range. Each endpoint reports
 how many runs were dropped and why. The black-hole variant is refused until
-the node-partition injector is wired.
+the node-partition injector is wired. The process-kill runner is described
+under [Fault modes](#fault-modes).
 
 **Calibration.** `percentes-calibrate` runs the §10 procedure against one
 replica addressed directly: coarse and fine ramps, the two-ramp agreement
@@ -307,23 +315,27 @@ service it describes, and the curve starts to fall R before the fire.
 
 ![The recovery detector on a schematic goodput curve](diagrams/recovery-detector.drawio.svg)
 
-The decomposition (`detect.NewPhase0Decomposition`, filled in
+The decomposition (`detect.NewDecomposition`, filled in
 `run.Execute`) reports each §5 boundary with its source. The probes supply
 replica-ready and traffic-restored when they run, and the detector
 supplies goodput restored. When `--victim` names the victim replica, the
 traffic-restored probe counts only a success whose `X-Percentes-Replica`
 header names that replica, a header only the mock sends; without
 `--victim` it counts any success. Routing propagation is traffic-restored
-minus replica-ready. No code path measures the Kubernetes application
-programming interface (API) and log boundaries yet (reschedule, container
-start, weight load, and the graph capture of CUDA, NVIDIA's Compute
-Unified Device Architecture), so they are reported N/A in every variant.
-The code measures the probe segments from the fire in every variant; §5
+minus replica-ready. No code path measures the Kubernetes API and log
+boundaries yet (reschedule, container start, weight load, and the graph
+capture of CUDA, NVIDIA's Compute Unified Device Architecture), so the
+clean-delete and black-hole variants report them N/A. Under the
+process-kill variant, container start comes from the container's
+`StartedAt` in `docker inspect`, the vLLM startup boundaries and the
+figures vLLM prints come from the server log (`internal/vllmlog`, patterns
+pinned to vLLM 0.29.0), and reschedule, traffic-restored and routing
+propagation are N/A. The code measures the probe segments from the fire in every variant; §5
 measures the black-hole ones from the partition expiry, which lands with
 the node-partition injector.
 
-The figure shows the §5 design. Of its boundaries, the code measures the
-probe and detector ones.
+The figure shows the §5 boundaries of the two Kubernetes variants. Of
+those, the code measures the probe and detector ones.
 
 ![Recovery decomposition: the boundaries §5 defines, and the source of each](diagrams/recovery-decomposition.drawio.svg)
 
@@ -338,14 +350,15 @@ probe and detector ones.
 | | `internal/sse` | SSE framing for the client, the recovery probes and naivesweep | §3 | `SplitLines`, `Events` | a unit per grammar case |
 | | `internal/histo` | the pinned HdrHistogram wrapper; `RecordValue` only, and a test fails the suite if a correction API appears | §3 | `New`, `H.Record`, `H.Summarize` | the correction-API ban; AC1 oracles |
 | | `internal/mock`, `cmd/mockserver` | OpenAI-compatible SSE mock: five scriptable fault modes and a slow-reload startup setting | §2 | `New`, `Server.Start`, `/admin/faults` | a behaviour test per mode, including a raw Transmission Control Protocol (TCP) silent-hang test |
-| Fault | `internal/orchestrator` | pre-armed fault execution with armed, fire and expiry records; mock-admin and clean-delete injectors | §1, §2, AC3 | `Execute`, `NewMockInjector`, `NewCleanDeleteInjector` | AC3; fake-ops tests |
+| Fault | `internal/orchestrator` | pre-armed fault execution with armed, fire and expiry records; mock-admin, clean-delete and process-kill injectors; container commands over SSH (Secure Shell) | §1, §2, AC3 | `Execute`, `NewMockInjector`, `NewCleanDeleteInjector`, `NewProcessKillInjector`, `SSHContainerOps` | AC3; fake-ops tests; a fake `ssh` on PATH |
 | Server side | `internal/serverstats` | Prometheus sampler, per-window reductions, G7 baseline means | §2, §6, §10 | `ForRun`, `Sampler.Start`, `Sampler.Stop`, `Preflight`, `BaselineMeans`, `ReduceWindow` | test servers; window, reset and per-label-set oracles |
-| Analysis | `internal/collect` | windows, incidence curves, in-flight accounting, threshold analysis, tail CIs, receive-path report | §3, §4, §7 | `Collect`, `EstimateIncidence`, `AccountInFlight`, `AnalyzeThresholds` | hand-computed incidence oracles; AC4, AC4b |
-| | `internal/detect` | recovery detector, decomposition, recovery probes, /health calibration | §5 | `BuildSeries`, `RunWith`, `ProbeRecovery`, `NewPhase0Decomposition` | synthetic-series units; AC5 |
+| Analysis | `internal/collect` | windows, incidence curves, in-flight accounting, threshold analysis, tail CIs, receive-path report | §3, §4, §7 | `Collect`, `EstimateIncidence`, `AccountInFlight`, `SplitAtFire`, `AnalyzeThresholds` | hand-computed incidence oracles; AC4, AC4b |
+| | `internal/detect` | recovery detector, decomposition, recovery probes, /health calibration | §5 | `BuildSeries`, `RunWith`, `ProbeRecovery`, `CalibrateHealth`, `NewDecomposition` | synthetic-series units; AC5 |
+| | `internal/vllmlog` | vLLM startup-log boundaries and printed figures, patterns pinned to vLLM 0.29.0, applied to the process-kill decomposition | §5 | `Parse`, `Apply`, `VLLM0290`, `Mock` | the 16 September 2026 vLLM start log as a byte-exact fixture |
 | | `internal/validity` | the G1 to G7 run-validity gates | §10 | `Evaluate` | a unit per gate |
 | | `internal/stats` | §7 statistics: values, median, mean, t-interval, coefficient of variation | §7 | `Summarize` | hand-computed oracles |
 | Composition | `internal/run` | one run's artifacts | §2 | `Execute` | the whole pipeline in process under the race detector |
-| | `internal/campaign` | N runs, per-run scalars, endpoint summaries with drop counts | §5, §7, §10 | `Run` | fake-runner units |
+| | `internal/campaign` | N runs, per-run scalars, endpoint summaries with drop counts, halt after an invalid run | §5, §7, §10 | `Run`, `RunWith` | fake-runner units |
 | | `internal/calibrate` | the §10 ramps and the §5 reference | §10, §5 | `RunRamp`, `Calibrate`, `Reference`, `LoadRunner` | a capacity-model fake runner; one step against the mock |
 | Output | `internal/report` | the report pairs for a run and a campaign | §2 to §5, §7 | `Generate`, `GenerateCampaign` | renderer units; AC6 field assertions |
 | | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
@@ -361,6 +374,7 @@ yet.
 |---|---|
 | `deploy/kind/` | the cluster configuration (one node, image pinned by digest, host port 18000 mapped to NodePort 30800); `smoke.sh`; `reproduce.sh`, the AC7 one-command run; `campaign-e2e.sh` |
 | `deploy/mock/` | the two-replica mock Deployment and its NodePort Service; a readiness probe on `/health` and no liveness probe, so silent_hang can hold `/health` silent |
+| `deploy/process-kill-e2e.sh` | the process-kill end-to-end: the mock in a Docker container under `--restart on-failure`, one dry kill and a two-run campaign that kill and restart it, and a check of the dry-kill record and the run files |
 | `deploy/phase1/` | the vLLM topology manifest, which does not deploy until its PIN-AT-PHASE1 placeholders are filled; capture scripts for the host fingerprint, the GPU sample series and the server log |
 | `configs/` | every runnable configuration; one file drives both the cluster ConfigMap and the host runner |
 
@@ -376,7 +390,7 @@ yet.
 | G2: GC pause | p99 < 1 ms, on the upper edge of the runtime histogram bucket that holds it | judged after the run | run invalid; a p99 in the runtime's open last bucket fails | same |
 | Fault source | an armed injector, or the mock's scheduled fires read back | after the run | run invalid | `run.validity` |
 | Injection timing (AC3) | fire within 500 ms of T_inject | after the run | run invalid | `run.validity` |
-| G1: share (§1) | 45 to 55 % per replica over the baseline window | after the run | run invalid under a per-request (layer-7) dataplane, descriptive under per-connection routing; a replica count other than the declared one, or no attributed baseline request, fails in either regime | `run.shareGate`, `config.BalancesPerRequest` |
+| G1: share (§1) | 45 to 55 % per replica over the baseline window | after the run | run invalid under a per-request (layer-7) dataplane, descriptive under per-connection routing; a replica count other than the declared one, or no attributed baseline request, fails in either regime; not applicable to a one-replica target | `run.shareGate`, `config.BalancesPerRequest` |
 | G3, G4 (black-hole only) | zero errored victim in-flight requests; staleness window ≥ 20 s with victim-bound traffic | per-run evaluation | a failed or unobserved gate strips the node-loss-representative label, and the run stays valid | `validity.Evaluate` |
 | G5 | GPU clock and power fingerprints equal across replicas and runs | per-run evaluation | not applicable until the capture output is wired | `validity.Evaluate` |
 | G6 | baseline goodput ≥ 0.99 | per-run evaluation | run invalid | `validity.Evaluate` |
@@ -490,6 +504,33 @@ of a black-hole partition.
 The first five are scheduled in the configuration or armed through the
 mock's `/admin/faults`; slow reload is set when the mock starts.
 
+**Process kill.** The process-kill variant runs against a container on a
+Docker host: vLLM in Phase 1, the mock in its end-to-end test. Before each
+run `percentes-campaign` waits until the container is running, `/health`
+returns 200 and one streamed inference succeeds, then reads the
+container's process ID (PID), start time and restart count from
+`docker inspect` and measures the host clock's offset from the client
+clock. `orchestrator.ProcessKillInjector` sends SIGKILL to that PID at
+T_inject after checking that the PID still belongs to the container; the
+kill script stamps the host clock before and after the kill, and the
+recorded fire is the midpoint of that bracket converted by the offset.
+Docker's `on-failure` restart policy starts the same container again.
+After the run the campaign reads the restart count, which must have
+advanced by exactly one and must not have moved between runs, the
+container's `die` and `start` events, the server log, from which
+`internal/vllmlog` fills the decomposition's log rows, and the
+fingerprints. A restart policy or container name other than the §6 pins
+invalidates the run. `collect.SplitAtFire` separates the in-flight
+requests ending just after the fire, which are indeterminate, from the
+rest, and the requests scheduled from the fire to replica-ready are
+collected as the `outage` window. The commands run over SSH on the host
+`--ssh-target` names, or locally when it is empty. `deploy/process-kill-e2e.sh`
+(`make process-kill-e2e`, in `make test` and in the `kind` job of
+continuous integration) runs the mock in a Docker container under the
+same restart policy, kills it once with `--dry-kill` and again in two
+campaign runs, and checks the dry-kill record and the run files; on macOS it reaches the container's process through a privileged
+helper container (`--kill-via docker-helper`).
+
 ## Tracing a published number
 
 `report.json`, the JavaScript Object Notation (JSON) report of one run:
@@ -505,12 +546,14 @@ mock's `/admin/faults`; slow reload is set when the mock starts.
 | `windows.*.goodput_frac`, `goodput_rps`, `goodput_sweep` | `collect.Collect` | §3, §4 |
 | `windows.*.ttft_tail_ci`, `e2e_tail_ci` | `collect.tailCIs`: 95 % order-statistic intervals, ranks by the normal approximation to the binomial, refused where a rank falls outside the sample | §7 |
 | `windows.fault_survivor` | `collect.Collect` over the replica `run.survivorOf` names | §3 |
+| `windows.outage` (process kill) | `collect.Collect` from the fire to replica-ready, in `percentes-campaign` | §1 |
 | `threshold_analysis` | `collect.AnalyzeThresholds` | §4 |
-| `in_flight_at_fire`, with `on_victim_*` | `collect.AccountInFlight` against the recorded fire | §3 |
+| `in_flight_at_fire`, with `on_victim_*` | `collect.AccountInFlight` against the recorded fire; under process kill, `determinate` and `indeterminate_at_fire` from `collect.SplitAtFire` | §1, §3 |
 | `detector.to_pre_fault`, `to_equilibrium`, `sensitivity`, `components` | `detect.RunWith`, one `detect.detect` per detection | §5 |
 | `detector.equilibrium_*`, `backlog_drain_*` | `detect.RunWith` | §5 |
 | `detector.partition_heal_recovery`, `heal_anchor_ns`, `integrated_goodput_deficit_to_partition_heal` | `detect.RunWith`, black-hole variant only | §5 |
-| `decomposition.segments` | `detect.NewPhase0Decomposition`, probe times in `run.Execute` | §5 |
+| `decomposition.segments` | `detect.NewDecomposition`, probe times in `run.Execute`; under process kill, container and log times from `percentes-campaign` through `vllmlog.Apply` | §5 |
+| `container` (process kill) | `percentes-campaign`: container state before and after, clock offsets, the kill record, fire uncertainty, `die` and `start` events, log boundaries | §5, §6 |
 | `loadgen.gates` | `loadgen.evaluateGates` | §2 |
 | `share_gate` | `run.shareGate` | §1 |
 | `victim_replica` | the `--victim` flag, through `run.Options.VictimReplica` | §1 |
@@ -527,6 +570,8 @@ mock's `/admin/faults`; slow reload is set when the mock starts.
 |---|---|---|
 | `campaign.per_run[*]`, each with its `receive_path`, `server_side` and `family_errors` | `campaign.extractScalars` | §5, §7 |
 | `campaign.endpoints[*]` (summary, `contributing_n`, `dropped_runs`, `dropped_reason`) | `stats.Summarize`, `campaign.summarize` | §7 |
+| `campaign.halted`, `failed`, `failed_run`, `failed_reason` | `campaign.RunWith` | §7 |
+| `instrument_commit`, `config_sha256`, `overrides` | `report.GenerateCampaignWith` | §6 |
 | `campaign.noise_floor_cov`, clean delete only | `campaign.Run`, from the coefficient of variation `stats.Summarize` gives for the primary endpoint | §7 |
 | `validity_gates[*]` | `validity.Evaluate`, per run | §10 |
 
@@ -577,8 +622,8 @@ mock's `/admin/faults`; slow reload is set when the mock starts.
   Vector Graphics (SVG) image that carries its draw.io source, so draw.io
   opens it for editing.
 - **Reproducing** anything: `make test` is the whole gate (`test-unit`,
-  `test-ac`, `kind-smoke`, `reproduce`, `campaign-e2e`), and each stage runs
-  alone. `make hooks` installs the git hooks.
+  `test-ac`, `kind-smoke`, `reproduce`, `campaign-e2e`, `process-kill-e2e`),
+  and each stage runs alone. `make hooks` installs the git hooks.
 
 ## Glossary
 
@@ -621,12 +666,17 @@ mock's `/admin/faults`; slow reload is set when the mock starts.
   to its start t.
 - **Node-loss-representative**: the label a black-hole run keeps when both
   §1 runtime assertions (G3, G4) pass.
+- **Outage**: under the process-kill variant, the kill to the first served
+  inference (replica-ready); the variant's primary endpoint (§7).
 - **p99**: the 99th percentile.
 - **Partition-heal recovery**: under the black-hole variant, the first held
   entry at or after the heal anchor, measured from the fire anchor; never
   reported as node-loss recovery (§5).
 - **Pre-armed**: the injector knows its fire and expiry times before it
   fires, so nothing depends on reaching the victim afterwards (§1).
+- **Process kill**: the §1 variant that sends SIGKILL from the host to the
+  vLLM API server process of one container, which the runtime's restart
+  policy starts again in place.
 - **Report pair**: the JSON and text files a binary writes: `report.json`
   and `report.txt` from `run.Artifacts`, `campaign.json` and `campaign.txt`
   from `campaign.Report`, and `calibration.json` and `calibration.txt` from

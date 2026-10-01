@@ -41,3 +41,19 @@ context is reachable.
   with timestamps (§5), from SINCE (a timestamp such as
   2026-09-29T12:00:00Z) or from the start.
   Run after the run.
+
+## Process kill
+
+The process-kill variant (SPEC.md §1) runs one vLLM container under
+Docker on the GPU host, started with `--restart on-failure`, the restart
+policy §6 pins, so a SIGKILL (signal 9, which a process cannot catch)
+sent from the host to the container's process 1 restarts the same
+container in place. `percentes-campaign` runs on the client and reaches
+the GPU host over SSH (Secure Shell) with the client's own key
+(`--ssh-identity`), so the GPU host's security rules admit port 22 from
+the client's private address beside port 8000. The remote scripts call
+Docker and the kill through `sudo -n`, which exits at once where sudo
+would prompt for a password. For this variant the campaign writes the
+server log and the fingerprints itself, as `run-N-server.log`,
+`run-N-fingerprint-before.txt` and `run-N-fingerprint-after.txt`, in
+place of `serverlog.sh` and `fingerprint.sh`.
