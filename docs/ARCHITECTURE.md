@@ -10,12 +10,14 @@ SPEC.md is authoritative everywhere.
 
 ## 1. Overview
 
-Percentes measures LLM-inference reliability under load and failure.
+Percentes measures large language model (LLM) inference reliability
+under load and failure.
 Replica loss is the Phase 0/1 fault class: what happens when a
 Kubernetes-served LLM inference service loses a replica under sustained
 load: the three questions SPEC.md §1 pins. Phase 0 builds and certifies the *instrument*
 against a mock inference server on a local kind cluster; passing the
-acceptance suite says nothing about real-GPU behaviour.
+acceptance suite says nothing about real graphics processing unit (GPU)
+behaviour.
 The Phase 1 groundwork adds everything for the real experiment that
 can be verified without hardware; one calibration has run against a
 standalone container, and the in-cluster run is pending.
@@ -42,6 +44,12 @@ The core methodological commitments:
 
 ## 2. Lifecycle of one request
 
+The diagram's columns are fixed width, so its terms are glossed here:
+server-sent events (SSE) carry the stream; time to first token (TTFT)
+and inter-token latency (ITL) are the two latencies, both re-based to the
+intended dispatch time; HTTP is the Hypertext Transfer Protocol and RST
+a TCP connection reset.
+
 ```
  schedule.go            sse_client.go                    mock / vLLM
  ───────────            ─────────────                    ───────────
@@ -63,7 +71,8 @@ ends one pinned client timeout before the fire anchor and the guard window
 runs from there to T_inject), records completed
 latencies into the pinned HdrHistogram configuration via `RecordValue()`
 only, adds every request to that window's incidence curve, and accumulates
-failure rates, goodput, the §4 threshold sweep, and §7 tail CIs.
+failure rates, goodput, the §4 threshold sweep, and §7 tail confidence
+intervals (CIs).
 `detect.BuildSeries` buckets the same requests at 1 Hz for the recovery
 detector. Nothing is computed twice from different sources: report
 numbers come from these artifacts.
@@ -72,8 +81,9 @@ numbers come from these artifacts.
 
 The load generator's hardest job is dispatching each request at its
 *intended* time `t_i` (fixed before the run) with sub-millisecond skew,
-even under GC pauses and OS scheduler jitter, because any dispatch
-lateness is coordinated omission creeping back in. It does this with a
+even under garbage-collection (GC) pauses and operating-system
+scheduler jitter, because any dispatch lateness is coordinated omission
+creeping back in. It does this with a
 **two-stage, nested precision design** (`internal/loadgen/loadgen.go`).
 See `docs/pacer-timing.drawio` for the diagram.
 
@@ -90,7 +100,8 @@ spawn shortens only that worker's runway and never cascades.
 
 **Stage 2: the worker (precise wait = timer then spin, boundary
 `spinNs` = 1.5 ms).** Each worker sleeps on a `time.Timer` until
-`t_i − 1.5 ms` (cheap, yields the CPU, but imprecise: `<-timer.C`
+`t_i − 1.5 ms` (cheap, yields the central processing unit (CPU), but
+imprecise: `<-timer.C`
 wakeup has scheduler latency), then **busy-spins** `for now() < t_i {}`
 for the final 1.5 ms (precise: no timer wakeup stands between the spin
 and `t_i`). `spinNs` is sized to exceed timer wakeup jitter while keeping
@@ -112,7 +123,9 @@ run-failing: p99 ≤ 5 ms, max ≤ 50 ms.
    monitors sample host CPU (1 Hz) and Go GC pauses for the §2
    client-validity gate.
 4. After the last terminal event: windows are collected (baseline, guard,
-   fault, plus degraded/recovered splits when the detector finds recovery);
+   fault, a fault_survivor window over the requests served by the one
+   baseline replica that is not the victim when attribution names it, plus
+   degraded/recovered splits when the detector finds recovery);
    in-flight-at-fire requests are classified by outcome and by replica;
    the detector runs (two baselines, hysteresis, 27-row sensitivity
    sweep); the share gate is computed from per-request replica
@@ -143,7 +156,8 @@ with median+range; drops are named, never imputed).
 | `internal/stats` | §7 statistics: verbatim values, median, mean, df-correct t-interval, CoV/noise floor, Holm | §7 | `Summarize`, `holm` | hand-computed oracles |
 | `internal/campaign` | N-run repetition engine; per-run seeds; endpoint aggregation with named drops | §5, §7, §10 | `Run` | fake-runner units |
 | `internal/validity` | §10 run-validity gates G1–G7; applicable-but-unobserved ⇒ FAIL; a failed or unobserved G3/G4 strips the node-loss-representative label and the run stays valid | §10 | `Evaluate` | per-gate units |
-| `internal/serverstats` | Samples each replica's Prometheus text endpoint from the run epoch, keeps the configured metric families per sample, and reduces to per-replica baseline-window means for G7 and to per-window changes per family (a gauge's mean, a counter's increase, a histogram's increase in count, sum and buckets, summed over consecutive samples with a fall marked as a reset); an absent gauge or a counter read as one is an error, and so is a non-finite family value | §2, §6, §10 | `ForRun`, `Sampler.Start`/`Stop`/`FamilyErrors`/`Reduce`, `BaselineMeans`, `ReduceWindow`, `Preflight` | httptest gauge and family servers; epoch-window, reduction and reset oracles |
+| `internal/serverstats` | Samples each replica's Prometheus text endpoint from the run epoch, keeps the configured metric families per sample, and reduces to per-replica baseline-window means for G7 and to per-window changes per family (a gauge's mean, a counter's increase, a histogram's increase in count, sum and buckets, measured per label set between its consecutive samples and summed, a label set missing from a sample adding nothing until it returns, a fall or a changed bucket layout marked as a reset); an absent gauge or a counter read as one is an error, and so is a non-finite family value | §2, §6, §10 | `ForRun`, `Sampler.Start`/`Stop`/`FamilyErrors`/`Reduce`, `BaselineMeans`, `ReduceWindow`, `Preflight` | httptest gauge and family servers; epoch-window, reduction and reset oracles |
+| `internal/hostqual` | Host qualification for the timing-coupled acceptance tests: timer wake lateness on an absolute schedule and garbage-collection (GC) pause p99 over an allocation burst, the load average recorded beside them; the dated `Allocation` sets the limits | §2, §8 | `Measure`, `Qualify`, `Qualified`, `Allocation` | per-limit and histogram units |
 | `internal/calibrate` | §10 single-replica capacity calibration: coarse and fine ramps against a `Runner`, two ramps agreeing within the pinned fraction or a third deciding by median, lambda_r frozen, and the §5 reference run at 2 x lambda_r; every step is a §3 collection over its measured window with the queue-gauge series, the kept families' window reductions and the §2 receive-path report, and the trace is rewritten after every step | §10, §5, §3, §2 | `RunRamp`, `Calibrate`, `Reference`, `LoadRunner` | capacity-model fake runner; one step against the mock with a stall inside the settle |
 | `cmd/percentes-calibrate` | Calibration trace pair (calibration.json, calibration.txt); exit 0/2/1; `--check` validates a config and lists its placeholders | §10 | | |
 | `cmd/percentes` | One run → report pair; exit 0/2/1 | AC7 | | via reproduce.sh |
@@ -156,7 +170,9 @@ image + NodePort mapping; `smoke.sh`, `reproduce.sh` = AC7,
 liveness probe by design), `deploy/phase1/` (vLLM topology manifest with
 PIN-AT-PHASE1 pre-registration placeholders, deliberately not deployable as-is; capture scripts for the host fingerprint, the GPU sample series and the server log), `configs/` (all runnable configs; one file drives both
 cluster ConfigMap and host runner), `internal/ac/` (the §8 acceptance
-suite; mock runs as a separate process per §6 placement pinning).
+suite; the mock runs as a separate process, so it never shares the
+generator's Go scheduler, and the timing-coupled tests qualify the host
+first through `internal/hostqual`).
 
 ## 5. Tracing any published number
 
@@ -212,19 +228,26 @@ own address behind the single NodePort service.
 The same sampler keeps every family `target.metrics_families` names on
 each sample and reduces them per window and replica into the report's
 `server_side` block (§2). `target.ttft_histogram` names the server-side
-time-to-first-token histogram among them; each window's `receive_path`
-block sets the client-side TTFT mean against it and carries the loopback
-canary's deviation from its fixed timing (`internal/loadgen`), the two §2
-receive-path checks, neither run-failing. `percentes-calibrate` takes the
-same two settings as `--families` and `--ttft-histogram`. `percentes`,
-`percentes-campaign` and `percentes-calibrate` check every metric name and
-the histogram's type against each endpoint before the load; the run report
-keeps the sample series under `server_samples` and the count of failed
-family reads under `family_errors`. The §10 one-token-per-event check (a
-sample of requests' client content-event counts against the
-server-reported completion token counts) is not implemented, so for any
-target other than the mock `report.txt` labels the pooled inter-token
-latency (ITL) inter-chunk (§3).
+TTFT histogram among them; each window's `receive_path` block sets the
+client-side TTFT mean against it and carries the loopback canary's event
+lag against its fixed timing (p99 and max, the §2 bound on host-side
+read-loop lag) with the first-token and per-gap deviations
+(`internal/loadgen`), the two §2 receive-path checks, neither
+run-failing. `percentes-calibrate` takes the same two settings as
+`--families` and `--ttft-histogram`. `percentes`, `percentes-campaign`
+and `percentes-calibrate` check every metric name and the histogram's
+type against each endpoint before the load; the run report keeps the
+sample series under `server_samples` and the count of failed family reads
+under `family_errors`. A self-hosted request asks for the usage object
+(`stream_options.include_usage`), the hosted body does not, and the
+client records a completion token count from any chunk carrying one
+beside its own content-event count. Per window the report carries both
+counts as distributions and the §10 check over the completed requests
+that carried usage; `report.txt` labels the pooled ITL inter-token when
+every such request matched one content event per token, one token per
+content event by construction for a mock run whose stream carried no
+usage, and inter-chunk (§3) otherwise, a hosted run being inter-chunk
+whatever the check says.
 
 One consequence shows up on macOS under the CGO_ENABLED=0 builds the
 make targets pin. Both binaries evaluate the §10 gates per run via
@@ -274,7 +297,7 @@ run exits 2. An applicable gate that goes unobserved never passes.
   censored observation in the incidence curve, never a latency sample.
   Errors are NOT censored: they are competing terminal events (§3).
 - **Goodput**: fraction of *scheduled* requests completing within the §4
-  SLO (TTFT ≤1 s ∧ e2e ≤14 s).
+  service-level objective (SLO): TTFT ≤1 s ∧ e2e ≤14 s.
 - **Fire anchor**: the earlier of T_inject and the recorded actual fire
   time; the window and TTR reference point (§3).
 - **Guard window**: the pinned client timeout before the fire anchor, cut

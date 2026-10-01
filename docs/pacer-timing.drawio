@@ -4,16 +4,16 @@
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" value="The two-stage precise wait — one request's dispatch" style="text;html=1;fontSize=16;fontStyle=1;align=left;verticalAlign=middle;" vertex="1" parent="1">
+        <mxCell id="title" value="The two-stage precise wait: one request's dispatch" style="text;html=1;fontSize=16;fontStyle=1;align=left;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry x="30" y="20" width="600" height="30" as="geometry" />
         </mxCell>
-        <mxCell id="legend1" value="CPU idle — timer sleep" style="text;html=1;fontSize=11;align=left;" vertex="1" parent="1">
+        <mxCell id="legend1" value="CPU idle: timer sleep" style="text;html=1;fontSize=11;align=left;" vertex="1" parent="1">
           <mxGeometry x="55" y="52" width="160" height="20" as="geometry" />
         </mxCell>
         <mxCell id="legsw1" value="" style="rounded=0;fillColor=#85B7EB;strokeColor=#185FA5;" vertex="1" parent="1">
           <mxGeometry x="30" y="55" width="16" height="14" as="geometry" />
         </mxCell>
-        <mxCell id="legend2" value="CPU hot — busy-spin" style="text;html=1;fontSize=11;align=left;" vertex="1" parent="1">
+        <mxCell id="legend2" value="CPU hot: busy-spin" style="text;html=1;fontSize=11;align=left;" vertex="1" parent="1">
           <mxGeometry x="255" y="52" width="150" height="20" as="geometry" />
         </mxCell>
         <mxCell id="legsw2" value="" style="rounded=0;fillColor=#F09595;strokeColor=#A32D2D;" vertex="1" parent="1">
@@ -29,7 +29,7 @@
         <mxCell id="pacersleep" value="sleeping" style="rounded=1;fillColor=#B5D4F4;strokeColor=#378ADD;fontSize=11;fontColor=#042C53;" vertex="1" parent="1">
           <mxGeometry x="30" y="118" width="130" height="32" as="geometry" />
         </mxCell>
-        <mxCell id="pacernext" value="sleeps until next request's (T − 10 ms) — moves on immediately" style="rounded=1;fillColor=#E6F1FB;strokeColor=#85B7EB;fontSize=11;fontColor=#0C447C;align=left;spacingLeft=10;" vertex="1" parent="1">
+        <mxCell id="pacernext" value="sleeps until next request's (T − 10 ms), moves on immediately" style="rounded=1;fillColor=#E6F1FB;strokeColor=#85B7EB;fontSize=11;fontColor=#0C447C;align=left;spacingLeft=10;" vertex="1" parent="1">
           <mxGeometry x="160" y="118" width="640" height="32" as="geometry" />
         </mxCell>
 
