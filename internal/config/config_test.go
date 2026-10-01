@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	acRef         = "../../configs/ac.reference.yaml"
-	experimentRef = "../../configs/experiment.reference.yaml"
+	acRef           = "../../configs/ac.reference.yaml"
+	experimentRef   = "../../configs/experiment.reference.yaml"
+	processKillRef  = "../../configs/phase1-process-kill.yaml"
+	processKillMock = "../../configs/process-kill-mock.yaml"
 )
 
 func loadRef(t *testing.T, path string) *Config {
@@ -23,7 +25,7 @@ func loadRef(t *testing.T, path string) *Config {
 }
 
 func TestReferenceConfigsLoadAndValidate(t *testing.T) {
-	for _, p := range []string{acRef, experimentRef} {
+	for _, p := range []string{acRef, experimentRef, processKillRef, processKillMock} {
 		if _, err := LoadFile(p); err != nil {
 			t.Errorf("reference config %s must load and validate: %v", p, err)
 		}
@@ -246,6 +248,18 @@ func TestPinnedValueEnforcement(t *testing.T) {
 		{"no-fault variant carrying an injection option", acRef, func(c *Config) {
 			c.Fault, c.Mock = Fault{Variant: VariantNone, InjectionToleranceMs: 500}, nil
 		}, "no injection options"},
+
+		{"process-kill replicas changed", processKillRef, func(c *Config) { c.Target.Replicas = 2 }, "target.replicas"},
+		{"process-kill partition duration set", processKillRef, func(c *Config) { c.Fault.PartitionDurationS = 120 }, "fault.partition_duration_s"},
+		{"process-kill restart policy changed", processKillRef, func(c *Config) { c.Pins.Container.RestartPolicy = "unless-stopped" }, "pins.container.restart_policy"},
+		{"process-kill container name empty", processKillRef, func(c *Config) { c.Pins.Container.Name = " " }, "pins.container.name"},
+		{"process-kill dataplane mode recorded", processKillRef, func(c *Config) { c.Pins.Kubernetes.DataplaneMode = "kube-proxy-iptables" }, "pins.kubernetes.dataplane_mode"},
+		{"process-kill readiness period set", processKillRef, func(c *Config) { c.Pins.Readiness.PeriodS = 2 }, "pins.readiness_probe"},
+		{"process-kill ac without mock", processKillMock, func(c *Config) { c.Mock = nil }, "mock: required"},
+		{"process-kill experiment with mock section", processKillRef, func(c *Config) { c.Mock = &Mock{} }, "mock: must be absent"},
+		{"container pins on a Kubernetes variant", experimentRef, func(c *Config) {
+			c.Pins.Container = &ContainerPins{Runtime: "docker", RestartPolicy: PinnedContainerRestartPolicy, Name: "vllm", CompileCache: "none", HFHubOffline: "unset"}
+		}, "pins.container"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -378,5 +392,128 @@ func TestConfigJSONRecord(t *testing.T) {
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := LoadFile(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
 		t.Fatal("missing file must error")
+	}
+}
+
+// The process-kill topology is one replica (§1); the experiment profile
+// pins it and the two-replica pin stays on the Kubernetes variants.
+func TestProcessKillReplicasPin(t *testing.T) {
+	c := loadRef(t, processKillRef)
+	if c.Target.Replicas != PinnedProcessKillReplicas {
+		t.Fatalf("process-kill reference replicas = %d, want %d", c.Target.Replicas, PinnedProcessKillReplicas)
+	}
+	c.Target.Replicas = PinnedExperimentReplicas
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "target.replicas: pre-registered value is 1") {
+		t.Fatalf("process-kill experiment config with 2 replicas must be refused on target.replicas, got: %v", err)
+	}
+
+	k := loadRef(t, experimentRef)
+	k.Target.Replicas = PinnedProcessKillReplicas
+	err = k.Validate()
+	if err == nil || !strings.Contains(err.Error(), "target.replicas: pre-registered value is 2") {
+		t.Fatalf("clean-delete experiment config with 1 replica must be refused on target.replicas, got: %v", err)
+	}
+}
+
+// Under the ac profile the process-kill variant runs against the mock and
+// requires its section; the experiment profile refuses it.
+func TestProcessKillACMockOnly(t *testing.T) {
+	m := loadRef(t, processKillMock)
+	if m.Profile != ProfileAC || m.Mock == nil {
+		t.Fatalf("process-kill mock config: profile %q, mock section present %v", m.Profile, m.Mock != nil)
+	}
+	m.Mock = nil
+	err := m.Validate()
+	want := "mock: required when fault.variant is \"process_kill\" under the ac profile"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("ac process-kill config without mock must be refused with %q, got: %v", want, err)
+	}
+
+	x := loadRef(t, processKillMock)
+	x.Profile = ProfileExperiment
+	err = x.Validate()
+	want = "mock: must be absent when fault.variant is \"process_kill\""
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("experiment process-kill config with a mock section must be refused with %q, got: %v", want, err)
+	}
+}
+
+// The process-kill pins replace Kubernetes and the readiness probe with
+// the container pin list (§6); each departure is refused naming the field.
+func TestProcessKillRequiresContainerPins(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"container missing", func(c *Config) { c.Pins.Container = nil }, "pins.container: required"},
+		{"restart policy always", func(c *Config) { c.Pins.Container.RestartPolicy = "always" }, "pins.container.restart_policy"},
+		{"runtime empty", func(c *Config) { c.Pins.Container.Runtime = "" }, "pins.container.runtime"},
+		{"compile cache empty", func(c *Config) { c.Pins.Container.CompileCache = "" }, "pins.container.compile_cache"},
+		{"hf_hub_offline empty", func(c *Config) { c.Pins.Container.HFHubOffline = "" }, "pins.container.hf_hub_offline"},
+		{"kubernetes version recorded", func(c *Config) { c.Pins.Kubernetes.Version = "v1.30.0" }, "pins.kubernetes.version"},
+		{"cni recorded", func(c *Config) { c.Pins.Kubernetes.CNI = "kindnet" }, "pins.kubernetes.cni"},
+		{"kube-proxy mode recorded", func(c *Config) { c.Pins.Kubernetes.KubeProxyMode = "iptables" }, "pins.kubernetes.kube_proxy_mode"},
+		{"grace period 40", func(c *Config) { c.Pins.Kubernetes.NodeMonitorGracePeriodS = 40 }, "pins.kubernetes.node_monitor_grace_period_s"},
+		{"readiness path /health", func(c *Config) { c.Pins.Readiness.Path = "/health" }, "pins.readiness_probe.path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := loadRef(t, processKillRef)
+			tc.mutate(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("mutation %q must be rejected", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error must name %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestProcessKillPinCoverage is the §6 process-kill checklist over the
+// committed process-kill config: every container pin is populated and the
+// Kubernetes and readiness pins read none.
+func TestProcessKillPinCoverage(t *testing.T) {
+	c := loadRef(t, processKillRef)
+	ct := c.Pins.Container
+	if ct == nil {
+		t.Fatal("§6 process-kill pin list \"container\": not carried")
+	}
+	strPins := map[string]string{
+		"container runtime and version": ct.Runtime,
+		"restart policy":                ct.RestartPolicy,
+		"container name":                ct.Name,
+		"torch.compile cache location":  ct.CompileCache,
+		"HF_HUB_OFFLINE":                ct.HFHubOffline,
+		"storage medium for weights":    c.Pins.Storage.WeightsMedium,
+		"waiting-queue gauge name (G7)": c.Target.QueueGauge,
+	}
+	for name, val := range strPins {
+		if strings.TrimSpace(val) == "" {
+			t.Errorf("§6 pin %q: schema field empty in the process-kill config", name)
+		}
+	}
+	if ct.RestartPolicy != PinnedContainerRestartPolicy {
+		t.Errorf("§6 pin \"restart policy\": %q, want %q", ct.RestartPolicy, PinnedContainerRestartPolicy)
+	}
+	for name, val := range map[string]string{
+		"Kubernetes version":   c.Pins.Kubernetes.Version,
+		"CNI":                  c.Pins.Kubernetes.CNI,
+		"dataplane mode":       c.Pins.Kubernetes.DataplaneMode,
+		"kube-proxy mode":      c.Pins.Kubernetes.KubeProxyMode,
+		"readiness probe path": c.Pins.Readiness.Path,
+	} {
+		if val != "none" {
+			t.Errorf("§6 pin %q: %q, want \"none\"", name, val)
+		}
+	}
+	if len(c.Target.MetricsURLs) != c.Target.Replicas {
+		t.Error("§6 pin \"one metrics endpoint per replica (G7)\": not carried")
+	}
+	if c.Calibration == nil {
+		t.Error("§10 calibration: not carried")
 	}
 }

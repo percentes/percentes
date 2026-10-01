@@ -32,11 +32,14 @@ const (
 // Fault variants (§1). VariantMock is the Phase 0 injector family; the
 // mock's fault modes are configured in Mock.FaultSchedule. VariantNone is
 // a run with no injection, the shape of a hosted load run (§6).
+// VariantProcessKill is a host-side SIGKILL of a single replica's server
+// process, which the container runtime restarts in place.
 const (
 	VariantCleanDelete = "clean_delete"
 	VariantBlackHole   = "black_hole"
 	VariantMock        = "mock"
 	VariantNone        = "none"
+	VariantProcessKill = "process_kill"
 )
 
 // Pre-registered constants. These are the SPEC.md numbers; Validate()
@@ -107,6 +110,11 @@ const (
 	PinnedConnMultiplier       = 4
 	PinnedAmbientRateRPS       = 20  // §8 AC-suite reference lambda
 	PinnedInjectionToleranceMs = 500 // §8 AC3
+
+	// §1 process-kill variant: one replica, restarted in place under the
+	// pinned container restart policy (§6).
+	PinnedProcessKillReplicas    = 1
+	PinnedContainerRestartPolicy = "on-failure"
 
 	// §1 black-hole runtime assertion (ii) / §10 G4: the dead pod must
 	// remain in ready EndpointSlices for at least this long or the run is
@@ -359,11 +367,12 @@ type Fault struct {
 }
 
 // Pins is the §6 configuration-control pin list the Phase 0 schema
-// carries. Every field is required. Phase 0 (mock) configs record
-// explicit "n/a-phase0-mock" values rather than omitting fields, and
-// Phase 1 replaces the placeholders with real pins; the calibration
-// values live in Config.Calibration, and the remaining Phase 1
-// infrastructure pins land with the Phase 1 schema.
+// carries. Every field is required except Container, which the
+// process-kill variant requires and every other variant omits. Phase 0
+// (mock) configs record explicit "n/a-phase0-mock" values rather than
+// omitting fields, and Phase 1 replaces the placeholders with real pins;
+// the calibration values live in Config.Calibration, and the remaining
+// Phase 1 infrastructure pins land with the Phase 1 schema.
 type Pins struct {
 	VLLM       VLLMPins       `yaml:"vllm" json:"vllm"`
 	Model      ModelPins      `yaml:"model" json:"model"`
@@ -372,6 +381,7 @@ type Pins struct {
 	Kubernetes KubernetesPins `yaml:"kubernetes" json:"kubernetes"`
 	Readiness  ReadinessProbe `yaml:"readiness_probe" json:"readiness_probe"`
 	Storage    StoragePins    `yaml:"storage" json:"storage"`
+	Container  *ContainerPins `yaml:"container,omitempty" json:"container,omitempty"`
 }
 
 type VLLMPins struct {
@@ -460,6 +470,15 @@ type ReadinessProbe struct {
 
 type StoragePins struct {
 	WeightsMedium string `yaml:"weights_medium" json:"weights_medium"`
+}
+
+// ContainerPins is the §6 pin list for a container restarted in place.
+type ContainerPins struct {
+	Runtime       string `yaml:"runtime" json:"runtime"`               // the per-run fingerprint records the server version
+	RestartPolicy string `yaml:"restart_policy" json:"restart_policy"` // pinned "on-failure"
+	Name          string `yaml:"name" json:"name"`
+	CompileCache  string `yaml:"compile_cache" json:"compile_cache"`
+	HFHubOffline  string `yaml:"hf_hub_offline" json:"hf_hub_offline"` // "unset" or the value
 }
 
 // ---------------------------------------------------------------------------

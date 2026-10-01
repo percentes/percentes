@@ -231,7 +231,11 @@ func (c *Config) validateTarget(v *validator) {
 		v.errf("target.base_url: %v", err)
 	}
 	if c.Profile == ProfileExperiment {
-		v.pinI("target.replicas", c.Target.Replicas, PinnedExperimentReplicas)
+		want := PinnedExperimentReplicas
+		if c.Fault.Variant == VariantProcessKill {
+			want = PinnedProcessKillReplicas
+		}
+		v.pinI("target.replicas", c.Target.Replicas, want)
 	} else if c.Target.Replicas < 1 {
 		v.errf("target.replicas: must be >= 1, got %d", c.Target.Replicas)
 	}
@@ -299,6 +303,18 @@ func (c *Config) validateFault(v *validator) {
 		if c.Mock == nil {
 			v.errf("mock: required when fault.variant is \"mock\"")
 		}
+	case VariantProcessKill:
+		// The ac profile kills the mock server's process; the experiment
+		// profile kills vLLM.
+		if c.Profile == ProfileExperiment && c.Mock != nil {
+			v.errf("mock: must be absent when fault.variant is %q", c.Fault.Variant)
+		}
+		if c.Profile == ProfileAC && c.Mock == nil {
+			v.errf("mock: required when fault.variant is %q under the ac profile", VariantProcessKill)
+		}
+		if c.Fault.PartitionDurationS != 0 {
+			v.errf("fault.partition_duration_s: must be 0 for fault.variant %q (no partition), got %d", VariantProcessKill, c.Fault.PartitionDurationS)
+		}
 	case VariantNone:
 		// §6: a no-fault run arms nothing, so it carries no injection
 		// instant and no injection option.
@@ -311,7 +327,7 @@ func (c *Config) validateFault(v *validator) {
 		}
 		return
 	default:
-		v.errf("fault.variant: must be one of %q, %q, %q, %q; got %q", VariantCleanDelete, VariantBlackHole, VariantMock, VariantNone, c.Fault.Variant)
+		v.errf("fault.variant: must be one of %q, %q, %q, %q, %q; got %q", VariantCleanDelete, VariantBlackHole, VariantMock, VariantNone, VariantProcessKill, c.Fault.Variant)
 	}
 	if c.Profile == ProfileExperiment {
 		// §1 phase sequence has no gap: the fault immediately follows the
@@ -382,18 +398,60 @@ func (c *Config) validatePins(v *validator) {
 	req("gpu.cudnn", p.GPU.CUDNN)
 	req("gpu.nccl", p.GPU.NCCL)
 	req("gpu.clock_power_policy", p.GPU.ClockPowerPolicy)
-	req("kubernetes.version", p.Kubernetes.Version)
-	req("kubernetes.cni", p.Kubernetes.CNI)
-	req("kubernetes.dataplane_mode", p.Kubernetes.DataplaneMode)
-	req("kubernetes.kube_proxy_mode", p.Kubernetes.KubeProxyMode)
-	if p.Kubernetes.NodeMonitorGracePeriodS <= 0 {
-		v.errf("pins.kubernetes.node_monitor_grace_period_s: must be > 0 (record the cluster's actual value, §1), got %d", p.Kubernetes.NodeMonitorGracePeriodS)
-	}
-	req("readiness_probe.path", p.Readiness.Path)
-	if p.Readiness.PeriodS <= 0 || p.Readiness.TimeoutS <= 0 || p.Readiness.FailureThreshold <= 0 {
-		v.errf("pins.readiness_probe: period_s, timeout_s, failure_threshold must all be > 0")
+	if c.Fault.Variant == VariantProcessKill {
+		validateProcessKillPins(v, p, req)
+	} else {
+		if p.Container != nil {
+			v.errf("pins.container: must be absent unless fault.variant is %q", VariantProcessKill)
+		}
+		req("kubernetes.version", p.Kubernetes.Version)
+		req("kubernetes.cni", p.Kubernetes.CNI)
+		req("kubernetes.dataplane_mode", p.Kubernetes.DataplaneMode)
+		req("kubernetes.kube_proxy_mode", p.Kubernetes.KubeProxyMode)
+		if p.Kubernetes.NodeMonitorGracePeriodS <= 0 {
+			v.errf("pins.kubernetes.node_monitor_grace_period_s: must be > 0 (record the cluster's actual value, §1), got %d", p.Kubernetes.NodeMonitorGracePeriodS)
+		}
+		req("readiness_probe.path", p.Readiness.Path)
+		if p.Readiness.PeriodS <= 0 || p.Readiness.TimeoutS <= 0 || p.Readiness.FailureThreshold <= 0 {
+			v.errf("pins.readiness_probe: period_s, timeout_s, failure_threshold must all be > 0")
+		}
 	}
 	req("storage.weights_medium", p.Storage.WeightsMedium)
+}
+
+// validateProcessKillPins holds the §6 pins of a container restarted in
+// place: no Kubernetes, no readiness probe, and the container pin list.
+func validateProcessKillPins(v *validator, p Pins, req func(field, val string)) {
+	none := func(field, val string) {
+		if val != "none" {
+			v.errf("pins.%s: pinned \"none\" for fault.variant %q (no Kubernetes, §6), got %q", field, VariantProcessKill, val)
+		}
+	}
+	none("kubernetes.version", p.Kubernetes.Version)
+	none("kubernetes.cni", p.Kubernetes.CNI)
+	none("kubernetes.dataplane_mode", p.Kubernetes.DataplaneMode)
+	none("kubernetes.kube_proxy_mode", p.Kubernetes.KubeProxyMode)
+	if p.Kubernetes.NodeMonitorGracePeriodS != 0 {
+		v.errf("pins.kubernetes.node_monitor_grace_period_s: must be 0 for fault.variant %q (no Kubernetes, §6), got %d", VariantProcessKill, p.Kubernetes.NodeMonitorGracePeriodS)
+	}
+	if p.Readiness.Path != "none" {
+		v.errf("pins.readiness_probe.path: pinned \"none\" for fault.variant %q (the runner's readiness wait replaces the probe, §6), got %q", VariantProcessKill, p.Readiness.Path)
+	}
+	if p.Readiness.PeriodS != 0 || p.Readiness.TimeoutS != 0 || p.Readiness.FailureThreshold != 0 {
+		v.errf("pins.readiness_probe: period_s, timeout_s, failure_threshold must all be 0 for fault.variant %q (§6)", VariantProcessKill)
+	}
+	ct := p.Container
+	if ct == nil {
+		v.errf("pins.container: required when fault.variant is %q (§6)", VariantProcessKill)
+		return
+	}
+	req("container.runtime", ct.Runtime)
+	if ct.RestartPolicy != PinnedContainerRestartPolicy {
+		v.errf("pins.container.restart_policy: pinned %q (§6), got %q", PinnedContainerRestartPolicy, ct.RestartPolicy)
+	}
+	req("container.name", ct.Name)
+	req("container.compile_cache", ct.CompileCache)
+	req("container.hf_hub_offline", ct.HFHubOffline)
 }
 
 func (c *Config) validateMock(v *validator) {
