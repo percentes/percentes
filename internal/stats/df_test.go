@@ -7,7 +7,7 @@ import (
 
 // The pinned t=2.776 applies only at df=4 (§7 assumes N=5 contributing
 // runs). When dropped runs reduce n, the df-correct multiplier must be
-// used — 2.776 at n=3 would publish an interval that is too narrow.
+// used; 2.776 at n=3 would publish an interval that is too narrow.
 func TestTIntervalDFCorrect(t *testing.T) {
 	s := Summarize([]float64{10, 12, 14}, true)
 	if s.DF != 2 || s.TMultiplier != 4.303 || s.AtPinnedDF {

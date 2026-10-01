@@ -1,17 +1,20 @@
 // Package stats implements the SPEC.md §7 single-stack statistics: the
 // run-level scalar summary (all five values verbatim, median, mean, a
-// t-interval with the pre-registered t=2.776 at df=4, and the min-max
-// range), the run-to-run coefficient of variation that becomes the
-// measured noise floor for the deferred cross-stack comparison, and Holm
-// correction for a family of secondary comparisons.
+// t-interval with the pre-registered t=2.776 at four degrees of freedom
+// (df=4), and the min-max range), the run-to-run coefficient of
+// variation that becomes the measured noise floor for the deferred
+// cross-stack comparison, and Holm correction for a family of secondary
+// comparisons.
 //
 // Normative rules encoded here:
 //   - All five per-run values are published verbatim (§5).
-//   - For plausibly heavy-tailed scalars (the TTRs), the median and the
-//     min-max range lead; the t-interval carries a normality caveat and
-//     is NOT the headline. Callers pass Heavy=true for such scalars.
+//   - For plausibly heavy-tailed scalars (the times to recovery, TTRs),
+//     the median and the min-max range lead; the t-interval carries a
+//     normality caveat and is NOT the headline. Callers pass Heavy=true
+//     for such scalars.
 //   - Bootstrap at N=5 is forbidden (§7).
-//   - No MDE / power claim is made for the single-stack study.
+//   - No minimum detectable effect (MDE) or power claim is made for the
+//     single-stack study.
 package stats
 
 import (
@@ -57,14 +60,14 @@ type Summary struct {
 
 	// SampleSD is the sample standard deviation (n-1 denominator).
 	SampleSD float64 `json:"sample_sd"`
-	// SEM is SampleSD/sqrt(n).
+	// SEM, the standard error of the mean, is SampleSD/sqrt(n).
 	SEM float64 `json:"sem"`
 
 	// TIntervalLo/Hi is the t-interval (mean ± t·SEM) at df = n-1. For
 	// Heavy scalars this is reported with the normality caveat, never as
 	// the headline. DF and TMultiplier record what was actually applied;
 	// AtPinnedDF is true only when df==4, the §7 pre-registered case
-	// (N=5 contributing runs) — a df<4 interval means runs were dropped
+	// (N=5 contributing runs); a df<4 interval means runs were dropped
 	// and the pinned §7 assumption was not met, which the report states.
 	TIntervalLo float64 `json:"t_interval_lo"`
 	TIntervalHi float64 `json:"t_interval_hi"`
