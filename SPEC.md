@@ -1,6 +1,6 @@
 # v0.2 Harness Spec: Replica-Loss Resilience Characterization for Kubernetes LLM Inference
 ### Project: Percentes. This document is the authoritative specification for the Percentes harness.
-### Status: Phase 0 implemented, mock-only with no graphics processing unit (GPU); §8 acceptance suite passed against this text on 15 September 2026. Phase 1: the §10 calibration procedure ran on one NVIDIA L40 on 16 September 2026 against a standalone container; the calibration inside the experiment's environment (§10) and the characterization runs are pending.
+### Status: Phase 0 implemented, mock-only with no graphics processing unit (GPU); §8 acceptance suite passed against this text on 15 September 2026. Phase 1: the §10 calibration procedure ran on one NVIDIA L40 on 16 September 2026 against a standalone container; the process-kill variant (amended 2026-10-02) runs a new standalone container under the same §6 engine, model and GPU pins; its runs, and the two-replica Kubernetes calibration and characterization runs, are pending.
 
 ## 0. Scope and versions
 
@@ -16,7 +16,7 @@ The commitments that shape the rest of the specification:
 ### Versions
 
 - **v0.1** (2026-07-28): first public version. Early commits label this version "v0.1.1" and use "v0.2" for the deferred cross-stack study (§11).
-- **v0.2** (2026-08-15, this version; revised through 2026-09-29). Every change to a measurement or reporting rule since first publication is listed, dated, in CHANGELOG.md; the git log carries the text. Changes are adopted before any data they could affect is collected, and the body sections below carry the normative text.
+- **v0.2** (2026-08-15, this version; revised through 2026-10-02). Every change to a measurement or reporting rule since first publication is listed, dated, in CHANGELOG.md; the git log carries the text. Changes are adopted before any data they could affect is collected, and the body sections below carry the normative text.
 
 Framing note: the first publication is a resilience characterization of vLLM, an open-source inference server for large language models (LLMs), under replica loss, published under the Percentes benchmark project. The benchmark label refers to the deferred cross-stack comparison (§11).
 
@@ -26,15 +26,15 @@ Standing caveat: the acceptance criteria certify the instrument against a mock a
 
 This study measures the cost of losing one serving replica under sustained load.
 
-**Question:** when one vLLM serving replica is lost under sustained load on Kubernetes, how many in-flight and queued requests fail or time out, how does the survivor degrade, and how long does recovery take, decomposed into measured sub-phases?
+**Question:** when one vLLM serving replica is lost under sustained load, how many in-flight and queued requests fail or time out, how does the survivor degrade where one exists, and how long does recovery take, decomposed into measured sub-phases? The clean-delete and black-hole variants ask this on Kubernetes with a survivor; the process-kill variant asks it of a single replica restarted in place, with no survivor to carry the load.
 
-**Topology:** 2 GPU worker nodes, one vLLM replica each, behind one Kubernetes Service. One 8B-class (about 8 billion parameters) dense model. Steady-state load is calibrated to a frozen point: the per-replica arrival rate lambda_r is fixed at 0.65 of the measured single-replica capacity lambda_max (§10), a point inside the 60 to 70 percent utilization band the design targets. Utilization (normative): lambda_r divided by lambda_max, per the §10 calibration. Loss of one replica then puts the survivor at 130 percent of measured single-replica capacity, which is the condition under study. Device-level and scheduler-level occupancy figures are explanatory (§2) and do not define the band.
+**Topology:** 2 GPU worker nodes, one vLLM replica each, behind one Kubernetes Service. One 8B-class (about 8 billion parameters) dense model. Steady-state load is calibrated to a frozen point: the per-replica arrival rate lambda_r is fixed at 0.65 of the measured single-replica capacity lambda_max (§10), a point inside the 60 to 70 percent utilization band the design targets. Utilization (normative): lambda_r divided by lambda_max, per the §10 calibration. Loss of one replica then puts the survivor at 130 percent of measured single-replica capacity, which is the condition under study. Device-level and scheduler-level occupancy figures are explanatory (§2) and do not define the band. The process-kill variant runs a second topology, one replica without a Service, stated in its own entry below.
 
 **Load-balancing validity gate (regime-conditional, run-failing where enforced):**
 - Document the container network interface (CNI) plugin and dataplane mode. Two regimes, defined by the layer at which the dataplane routes, and the gate differs between them: a request-aware layer-7 proxy assigns each request to an endpoint independently (**per-request**); a layer-4 dataplane selects the endpoint at connection setup and binds the connection to it for its lifetime (**per-connection**). The recorded `dataplane_mode` pin selects the regime, conservatively: unless the pin positively documents a request-aware layer-7 mechanism, the regime is per-connection. The analysis states which regime the run used.
 - The client does not cap connection count: pool capacity is provisioned above lambda times the pinned 30 s timeout (lambda is the load generator's total offered arrival rate, 2 lambda_r in the experiment, and the timeout is the worst-case request lifetime) so dispatch is never throttled by connection availability. Concurrency demand therefore sets the number of open connections. Reconnect-on-error, no request retries.
 - Pre-fault assertion, from server-side request counters: each replica received 45 to 55 percent of requests over the baseline window. **Under per-request balancing this is run-failing.** Under per-connection routing the share is a binomial draw over the open-connection count C: at the concurrency this protocol produces, its standard deviation is 50/sqrt(C) percentage points, above the 5-point half-width whenever fewer than 100 connections are open, so the share is recorded and reported but does **not** invalidate the run; a run whose balancing claim matters is executed behind a per-request (layer-7) balancer. Traffic reaching fewer replicas than the topology declares is run-failing in either regime.
-- Phase 1 deploys a request-aware layer-7 proxy (for example Envoy via Cilium ingress or the Kubernetes Gateway API (application programming interface)) in front of the Service, with the proxy, its version, and its configuration pinned (§6) and proxy-level retries disabled, so the band is enforced on every characterization run.
+- Phase 1 deploys a request-aware layer-7 proxy (for example Envoy via Cilium ingress or the Kubernetes Gateway API (application programming interface)) in front of the Service, with the proxy, its version, and its configuration pinned (§6) and proxy-level retries disabled, so the band is enforced on every two-replica characterization run.
 - Record which pod is killed and its share at T_inject, the configured fault-injection instant.
 
 **Fault variants:**
@@ -51,7 +51,8 @@ This study measures the cost of losing one serving replica under sustained load.
     - **A client-side packet capture,** where taken, is recorded as mechanism evidence; zero RSTs sourced from the dead replica is expected by construction under a DROP-all partition and is reported, not gated on.
   - **(ii) Staleness of the routed path** (gate G4 in §10): the dead pod remains present in ready EndpointSlices for an observed window of at least 20 seconds (report the measured window against the cluster's node-monitor-grace-period), and at least one post-T_inject connection or request is observed routed to the stale endpoint inside that window; a stale EndpointSlice entry alone does not establish that the dataplane was still routing traffic to the dead pod.
   - **Where either assertion fails** or goes unobserved, including a run without the per-request victim attribution that assertion (i) requires, the run loses the node-loss-representative label and is reported as clean-variant-equivalent; the run stays valid. Every other applicable §10 gate failure invalidates the run.
-- **Third regime, Phase 1 only:** real spot preemption, which includes the provider's documented advance warning and possible graceful drain, is neither variant. It is measured and reported as its own condition. The two injected variants are controllable reference conditions.
+- **Process kill (single replica, restart in place):** SIGKILL (signal 9, the termination signal a process cannot catch) delivered from the host to the vLLM API server process, process 1 of the container; the container runtime's restart policy, pinned `on-failure` (§6), starts the same container again. Topology: one replica on one GPU, addressed directly by the client, no Service and no proxy; offered load 1 x lambda_r. In-flight connections fail and each failure is recorded under its §3 error class. Measured: the outage from the kill to the first served inference, the outcome split of the requests scheduled inside it, TTR to the pre-fault baseline, and the restart decomposed per §5. The §1 share gate does not apply. The variant is labelled 'single-replica process kill'; it is never called node loss and never called replica loss on Kubernetes. The fire instant is the midpoint of a host-side timestamp bracket around the kill, converted to the client clock by the offset measured before the run; the host times of the restart are converted by the same offset. The fire uncertainty, recorded per run, is the bracket half-width plus the larger of the offset bounds measured before and after the run, plus the change in the offset between those two measurements. An in-flight request whose terminal time, as the client records it, falls after the fire by no more than the fire uncertainty plus the larger offset bound (the allowance for delivery to the client) is reported as indeterminate; the in-flight outcome counts and the in-flight loss fraction include it, and outcome counts that leave the indeterminate requests out are reported beside them. (Amended 2026-10-02, CHANGELOG.md.)
+- **Third regime, Phase 1 only:** real spot preemption, which includes the provider's documented advance warning and possible graceful drain, is none of the injected variants. It is measured and reported as its own condition. The injected variants are controllable reference conditions.
 
 **Load profile:** open-loop arrivals at a pinned rate (Poisson for characterization runs; the configuration also accepts deterministic arrivals for diagnostics), fixed input length, output forced via ignore_eos (a vLLM extension that disables the model's end-of-sequence stop, §6) with max_tokens=256, pinned prompt set with unique per-request prefixes. Phases: warm-up 60s (discarded), baseline 300s, fault at T_inject, degradation-and-recovery window with a 600s timeout, cooldown 60s. The pre-fault guard window runs from one pinned client timeout (30 s) before the fire anchor defined in §3 to T_inject, so under an early fire it exceeds 30 s by the amount the fire preceded T_inject: load is identical throughout, baseline statistics cover approximately the first 270 s, and the guard window is reported separately and excluded from every baseline-derived quantity.
 
@@ -71,7 +72,7 @@ This study measures the cost of losing one serving replica under sustained load.
     - **(ii) a loopback canary,** one concurrent stream against a known-timing endpoint on the client host (the mock server), runs through the same read path during measurement windows, and each event's observed lag behind its scheduled time is reported as the bound on host-side read-loop lag, with the first-token and per-gap deviations beside it (amended 2026-09-29, CHANGELOG.md).
   - **The canary** bounds host-side delay only; it says nothing about the network path.
 
-**Chaos orchestrator:** fires the configured variant at T_inject; records armed/fire/expiry timestamps; pluggable injectors (mock fault modes locally; clean delete, node partition, or spot capture in Phase 1). The harness is agnostic beyond timestamps.
+**Chaos orchestrator:** fires the configured variant at T_inject; records armed/fire/expiry timestamps; pluggable injectors (mock fault modes locally; clean delete, node partition, process kill, or spot capture in Phase 1). The harness is agnostic beyond timestamps.
 
 **Metrics collector:** client-side stream is authoritative for latency, errors, and censoring. Server-side vLLM Prometheus metrics are explanatory and provide per-replica request counters for the share gate, plus batching and cache occupancy. Per replica and per window the collector records the vLLM waiting-queue and running-request gauges, key-value (KV) cache occupancy, and GPU busy percent from nvidia-smi or NVIDIA Data Center GPU Manager (DCGM); these are reported as context for the utilization definition (§10) and none of them defines the band. vLLM metric names vary across releases (at the time of writing: vllm:num_requests_waiting, vllm:num_requests_running, vllm:gpu_cache_usage_perc); the exact names are re-verified against the pinned vLLM version, and a gauge the pinned version does not emit is reported N/A (not applicable), never inferred. Records client-to-service round-trip time (RTT) and generator placement; server-side TTFT histograms reported alongside client-side.
 
@@ -145,6 +146,8 @@ A gap between successive SSE content events smaller than the histogram's 1 micro
 
 The survivor cohort (adopted 2026-09-29, CHANGELOG.md) is the fault-window requests attributed to the one replica that served the baseline beside the victim; where the attribution names exactly one such replica, the survivor figures (the survivor's TTFT and end-to-end percentiles, `survivor_p95_ms`) are computed over that cohort and the pooled fault-window figures are reported under pooled names; otherwise no survivor figure is published (amended 2026-09-29, CHANGELOG.md).
 
+With one replica, every request in flight at fire is in flight on the killed replica, so the in-flight loss fraction is defined without per-request attribution; the errored requests are also split by class. (Amended 2026-10-02.)
+
 ## 4. SLO (pre-registered)
 
 A request meets SLO iff TTFT at most 1000 ms, end-to-end at most 14 s (1000 ms plus 256 tokens at a 20 tokens-per-second floor, rounded up to 14 s), and completion without error.
@@ -156,7 +159,7 @@ A request meets SLO iff TTFT at most 1000 ms, end-to-end at most 14 s (1000 ms p
 
 ## 5. Recovery (two baselines, hysteresis, measured decomposition)
 
-**Two baselines, both reported:** time to the single-replica equilibrium as defined below, and time to the two-replica pre-fault baseline. They answer different questions and are never conflated.
+**Two baselines, both reported:** time to the single-replica equilibrium as defined below, and time to the two-replica pre-fault baseline. They answer different questions and are never conflated. Under the process-kill variant the pre-fault baseline is the single replica's own and the equilibrium is not applicable (below; amended 2026-10-02).
 
 **Detector, pre-registered numbers:**
 
@@ -187,6 +190,8 @@ A request meets SLO iff TTFT at most 1000 ms, end-to-end at most 14 s (1000 ms p
 - **Independent reference (Phase 1):** a one-off single-replica no-fault calibration run per (model, config) at the identical offered load (2 lambda_r, the post-fault survivor load of §10), prompt set, and timeout policy, over the §1 warm-up and baseline durations, executed before the characterization runs; its goodput, completion rate, error rate, and censored rate are published, and the within-run plateau estimates are reported alongside it.
   - **The reference** is documented and appears in no §10 gate.
 
+Under the process-kill variant there is no survivor; the single-replica equilibrium is a survivor quantity and is reported not applicable, with the detector's not-estimable reason recorded beside it. The reported recovery quantities for the variant are the outage (kill to replica-ready) and TTR to the pre-fault baseline, with the integrated goodput deficit.
+
 **Partition-heal recovery (black-hole):** Under the black-hole variant the two-replica baseline is reached by partition heal (§1): the same pod returns when the pinned partition expires. That time is labelled partition-heal recovery, is bounded below by the pinned 120 s partition duration, and is never reported as node-loss recovery or compared with clean-delete recovery as the same phenomenon. It is the first held entry at or after the heal anchor (the observed partition expiry, else the fire anchor plus the pinned duration), measured from the fire anchor; the raw goodput-threshold crossing, which can precede the heal, is reported beside it and never as recovery (amended 2026-09-29, CHANGELOG.md).
 
 **Per-component recovery:** report recovery separately for TTFT-SLO, e2e-SLO (e2e: end-to-end latency), and error rate, plus a backlog-drain time where a failed-request backlog exists.
@@ -200,11 +205,12 @@ A request meets SLO iff TTFT at most 1000 ms, end-to-end at most 14 s (1000 ms p
 - **Traffic-restored:** first successful inference via the Service. Harness probe. The gap between these two is routing propagation and is reported as its own segment.
 - Goodput restored: from the client stream per the detector.
 - Phase 1 setup includes a one-off calibration comparing /health 200 timing against direct first-inference success on the pinned vLLM version; the relationship is documented.
-- Variant applicability: under black-hole on this topology no reschedule occurs (§1), so Reschedule, Container start, Weight load, and CUDA-graph capture are reported N/A for that variant; Replica-ready and Traffic-restored are reported relative to the recorded partition expiry and labelled partition-heal segments. Time to single-replica equilibrium concerns the survivor only and is reported for both variants.
+- Variant applicability: under black-hole on this topology no reschedule occurs (§1), so Reschedule, Container start, Weight load, and CUDA-graph capture are reported N/A for that variant; Replica-ready and Traffic-restored are reported relative to the recorded partition expiry and labelled partition-heal segments. Time to single-replica equilibrium concerns the survivor only and is reported for the clean-delete and black-hole variants.
+- Under process kill: Reschedule N/A (no scheduler). Container start: kill to the runtime's recorded start time (`docker inspect` `StartedAt`), via API. Log-derived boundaries with patterns pinned to vLLM 0.29.0 from the 16 September 2026 start log: API-server bring-up (first banner line to the server-start line), engine init, weight download (absent on a restart, reported N/A), weight load, torch.compile (PyTorch's graph compiler), the interval from compile end to the end of CUDA-graph capture (which holds the profiling run, KV-cache creation and capture), engine ready, server ready; CUDA-graph capture itself is the logged duration, published verbatim at the log's 1 s resolution. Replica-ready: harness probe against the replica directly. Traffic-restored and routing propagation: N/A (no Service). Host-clock times are converted to the client clock by a measured offset whose bound is recorded per run. (Amended 2026-10-02.)
 
 ![Recovery decomposition: the clean-delete boundaries (reschedule, container start, weight load, CUDA-graph capture, replica-ready, traffic-restored, goodput restored) with the source of each, and the black-hole lane in which the first four are not applicable and recovery is partition heal](docs/diagrams/recovery-decomposition.drawio.svg)
 
-**Repetition:** N=5 runs per (variant, config). All five per-run values are published verbatim alongside the statistics.
+**Repetition:** N=5 runs per (variant, config). All five per-run values are published verbatim alongside the statistics. A process-kill campaign ends after its first invalid run and is published as halted, with the runs it completed (amended 2026-10-02).
 
 ## 6. Configuration control (enforced, verified, pinned)
 
@@ -216,6 +222,7 @@ A request meets SLO iff TTFT at most 1000 ms, end-to-end at most 14 s (1000 ms p
 - Black-hole partition duration pinned at 120 s in configuration (§1). Also pinned and recorded: unreachable and not-ready pod toleration seconds, Deployment update strategy, PodDisruptionBudget presence, and cluster-autoscaler status (absent or disabled for characterization runs); whether pod eviction fired during the partition is recorded per run.
 - Also pinned and recorded: the measured single-replica capacity lambda_max, the frozen arrival rate lambda_r, and the full calibration trace (§10).
 - Also pinned and recorded, for G7 (§10): the waiting-queue gauge name read from each replica's metrics endpoint (vllm:num_requests_waiting on vLLM; re-verified against the pinned version, as the metrics collector paragraph in §2 requires) and the 1 s sample cadence from the run epoch.
+- For the process-kill variant, also pinned: the restart policy (`on-failure`) and the container name, both checked against the inspected container on every run, the location of the torch.compile cache (the container's writable layer, not cleared between runs), and `HF_HUB_OFFLINE` (the Hugging Face Hub offline switch) unset, so a restart still contacts the Hub. Recorded before and after each run: the container runtime's server version and the container's mounts, which include the weight cache, the client-to-host clock offset and its bound, the runtime's restart count, and the nvidia-smi fingerprint. The readiness-probe pin reads `none`: the runner's readiness wait (container running, `/health` 200, one served inference, polled every 2 s) replaces it. (Amended 2026-10-02.)
 
 ### Hosted targets
 
@@ -233,7 +240,13 @@ Against a hosted target:
 
 ## 7. Statistics (single-stack study)
 
-- **Pre-registered primary endpoint:** TTR to single-replica equilibrium under the clean-delete variant. Everything else is secondary or exploratory and labelled so; Holm step-down correction for multiple comparisons where several secondaries are formally compared.
+- **Pre-registered primary endpoint:** TTR to single-replica equilibrium under the clean-delete variant. Everything else is secondary or exploratory and labelled so; Holm step-down correction for multiple comparisons where several secondaries are formally compared. For the process-kill variant the primary endpoint is the outage, kill to replica-ready, in seconds; TTR to the pre-fault baseline is secondary.
+- **Process-kill claims (pre-registered 2026-10-02, CHANGELOG.md):** derived from the 16 September 2026 cold-start log, `internal/vllmlog/testdata/vllm-startup-16Sep2026.log`, whose line numbers are cited below.
+  - **Evaluation rule:** every campaign started under this amendment is published, a halted or failed one included. The claims are evaluated over the valid runs of all such campaigns pooled, and each claim is reported as evaluated on k valid runs of the n runs started. Every invalid run is published with its reasons, and no run is re-run in place of an invalid one.
+  - **C1:** in every valid run, the API-server bring-up (`log_bringup`, the version banner to the server-start line in the restart's log) is under 61.3 s. The cold banner (line 3, 19:22:27) to the server-start line (line 57, 19:23:50) took 83.0 s, of which 21.7 s was the weight download (line 21), which does not recur on a restart; the expected torch.compile cache saving is left out of the bound. Refuted by one valid run at 61.3 s or more, or by either line absent from the restart's log.
+  - **C2:** in every valid run, every in-flight request that is not indeterminate (§1) ends errored, under any §3 error class, with the class split published, and no request scheduled from the fire to replica-ready ends censored. A refused connection fails at once (class `connect`); a dropped connection runs to the 30 s deadline and ends censored. Refuted by one determinate in-flight request ending completed or censored, or by one censored request scheduled in the outage. Indeterminate requests neither confirm nor refute.
+  - **C3:** in every valid run, the restart reuses the torch.compile cache: the compilation figure of the init-engine line (`init_engine_compilation_s`) is under 5.0 s, the init-engine figure (`init_engine_s`) is under 17.0 s, and the logged CUDA-graph capture (`graph_capture_s`) is at least 4 s. Cold, torch.compile took 17.12 s (line 40); the cache removes the Dynamo transform (5.82 s, line 36) and the graph compile (7.50 s, line 37), leaving 3.80 s that includes the cache write itself (lines 38 and 39), and the bound adds 1.2 s. Init engine took 29.24 s cold (line 51); less the 13.32 s the cache removes, that is 15.92 s, rounded up to 17.0 s. Capture is not cached; it read 5 s cold (line 48), printed at 1 s resolution. Refuted by one valid run at 5.0 s or more, at 17.0 s or more, or with capture under 4 s, or by an absent init-engine or graph-capture line.
+  - The outage, its segments and TTR to the pre-fault baseline are reported with no threshold.
 - Run-level scalars: report all five values, the median, the mean, and a t-interval (t=2.776 at four degrees of freedom (df=4)). For plausibly heavy-tailed scalars (the TTRs), the median and the min-max range are the headline, and the t-interval is reported beside them with a normality caveat. Bootstrap at N=5 is forbidden.
 - No MDE claim is made for the single-stack study; there is no comparison to power. The single-stack run-to-run coefficient of variation becomes the measured noise floor that the cross-stack comparison design (§11) and its pre-registered two-sample MDE will be built on.
 - Tail policy: p95 and p99 with order-statistic confidence intervals where the completed-sample budget permits; the intervals are two-sided 95 percent distribution-free order-statistic intervals, ranks from the normal approximation to the binomial, and an interval is reported only where both ranks fall inside the completed sample, which is the budget condition. p99.9 and max are descriptive-only unless a long steady-state run is explicitly sized for them with a binomial validity gate. No estimated quantiles from short fault windows.
@@ -278,7 +291,7 @@ Language: Go or Rust for the load generator; the choice is documented with ratio
 
 ## 10. Phase 1 (real GPU) and run-validity gates
 
-Swap the mock for vLLM, two replicas across two GPU nodes, same model and output budget. Run both variants, N=5 each. Runs are short and deliberately inexpensive to reproduce.
+Swap the mock for vLLM. Clean delete and black hole: two replicas across two GPU nodes, same model and output budget, N=5 each. Process kill: one standalone container on one GPU host under the same §6 engine, model and GPU pins, N=5; the 16 September 2026 calibration applies to it because those pins are unchanged. A changed engine, model or GPU pin triggers recalibration as below; the container pins added for this variant are recorded and do not. Runs are short and deliberately inexpensive to reproduce.
 
 **Utilization and calibration (normative):** utilization is the frozen per-replica arrival rate lambda_r divided by the measured single-replica capacity lambda_max.
 
@@ -292,20 +305,20 @@ lambda_max is measured once per Phase 1 environment, before any characterization
   - **Sample coverage:** the queue mean is taken only when at least 90 percent of the samples expected at the pinned cadence landed inside the measured portion; a step short of that is not judged, and the procedure stops as an execution error recorded in the trace.
 - **The procedure runs twice**; if the two lambda_max values differ by more than 10 percent of the larger value, a third ramp decides by median; when they agree, lambda_max is the lower of the two.
 - **The full trace** (every step's rate, goodput, and queue-gauge series) is published with the report.
-- **lambda_r** is frozen at 0.65 times lambda_max, recorded in the run configuration, and unchanged for all N=5 runs of both variants.
-  - **Recalibration** occurs only if a §6 pin changes, and is recorded.
+- **lambda_r** is frozen at 0.65 times lambda_max, recorded in the run configuration, and unchanged for all N=5 runs of every variant.
+  - **Recalibration** occurs only if a §6 pin changes (under process kill, an engine, model or GPU pin), and is recorded.
 
 ![The §10 capacity calibration as a flowchart: the coarse ramp from 2 requests per second doubling, the fine ramp in fixed steps of 10 percent of the last passing rate, the two-ramp agreement rule with a third ramp by median, the step pass criteria and sample coverage, and lambda_r frozen at 0.65 lambda_max](docs/diagrams/calibration.drawio.svg)
 
 The post-fault survivor load of 2 times lambda_r operates the survivor at 130 percent of measured single-replica capacity.
 
-Deploy a request-aware layer-7 proxy, per §1, so the share gate is enforced rather than descriptive; the proxy, its version, and its configuration (retries disabled) are pinned per §6.
+For the clean-delete and black-hole variants, deploy a request-aware layer-7 proxy, per §1, so the share gate is enforced rather than descriptive; the proxy, its version, and its configuration (retries disabled) are pinned per §6.
 
 Phase 1 setup verifies the one-token-per-event invariant for the pinned vLLM version, and every run repeats the check per window: for each completed request whose stream carries a usage object, the count of SSE content events observed by the client is compared with the reported completion token count. A window's ITL is labelled inter-token only where that sample is non-empty and every request in it matched; otherwise it is reported as inter-chunk latency (§3) (amended 2026-09-29, CHANGELOG.md).
 
 **Run-validity gates:**
 
-- **G1** per-replica share 45-55 percent pre-fault (enforced under per-request balancing; descriptive under per-connection routing, §1)
+- **G1** per-replica share 45-55 percent pre-fault (enforced under per-request balancing; descriptive under per-connection routing, §1); reports not applicable for a one-replica target
 - **G2** client-validity gate clean (§2)
 - **G3** (black-hole only, label-determining) zero errored outcomes among victim-attributed in-flight requests, every non-completing one censored at the pinned timeout (§1(i); requires victim attribution)
 - **G4** (black-hole only, label-determining) observed endpoint-staleness window at least 20 s with victim-bound traffic observed inside the window
@@ -315,7 +328,7 @@ Phase 1 setup verifies the one-token-per-event invariant for the pinned vLLM ver
 
 Failure or non-observation of G3 or G4 strips the node-loss-representative label and the run is reported as clean-variant-equivalent (§1); the run stays valid. Every other applicable gate failure invalidates the run.
 
-**Proxy validation:** pre-register the equivalence quantities (in-flight loss fraction, TTR, survivor p95) and a tolerance; collect real spot-preemption events opportunistically (running on spot makes them free) and report their distribution against the two injected variants as a third regime. A single real event confirms only the code path, and the report says so. The tolerance, the minimum event count, and the decision rule are pinned, dated and published in CHANGELOG.md before any spot-preemption comparison is published.
+**Proxy validation:** pre-register the equivalence quantities (in-flight loss fraction, TTR, survivor p95) and a tolerance; collect real spot-preemption events opportunistically (running on spot makes them free) and report their distribution against the clean-delete and black-hole variants as a third regime. A single real event confirms only the code path, and the report says so. The tolerance, the minimum event count, and the decision rule are pinned, dated and published in CHANGELOG.md before any spot-preemption comparison is published.
 
 ## 11. Deferred cross-stack comparison (a future major revision)
 
@@ -323,8 +336,10 @@ The cross-stack study compares vLLM against a second serving stack (Triton) on t
 
 ## Appendix: conditional headline template
 
-The template below pre-commits the shape of the eventual public summary before any data exists, so the finding cannot be re-framed around whichever numbers look best. Each bracketed slot names the measured value that fills it, drawn from the run reports when characterization runs complete; [URL] resolves to the published methodology and per-run data at publication. Until then the slots stand empty.
+The templates below pre-commit the shape of the eventual public summary before any data exists, so the finding cannot be re-framed around whichever numbers look best. Each bracketed slot names the measured value that fills it, drawn from the run reports when characterization runs complete; [URL] resolves to the published methodology and per-run data at publication. Until then the slots stand empty.
 
 "Under abrupt loss of one vLLM replica at 65 percent of measured single-replica capacity, [clean-delete failure %] of in-flight requests failed immediately, versus [black-hole failure %] failing and [black-hole timeout %] timing out at 30 s under the black-hole network partition; TTFT (conditional on completion) degraded from [baseline p50] to [survivor-cohort p50, or the fault-window p50 pooled across replicas where §3 publishes no survivor figure], with the cumulative incidence of completion within 1 s falling to [incidence at 1 s]; recovery to single-replica equilibrium took [median time to equilibrium] (clean delete; median of 5 runs, range [low] to [high]), and recovery to the two-replica pre-fault baseline took [time to pre-fault baseline], decomposed as [measured segments], with [dominant segment] dominating. The methodology and the raw per-run data are at [URL], with the harness that reproduces them."
+
+"Under a SIGKILL of the only vLLM replica at 65 percent of measured single-replica capacity, [in-flight failure %] of in-flight requests failed and [in-flight timeout %] timed out at 30 s; the replica served again [outage median] s after the kill (median of [k] valid runs, range [low] to [high]), every request scheduled in the outage ended [outage outcome split], and the outage decomposed as [measured segments] with [dominant segment] dominating; recovery to the pre-fault baseline took [TTR median]. The methodology and the raw per-run data are at [URL], with the harness that reproduces them."
 
 The fault-window TTFT slot was amended 2026-09-29 (CHANGELOG.md).
