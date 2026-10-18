@@ -30,16 +30,17 @@ type Release struct {
 // attempts file, the report pair, the manifest, the scorer output on
 // every measured attempt of a pilot run, the cell record with a
 // consistent label and aggregate dispatch series, whose own run's part
-// counts the attempts file's dispatches, and an attempts file without
-// answer text for a release run, and the frame store with one line per
-// attempt. A release cell that does not count passes as a labelled
-// record, which never enters its route's frame (Manifest.Counted); one
-// whose ladder never started has empty attempts and frame files. Every
-// file the manifest names must exist with the SHA-256 and size it
-// records: the config, the attempts file, the report pair and the clock
-// and status records in r.Dir, and the frame store and the operator
-// copies in the run's frame directory. Otherwise it returns an error
-// naming every missing item and every mismatch.
+// counts the attempts file's dispatches, and inter-chunk gap histograms
+// that agree with the attempts file's completions, and an attempts file
+// without answer text for a release run, and the frame store with one
+// line per attempt. A release cell that does not count passes as a
+// labelled record, which never enters its route's frame
+// (Manifest.Counted); one whose ladder never started has empty attempts
+// and frame files. Every file the manifest names must exist with the
+// SHA-256 and size it records: the config, the attempts file, the report
+// pair and the clock and status records in r.Dir, and the frame store
+// and the operator copies in the run's frame directory. Otherwise it
+// returns an error naming every missing item and every mismatch.
 func CheckRelease(r Release) (*Manifest, error) {
 	m, err := ReadManifest(filepath.Join(r.Dir, ManifestFile))
 	if err != nil {
@@ -136,6 +137,13 @@ func CheckRelease(r Release) (*Manifest, error) {
 				}
 				if d.Sources[0].Dispatches != sent {
 					fail("cell record: dispatch_aggregate: the cell's own series counts %d dispatches, %s %d", d.Sources[0].Dispatches, AttemptsFile, sent)
+				}
+			}
+			if c.Gaps == nil {
+				fail("cell record: inter_chunk_gaps: none")
+			} else if attempts != nil {
+				if err := CheckGaps(c.Gaps, recs); err != nil {
+					fail("cell record: %v", err)
 				}
 			}
 		}

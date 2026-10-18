@@ -42,7 +42,7 @@ func cellReport(m *evidence.Manifest, cfg *config.Config, recs []evidence.Record
 		}
 	}
 	label := fmt.Sprintf("%s-a%d", c.Run.Label, c.Run.Attempt)
-	st, err := stepTables(cfg, c.Admission, []CellRecords{{Cell: label, Outcome: c.Outcome, Records: recs}})
+	st, err := stepTables(cfg, c.Admission, []CellRecords{{Cell: label, Outcome: c.Outcome, Gaps: c.Gaps, Records: recs}})
 	if err != nil {
 		return nil, "", err
 	}

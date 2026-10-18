@@ -125,17 +125,18 @@ type G6 struct {
 }
 
 // CellStep is one step of a cell. An attempted step with scheduled
-// requests carries its lines, hosted-G6, completion-incidence curve and
-// signals.
+// requests carries its lines, hosted-G6, completion-incidence curve with
+// its quantiles, and signals.
 type CellStep struct {
-	Step      int          `json:"step"`
-	RPS       float64      `json:"rps"`
-	State     string       `json:"state"`
-	Scheduled int          `json:"scheduled"`
-	Lines     []Line       `json:"lines,omitempty"`
-	G6        *G6          `json:"hosted_g6,omitempty"`
-	Curve     []CurvePoint `json:"completion_incidence,omitempty"`
-	Signals   *Signals     `json:"signals,omitempty"`
+	Step      int                 `json:"step"`
+	RPS       float64             `json:"rps"`
+	State     string              `json:"state"`
+	Scheduled int                 `json:"scheduled"`
+	Lines     []Line              `json:"lines,omitempty"`
+	G6        *G6                 `json:"hosted_g6,omitempty"`
+	Curve     []CurvePoint        `json:"completion_incidence,omitempty"`
+	Incidence *IncidenceQuantiles `json:"incidence_quantiles,omitempty"`
+	Signals   *Signals            `json:"signals,omitempty"`
 }
 
 // CellTable is one cell's per-step table.
@@ -208,15 +209,16 @@ type PooledG6 struct {
 // PooledStep is one step pooled over the cells that attempted it with
 // requests scheduled; Cells counts them. No figure pools across steps.
 type PooledStep struct {
-	Step      int                `json:"step"`
-	RPS       float64            `json:"rps"`
-	Admitted  bool               `json:"admitted"`
-	Cells     int                `json:"cells"`
-	Scheduled int                `json:"scheduled"`
-	Lines     []PooledLine       `json:"lines,omitempty"`
-	G6        *PooledG6          `json:"hosted_g6,omitempty"`
-	Curve     []PooledCurvePoint `json:"completion_incidence,omitempty"`
-	Signals   *Signals           `json:"signals,omitempty"`
+	Step      int                 `json:"step"`
+	RPS       float64             `json:"rps"`
+	Admitted  bool                `json:"admitted"`
+	Cells     int                 `json:"cells"`
+	Scheduled int                 `json:"scheduled"`
+	Lines     []PooledLine        `json:"lines,omitempty"`
+	G6        *PooledG6           `json:"hosted_g6,omitempty"`
+	Curve     []PooledCurvePoint  `json:"completion_incidence,omitempty"`
+	Incidence *IncidenceQuantiles `json:"incidence_quantiles,omitempty"`
+	Signals   *Signals            `json:"signals,omitempty"`
 }
 
 // StepTables is one route's per-step tables (SPEC-HOSTED HA3 point 13):
@@ -224,22 +226,26 @@ type PooledStep struct {
 // a fraction of each recorded limit, one table per cell, and, for a
 // complete frame of admission.ReleaseCells cells, the cells pooled per
 // step. Pooled is nil for an incomplete frame. Each attempted step
-// carries its completion-incidence curve with pointwise bands.
+// carries its completion-incidence curve with pointwise bands and its
+// quantiles inside the hard timeout.
 type StepTables struct {
 	Route         string           `json:"route"`
 	CeilingTokens int              `json:"ceiling_tokens"`
 	DeadlineS     int              `json:"deadline_s"`
+	HardTimeoutS  int              `json:"hard_timeout_s"`
 	Limits        []admission.Step `json:"limits"`
 	Cells         []CellTable      `json:"cells"`
 	FrameCells    int              `json:"frame_cells"`
 	Pooled        []PooledStep     `json:"pooled,omitempty"`
 }
 
-// CellRecords is one cell's label, the outcome its manifest records
-// (evidence.Cell) and the records of its attempts file.
+// CellRecords is one cell's label, the outcome and inter-chunk gap
+// histograms its manifest records (evidence.Cell) and the records of its
+// attempts file.
 type CellRecords struct {
 	Cell    string
 	Outcome string
+	Gaps    []evidence.GapHistogram
 	Records []evidence.Record
 }
 
@@ -340,7 +346,7 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 	t := &tables{
 		StepTables: &StepTables{
 			Route: cfg.Target.Name, CeilingTokens: rel.Shape.CeilingTokens, DeadlineS: rel.Shape.DeadlineS,
-			Limits: v.Steps, FrameCells: admission.ReleaseCells,
+			HardTimeoutS: cfg.Client.HTTPTimeoutS, Limits: v.Steps, FrameCells: admission.ReleaseCells,
 		},
 		docs:          map[int]*config.StatusDoc{},
 		errorDocs:     map[string]*config.ErrorDoc{},
@@ -411,12 +417,18 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 		if line == loadgen.ErrMalformedStream {
 			tl.inBand[inBandLabel(r.StreamError)]++
 		}
-		if err := tl.add(line, r); err != nil {
+		if err := tl.add(line, r, int64(t.HardTimeoutS)*1_000_000); err != nil {
 			return ct, nil, fmt.Errorf("record %d: %w", r.Index, err)
 		}
 		if r.DispatchNs != 0 {
 			dispatched[r.Step-1] = true
 		}
+	}
+	if err := evidence.CheckGaps(c.Gaps, c.Records); err != nil {
+		return ct, nil, err
+	}
+	for _, g := range c.Gaps {
+		copy(tally[g.Step-1].gaps, g.Counts)
 	}
 	later := false
 	for k := len(steps) - 1; k >= 0; k-- {
@@ -453,6 +465,7 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 			s.G6.ExcludingConnectReset = &r
 		}
 		s.Curve = curve(completionTimes(tl), s.Scheduled)
+		s.Incidence = incidence([]*stepTally{tl}, t.HardTimeoutS)
 	}
 	return ct, tally, nil
 }
@@ -559,6 +572,7 @@ func (t *tables) pool() {
 				times[i] = completionTimes(s)
 			}
 			ps.Curve = pooledCurve(times, n)
+			ps.Incidence = incidence(cs, t.HardTimeoutS)
 			ps.Signals = signals(cs, ps.Scheduled, t.retryRecorded)
 		}
 		t.Pooled = append(t.Pooled, ps)
@@ -650,6 +664,7 @@ func (t *StepTables) text(frame bool) string {
 				w("  hosted-G6 excluding connect and reset: %d/%d %s [%s, %s]", r.Count, r.Scheduled, pct(r.Value), pct(r.Lo), pct(r.Hi))
 			}
 			curveText(w, s.Curve, s.Scheduled, t.DeadlineS)
+			incidenceQuantilesText(w, s.Incidence)
 			signalsText(w, s.Signals)
 		}
 		w("")
@@ -692,6 +707,7 @@ func (t *StepTables) text(frame bool) string {
 			w("  hosted-G6 excluding connect and reset: %s", pooled(*p))
 		}
 		pooledCurveText(w, s.Curve, s.Scheduled, s.Cells, t.DeadlineS)
+		incidenceQuantilesText(w, s.Incidence)
 		signalsText(w, s.Signals)
 	}
 	return b.String()

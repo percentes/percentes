@@ -46,6 +46,7 @@ func releaseCell(cfg *config.Config) *Cell {
 		PreWindowRequests: 25,
 		Outcome:           CellCounted,
 		LadderStarted:     true,
+		Gaps:              []GapHistogram{},
 	}, 3)
 }
 
@@ -180,7 +181,7 @@ func TestManifestCellRecord(t *testing.T) {
 	}
 	for _, field := range []string{`"frame_limit_bytes": 8388608`, `"error_body_limit_bytes": 4096`, `"error_body_wait_ns": 1000000000`,
 		`"offset_minutes": 20`, `"concurrent_runs": [`, `"binding": {`, `"ceiling_choice": {`, `"account_created": "2026-09-15"`, `"pre_window_requests": 25`,
-		`"outcome": "counted"`, `"ladder_started": true`, `"dispatch_aggregate": {`, `"max_per_second": 3`} {
+		`"outcome": "counted"`, `"ladder_started": true`, `"dispatch_aggregate": {`, `"max_per_second": 3`, `"inter_chunk_gaps": []`} {
 		if !strings.Contains(string(b), field) {
 			t.Errorf("manifest lacks %s", field)
 		}
@@ -233,6 +234,8 @@ func TestManifestCellRefusals(t *testing.T) {
 		"negative count":             func(c *Cell) { c.Dispatch.Counts[1], c.Dispatch.Counts[2] = -1, 3 },
 		"maximum not the counts'":    func(c *Cell) { c.Dispatch.MaxPerSecond = 2 },
 		"maximum at another second":  func(c *Cell) { c.Dispatch.MaxAtUTC = &c.Dispatch.EndUTC },
+		"no gap histograms":          func(c *Cell) { c.Gaps = nil },
+		"gaps off the bins":          func(c *Cell) { c.Gaps = []GapHistogram{{Step: 1, Gaps: 1, Counts: []int64{1}}} },
 	} {
 		c := releaseCell(cfg)
 		edit(c)
@@ -385,7 +388,8 @@ func TestCheckReleaseLabelledCell(t *testing.T) {
 
 // A release run passes the check only with its cell record, whose
 // aggregate dispatch series counts the attempts file's dispatches as its
-// own, and an attempts file without answer text.
+// own and whose gap histograms are the attempts file's, and an attempts
+// file without answer text.
 func TestCheckReleaseCellAndAnswer(t *testing.T) {
 	r := newReleaseRun(t, config.ProfileRelease)
 	_, err := r.check()
@@ -417,6 +421,22 @@ func TestCheckReleaseCellAndAnswer(t *testing.T) {
 	if _, err := r.check(); err != nil {
 		t.Fatalf("complete release run: %v", err)
 	}
+
+	// The gap histograms are the attempts file's: its completions carry no
+	// content event, so no step has a gap.
+	counts := make([]int64, len(GapEdgesUs))
+	counts[4] = 1
+	r.m.Release.Gaps = []GapHistogram{{Step: 1, Gaps: 1, Counts: counts}}
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "cell record: inter_chunk_gaps: map[1:1] gaps per step, "+AttemptsFile+" gives map[]") {
+		t.Errorf("gaps the attempts do not give: %v", err)
+	}
+	r.m.Release.Gaps = nil
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "cell record: inter_chunk_gaps: none") {
+		t.Errorf("no gap histograms: %v", err)
+	}
+	r.m.Release.Gaps = []GapHistogram{}
 
 	// The aggregate's own part counts the attempts file's dispatches, and
 	// the aggregate agrees with itself.

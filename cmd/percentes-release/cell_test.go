@@ -20,13 +20,16 @@ import (
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
-// chatStream is a complete chat-completions stream.
-const chatStream = "data: {\"model\":\"openai/gpt-oss-120b\",\"choices\":[{\"delta\":{\"content\":\"Two sentences.\"}}]}\n\n" +
+// chatStream is a complete chat-completions stream of two content
+// events.
+const chatStream = "data: {\"model\":\"openai/gpt-oss-120b\",\"choices\":[{\"delta\":{\"content\":\"Two \"}}]}\n\n" +
+	"data: {\"model\":\"openai/gpt-oss-120b\",\"choices\":[{\"delta\":{\"content\":\"sentences.\"}}]}\n\n" +
 	"data: {\"model\":\"openai/gpt-oss-120b\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 	"data: [DONE]\n\n"
 
@@ -114,8 +117,9 @@ func ledgerState(t *testing.T, path string) *admission.State {
 // A cell runs the ladder at the admitted steps only, with Shape S texts
 // under the run's seed, settles what it sent, and writes its evidence:
 // the attempts without answer text, the probe, the final dispatch
-// series, a manifest carrying the cell record, its label and the host's
-// aggregate dispatch series, and the report pair.
+// series, a manifest carrying the cell record, its label, the host's
+// aggregate dispatch series and the inter-chunk gap histograms, and the
+// report pair.
 func TestCellRunsAdmittedSteps(t *testing.T) {
 	e := newEndpoint(t, always200)
 	r, f := newTestRoute(t, releaseConfig(t, e.url()), "+0.005032")
@@ -204,6 +208,22 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	}
 	if d := c.Dispatch; d == nil || len(d.Sources) != 1 || d.Sources[0].Run != run || d.Sources[0].Dispatches != sent || !d.Sources[0].Final {
 		t.Fatalf("aggregate dispatch series %+v", d)
+	}
+	completed := map[int]int64{}
+	for _, a := range recs {
+		if a.Outcome == loadgen.OutcomeCompleted && !a.Warmup {
+			completed[a.Step]++
+		}
+	}
+	var gaps int64
+	for _, g := range c.Gaps {
+		if g.Gaps != completed[g.Step] {
+			t.Errorf("step %d: %d gaps over %d completions of two content events", g.Step, g.Gaps, completed[g.Step])
+		}
+		gaps += g.Gaps
+	}
+	if gaps == 0 || len(c.Gaps) != len(completed) {
+		t.Fatalf("gap histograms %+v for completions per step %v", c.Gaps, completed)
 	}
 }
 

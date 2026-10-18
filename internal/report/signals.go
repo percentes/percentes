@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/percentes/percentes/internal/admission"
+	"github.com/percentes/percentes/internal/collect"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 )
@@ -50,24 +51,35 @@ const (
 // nanoseconds: per error class to the failure signal, and per
 // connection (0 dialled, 1 reused) to the first content event and to the
 // whole answer. retry counts the status_429 responses per Retry-After
-// value.
+// value. events holds each completion's content events, and tokens and
+// reasoning its provider-reported completion and reasoning tokens where
+// its record carries them; obs holds every request's terminal state for
+// the incidence estimator, and gaps the inter-chunk gaps per bin of
+// evidence.GapEdgesUs.
 type timing struct {
-	failure    map[string][]int64
-	ttft, done [2][]int64
-	retry      map[string]int
+	failure                   map[string][]int64
+	ttft, done                [2][]int64
+	retry                     map[string]int
+	events, tokens, reasoning []int
+	obs                       []collect.Obs
+	gaps                      []int64
 }
 
 func newStepTally() stepTally {
 	return stepTally{
 		lines: map[string]int{}, statuses: map[int]int{}, inBand: map[string]int{},
-		timing: timing{failure: map[string][]int64{}, retry: map[string]int{}},
+		timing: timing{failure: map[string][]int64{}, retry: map[string]int{}, gaps: make([]int64, len(evidence.GapEdgesUs))},
 	}
 }
 
-// add keeps the durations of a record that fell on line.
-func (t *timing) add(line string, r *evidence.Record) error {
+// add keeps the durations and counts of a record that fell on line. An
+// unsent request is censored at the horizon.
+func (t *timing) add(line string, r *evidence.Record, horizonUs int64) error {
 	switch line {
-	case LineCensored, LineUnsent:
+	case LineUnsent:
+		t.obs = append(t.obs, collect.Obs{TimeUs: horizonUs, Kind: collect.ObsCensored})
+	case LineCensored:
+		t.obs = append(t.obs, collect.Obs{TimeUs: max(0, r.DoneNs-r.IntendedNs) / 1000, Kind: collect.ObsCensored})
 	case LineInTime, LineLate:
 		if r.FirstTokNs == 0 || r.FirstTokNs < r.IntendedNs || r.DoneNs < r.FirstTokNs {
 			return fmt.Errorf("completed with intended_ns %d, first_token_ns %d and done_ns %d", r.IntendedNs, r.FirstTokNs, r.DoneNs)
@@ -78,11 +90,20 @@ func (t *timing) add(line string, r *evidence.Record) error {
 		}
 		t.ttft[c] = append(t.ttft[c], r.FirstTokNs-r.IntendedNs)
 		t.done[c] = append(t.done[c], r.DoneNs-r.IntendedNs)
+		t.obs = append(t.obs, collect.Obs{TimeUs: (r.DoneNs - r.IntendedNs) / 1000, Kind: collect.ObsCompletion})
+		t.events = append(t.events, r.ContentEvents)
+		if r.CompletionTokens != nil {
+			t.tokens = append(t.tokens, *r.CompletionTokens)
+		}
+		if r.ReasoningTokens != nil {
+			t.reasoning = append(t.reasoning, *r.ReasoningTokens)
+		}
 	default:
 		if r.DoneNs == 0 || r.DoneNs < r.IntendedNs {
 			return fmt.Errorf("errored with intended_ns %d and done_ns %d", r.IntendedNs, r.DoneNs)
 		}
 		t.failure[line] = append(t.failure[line], r.DoneNs-r.IntendedNs)
+		t.obs = append(t.obs, collect.Obs{TimeUs: (r.DoneNs - r.IntendedNs) / 1000, Kind: collect.ObsError})
 		if line == loadgen.ErrStatus429 && r.RetryAfter != "" {
 			t.retry[r.RetryAfter]++
 		}
@@ -142,15 +163,23 @@ type RetryAfterValue struct {
 	Count int    `json:"count"`
 }
 
-// Signals is a step's failure timing per error class with events, its
-// completion latency by connection, and its Retry-After record, nil
-// where the step had no status_429. ConditionalCaveat marks errors and
-// censored requests above 5 percent of scheduled, where the latency is
-// read beside the incidence curve.
+// Signals is a step's failure timing per error class with events; its
+// completion latency over every completion and by connection; its
+// completion length as content events, provider-reported completion
+// tokens and reasoning tokens; its inter-chunk gaps; and its Retry-After
+// record, nil where the step had no status_429. ConditionalCaveat marks
+// errors and censored requests above 5 percent of scheduled, where the
+// latency is read beside the incidence curve.
 type Signals struct {
 	Failures          []FailureTiming `json:"failure_timing,omitempty"`
+	TTFT              Distribution    `json:"ttft"`
+	WholeAnswer       Distribution    `json:"whole_answer"`
 	Latency           []ConnLatency   `json:"latency_by_connection"`
 	ConditionalCaveat bool            `json:"conditional_caveat,omitempty"`
+	ContentEvents     Counts          `json:"content_events"`
+	CompletionTokens  Counts          `json:"completion_tokens"`
+	ReasoningTokens   Counts          `json:"reasoning_tokens"`
+	Gaps              Gaps            `json:"inter_chunk_gaps"`
 	RetryAfter        *RetryAfter     `json:"retry_after,omitempty"`
 }
 
@@ -181,6 +210,20 @@ func signals(ts []*stepTally, scheduled int, retryRecorded bool) *Signals {
 		}
 	}
 	s.ConditionalCaveat = float64(failed) > conditionalLimit*float64(scheduled)
+	s.TTFT = distribution(cat(func(t *stepTally) []int64 { return append(slices.Clone(t.ttft[0]), t.ttft[1]...) }))
+	s.WholeAnswer = distribution(cat(func(t *stepTally) []int64 { return append(slices.Clone(t.done[0]), t.done[1]...) }))
+	catInts := func(f func(*stepTally) []int) []int {
+		var out []int
+		for _, t := range ts {
+			out = append(out, f(t)...)
+		}
+		return out
+	}
+	of := s.WholeAnswer.N
+	s.ContentEvents = counts(catInts(func(t *stepTally) []int { return t.events }), of)
+	s.CompletionTokens = counts(catInts(func(t *stepTally) []int { return t.tokens }), of)
+	s.ReasoningTokens = counts(catInts(func(t *stepTally) []int { return t.reasoning }), of)
+	s.Gaps = gapsOf(ts)
 	for c, conn := range []string{ConnDialled, ConnReused} {
 		s.Latency = append(s.Latency, ConnLatency{
 			Conn:        conn,
@@ -188,16 +231,16 @@ func signals(ts []*stepTally, scheduled int, retryRecorded bool) *Signals {
 			WholeAnswer: quantiles(cat(func(t *stepTally) []int64 { return t.done[c] })),
 		})
 	}
-	of := 0
+	limited := 0
 	values := map[string]int{}
 	for _, t := range ts {
-		of += t.lines[loadgen.ErrStatus429]
+		limited += t.lines[loadgen.ErrStatus429]
 		for v, n := range t.retry {
 			values[v] += n
 		}
 	}
-	if of > 0 {
-		ra := &RetryAfter{Recorded: retryRecorded, Of: of}
+	if limited > 0 {
+		ra := &RetryAfter{Recorded: retryRecorded, Of: limited}
 		for v, n := range values {
 			ra.With += n
 			ra.Values = append(ra.Values, RetryAfterValue{Value: v, Count: n})
@@ -238,18 +281,21 @@ func maxHalfFraction(s admission.Step) (f float64, ok bool) {
 	return f, ok
 }
 
-// signalsText renders a step's failure timing and completion latency.
+// signalsText renders a step's failure timing, completion latency,
+// completion length and inter-chunk gaps.
 func signalsText(w func(string, ...any), s *Signals) {
-	ms := func(ns int64) string { return fmt.Sprintf("%.1f ms", float64(ns)/1e6) }
 	q := func(x Quantiles) string {
 		if x.N == 0 {
 			return "n 0"
 		}
-		return fmt.Sprintf("n %d, median %s, 90th percentile %s", x.N, ms(x.P50Ns), ms(x.P90Ns))
+		return fmt.Sprintf("n %d, median %s, 90th percentile %s", x.N, msText(x.P50Ns), msText(x.P90Ns))
 	}
 	for _, f := range s.Failures {
 		w("  time to failure signal, %s: %s", f.Class, q(f.Quantiles))
 	}
+	w("  completions, client-observed from intended dispatch, conditional on completion:")
+	w("    TTFT          %s", distributionText(s.TTFT))
+	w("    whole answer  %s", distributionText(s.WholeAnswer))
 	w("  completions by connection, client-observed from intended dispatch, conditional on completion:")
 	for _, l := range s.Latency {
 		w("    %-8s TTFT %s; whole answer %s", l.Conn, q(l.TTFT), q(l.WholeAnswer))
@@ -257,6 +303,15 @@ func signalsText(w func(string, ...any), s *Signals) {
 	if s.ConditionalCaveat {
 		w("    errors and censored above 5%% of scheduled: read with the incidence curve")
 	}
+	if s.ContentEvents.Of == 0 {
+		w("  completion length: no completions")
+	} else {
+		w("  completion length over the %d completions:", s.ContentEvents.Of)
+		w("    %-37s %s", "content events", countsText(s.ContentEvents))
+		w("    %-37s %s", "provider-reported completion tokens", countsText(s.CompletionTokens))
+		w("    %-37s %s", "provider-reported reasoning tokens", countsText(s.ReasoningTokens))
+	}
+	gapsText(w, s.Gaps)
 }
 
 // retryAfterText renders a step's status_429 context: the largest

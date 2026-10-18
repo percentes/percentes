@@ -108,6 +108,11 @@ func TestCurveCell(t *testing.T) {
 			row("by 20 s") + pct(4, 10) + "\n" +
 			row("by 30 s") + pct(6, 10) + "\n" +
 			row("by last completion 45.000 s") + pct(7, 10) + "\n" +
+			"  completion-incidence quantiles, Aalen-Johansen over scheduled, inside the 90 s hard timeout:\n" +
+			"    median           25.000 s\n" +
+			"    90th percentile  unattainable (final completion incidence 70.00%; ceiling 80.00%)\n" +
+			"    95th percentile  unattainable (final completion incidence 70.00%; ceiling 80.00%)\n" +
+			"    99th percentile  unattainable (final completion incidence 70.00%; ceiling 80.00%)\n" +
 			"  time to failure signal, status_429:",
 		row("by 30 s") + pct(1, 4) + "\n" + row("by last completion 7.000 s") + pct(1, 4) + "\n",
 		row("by 30 s") + pct(0, 2) + "\n    no completions\n",

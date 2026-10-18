@@ -306,15 +306,24 @@ func orderStatCI(sorted []int64, q float64) *OrderStatCI {
 	if n == 0 {
 		return nil
 	}
-	const z = 1.959964 // 95%
-	mean := float64(n) * q
-	half := z * math.Sqrt(float64(n)*q*(1-q))
-	lo := int(math.Floor(mean - half))
-	hi := int(math.Ceil(mean + half))
-	if lo < 1 || hi > n {
+	lo, hi, ok := OrderStatRanks(n, q)
+	if !ok {
 		return &OrderStatCI{Permitted: false}
 	}
 	return &OrderStatCI{LoUs: sorted[lo-1], HiUs: sorted[hi-1], Permitted: true}
+}
+
+// OrderStatRanks are the 1-based ranks, among n ordered values, of the
+// two-sided 95 percent distribution-free order-statistic interval for
+// quantile q, from the normal approximation to the binomial (SPEC.md
+// §7); ok is false where either rank falls outside the sample.
+func OrderStatRanks(n int, q float64) (lo, hi int, ok bool) {
+	const z = 1.959964 // 95%
+	mean := float64(n) * q
+	half := z * math.Sqrt(float64(n)*q*(1-q))
+	lo = int(math.Floor(mean - half))
+	hi = int(math.Ceil(mean + half))
+	return lo, hi, lo >= 1 && hi <= n
 }
 
 // ThresholdAnalysis is the §4 statement: how many baseline standard

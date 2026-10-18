@@ -186,7 +186,7 @@ func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, 
 		if err != nil {
 			return nil, err
 		}
-		rr.cells = append(rr.cells, report.CellRecords{Cell: cellLabel(rec.Run), Outcome: m.Release.Outcome, Records: recs})
+		rr.cells = append(rr.cells, report.CellRecords{Cell: cellLabel(rec.Run), Outcome: m.Release.Outcome, Gaps: m.Release.Gaps, Records: recs})
 	}
 	if rr.verdict == nil {
 		return nil, fmt.Errorf("pages: route %s has no cell with a %s under %s", name, evidence.ManifestFile, out)

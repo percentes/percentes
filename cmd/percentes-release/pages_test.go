@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
 )
@@ -184,7 +186,28 @@ func TestPagesCmd(t *testing.T) {
 		}
 	}
 	if len(st.Cells) != 1 || st.Cells[0].Cell != cellLabel(counted) || scheduled != measured || measured == 0 {
-		t.Errorf("groq tables: %d cells, %d scheduled, the attempts file %d measured", len(st.Cells), scheduled, measured)
+		t.Fatalf("groq tables: %d cells, %d scheduled, the attempts file %d measured", len(st.Cells), scheduled, measured)
+	}
+	// Each completion of the endpoint's two content events gives one gap.
+	var completions, gaps int64
+	for i := range recs {
+		if !recs[i].Warmup && recs[i].Outcome == loadgen.OutcomeCompleted {
+			completions++
+		}
+	}
+	for _, s := range st.Cells[0].Steps {
+		if s.State == report.StepAttempted && s.Scheduled > 0 && (s.Incidence == nil || s.Signals == nil) {
+			t.Errorf("step %d: incidence quantiles %v, signals %v", s.Step, s.Incidence, s.Signals)
+		}
+		if s.Signals != nil {
+			gaps += s.Signals.Gaps.N
+			if line := fmt.Sprintf("  inter-chunk gaps between successive content events, over completions: n %d\n", s.Signals.Gaps.N); !strings.Contains(page, line) {
+				t.Errorf("groq page lacks %q", line)
+			}
+		}
+	}
+	if completions == 0 || gaps != completions || !strings.Contains(page, "  completion-incidence quantiles, Aalen-Johansen over scheduled, inside the 90 s hard timeout:\n") {
+		t.Errorf("groq page: %d gaps over %d completions:\n%s", gaps, completions, page)
 	}
 	var anthTables report.StepTables
 	if err := json.Unmarshal(files["routes/anth.json"], &anthTables); err != nil || len(anthTables.Cells) != 0 {

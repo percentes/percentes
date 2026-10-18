@@ -198,11 +198,12 @@ type cellFiles struct {
 
 // retain writes a finished cell's evidence: the final dispatch series,
 // the end status, the frame store and operator copies, the attempts
-// file, the manifest carrying the cell's label and the host's aggregate
-// dispatch series, and the report pair. A nil res is a cell whose ladder
-// never started: its attempts file and frame store are empty, and its
-// epoch is the cell's start. A frame store that fails to write leaves
-// the rest to be written; the failure is returned after them.
+// file, the manifest carrying the cell's label, the host's aggregate
+// dispatch series and the inter-chunk gap histograms, and the report
+// pair. A nil res is a cell whose ladder never started: its attempts
+// file and frame store are empty, and its epoch is the cell's start. A
+// frame store that fails to write leaves the rest to be written; the
+// failure is returned after them.
 func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res *loadgen.Result) error {
 	ladder := res != nil
 	if !ladder {
@@ -253,6 +254,7 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 		return errors.Join(ferr, err)
 	}
 	cell.Outcome, cell.Reasons, cell.LadderStarted = rec.Outcome, rec.Reasons, ladder
+	cell.Gaps = evidence.StepGaps(res)
 	m, err := evidence.NewManifest(evidence.ManifestInput{
 		Config:          ev.cfg,
 		ConfigName:      r.configName,

@@ -42,6 +42,8 @@ type Cell struct {
 	Concurrent []schedule.Run `json:"concurrent_runs"`
 	// Dispatch is the host's aggregate dispatch series over the cell.
 	Dispatch *Dispatch `json:"dispatch_aggregate"`
+	// Gaps are the run's inter-chunk gap histograms per ladder step.
+	Gaps []GapHistogram `json:"inter_chunk_gaps"`
 	// Admission is the ceiling rule's verdict: the admitted steps, and
 	// each excluded step with its binding limit.
 	Admission *admission.Verdict `json:"admission"`
@@ -178,6 +180,10 @@ func checkCell(cfg *config.Config, t *config.Target, c *Cell) error {
 		fail("pre_window_requests %d is negative", c.PreWindowRequests)
 	}
 	problems = append(problems, c.dispatchProblems()...)
+	if c.Gaps == nil {
+		fail("inter_chunk_gaps: none")
+	}
+	problems = append(problems, gapProblems(c.Gaps)...)
 	if len(problems) > 0 {
 		return errors.New("evidence: release cell: " + strings.Join(problems, "; "))
 	}

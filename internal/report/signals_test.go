@@ -126,7 +126,7 @@ func signalsCell(label string) CellRecords {
 	failed(loadgen.ErrMalformedStream, 200, 6000, "", `{"type":"overl`)
 	failed(loadgen.ErrMalformedStream, 200, 7000, "", "")
 	failed(loadgen.ErrMalformedStream, 200, 8000, "", `{"type":"api_error"}`)
-	add(evidence.Record{Outcome: loadgen.OutcomeCensored})
+	add(evidence.Record{Outcome: loadgen.OutcomeCensored, DoneNs: base + 90_000*ms})
 	return c
 }
 
@@ -220,6 +220,9 @@ func TestStepTablesSignals(t *testing.T) {
 		"\n  time to failure signal, status_429: n 3, median 60.0 ms, 90th percentile 70.0 ms\n" +
 			"  time to failure signal, status_other: n 1, median 25000.0 ms, 90th percentile 25000.0 ms\n" +
 			"  time to failure signal, malformed_stream: n 6, median 5000.0 ms, 90th percentile 8000.0 ms\n" +
+			"  completions, client-observed from intended dispatch, conditional on completion:\n" +
+			"    TTFT          n 6, median 400.0 ms, 90th percentile 1000.0 ms; 95th and 99th percentiles not reported: their interval ranks fall outside the sample\n" +
+			"    whole answer  n 6, median 1000.0 ms, 90th percentile 31000.0 ms; 95th and 99th percentiles not reported: their interval ranks fall outside the sample\n" +
 			"  completions by connection, client-observed from intended dispatch, conditional on completion:\n" +
 			"    dialled  TTFT n 1, median 200.0 ms, 90th percentile 200.0 ms; whole answer n 1, median 1000.0 ms, 90th percentile 1000.0 ms\n" +
 			"    reused   TTFT n 5, median 500.0 ms, 90th percentile 1000.0 ms; whole answer n 5, median 1200.0 ms, 90th percentile 31000.0 ms\n" +
