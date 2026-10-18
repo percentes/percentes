@@ -232,8 +232,8 @@ func maskSecretPrefixTail(b []byte, secrets []string) {
 }
 
 // recordChunk keeps a chunk's usage, finish reason, reported model and
-// any mismatch with the requested one, system fingerprint, in-band error
-// and reasoning arrival on r.
+// any mismatch with the requested one, system fingerprint, in-band error,
+// refusal text and reasoning arrival on r.
 func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	if !c.known {
 		r.UnknownEvents++
@@ -268,6 +268,12 @@ func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 		json.Compact(&b, c.err) //nolint:errcheck
 		r.StreamError = string(readErrorBody(&b, secrets))
 	}
+	if c.refusal != "" {
+		r.RefusalBytes += len(c.refusal)
+		if g.cfg.Target.Hosted {
+			r.Refusal += c.refusal
+		}
+	}
 	if c.reasoning != "" {
 		r.ReasoningChunks++
 		if r.FirstReasoningNs == 0 {
@@ -283,8 +289,10 @@ type chunk struct {
 	finish, model      string
 	fingerprint        string
 	usage, err         json.RawMessage
-	// known: the event carried choices, a usage object or an error, or
-	// is a Messages event type the adapter reads.
+	// refusal is the text at the shape's refusal paths, in path order.
+	refusal string
+	// known: the event carried choices, a usage object, an error or a
+	// refusal field, or is a Messages event type the adapter reads.
 	known bool
 	// end: the stream's terminator.
 	end bool
@@ -298,8 +306,8 @@ type chunk struct {
 
 // parseChunk decodes one chat-completion chunk. ok is false when the
 // payload is not a JSON object or null, or when any choice, delta, or
-// content or reasoning value has the wrong type. Field names match
-// exactly.
+// content, reasoning or refusal value has the wrong type. Field names
+// match exactly.
 func parseChunk(payload []byte, sh config.ResponseShape) (c chunk, ok bool) {
 	var root map[string]json.RawMessage
 	if json.Unmarshal(payload, &root) != nil {
@@ -343,6 +351,15 @@ func parseChunk(payload []byte, sh config.ResponseShape) (c chunk, ok bool) {
 	for _, p := range sh.Error {
 		if v := lookup(root, p); v != nil && c.err == nil {
 			c.err, c.known = v, true
+		}
+	}
+	for _, p := range sh.Refusal {
+		if v := lookup(root, p); v != nil {
+			var s string
+			if !stringField(v, &s) {
+				return c, false
+			}
+			c.refusal, c.known = c.refusal+s, true
 		}
 	}
 	return c, true

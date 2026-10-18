@@ -244,6 +244,49 @@ func TestScoreFromRecords(t *testing.T) {
 	}
 }
 
+// Where the shape names a refusal path, each record carries refusal
+// presence and length and never the text; the scorer reads the text from
+// the request; the request read back keeps the length. With no refusal
+// path the record has no refusal field.
+func TestRefusalFromRecords(t *testing.T) {
+	res := &loadgen.Result{Requests: []loadgen.Request{
+		{Index: 0, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrEmptyStream, FinishReason: "stop", Refusal: "I cannot help.", RefusalBytes: 14},
+		{Index: 1, Outcome: loadgen.OutcomeCompleted, Content: `{"route":"billing"}`, FinishReason: "stop"},
+	}}
+	cfg := hostedCfg("")
+	cfg.Target.ResponseShape = &config.ResponseShape{Refusal: []string{"choices.0.delta.refusal"}}
+	recs := Records(cfg, res, Options{Scoring: &Scoring{Scorer: testScorer(t), Expected: []string{"billing", "billing"}}})
+	var b bytes.Buffer
+	if err := Write(&b, recs); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), "cannot") {
+		t.Fatalf("refusal text in the records: %s", b.Bytes())
+	}
+	got := lines(t, b.Bytes())
+	if string(got[0]["refusal"]) != "true" || string(got[0]["refusal_bytes"]) != "14" {
+		t.Errorf("record 0: refusal %s bytes %s, want true and 14", got[0]["refusal"], got[0]["refusal_bytes"])
+	}
+	if _, ok := got[1]["refusal_bytes"]; string(got[1]["refusal"]) != "false" || ok {
+		t.Errorf("record 1: refusal %s bytes %s, want false and no length", got[1]["refusal"], got[1]["refusal_bytes"])
+	}
+	if s := recs[0].Score; s == nil || s.Class != score.Refusal {
+		t.Errorf("record 0: score %+v, want %s", s, score.Refusal)
+	}
+	if s := recs[1].Score; s == nil || s.Class != score.Success {
+		t.Errorf("record 1: score %+v, want %s", s, score.Success)
+	}
+	if r := recs[0].Request(); r.RefusalBytes != 14 || r.Refusal != "" {
+		t.Errorf("request 0 read back: refusal %q bytes %d", r.Refusal, r.RefusalBytes)
+	}
+
+	for _, rec := range Records(hostedCfg(""), res, Options{}) {
+		if rec.Refusal != nil || rec.RefusalBytes != 0 {
+			t.Errorf("record %d with no refusal path: refusal present %v, bytes %d", rec.Index, rec.Refusal != nil, rec.RefusalBytes)
+		}
+	}
+}
+
 // http10Server answers every request with an HTTP/1.0 stream.
 func http10Server(t *testing.T) string {
 	t.Helper()

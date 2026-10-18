@@ -80,6 +80,12 @@ type Record struct {
 	Reasoning        bool    `json:"reasoning"`
 	ReasoningChunks  int     `json:"reasoning_chunks,omitempty"`
 	FirstReasoningNs int64   `json:"first_reasoning_ns,omitempty"`
+	// Refusal says whether the stream carried text at a refusal path the
+	// target's response shape names, and RefusalBytes is that text's
+	// length; Refusal is absent when the shape names none. The text is
+	// never recorded here.
+	Refusal      *bool `json:"refusal,omitempty"`
+	RefusalBytes int   `json:"refusal_bytes,omitempty"`
 	// Score is the scorer's output for an attempt with an expected label.
 	Score *Score `json:"score,omitempty"`
 	// RunFailures are the run's invalid reasons, repeated on every record
@@ -124,7 +130,7 @@ func Records(cfg *config.Config, res *loadgen.Result, opt Options) []Record {
 		}
 		if s := opt.Scoring; s != nil && rec.Index >= 0 && rec.Index < int64(len(s.Expected)) && s.Expected[rec.Index] != "" {
 			a := rec.Attempt(s.Expected[rec.Index])
-			a.Answer = r.Content
+			a.Answer, a.Refusal = r.Content, r.Refusal
 			rec.Score = scoreOf(s.Scorer, a)
 		}
 	}
@@ -161,6 +167,10 @@ func record(r *loadgen.Request, cfg *config.Config) Record {
 		Reasoning:         r.ReasoningChunks > 0,
 		ReasoningChunks:   r.ReasoningChunks,
 		FirstReasoningNs:  r.FirstReasoningNs,
+	}
+	if len(cfg.Target.Shape().Refusal) > 0 {
+		refused := r.RefusalBytes > 0
+		rec.Refusal, rec.RefusalBytes = &refused, r.RefusalBytes
 	}
 	if r.UsageSeen {
 		n := r.CompletionTokens
@@ -217,7 +227,8 @@ func reasoningTokens(usage json.RawMessage) *int {
 
 // Attempt is what the scorer reads from rec. The stream ended when it
 // completed, or reached [DONE] with no visible content (empty_stream).
-// The refusal field and the incompatible flag are left unset.
+// The refusal text, which rec does not carry, and the incompatible flag
+// are left unset.
 func (rec *Record) Attempt(expected string) score.Attempt {
 	a := score.Attempt{
 		Expected:     expected,
@@ -248,8 +259,9 @@ func scoreOf(s *score.Scorer, a score.Attempt) *Score {
 }
 
 // Request is the request rec records. The fields the per-attempt record
-// does not carry are zero: inter-token gaps, replica, reasoning text, the
-// non-200 body, the frames, and a release request's answer.
+// does not carry are zero: inter-token gaps, replica, reasoning and
+// refusal text, the non-200 body, the frames, and a release request's
+// answer.
 func (rec *Record) Request() loadgen.Request {
 	r := loadgen.Request{
 		Index:             rec.Index,
@@ -271,6 +283,7 @@ func (rec *Record) Request() loadgen.Request {
 		StreamError:       rec.StreamError,
 		ReasoningChunks:   rec.ReasoningChunks,
 		FirstReasoningNs:  rec.FirstReasoningNs,
+		RefusalBytes:      rec.RefusalBytes,
 		UnknownEvents:     rec.UnknownEvents,
 		Proto:             rec.Protocol,
 		Status:            rec.Status,

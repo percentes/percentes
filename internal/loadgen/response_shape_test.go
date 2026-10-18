@@ -187,6 +187,50 @@ func TestExplicitErrorEvent(t *testing.T) {
 	}
 }
 
+// Refusal text is read only at the paths the shape names, joined across
+// chunks and counted in bytes; the text stays out of JSON and is kept for
+// hosted targets only; two paths in one chunk join in path order. A
+// refusal of the wrong type is a malformed stream.
+func TestRefusalFieldAtConfiguredPath(t *testing.T) {
+	delta := &config.ResponseShape{Refusal: []string{"choices.0.delta.refusal"}}
+	refusal := func(s string) string {
+		return "data: {\"choices\":[{\"delta\":{\"content\":null,\"refusal\":" + s + "}}]}\n\n"
+	}
+	frames := []string{refusal(`"I can\u2019t "`), refusal(`null`), refusal(`"help."`), stopFrame, doneFrame}
+	const text, n = "I can\u2019t help.", 15
+
+	r := executeShaped(t, true, delta, frames...)
+	if r.Outcome != OutcomeErrored || r.ErrClass != ErrEmptyStream || r.Tokens != 0 {
+		t.Fatalf("got %v/%q tokens=%d, want errored/%s", r.Outcome, r.ErrClass, r.Tokens, ErrEmptyStream)
+	}
+	if r.Refusal != text || r.RefusalBytes != n || r.UnknownEvents != 0 || r.FinishReason != "stop" {
+		t.Fatalf("refusal %q bytes %d unknown %d finish %q, want %q and %d bytes", r.Refusal, r.RefusalBytes, r.UnknownEvents, r.FinishReason, text, n)
+	}
+	b, _ := json.Marshal(r)
+	if strings.Contains(string(b), "help") || !strings.Contains(string(b), `"refusal_bytes":15`) {
+		t.Fatalf("refusal in JSON: %s", b)
+	}
+
+	if r := executeShaped(t, false, delta, frames...); r.Refusal != "" || r.RefusalBytes != n {
+		t.Fatalf("self-hosted: refusal %q bytes %d, want no text and %d bytes", r.Refusal, r.RefusalBytes, n)
+	}
+	if r := executeShaped(t, true, nil, frames...); r.Refusal != "" || r.RefusalBytes != 0 {
+		t.Fatalf("unconfigured path: refusal %q bytes %d", r.Refusal, r.RefusalBytes)
+	}
+
+	vendor := &config.ResponseShape{Refusal: []string{"choices.0.delta.refusal", "x_refusal.text"}}
+	r = executeShaped(t, true, vendor, answerFrame, "data: {\"x_refusal\":{\"text\":\"no\"}}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"refusal\":\" and \"}}],\"x_refusal\":{\"text\":\"no\"}}\n\n", stopFrame, doneFrame)
+	if r.Outcome != OutcomeCompleted || r.Refusal != "no and no" || r.RefusalBytes != 9 || r.UnknownEvents != 0 {
+		t.Fatalf("vendor path: %v/%q refusal %q bytes %d unknown %d", r.Outcome, r.ErrClass, r.Refusal, r.RefusalBytes, r.UnknownEvents)
+	}
+
+	r = executeShaped(t, true, delta, answerFrame, refusal(`{"text":"no"}`), doneFrame)
+	if r.ErrClass != ErrMalformedStream || r.RefusalBytes != 0 {
+		t.Fatalf("refusal object: %v/%q bytes %d, want %s", r.Outcome, r.ErrClass, r.RefusalBytes, ErrMalformedStream)
+	}
+}
+
 // Events of another schema are counted and carry no token; extra keys on
 // a known chunk are ignored; a configured field of the wrong type is a
 // malformed stream.

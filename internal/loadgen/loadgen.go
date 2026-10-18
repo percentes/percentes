@@ -112,6 +112,12 @@ type Request struct {
 	// kept for hosted targets only; never in JSON.
 	Content   string `json:"-"`
 	Reasoning string `json:"-"`
+	// Refusal is the text at the refusal paths target.response_shape
+	// names, joined in arrival order, kept for hosted targets only; never
+	// in JSON. RefusalBytes is its length in bytes, counted for every
+	// target.
+	Refusal      string `json:"-"`
+	RefusalBytes int    `json:"refusal_bytes,omitempty"`
 	// Proto is the response's protocol version ("" = no response).
 	Proto string `json:"proto,omitempty"`
 	// Status is the HTTP status code (0 = no response). Headers holds the
