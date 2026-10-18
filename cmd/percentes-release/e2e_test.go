@@ -184,6 +184,7 @@ func mockCounts(t *testing.T, s *mock.Server) map[string]int {
 // the test is skipped.
 func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	enoughOpenFiles(t)
+	fastDispatch(t)
 	dir := t.TempDir()
 	out, frames := t.TempDir(), t.TempDir()
 	clockSync := fakeSNTP(t, "+0.005032")
@@ -285,6 +286,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 
 	gateOnly := false
 	sent := 0
+	var sends []time.Time
 	st := ledgerState(t, ledgerPath)
 	for i, r := range routes {
 		name, rec := names[i], recs[i]
@@ -340,6 +342,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 				continue
 			}
 			dispatched++
+			sends = append(sends, rec.EpochUTC.Add(time.Duration(a.DispatchNs)))
 			if a.Status != http.StatusOK || a.Outcome != loadgen.OutcomeCompleted || !a.InTime || a.Answer != nil || a.Step < 1 || a.Step > top ||
 				a.ReasoningChunks != reasoning || a.FinishReason != finish || a.CompletionTokens == nil || a.ContentEvents == 0 {
 				t.Fatalf("%s: record %+v", name, a)
@@ -412,6 +415,43 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 				t.Errorf("%s: %s ran beside it for %s and is not listed", names[i], names[j], to.Sub(from))
 			}
 		}
+	}
+
+	// Each cell's manifest carries the host's aggregate dispatch series
+	// over its seconds, every route's sends summed, each series read final
+	// or counting through the cell's end. The last second runs past the
+	// end, so it holds at least the sends before the end.
+	for i, r := range routes {
+		m, err := evidence.ReadManifest(filepath.Join(r.cellDir(runs[i]), evidence.ManifestFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := m.Release.Dispatch
+		if d == nil || len(d.Sources) != 1+len(recs[i].Concurrent) || len(d.Counts) == 0 {
+			t.Errorf("%s: aggregate %+v with %d concurrent runs", names[i], d, len(recs[i].Concurrent))
+			continue
+		}
+		for _, src := range d.Sources {
+			if !src.Final && (src.ThroughUTC == nil || src.ThroughUTC.Before(d.EndUTC)) {
+				t.Errorf("%s: %s's series counts through %v, before the cell's end %s", names[i], src.Run.Route, src.ThroughUTC, d.EndUTC)
+			}
+		}
+		want, last := make([]int, len(d.Counts)), len(d.Counts)-1
+		beforeEnd := 0
+		for _, at := range sends {
+			k := int(at.UTC().Truncate(time.Second).Sub(d.StartUTC) / time.Second)
+			if k < 0 || k > last {
+				continue
+			}
+			want[k]++
+			if k == last && at.Before(d.EndUTC) {
+				beforeEnd++
+			}
+		}
+		if !slices.Equal(d.Counts[:last], want[:last]) || d.Counts[last] < beforeEnd || d.Counts[last] > want[last] {
+			t.Errorf("%s: aggregate %v, the routes' sends per second %v", names[i], d.Counts, want)
+		}
+		t.Logf("%s: %d concurrent runs, at most %d dispatches a second", names[i], len(recs[i].Concurrent), d.MaxPerSecond)
 	}
 
 	// The pinned offsets keep the routes' top-step windows apart.

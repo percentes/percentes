@@ -30,6 +30,9 @@ func (g *gen) execute(r *Request) {
 	r.DispatchNs = g.now()
 	g.trip.start(r.DispatchNs, r.Step)
 	defer g.trip.end()
+	if g.onDispatch != nil {
+		g.onDispatch(r)
+	}
 	timeout := clientTimeout(g.cfg)
 	deadline := g.epoch.Add(time.Duration(r.DispatchNs) + timeout)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)

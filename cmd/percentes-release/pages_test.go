@@ -218,7 +218,10 @@ func TestPagesCmd(t *testing.T) {
 		writeFile(t, dir, ent.Name(), b)
 	}
 	editJSON(t, filepath.Join(dir, cellFile), func(c *cellRecord) { c.Run.Attempt = 2 })
-	editJSON(t, filepath.Join(dir, evidence.ManifestFile), func(m *evidence.Manifest) { m.Release.Run.Attempt = 2 })
+	editJSON(t, filepath.Join(dir, evidence.ManifestFile), func(m *evidence.Manifest) {
+		m.Release.Run.Attempt = 2
+		m.Release.Dispatch.Sources[0].Run.Attempt = 2
+	})
 	code, err := pagesCmd(args)
 	if code != exitError || err == nil || !strings.Contains(err.Error(), "cell "+counted.Label+" of route groq counted twice") {
 		t.Fatalf("exit %d: %v", code, err)

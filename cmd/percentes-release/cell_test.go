@@ -113,8 +113,9 @@ func ledgerState(t *testing.T, path string) *admission.State {
 
 // A cell runs the ladder at the admitted steps only, with Shape S texts
 // under the run's seed, settles what it sent, and writes its evidence:
-// the attempts without answer text, the probe, the dispatch series, a
-// manifest carrying the cell record and its label, and the report pair.
+// the attempts without answer text, the probe, the final dispatch
+// series, a manifest carrying the cell record, its label and the host's
+// aggregate dispatch series, and the report pair.
 func TestCellRunsAdmittedSteps(t *testing.T) {
 	e := newEndpoint(t, always200)
 	r, f := newTestRoute(t, releaseConfig(t, e.url()), "+0.005032")
@@ -198,8 +199,11 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	for _, n := range ds.Counts {
 		total += n
 	}
-	if total != sent || ds.Run != run {
-		t.Fatalf("dispatch series counts %d of %d sent", total, sent)
+	if total != sent || ds.Run != run || !ds.Final {
+		t.Fatalf("dispatch series counts %d of %d sent, final %t", total, sent, ds.Final)
+	}
+	if d := c.Dispatch; d == nil || len(d.Sources) != 1 || d.Sources[0].Run != run || d.Sources[0].Dispatches != sent || !d.Sources[0].Final {
+		t.Fatalf("aggregate dispatch series %+v", d)
 	}
 }
 

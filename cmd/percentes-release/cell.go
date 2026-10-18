@@ -66,6 +66,10 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	cfg := cellConfig(r.cfg, run.Seed, r.steps)
 	t := &cfg.Target
 	ev := &cellFiles{dir: dir, run: run, cfg: cfg}
+	if ev.live, err = startLiveSeries(filepath.Join(dir, dispatchFile), run); err != nil {
+		return rec, err
+	}
+	defer ev.live.stop()
 	ev.clock = evidence.ReadClock(ctx, r.clock)
 	if ev.clockPath, err = evidence.WriteClock(dir, ev.clock); err != nil {
 		return rec, err
@@ -142,8 +146,10 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	res, runErr := loadgen.Run(cellCtx, cfg, &loadgen.Hooks{
 		Cases: cases,
 		OnEpoch: func(e time.Time) {
+			ev.live.setEpoch(e)
 			canary, canaryErr = loadgen.StartCanary(cellCtx, e)
 		},
+		OnDispatch: ev.live.dispatched,
 		OnDone: func(q *loadgen.Request) {
 			if s := billingRefusal(t, q.Status, q.ErrorBody); s != nil {
 				stop(s)
@@ -176,29 +182,37 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 }
 
 // cellFiles are what a cell has recorded before its evidence is
-// retained: the clock record, the start status, the ledger position and
-// the probe record where the cell reached them.
+// retained: the running dispatch series, the clock record, the start
+// status, the ledger position and the probe record where the cell
+// reached them.
 type cellFiles struct {
 	dir                    string
 	run                    schedule.Run
 	cfg                    *config.Config
+	live                   *liveSeries
 	clock                  *evidence.ClockRecord
 	clockPath, statusStart string
 	ledger                 *evidence.LedgerRef
 	probePath              string
 }
 
-// retain writes a finished cell's evidence: the end status, the frame
-// store and operator copies, the attempts file, the dispatch series, the
-// manifest carrying the cell's label, and the report pair. A nil res is
-// a cell whose ladder never started: its attempts file and frame store
-// are empty, and its epoch is the cell's start. A frame store that fails
-// to write leaves the rest to be written; the failure is returned after
-// them.
+// retain writes a finished cell's evidence: the final dispatch series,
+// the end status, the frame store and operator copies, the attempts
+// file, the manifest carrying the cell's label and the host's aggregate
+// dispatch series, and the report pair. A nil res is a cell whose ladder
+// never started: its attempts file and frame store are empty, and its
+// epoch is the cell's start. A frame store that fails to write leaves
+// the rest to be written; the failure is returned after them.
 func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res *loadgen.Result) error {
 	ladder := res != nil
 	if !ladder {
 		res = &loadgen.Result{EpochWall: rec.StartUTC}
+	}
+	ev.live.stop()
+	dispatchPath := filepath.Join(ev.dir, dispatchFile)
+	own := newDispatchSeries(ev.run, res)
+	if err := replaceJSON(dispatchPath, own); err != nil {
+		return err
 	}
 	var err error
 	if ev.ledger == nil {
@@ -226,16 +240,16 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	if ev.probePath != "" {
 		artifacts = append(artifacts, ev.probePath)
 	}
-	dispatchPath := filepath.Join(ev.dir, dispatchFile)
-	if err := replaceJSON(dispatchPath, newDispatchSeries(ev.run, res)); err != nil {
-		return errors.Join(ferr, err)
-	}
 	artifacts = append(artifacts, dispatchPath)
+	end := time.Now()
 	if rec.Concurrent, err = r.concurrent(rec.StartUTC, r.now().UTC()); err != nil {
 		return errors.Join(ferr, err)
 	}
 	cell, err := r.cellEvidence(ev.dir, ev.run, rec)
 	if err != nil {
+		return errors.Join(ferr, err)
+	}
+	if cell.Dispatch, err = r.hostDispatch(ev.live.start, end, own, cell.Concurrent); err != nil {
 		return errors.Join(ferr, err)
 	}
 	cell.Outcome, cell.Reasons, cell.LadderStarted = rec.Outcome, rec.Reasons, ladder

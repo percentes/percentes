@@ -166,6 +166,14 @@ func shortLadder(r *route) {
 	r.cfg.ClientValidity.CPUWindowS = 1
 }
 
+// fastDispatch shortens the running dispatch series' timing for a test.
+func fastDispatch(t *testing.T) {
+	t.Helper()
+	flush, lag, wait := dispatchFlush, dispatchLag, dispatchWaitMax
+	dispatchFlush, dispatchLag, dispatchWaitMax = 50*time.Millisecond, 50*time.Millisecond, 500*time.Millisecond
+	t.Cleanup(func() { dispatchFlush, dispatchLag, dispatchWaitMax = flush, lag, wait })
+}
+
 // readCell reads a cell's record.
 func readCell(t *testing.T, r *route, run schedule.Run) *cellRecord {
 	t.Helper()

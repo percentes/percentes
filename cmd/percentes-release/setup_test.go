@@ -310,6 +310,78 @@ func TestDispatchSeries(t *testing.T) {
 	}
 }
 
+// A cell's aggregate sums its own final series and each concurrent
+// run's over the cell's seconds: a final series as it stands, a running
+// one once it counts through the cell's end, and a run with no series as
+// none. A series of another run is refused.
+func TestHostDispatch(t *testing.T) {
+	fastDispatch(t)
+	out := t.TempDir()
+	r := &route{out: out}
+	start := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	run := func(route string) schedule.Run {
+		return schedule.Run{Route: route, Label: "weekend-00", Attempt: 1, Date: "2026-10-17", Start: start}
+	}
+	path := func(run schedule.Run) string {
+		return filepath.Join(runDir(filepath.Join(out, run.Route), run), dispatchFile)
+	}
+	own, done, live, gone := run("groq"), run("baseten"), run("google"), run("anthropic")
+
+	from := time.Now().Add(-3 * time.Second)
+	lo := from.UTC().Truncate(time.Second)
+	ownSeries := &dispatchSeries{Run: own, StartUTC: lo, Counts: []int{1, 2}, Final: true}
+	if err := replaceJSON(path(done), &dispatchSeries{Run: done, StartUTC: lo.Add(-time.Second), Counts: []int{5, 1, 0, 3}, Final: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path(live)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	l, err := startLiveSeries(path(live), live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.stop)
+	l.setEpoch(lo)
+	l.dispatched(&loadgen.Request{DispatchNs: int64(500 * time.Millisecond)})
+	l.dispatched(&loadgen.Request{DispatchNs: int64(2500 * time.Millisecond)})
+
+	end := time.Now()
+	d, err := r.hostDispatch(from, end, ownSeries, []schedule.Run{done, live, gone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]int, int(end.Sub(lo)/time.Second)+1)
+	copy(want, []int{3, 2, 4})
+	if !d.StartUTC.Equal(lo) || !d.EndUTC.Equal(end) || !slices.Equal(d.Counts, want) || d.MaxPerSecond != 4 || d.MaxAtUTC == nil || !d.MaxAtUTC.Equal(lo.Add(2*time.Second)) {
+		t.Fatalf("aggregate %+v, want counts %v", d, want)
+	}
+	if len(d.Sources) != 4 {
+		t.Fatalf("sources %+v", d.Sources)
+	}
+	for i, w := range []struct {
+		run        schedule.Run
+		dispatches int
+		final      bool
+	}{{own, 3, true}, {done, 4, true}, {live, 2, false}, {gone, 0, false}} {
+		if s := d.Sources[i]; s.Run != w.run || s.Dispatches != w.dispatches || s.Final != w.final {
+			t.Errorf("source %d: %+v, want %s with %d dispatches, final %t", i, s, w.run.Route, w.dispatches, w.final)
+		}
+	}
+	if th := d.Sources[2].ThroughUTC; th == nil || th.Before(end) {
+		t.Errorf("the running series counts through %v, before the cell's end %s", th, end)
+	}
+	if d.Sources[1].ThroughUTC != nil || d.Sources[3].ThroughUTC != nil {
+		t.Errorf("through on a final or absent series: %+v", d.Sources)
+	}
+
+	if err := replaceJSON(path(gone), &dispatchSeries{Run: done, StartUTC: lo, Counts: []int{1}, Final: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.hostDispatch(from, end, ownSeries, []schedule.Run{gone}); err == nil || !strings.Contains(err.Error(), "is the series of baseten") {
+		t.Fatalf("another run's series: %v", err)
+	}
+}
+
 // check-cpu takes no arguments, and the commands refuse missing flags.
 func TestCommandFlags(t *testing.T) {
 	if code := dispatch([]string{"check-cpu", "extra"}); code != exitError {

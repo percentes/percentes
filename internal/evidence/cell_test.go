@@ -31,7 +31,7 @@ func releaseCfg(t *testing.T) *config.Config {
 func releaseCell(cfg *config.Config) *Cell {
 	start := time.Date(2026, 10, 17, 8, 20, 0, 0, time.UTC)
 	tpm := admission.Demand{Dimension: config.LimitTPM, Limit: 1, Value: 250000, Demand: 205440, Fraction: 0.82176, Half: true}
-	return &Cell{
+	return withDispatch(&Cell{
 		Run:           schedule.Run{Route: cfg.Target.Name, Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start, Seed: 7},
 		OffsetMinutes: 20,
 		Concurrent:    []schedule.Run{{Route: "baseten", Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start.Add(10 * time.Minute), Seed: 8}},
@@ -46,7 +46,25 @@ func releaseCell(cfg *config.Config) *Cell {
 		PreWindowRequests: 25,
 		Outcome:           CellCounted,
 		LadderStarted:     true,
+	}, 3)
+}
+
+// withDispatch gives c an aggregate dispatch series in which its own run
+// sends own requests in the first second and its concurrent run two in
+// the third.
+func withDispatch(c *Cell, own int) *Cell {
+	end := c.Run.Start.Add(2500 * time.Millisecond)
+	at := c.Run.Start.Add(2 * time.Second)
+	d := &Dispatch{StartUTC: c.Run.Start, EndUTC: end, Counts: []int{own, 0, 2}, MaxPerSecond: 2, Sources: []DispatchSource{
+		{Run: c.Run, Dispatches: own, Final: true},
+		{Run: c.Concurrent[0], Dispatches: 2, ThroughUTC: &end},
+	}}
+	if own >= 2 {
+		d.MaxPerSecond, at = own, c.Run.Start
 	}
+	d.MaxAtUTC = &at
+	c.Dispatch = d
+	return c
 }
 
 // A release record carries the request's shape, ceiling, step and
@@ -162,7 +180,7 @@ func TestManifestCellRecord(t *testing.T) {
 	}
 	for _, field := range []string{`"frame_limit_bytes": 8388608`, `"error_body_limit_bytes": 4096`, `"error_body_wait_ns": 1000000000`,
 		`"offset_minutes": 20`, `"concurrent_runs": [`, `"binding": {`, `"ceiling_choice": {`, `"account_created": "2026-09-15"`, `"pre_window_requests": 25`,
-		`"outcome": "counted"`, `"ladder_started": true`} {
+		`"outcome": "counted"`, `"ladder_started": true`, `"dispatch_aggregate": {`, `"max_per_second": 3`} {
 		if !strings.Contains(string(b), field) {
 			t.Errorf("manifest lacks %s", field)
 		}
@@ -206,6 +224,15 @@ func TestManifestCellRefusals(t *testing.T) {
 		"verdict at another ceiling": func(c *Cell) { c.Admission.CeilingTokens = 1024 },
 		"account date":               func(c *Cell) { c.AccountCreated = "15 Sep 2026" },
 		"negative volume":            func(c *Cell) { c.PreWindowRequests = -1 },
+		"no dispatch aggregate":      func(c *Cell) { c.Dispatch = nil },
+		"concurrent run unsummed":    func(c *Cell) { c.Dispatch.Sources = c.Dispatch.Sources[:1] },
+		"another run summed":         func(c *Cell) { c.Dispatch.Sources[1].Run.Attempt = 2 },
+		"own series not final":       func(c *Cell) { c.Dispatch.Sources[0].Final = false },
+		"counts off the sources":     func(c *Cell) { c.Dispatch.Counts[1] = 1 },
+		"counts off the span":        func(c *Cell) { c.Dispatch.Counts = append(c.Dispatch.Counts, 0) },
+		"negative count":             func(c *Cell) { c.Dispatch.Counts[1], c.Dispatch.Counts[2] = -1, 3 },
+		"maximum not the counts'":    func(c *Cell) { c.Dispatch.MaxPerSecond = 2 },
+		"maximum at another second":  func(c *Cell) { c.Dispatch.MaxAtUTC = &c.Dispatch.EndUTC },
 	} {
 		c := releaseCell(cfg)
 		edit(c)
@@ -322,6 +349,9 @@ func TestCheckReleaseLabelledCell(t *testing.T) {
 		ref.Name = releaseRunDir + "/" + FramesFile
 		r.m.Frames = &ref
 		c := releaseCell(releaseCfg(t))
+		if !ladder {
+			withDispatch(c, 0)
+		}
 		c.Outcome, c.Reasons, c.LadderStarted = CellStopped, stop, ladder
 		r.m.Release, r.m.RunValid, r.m.InvalidReasons = c, false, stop
 		r.write(t)
@@ -353,8 +383,9 @@ func TestCheckReleaseLabelledCell(t *testing.T) {
 	}
 }
 
-// A release run passes the check only with its cell record and an
-// attempts file without answer text.
+// A release run passes the check only with its cell record, whose
+// aggregate dispatch series counts the attempts file's dispatches as its
+// own, and an attempts file without answer text.
 func TestCheckReleaseCellAndAnswer(t *testing.T) {
 	r := newReleaseRun(t, config.ProfileRelease)
 	_, err := r.check()
@@ -385,6 +416,19 @@ func TestCheckReleaseCellAndAnswer(t *testing.T) {
 	r.write(t)
 	if _, err := r.check(); err != nil {
 		t.Fatalf("complete release run: %v", err)
+	}
+
+	// The aggregate's own part counts the attempts file's dispatches, and
+	// the aggregate agrees with itself.
+	withDispatch(r.m.Release, 2)
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "own series counts 2 dispatches, "+AttemptsFile+" 3") {
+		t.Errorf("own series short of the attempts: %v", err)
+	}
+	withDispatch(r.m.Release, 3).Dispatch.Counts[1] = 1
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "cell record: dispatch_aggregate: counts sum to 6, the sources to 5") {
+		t.Errorf("counts off the sources: %v", err)
 	}
 }
 

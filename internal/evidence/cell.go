@@ -40,6 +40,8 @@ type Cell struct {
 	// Concurrent lists the other routes' runs from the same client host
 	// whose cells overlap this one.
 	Concurrent []schedule.Run `json:"concurrent_runs"`
+	// Dispatch is the host's aggregate dispatch series over the cell.
+	Dispatch *Dispatch `json:"dispatch_aggregate"`
 	// Admission is the ceiling rule's verdict: the admitted steps, and
 	// each excluded step with its binding limit.
 	Admission *admission.Verdict `json:"admission"`
@@ -53,6 +55,85 @@ type Cell struct {
 	// opened.
 	AccountCreated    string `json:"account_created"`
 	PreWindowRequests int    `json:"pre_window_requests"`
+}
+
+// Dispatch is the client host's aggregate dispatch series over a cell
+// (SPEC-HOSTED HA3 points 9 and 15): the requests every route sent per
+// UTC second from StartUTC, the second of the cell's start, through the
+// second of EndUTC, summed over Sources: the cell's own run first, then
+// each of its concurrent runs in order.
+type Dispatch struct {
+	StartUTC     time.Time        `json:"start_utc"`
+	EndUTC       time.Time        `json:"end_utc"`
+	Counts       []int            `json:"counts"`
+	MaxPerSecond int              `json:"max_per_second"`
+	MaxAtUTC     *time.Time       `json:"max_at_utc,omitempty"`
+	Sources      []DispatchSource `json:"sources"`
+}
+
+// DispatchSource is one run's part of the aggregate: its dispatches
+// inside the series' seconds. Final is set when the run had ended and its
+// series was whole; otherwise ThroughUTC is the time the series read was
+// complete up to, absent when no series was found.
+type DispatchSource struct {
+	Run        schedule.Run `json:"run"`
+	Dispatches int          `json:"dispatches"`
+	Final      bool         `json:"final"`
+	ThroughUTC *time.Time   `json:"through_utc,omitempty"`
+}
+
+// dispatchProblems reports every way c's aggregate dispatch series
+// disagrees with itself and with the cell's runs.
+func (c *Cell) dispatchProblems() []string {
+	d := c.Dispatch
+	if d == nil {
+		return []string{"dispatch_aggregate: none"}
+	}
+	var problems []string
+	fail := func(format string, a ...any) {
+		problems = append(problems, "dispatch_aggregate: "+fmt.Sprintf(format, a...))
+	}
+	runs := append([]schedule.Run{c.Run}, c.Concurrent...)
+	if len(d.Sources) != len(runs) {
+		fail("%d sources for the cell's run and %d concurrent runs", len(d.Sources), len(c.Concurrent))
+	} else {
+		for i, src := range d.Sources {
+			if src.Run != runs[i] {
+				fail("source %d is %s %s attempt %d, want %s %s attempt %d", i, src.Run.Route, src.Run.Label, src.Run.Attempt, runs[i].Route, runs[i].Label, runs[i].Attempt)
+			}
+		}
+		if !d.Sources[0].Final {
+			fail("the cell's own series is not final")
+		}
+	}
+	if d.StartUTC.IsZero() || d.EndUTC.Before(d.StartUTC) {
+		fail("span %s to %s", d.StartUTC.Format(time.RFC3339), d.EndUTC.Format(time.RFC3339))
+	} else if n := int(d.EndUTC.Sub(d.StartUTC)/time.Second) + 1; len(d.Counts) != n {
+		fail("%d counts for %d seconds", len(d.Counts), n)
+	}
+	sent, sum, top, at := 0, 0, 0, -1
+	for _, src := range d.Sources {
+		sent += src.Dispatches
+	}
+	for k, n := range d.Counts {
+		if n < 0 {
+			fail("negative count at second %d", k)
+		}
+		sum += n
+		if n > top {
+			top, at = n, k
+		}
+	}
+	if sum != sent {
+		fail("counts sum to %d, the sources to %d", sum, sent)
+	}
+	switch {
+	case d.MaxPerSecond != top:
+		fail("max_per_second %d, the counts' %d", d.MaxPerSecond, top)
+	case at < 0 && d.MaxAtUTC != nil, at >= 0 && (d.MaxAtUTC == nil || !d.MaxAtUTC.Equal(d.StartUTC.Add(time.Duration(at)*time.Second))):
+		fail("max_at_utc is not the first second of the maximum")
+	}
+	return problems
 }
 
 // checkCell reports every way c disagrees with the route's configuration
@@ -96,6 +177,7 @@ func checkCell(cfg *config.Config, t *config.Target, c *Cell) error {
 	if c.PreWindowRequests < 0 {
 		fail("pre_window_requests %d is negative", c.PreWindowRequests)
 	}
+	problems = append(problems, c.dispatchProblems()...)
 	if len(problems) > 0 {
 		return errors.New("evidence: release cell: " + strings.Join(problems, "; "))
 	}

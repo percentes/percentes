@@ -400,8 +400,9 @@ type gen struct {
 	// gates evaluates the client-validity gate; a ladder step's verdict
 	// uses it too.
 	gates gateFunc
-	// onDone is Hooks.OnDone.
-	onDone func(r *Request)
+	// onDispatch and onDone are Hooks.OnDispatch and Hooks.OnDone.
+	onDispatch func(r *Request)
+	onDone     func(r *Request)
 }
 
 type gateFunc func(cfg *config.Config, requests []Request, samples []cpuSample, gcLoMs, gcHiMs float64, measStartNs, measEndNs int64) GateReport
@@ -418,6 +419,10 @@ type Hooks struct {
 	// body or whose config carries a pilot body, one per scheduled
 	// request, by index.
 	Cases []string
+	// OnDispatch is called with each request as it is sent, once its
+	// DispatchNs is set, on that request's goroutine, concurrently with
+	// other calls. It must not block.
+	OnDispatch func(r *Request)
 	// OnDone is called with each dispatched request once it is terminal,
 	// on that request's goroutine, concurrently with other calls. It must
 	// not block.
@@ -445,11 +450,11 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 		return nil, fmt.Errorf("loadgen: empty schedule")
 	}
 	var (
-		cases  []string
-		onDone func(*Request)
+		cases              []string
+		onDispatch, onDone func(*Request)
 	)
 	if hooks != nil {
-		cases, onDone = hooks.Cases, hooks.OnDone
+		cases, onDispatch, onDone = hooks.Cases, hooks.OnDispatch, hooks.OnDone
 	}
 	if cfg.Target.Body != "" {
 		if cfg.Pilot != nil {
@@ -485,15 +490,16 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 		}
 	}
 	g := &gen{
-		cfg:    cfg,
-		client: &http.Client{Transport: transport},
-		filler: buildFiller(cfg.Load.InputLengthTokens),
-		model:  model,
-		apiKey: apiKey,
-		trip:   newTripwire(cfg, len(schedule)),
-		cases:  cases,
-		gates:  gates,
-		onDone: onDone,
+		cfg:        cfg,
+		client:     &http.Client{Transport: transport},
+		filler:     buildFiller(cfg.Load.InputLengthTokens),
+		model:      model,
+		apiKey:     apiKey,
+		trip:       newTripwire(cfg, len(schedule)),
+		cases:      cases,
+		gates:      gates,
+		onDispatch: onDispatch,
+		onDone:     onDone,
 	}
 	if ladder != nil {
 		g.trip = newLadderTripwire(cfg, ladder)

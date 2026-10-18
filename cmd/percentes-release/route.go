@@ -338,8 +338,11 @@ func waitUntil(ctx context.Context, t time.Time) error {
 }
 
 // cellDir is a run's directory under the route's.
-func (r *route) cellDir(run schedule.Run) string {
-	return filepath.Join(r.dir, fmt.Sprintf("%s-a%d", run.Label, run.Attempt))
+func (r *route) cellDir(run schedule.Run) string { return runDir(r.dir, run) }
+
+// runDir is a run's directory under its route's directory.
+func runDir(routeDir string, run schedule.Run) string {
+	return filepath.Join(routeDir, fmt.Sprintf("%s-a%d", run.Label, run.Attempt))
 }
 
 // routeState is the route's position read from its cell records: every
