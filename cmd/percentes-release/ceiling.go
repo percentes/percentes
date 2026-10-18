@@ -1,0 +1,104 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"path/filepath"
+	"time"
+
+	"github.com/percentes/percentes/internal/admission"
+	"github.com/percentes/percentes/internal/pilot"
+	"github.com/percentes/percentes/internal/probe"
+)
+
+// ceilingCheckCmd sends the route's ceiling check (SPEC-HOSTED HA3 point
+// 7) at its configured ceiling: probe.CeilingRequests requests of Shape S
+// text, admitted in the release ledger before the first is sent and
+// settled with the requests sent. It writes the record run reads with
+// --ceiling-probe, also when the check fails or is blocked.
+func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
+	fs := flag.NewFlagSet("ceiling-check", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "the route's release configuration at the ceiling checked (required)")
+	envFile := fs.String("env", "", "env file holding the target's api_key_env (required)")
+	ledgerPath := fs.String("ledger", "", "the release admission ledger, holding the route's price (required)")
+	out := fs.String("out", "", "output directory; the check writes ceiling-<UTC time>/<route>-<ceiling>/"+probe.File+" under it (required)")
+	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
+	snapshots := fs.String("snapshots", "", "directory of the retained limit copies the configuration names by file name")
+	if err := fs.Parse(args); err != nil {
+		return exitError, err
+	}
+	if *cfgPath == "" || *ledgerPath == "" || *out == "" {
+		return exitError, errors.New("ceiling-check: --config, --ledger and --out are required")
+	}
+	if *byteCap <= 0 {
+		return exitError, fmt.Errorf("ceiling-check: --byte-cap %d: the Shape S ticket byte cap is required", *byteCap)
+	}
+	cfgs, err := loadReleases([]string{*cfgPath})
+	if err != nil {
+		return exitError, err
+	}
+	cfg := cfgs[0]
+	name, ceiling := cfg.Target.Name, cfg.Release.Shape.CeilingTokens
+	shape, err := pilot.GenerateShapeS(pilot.ShapeSSeed, *byteCap)
+	if err != nil {
+		return exitError, err
+	}
+	// The ceiling is the texts' request-reference seed, so the checks at
+	// the two ceilings send different texts.
+	texts := make([]string, probe.CeilingRequests)
+	for i := range texts {
+		texts[i] = shape.UserText(int64(ceiling), i)
+	}
+	ledger, err := admission.Open(*ledgerPath)
+	if err != nil {
+		return exitError, err
+	}
+	st, err := ledger.State()
+	if err != nil {
+		return exitError, err
+	}
+	if err := st.CheckRelease(cfg); err != nil {
+		return exitError, err
+	}
+	if err := loadKey(*envFile, &cfg.Target); err != nil {
+		return exitError, err
+	}
+
+	a, err := ledger.Admit(name, admission.PurposeProbe, probe.CeilingRequests)
+	if err != nil {
+		return exitError, err
+	}
+	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: *snapshots})
+	sent := 0
+	if rec != nil {
+		sent = rec.Sent()
+	}
+	if serr := ledger.Settle(a, admission.Counts{Probe: sent}); serr != nil {
+		return exitError, errors.Join(err, serr)
+	}
+	if err != nil {
+		return exitError, err
+	}
+	dir := filepath.Join(*out, "ceiling-"+time.Now().UTC().Format("20060102T150405Z"), fmt.Sprintf("%s-%d", name, ceiling))
+	path, err := probe.Write(dir, rec)
+	if err != nil {
+		return exitError, err
+	}
+
+	c, ib := rec.Ceiling, rec.InputBound
+	fmt.Printf("%s: ceiling %d: %d of %d sent passed; input bound %d tokens: %d reported, largest %d, %d above; %d findings; written %s\n",
+		name, c.Ceiling, c.Passed, c.Sent, ib.BoundTokens, ib.Reported, ib.MaxPromptTokens, ib.Exceeded, len(rec.Findings), path)
+	switch {
+	case rec.Start.Blocked:
+		fmt.Printf("%s: BLOCKED: %s\n", name, rec.Start.Reason)
+	case !c.Pass:
+		fmt.Printf("%s: FAILED the ceiling check at %d\n", name, c.Ceiling)
+	case !ib.Pass:
+		fmt.Printf("%s: FAILED the input bound of %d tokens\n", name, ib.BoundTokens)
+	default:
+		return exitOK, nil
+	}
+	return exitAdverse, nil
+}

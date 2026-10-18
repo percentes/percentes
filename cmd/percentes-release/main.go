@@ -12,6 +12,19 @@
 // named with --env, never from the inherited environment, and is never
 // printed.
 //
+// Before the window, schedule writes the committed schedule of the routes
+// whose configurations it is given, ledger create starts the release
+// ledger with their caps, ledger price records a route's prices at its
+// shape, and ceiling-check sends a route's ceiling check, admitted in the
+// ledger, and writes the record run reads with --ceiling-probe.
+//
+//	percentes-release schedule --master-seed SEED --first DATE --last DATE
+//	    --config FILE ... --schedule FILE
+//	percentes-release ledger create --ledger FILE --config FILE ...
+//	percentes-release ledger price --ledger FILE --config FILE --input USD
+//	    --output USD --source URL --retrieved DATE
+//	percentes-release ceiling-check --config FILE --env FILE --ledger FILE
+//	    --out DIR --byte-cap N [--snapshots DIR]
 //	percentes-release run --config FILE --env FILE --ledger FILE
 //	    --schedule FILE --out DIR --frames DIR --clock-sync CMD
 //	    --status-cmd CMD --operator FILE --ceiling-probe FILE ...
@@ -19,16 +32,18 @@
 //	percentes-release dispatch --out DIR
 //	percentes-release check-cpu
 //
-// Exit codes: 0 = the route's runs are over and every cell counts; 2 =
-// the runs are over and a cell does not count; 3 = the route stopped (a
-// ledger refusal, a documented billing refusal, a clock offset above the
-// pinned bound, or an operator abort); 1 = execution error or refusal to
-// start.
+// Exit codes: 0 = the route's runs are over and every cell counts, or
+// the ceiling check passed with the input bound; 2 = the runs are over
+// and a cell does not count, or the ceiling check failed or was blocked;
+// 3 = the route stopped (a ledger refusal, a documented billing refusal,
+// a clock offset above the pinned bound, or an operator abort); 1 =
+// execution error or refusal to start.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -51,9 +66,13 @@ const (
 const usage = `usage: percentes-release <command> [flags]
 
 commands:
-  run         run one route's cells over the committed window
-  dispatch    sum every cell's dispatch series under --out
-  check-cpu   whether this build measures host CPU
+  schedule        write the committed schedule of the routes
+  ledger create   start the release ledger with the routes' caps
+  ledger price    record a route's prices at its shape
+  ceiling-check   send a route's ceiling check and write its record
+  run             run one route's cells over the committed window
+  dispatch        sum every cell's dispatch series under --out
+  check-cpu       whether this build measures host CPU
 
 Run percentes-release <command> -h for the command's flags.
 `
@@ -74,6 +93,12 @@ func dispatch(args []string) int {
 		err  error
 	)
 	switch args[0] {
+	case "schedule":
+		code, err = scheduleCmd(args[1:])
+	case "ledger":
+		code, err = ledgerCmd(args[1:])
+	case "ceiling-check":
+		code, err = ceilingCheckCmd(ctx, args[1:])
 	case "run":
 		code, err = runCmd(ctx, args[1:])
 	case "dispatch":
@@ -120,6 +145,26 @@ func (l *listFlag) String() string { return strings.Join(*l, ",") }
 func (l *listFlag) Set(s string) error {
 	*l = append(*l, s)
 	return nil
+}
+
+// loadReleases loads each configuration and refuses one outside the
+// release profile.
+func loadReleases(paths []string) ([]*config.Config, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("--config is required")
+	}
+	var out []*config.Config
+	for _, p := range paths {
+		cfg, err := config.LoadFile(p)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Profile != config.ProfileRelease || cfg.Release == nil {
+			return nil, fmt.Errorf("%s: profile %q, want %q", p, cfg.Profile, config.ProfileRelease)
+		}
+		out = append(out, cfg)
+	}
+	return out, nil
 }
 
 // replaceJSON writes v, indented, to path through a temporary file, so a

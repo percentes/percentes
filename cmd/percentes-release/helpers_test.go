@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,28 @@ func releaseConfig(t *testing.T, endpoint string) *config.Config {
 	cfg.Target.EndpointURL = endpoint
 	t.Setenv(cfg.Target.APIKeyEnv, testKey)
 	return cfg
+}
+
+// routeConfigFile writes the release reference as route name at endpoint
+// with routeUSD as its cap, and returns the file's path.
+func routeConfigFile(t *testing.T, name, endpoint, routeUSD string) string {
+	t.Helper()
+	b, err := os.ReadFile("../../configs/release.reference.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, r := range [][2]string{
+		{"\n  name: groq\n", "\n  name: " + name + "\n"},
+		{"endpoint_url: https://api.groq.com/openai/v1/chat/completions", "endpoint_url: " + endpoint},
+		{`route_usd: "10"`, `route_usd: "` + routeUSD + `"`},
+	} {
+		if strings.Count(s, r[0]) != 1 {
+			t.Fatalf("reference config: %q not found once", r[0])
+		}
+		s = strings.Replace(s, r[0], r[1], 1)
+	}
+	return writeFile(t, t.TempDir(), name+".yaml", []byte(s))
 }
 
 // testSchedule is a schedule over 17 to 26 October 2026 for routes.

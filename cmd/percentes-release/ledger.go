@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"math/big"
 	"os"
@@ -71,4 +73,71 @@ func sentBefore(entries []admission.Entry, route string, t time.Time) int {
 		}
 	}
 	return n
+}
+
+// ledgerCmd creates the release ledger with the caps of every route's
+// configuration (admission.ReleaseCaps), or records a route's prices at
+// its shape's input bound and ceiling.
+func ledgerCmd(args []string) (int, error) {
+	if len(args) == 0 {
+		return exitError, errors.New("ledger: create or price")
+	}
+	fs := flag.NewFlagSet("ledger "+args[0], flag.ContinueOnError)
+	path := fs.String("ledger", "", "the release admission ledger file (required)")
+	var cfgPaths listFlag
+	fs.Var(&cfgPaths, "config", "create: every route's release configuration (repeatable); price: the route's (required)")
+	in := fs.String("input", "", "price: input list price, US$ per million tokens")
+	out := fs.String("output", "", "price: output list price, US$ per million tokens")
+	source := fs.String("source", "", "price: the URL the prices were read from")
+	retrieved := fs.String("retrieved", "", "price: the date they were read, 2006-01-02")
+	if err := fs.Parse(args[1:]); err != nil {
+		return exitError, err
+	}
+	if *path == "" {
+		return exitError, errors.New("ledger: --ledger is required")
+	}
+	if args[0] != "create" && args[0] != "price" {
+		return exitError, fmt.Errorf("ledger: unknown action %q", args[0])
+	}
+	cfgs, err := loadReleases(cfgPaths)
+	if err != nil {
+		return exitError, err
+	}
+	if args[0] == "create" {
+		caps, err := admission.ReleaseCaps(cfgs...)
+		if err != nil {
+			return exitError, err
+		}
+		if _, err := admission.Create(*path, caps); err != nil {
+			return exitError, err
+		}
+		fmt.Printf("ledger created: %s; global cap US$%s; %d routes\n", *path, caps.LiabilityUSD, len(caps.RouteLiabilityUSD))
+		return exitOK, nil
+	}
+	if len(cfgs) != 1 {
+		return exitError, fmt.Errorf("ledger price: %d configurations, want the route's one", len(cfgs))
+	}
+	cfg := cfgs[0]
+	l, err := admission.Open(*path)
+	if err != nil {
+		return exitError, err
+	}
+	st, err := l.State()
+	if err != nil {
+		return exitError, err
+	}
+	if err := st.CheckRelease(cfg); err != nil {
+		return exitError, err
+	}
+	sh := cfg.Release.Shape
+	if err := l.RecordPrice(cfg.Target.Name, admission.Price{InputUSDPerMTok: *in, OutputUSDPerMTok: *out,
+		InputTokens: sh.InputBoundTokens, OutputTokens: sh.CeilingTokens, Source: *source, Retrieved: *retrieved}); err != nil {
+		return exitError, err
+	}
+	if st, err = l.State(); err != nil {
+		return exitError, err
+	}
+	fmt.Printf("%s: price recorded at %d input and %d output tokens; the ledger admits at US$%s a request\n",
+		cfg.Target.Name, sh.InputBoundTokens, sh.CeilingTokens, st.Routes[cfg.Target.Name].MaxPerRequestUSD.FloatString(6))
+	return exitOK, nil
 }
