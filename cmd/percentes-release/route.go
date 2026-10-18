@@ -96,6 +96,7 @@ type route struct {
 	framesRoot string
 	clock      evidence.ClockCommand
 	status     []string
+	balance    []string
 	op         *evidence.Operator
 	build      *debug.BuildInfo
 
@@ -117,6 +118,7 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	framesRoot := fs.String("frames", "", "raw-frame store directory outside the source tree (required)")
 	clockSync := fs.String("clock-sync", "", "host clock-sync command run before each cell, split on spaces with no shell (required)")
 	statusCmd := fs.String("status-cmd", "", "endpoint-status command run at each cell's start and end, split on spaces with no shell (required)")
+	balanceCmd := fs.String("balance-cmd", "", "account balance or quota command run at each cell's start and end, split on spaces with no shell (required)")
 	opPath := fs.String("operator", "", "the route's operator file (required)")
 	var probeFiles listFlag
 	fs.Var(&probeFiles, "ceiling-probe", "a release probe record of a host of the route's model, from the ceiling check (repeatable, required)")
@@ -138,7 +140,7 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	build, _ := debug.ReadBuildInfo()
 	r, err := newRoute(routeInput{
 		cfg: cfg, configName: filepath.Base(*cfgPath), schedulePath: *schedulePath, out: *out, ledgerPath: *ledgerPath,
-		framesRoot: *framesRoot, clockSync: *clockSync, statusCmd: *statusCmd, opPath: *opPath, probeFiles: probeFiles,
+		framesRoot: *framesRoot, clockSync: *clockSync, statusCmd: *statusCmd, balanceCmd: *balanceCmd, opPath: *opPath, probeFiles: probeFiles,
 		byteCap: *byteCap, accountCreated: *accountCreated, build: build,
 	})
 	if err != nil {
@@ -156,6 +158,7 @@ type routeInput struct {
 	cfg                                       *config.Config
 	configName, schedulePath, out, ledgerPath string
 	framesRoot, clockSync, statusCmd, opPath  string
+	balanceCmd                                string
 	probeFiles                                []string
 	byteCap                                   int
 	accountCreated                            string
@@ -208,6 +211,9 @@ func newRoute(in routeInput) (*route, error) {
 		return nil, err
 	}
 	if r.status, err = evidence.ParseStatusCommand(in.statusCmd); err != nil {
+		return nil, err
+	}
+	if r.balance, err = evidence.ParseBalanceCommand(in.balanceCmd); err != nil {
 		return nil, err
 	}
 

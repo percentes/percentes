@@ -72,6 +72,9 @@ func newReleaseRun(t *testing.T, profile config.Profile) *releaseRun {
 	m.Clock.File = put(r.dir, ClockFile, []byte(`{"clock":true}`))
 	end := put(r.dir, StatusEndFile, []byte(`{"end":true}`))
 	m.StatusEnd = &end
+	balanceStart := put(r.dir, BalanceStartFile, []byte(`{"balance":"start"}`))
+	balanceEnd := put(r.dir, BalanceEndFile, []byte(`{"balance":"end"}`))
+	m.BalanceStart, m.BalanceEnd = &balanceStart, &balanceEnd
 	frames := put(r.runDir, FramesFile, []byte("{\"index\":0}\n{\"index\":1}\n{\"index\":2}\n"))
 	frames.Name = releaseRunDir + "/" + FramesFile
 	m.Frames = &frames
@@ -200,6 +203,8 @@ func TestCheckReleaseRefusals(t *testing.T) {
 		{"clock record edited", func(t *testing.T, r *releaseRun) { rewrite(t, filepath.Join(r.dir, ClockFile), []byte(`{}`)) }, "clock record: " + ClockFile + " has SHA-256"},
 		{"start status missing", func(t *testing.T, r *releaseRun) { os.Remove(filepath.Join(r.dir, StatusStartFile)) }, "start status: " + StatusStartFile + " is missing"},
 		{"end status edited", func(t *testing.T, r *releaseRun) { rewrite(t, filepath.Join(r.dir, StatusEndFile), []byte(`{}`)) }, "end status: " + StatusEndFile + " has SHA-256"},
+		{"start balance missing", func(t *testing.T, r *releaseRun) { os.Remove(filepath.Join(r.dir, BalanceStartFile)) }, "start balance: " + BalanceStartFile + " is missing"},
+		{"end balance edited", func(t *testing.T, r *releaseRun) { rewrite(t, filepath.Join(r.dir, BalanceEndFile), []byte(`{}`)) }, "end balance: " + BalanceEndFile + " has SHA-256"},
 		{"measured attempt unscored", func(t *testing.T, r *releaseRun) {
 			attempts(t, r, []Record{{Index: 0}, {Index: 1, IntendedNs: measured}, {Index: 2, IntendedNs: measured, Score: &Score{Expected: "billing", Class: score.Success}}})
 			r.write(t)

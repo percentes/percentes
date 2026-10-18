@@ -329,20 +329,22 @@ func manifestRun(t *testing.T) (ManifestInput, string) {
 	clock := &ClockRecord{Tool: ClockSNTP, StartUTC: epoch.Add(-3 * time.Second), EndUTC: epoch.Add(-2 * time.Second), AbsOffsetS: &off}
 	frames := t.TempDir()
 	in := ManifestInput{
-		Config:          cfg,
-		ConfigName:      "pilot.reference.yaml",
-		Target:          &cfg.Pilot.Targets[1],
-		Result:          res,
-		Build:           buildInfo("CGO_ENABLED", "1", "vcs.revision", "bce0628", "vcs.time", "2026-10-06T12:00:00Z", "vcs.modified", "true"),
-		Operator:        loadOperator(t),
-		Ledger:          &LedgerRef{FileRef: FileRef{Name: "ledger.jsonl", SHA256: sha("x\n"), Bytes: 2}, Lines: 1},
-		Clock:           clock,
-		ClockPath:       write(out, ClockFile, "clock"),
-		StatusStartPath: write(out, StatusStartFile, "start"),
-		StatusEndPath:   write(out, StatusEndFile, "end"),
-		ArtifactPaths:   []string{write(out, AttemptsFile, "attempts"), write(out, "report.json", "{}")},
-		FramesRoot:      frames,
-		FramesPath:      write(frames, "20261010T200000.000000000Z/"+FramesFile, "frames"),
+		Config:           cfg,
+		ConfigName:       "pilot.reference.yaml",
+		Target:           &cfg.Pilot.Targets[1],
+		Result:           res,
+		Build:            buildInfo("CGO_ENABLED", "1", "vcs.revision", "bce0628", "vcs.time", "2026-10-06T12:00:00Z", "vcs.modified", "true"),
+		Operator:         loadOperator(t),
+		Ledger:           &LedgerRef{FileRef: FileRef{Name: "ledger.jsonl", SHA256: sha("x\n"), Bytes: 2}, Lines: 1},
+		Clock:            clock,
+		ClockPath:        write(out, ClockFile, "clock"),
+		StatusStartPath:  write(out, StatusStartFile, "start"),
+		StatusEndPath:    write(out, StatusEndFile, "end"),
+		ArtifactPaths:    []string{write(out, AttemptsFile, "attempts"), write(out, "report.json", "{}")},
+		BalanceStartPath: write(out, BalanceStartFile, "balance at start"),
+		BalanceEndPath:   write(out, BalanceEndFile, "balance at end"),
+		FramesRoot:       frames,
+		FramesPath:       write(frames, "20261010T200000.000000000Z/"+FramesFile, "frames"),
 		Gates: &validity.Report{Gates: []validity.Gate{
 			{ID: "G1", Name: "share"}, {ID: "G2", Name: "client", Applicable: true, Observed: true, Pass: true}, {ID: "G6", Name: "hosted-G6", Applicable: true, Observed: true, ReportedOnly: true, Detail: "118/120"},
 		}},
@@ -386,6 +388,12 @@ func TestManifestFields(t *testing.T) {
 	}
 	if m.StatusStart != refOf(StatusStartFile, []byte("start")) || m.StatusEnd == nil || *m.StatusEnd != refOf(StatusEndFile, []byte("end")) {
 		t.Errorf("status %+v %+v", m.StatusStart, m.StatusEnd)
+	}
+	if want := refOf(BalanceStartFile, []byte("balance at start")); m.BalanceStart == nil || *m.BalanceStart != want {
+		t.Errorf("start balance %+v", m.BalanceStart)
+	}
+	if want := refOf(BalanceEndFile, []byte("balance at end")); m.BalanceEnd == nil || *m.BalanceEnd != want {
+		t.Errorf("end balance %+v", m.BalanceEnd)
 	}
 	if m.Operator != in.Operator.File || m.Roles != in.Operator.Roles || !reflect.DeepEqual(m.Records, in.Operator.Records) || m.Ledger != in.Ledger {
 		t.Errorf("operator %+v %+v %+v", m.Operator, m.Roles, m.Ledger)

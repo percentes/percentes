@@ -77,6 +77,9 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if ev.statusStart, err = evidence.WriteStatus(dir, evidence.StatusStartFile, evidence.ReadStatus(ctx, r.status)); err != nil {
 		return rec, err
 	}
+	if ev.balanceStart, err = evidence.WriteStatus(dir, evidence.BalanceStartFile, evidence.ReadBalance(ctx, r.balance)); err != nil {
+		return rec, err
+	}
 	if c := ev.clock; c.AbsOffsetS != nil && *c.AbsOffsetS > config.PinnedClockOffsetMaxS {
 		finish(outcomeStopped, (&routeStop{c.Flag}).Error())
 		return rec, r.retain(ctx, ev, rec, nil)
@@ -183,8 +186,8 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 
 // cellFiles are what a cell has recorded before its evidence is
 // retained: the running dispatch series, the clock record, the start
-// status, the ledger position and the probe record where the cell
-// reached them.
+// status and balance, the ledger position and the probe record where the
+// cell reached them.
 type cellFiles struct {
 	dir                    string
 	run                    schedule.Run
@@ -192,18 +195,19 @@ type cellFiles struct {
 	live                   *liveSeries
 	clock                  *evidence.ClockRecord
 	clockPath, statusStart string
+	balanceStart           string
 	ledger                 *evidence.LedgerRef
 	probePath              string
 }
 
 // retain writes a finished cell's evidence: the final dispatch series,
-// the end status, the frame store and operator copies, the attempts
-// file, the manifest carrying the cell's label, the host's aggregate
-// dispatch series and the inter-chunk gap histograms, and the report
-// pair. A nil res is a cell whose ladder never started: its attempts
-// file and frame store are empty, and its epoch is the cell's start. A
-// frame store that fails to write leaves the rest to be written; the
-// failure is returned after them.
+// the end status and balance, the frame store and operator copies, the
+// attempts file, the manifest carrying the cell's label, the host's
+// aggregate dispatch series and the inter-chunk gap histograms, and the
+// report pair. A nil res is a cell whose ladder never started: its
+// attempts file and frame store are empty, and its epoch is the cell's
+// start. A frame store that fails to write leaves the rest to be
+// written; the failure is returned after them.
 func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res *loadgen.Result) error {
 	ladder := res != nil
 	if !ladder {
@@ -224,6 +228,10 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	statusEnd, serr := evidence.WriteStatus(ev.dir, evidence.StatusEndFile, evidence.ReadStatus(ctx, r.status))
 	if serr != nil {
 		statusEnd = ""
+	}
+	balanceEnd, berr := evidence.WriteStatus(ev.dir, evidence.BalanceEndFile, evidence.ReadBalance(ctx, r.balance))
+	if berr != nil {
+		balanceEnd = ""
 	}
 	framesPath, ferr := evidence.WriteRunFrames(r.framesRoot, res)
 	if ferr == nil {
@@ -256,23 +264,25 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	cell.Outcome, cell.Reasons, cell.LadderStarted = rec.Outcome, rec.Reasons, ladder
 	cell.Gaps = evidence.StepGaps(res)
 	m, err := evidence.NewManifest(evidence.ManifestInput{
-		Config:          ev.cfg,
-		ConfigName:      r.configName,
-		Target:          &ev.cfg.Target,
-		Result:          res,
-		Build:           r.build,
-		Operator:        r.op,
-		Ledger:          ev.ledger,
-		Clock:           ev.clock,
-		ClockPath:       ev.clockPath,
-		StatusStartPath: ev.statusStart,
-		StatusEndPath:   statusEnd,
-		ArtifactPaths:   artifacts,
-		FramesRoot:      r.framesRoot,
-		FramesPath:      framesPath,
-		RunValid:        rec.Outcome == outcomeCounted,
-		InvalidReasons:  invalid,
-		Release:         cell,
+		Config:           ev.cfg,
+		ConfigName:       r.configName,
+		Target:           &ev.cfg.Target,
+		Result:           res,
+		Build:            r.build,
+		Operator:         r.op,
+		Ledger:           ev.ledger,
+		Clock:            ev.clock,
+		ClockPath:        ev.clockPath,
+		StatusStartPath:  ev.statusStart,
+		StatusEndPath:    statusEnd,
+		ArtifactPaths:    artifacts,
+		BalanceStartPath: ev.balanceStart,
+		BalanceEndPath:   balanceEnd,
+		FramesRoot:       r.framesRoot,
+		FramesPath:       framesPath,
+		RunValid:         rec.Outcome == outcomeCounted,
+		InvalidReasons:   invalid,
+		Release:          cell,
 	})
 	if err != nil {
 		return errors.Join(ferr, err)

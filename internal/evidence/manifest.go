@@ -76,6 +76,10 @@ type Manifest struct {
 	Roles       *Roles           `json:"roles,omitempty"`
 	Records     []OperatorRecord `json:"records"`
 	Ledger      *LedgerRef       `json:"ledger,omitempty"`
+	// BalanceStart and BalanceEnd are the account balance or quota
+	// records, read at a release cell's start and end.
+	BalanceStart *FileRef `json:"balance_start,omitempty"`
+	BalanceEnd   *FileRef `json:"balance_end,omitempty"`
 	// Artifacts are the run's other published files.
 	Artifacts []FileRef `json:"artifacts"`
 	// Frames is the raw-frame store file, named from the store's root.
@@ -236,6 +240,10 @@ type ManifestInput struct {
 	// StatusEndPath is empty when the end status was not recorded.
 	StatusEndPath string
 	ArtifactPaths []string
+	// BalanceStartPath and BalanceEndPath are the balance records; the
+	// start record is required under the release profile, and either is
+	// empty when not recorded.
+	BalanceStartPath, BalanceEndPath string
 	// FramesPath is empty when no frame store was written.
 	FramesRoot, FramesPath string
 
@@ -256,6 +264,8 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		return nil, errors.New("evidence: a release run's manifest needs its cell record")
 	case !release && in.Release != nil:
 		return nil, fmt.Errorf("evidence: a cell record under the %q profile", cfg.Profile)
+	case release && in.BalanceStartPath == "":
+		return nil, errors.New("evidence: a release run's manifest needs its start balance record")
 	case release:
 		if err := checkCell(cfg, t, in.Release); err != nil {
 			return nil, err
@@ -337,6 +347,12 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		}
 		m.StatusEnd = &ref
 	}
+	if m.BalanceStart, err = hashOptional(in.BalanceStartPath); err != nil {
+		return nil, err
+	}
+	if m.BalanceEnd, err = hashOptional(in.BalanceEndPath); err != nil {
+		return nil, err
+	}
 	for _, p := range in.ArtifactPaths {
 		ref, err := HashFile(p, filepath.Base(p))
 		if err != nil {
@@ -363,6 +379,19 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		}
 	}
 	return m, nil
+}
+
+// hashOptional returns the reference of the file at path under its base
+// name, or nil for an empty path.
+func hashOptional(path string) (*FileRef, error) {
+	if path == "" {
+		return nil, nil
+	}
+	ref, err := HashFile(path, filepath.Base(path))
+	if err != nil {
+		return nil, err
+	}
+	return &ref, nil
 }
 
 // WriteManifest writes m to ManifestFile in dir and returns the file's

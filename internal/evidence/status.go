@@ -13,15 +13,23 @@ const (
 	StatusEndFile   = "status-end.json"
 )
 
+// The account balance or quota records' file names in a release cell's
+// directory.
+const (
+	BalanceStartFile = "balance-start.json"
+	BalanceEndFile   = "balance-end.json"
+)
+
 // statusTimeout bounds the endpoint-status command's run time.
 var statusTimeout = 30 * time.Second
 
 // statusOutputLimit bounds each of the command's output streams.
 const statusOutputLimit = 1 << 20
 
-// StatusRecord is one run of the operator's endpoint-status command at
-// run start or run end, with its output verbatim and unparsed. Error is
-// set when the command failed, timed out, or printed past the size limit.
+// StatusRecord is one run of the operator's endpoint-status command, or
+// of its balance command, at run start or run end, with its output
+// verbatim and unparsed. Error is set when the command failed, timed out,
+// or printed past the size limit.
 type StatusRecord struct {
 	Command  []string  `json:"command"`
 	StartUTC time.Time `json:"start_utc"`
@@ -46,6 +54,16 @@ func ParseStatusCommand(s string) ([]string, error) {
 	return args, nil
 }
 
+// ParseBalanceCommand splits s on white space into the balance
+// command's arguments.
+func ParseBalanceCommand(s string) ([]string, error) {
+	args := strings.Fields(s)
+	if len(args) == 0 {
+		return nil, errors.New("evidence: no balance command")
+	}
+	return args, nil
+}
+
 // ReadStatus runs the endpoint-status command args with only PATH and
 // LC_ALL=C in its environment and records its output.
 func ReadStatus(ctx context.Context, args []string) *StatusRecord {
@@ -60,6 +78,12 @@ func ReadStatus(ctx context.Context, args []string) *StatusRecord {
 		DroppedBytes: run.dropped,
 		Error:        run.err,
 	}
+}
+
+// ReadBalance runs the balance command args as ReadStatus runs the
+// endpoint-status command; the route's key is not in its environment.
+func ReadBalance(ctx context.Context, args []string) *StatusRecord {
+	return ReadStatus(ctx, args)
 }
 
 // WriteStatus writes rec to name in dir and returns the file's path.

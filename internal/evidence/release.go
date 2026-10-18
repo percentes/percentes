@@ -38,7 +38,8 @@ type Release struct {
 // (Manifest.Counted); one whose ladder never started has empty attempts
 // and frame files. Every file the manifest names must exist with the
 // SHA-256 and size it records: the config, the attempts file, the report
-// pair and the clock and status records in r.Dir, and the frame store
+// pair and the clock, status and balance records in r.Dir, a release
+// run's start balance among them, and the frame store
 // and the operator copies in the run's frame directory. Otherwise it
 // returns an error naming every missing item and every mismatch.
 func CheckRelease(r Release) (*Manifest, error) {
@@ -86,6 +87,15 @@ func CheckRelease(r Release) (*Manifest, error) {
 	check(r.Dir, m.StatusStart, "start status")
 	if m.StatusEnd != nil {
 		check(r.Dir, *m.StatusEnd, "end status")
+	}
+	switch {
+	case m.BalanceStart != nil:
+		check(r.Dir, *m.BalanceStart, "start balance")
+	case m.Profile == config.ProfileRelease:
+		fail("start balance: not in the manifest")
+	}
+	if m.BalanceEnd != nil {
+		check(r.Dir, *m.BalanceEnd, "end balance")
 	}
 
 	var recs []Record

@@ -147,7 +147,8 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 		t.Fatalf("ladder %+v", l)
 	}
 	dir := r.cellDir(run)
-	for _, name := range []string{cellFile, evidence.AttemptsFile, evidence.ManifestFile, probe.File, dispatchFile, evidence.ClockFile, evidence.StatusStartFile, evidence.StatusEndFile, "ceiling-probe-groq-512.json"} {
+	for _, name := range []string{cellFile, evidence.AttemptsFile, evidence.ManifestFile, probe.File, dispatchFile, evidence.ClockFile, evidence.StatusStartFile, evidence.StatusEndFile,
+		evidence.BalanceStartFile, evidence.BalanceEndFile, "ceiling-probe-groq-512.json"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Error(err)
 		}
@@ -335,5 +336,45 @@ func TestCellStopsAndBlocks(t *testing.T) {
 				t.Fatalf("reservation left open: %+v", u)
 			}
 		})
+	}
+}
+
+// Each cell reads the account balance at its start and at its end, also
+// a cell stopped before its ladder, and its manifest names both records.
+func TestCellBalanceRecords(t *testing.T) {
+	e := newEndpoint(t, always200)
+	r, _ := newTestRoute(t, releaseConfig(t, e.url()), "+75.5")
+	for i, run := range r.runs[:2] {
+		rec, err := r.runCell(context.Background(), run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Outcome != outcomeStopped {
+			t.Fatalf("cell %d: outcome %s %q", i, rec.Outcome, rec.Reasons)
+		}
+		m, _ := checkRetained(t, r, run)
+		for j, b := range []struct {
+			name string
+			ref  *evidence.FileRef
+		}{{evidence.BalanceStartFile, m.BalanceStart}, {evidence.BalanceEndFile, m.BalanceEnd}} {
+			if b.ref == nil || b.ref.Name != b.name {
+				t.Fatalf("cell %d: manifest names %+v for %s", i, b.ref, b.name)
+			}
+			raw, err := os.ReadFile(filepath.Join(r.cellDir(run), b.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got evidence.StatusRecord
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			want := fmt.Sprintf("balance USD 30.00, read %d\n", 2*i+j+1)
+			if got.Stdout.Text != want || !slices.Equal(got.Command, []string{"balance", "--account", "test"}) || got.Error != "" {
+				t.Errorf("cell %d %s: command %q, stdout %q, error %q; want stdout %q", i, b.name, got.Command, got.Stdout.Text, got.Error, want)
+			}
+		}
+	}
+	if n := e.hits.Load(); n != 0 {
+		t.Fatalf("server saw %d requests", n)
 	}
 }

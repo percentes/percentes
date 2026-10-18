@@ -181,7 +181,8 @@ func TestManifestCellRecord(t *testing.T) {
 	}
 	for _, field := range []string{`"frame_limit_bytes": 8388608`, `"error_body_limit_bytes": 4096`, `"error_body_wait_ns": 1000000000`,
 		`"offset_minutes": 20`, `"concurrent_runs": [`, `"binding": {`, `"ceiling_choice": {`, `"account_created": "2026-09-15"`, `"pre_window_requests": 25`,
-		`"outcome": "counted"`, `"ladder_started": true`, `"dispatch_aggregate": {`, `"max_per_second": 3`, `"inter_chunk_gaps": []`} {
+		`"outcome": "counted"`, `"ladder_started": true`, `"dispatch_aggregate": {`, `"max_per_second": 3`, `"inter_chunk_gaps": []`,
+		`"balance_start": {`, `"balance_end": {`} {
 		if !strings.Contains(string(b), field) {
 			t.Errorf("manifest lacks %s", field)
 		}
@@ -192,6 +193,23 @@ func TestManifestCellRecord(t *testing.T) {
 	}
 	if !reflect.DeepEqual(back.Release, in.Release) || back.Capture != m.Capture {
 		t.Errorf("read back\n%+v\nwritten\n%+v", back.Release, in.Release)
+	}
+	if !reflect.DeepEqual(back.BalanceStart, m.BalanceStart) || !reflect.DeepEqual(back.BalanceEnd, m.BalanceEnd) {
+		t.Errorf("balance read back %+v %+v, written %+v %+v", back.BalanceStart, back.BalanceEnd, m.BalanceStart, m.BalanceEnd)
+	}
+
+	// The end balance is absent where it was not recorded; the start
+	// balance is required.
+	in.BalanceEndPath = ""
+	if m, err = NewManifest(in); err != nil {
+		t.Fatal(err)
+	}
+	if m.BalanceEnd != nil || m.BalanceStart == nil {
+		t.Errorf("no end balance: %+v %+v", m.BalanceStart, m.BalanceEnd)
+	}
+	in.BalanceStartPath = ""
+	if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "needs its start balance record") {
+		t.Errorf("release run without a start balance: %v", err)
 	}
 }
 
@@ -454,6 +472,15 @@ func TestCheckReleaseCellAndAnswer(t *testing.T) {
 	if _, err := r.check(); err != nil {
 		t.Fatalf("complete release run: %v", err)
 	}
+
+	// A release run needs its start balance record.
+	start := r.m.BalanceStart
+	r.m.BalanceStart = nil
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "start balance: not in the manifest") {
+		t.Errorf("release run without a start balance: %v", err)
+	}
+	r.m.BalanceStart = start
 
 	// The gap histograms are the attempts file's: its completions carry no
 	// content event, so no step has a gap.

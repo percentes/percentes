@@ -67,6 +67,20 @@ func fakeSNTP(t *testing.T, offset string) string {
 	return "sntp time.example.test"
 }
 
+// fakeBalance puts a balance command on PATH that prints its own read
+// count, kept in a file beside it, and returns the command.
+func fakeBalance(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	count := filepath.Join(dir, "count")
+	script := "#!/bin/sh\nn=$(($(cat '" + count + "' 2>/dev/null || echo 0) + 1))\necho $n > '" + count + "'\necho \"balance USD 30.00, read $n\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "balance"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return "balance --account test"
+}
+
 // releaseConfig is the release reference at endpoint, with the test key
 // set in its variable.
 func releaseConfig(t *testing.T, endpoint string) *config.Config {
@@ -114,7 +128,8 @@ func testSchedule(t *testing.T, routes ...string) *schedule.Schedule {
 
 // newFixture writes every input of cfg's route: its schedule beside
 // "other", a ledger with the route's caps and price, an operator file, a
-// ceiling probe that passed at 512, and a clock reading of offset.
+// ceiling probe that passed at 512, a clock reading of offset and a
+// counting balance command.
 func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	t.Helper()
 	dir := t.TempDir()
@@ -143,7 +158,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	return &fixture{
 		in: routeInput{
 			cfg: cfg, configName: "groq.yaml", schedulePath: writeFile(t, dir, "schedule.json", sb), out: t.TempDir(), ledgerPath: ledger,
-			framesRoot: t.TempDir(), clockSync: fakeSNTP(t, offset), statusCmd: "true", opPath: writeFile(t, dir, "operator.json", []byte(operatorJSON)),
+			framesRoot: t.TempDir(), clockSync: fakeSNTP(t, offset), statusCmd: "true", balanceCmd: fakeBalance(t), opPath: writeFile(t, dir, "operator.json", []byte(operatorJSON)),
 			probeFiles: []string{writeFile(t, dir, "ceiling.json", cp)}, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
 		},
 		ledger: ledger,
