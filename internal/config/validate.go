@@ -247,6 +247,7 @@ func (c *Config) validateTarget(v *validator) {
 			v.errf("target.api_key_env: required for a hosted target (name of the env var holding the bearer token; never the token itself)")
 		}
 	}
+	c.validateResponseHeaders(v)
 	// §10 G7: the scrape needs one endpoint per replica and a gauge name;
 	// a hosted target has no replica endpoints (§6).
 	if n := len(c.Target.MetricsURLs); n > 0 {
@@ -288,6 +289,44 @@ func (c *Config) validateTarget(v *validator) {
 			v.errf("target.ttft_histogram: set without target.metrics_urls")
 		}
 	}
+}
+
+// validateResponseHeaders refuses an allowlist entry that is not a header
+// name (with an optional trailing "*"), repeats another, or could match a
+// credential header.
+func (c *Config) validateResponseHeaders(v *validator) {
+	seen := map[string]bool{}
+	for i, e := range c.Target.ResponseHeaders {
+		name := strings.TrimSuffix(e, "*")
+		if !headerToken(name) {
+			v.errf("target.response_headers[%d]: %q is not a header name, optionally ending in *", i, e)
+			continue
+		}
+		key := strings.ToLower(e)
+		if seen[key] {
+			v.errf("target.response_headers[%d]: %q listed twice", i, e)
+		}
+		seen[key] = true
+		for _, cred := range credentialHeaders {
+			if headerMatch(e, cred) {
+				v.errf("target.response_headers[%d]: %q matches %s, which is never recorded", i, e, cred)
+			}
+		}
+	}
+}
+
+// headerToken accepts one or more characters from a-z, A-Z, 0-9 and hyphen.
+func headerToken(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Config) validateFault(v *validator) {

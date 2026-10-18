@@ -71,6 +71,20 @@ type Request struct {
 	Replica          string `json:"replica,omitempty"`
 	// Proto is the response's protocol version ("" = no response).
 	Proto string `json:"proto,omitempty"`
+	// Status is the HTTP status code (0 = no response). Headers holds the
+	// response headers target.response_headers allows, by canonical name.
+	Status  int                 `json:"status,omitempty"`
+	Headers map[string][]string `json:"headers,omitempty"`
+	// PeerAddr is the remote address of the connection the request used
+	// ("" = none obtained); ConnReused says it came from the idle pool.
+	PeerAddr   string `json:"peer_addr,omitempty"`
+	ConnReused bool   `json:"conn_reused,omitempty"`
+	// ErrText is the redacted Go error string of a transport or stream
+	// failure.
+	ErrText string `json:"err_text,omitempty"`
+	// ErrorBody is the first errorBodyLimit bytes of a non-200 body with
+	// credentials masked, held for the raw-frame store; never in JSON.
+	ErrorBody []byte `json:"-"`
 
 	// ITLsUs are inter-token latency (ITL) gaps (us) for pooled per-window ITL
 	// histograms (§3: per-request p99 is forbidden; pooling happens in

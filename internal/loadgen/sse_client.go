@@ -8,11 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/redact"
 	"github.com/percentes/percentes/internal/sse"
 )
 
@@ -25,10 +29,16 @@ func (g *gen) execute(r *Request) {
 	deadline := g.epoch.Add(time.Duration(r.DispatchNs) + time.Duration(config.PinnedClientTimeoutS)*time.Second)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			r.PeerAddr, r.ConnReused = info.Conn.RemoteAddr().String(), info.Reused
+		},
+	})
 
 	req, err := g.newRequest(ctx, g.requestBody(r))
 	if err != nil {
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrConnect, g.now()
+		r.ErrText = redact.ErrorText(err, config.PinnedClientTimeoutS*time.Second)
 		return
 	}
 
@@ -39,6 +49,9 @@ func (g *gen) execute(r *Request) {
 	}
 	defer resp.Body.Close()
 	r.Proto = resp.Proto
+	r.Status = resp.StatusCode
+	secrets := g.secrets()
+	r.Headers = allowedHeaders(resp.Header, g.cfg.Target.ResponseHeaders, secrets)
 	// Only the mock's replica header is recorded (§1); any other endpoint controls the value.
 	r.Replica = replicaFrom(resp.Header, g.cfg.Mock != nil && !g.cfg.Target.Hosted, g.cfg.Target.BaseURL, g.apiKey)
 
@@ -49,6 +62,9 @@ func (g *gen) execute(r *Request) {
 			class = ErrStatus429
 		}
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, class, g.now()
+		stop := time.AfterFunc(errorBodyWait, cancel)
+		defer stop.Stop()
+		r.ErrorBody = readErrorBody(resp.Body, secrets)
 		return
 	}
 
@@ -212,8 +228,16 @@ const eventLimit = 1 << 20
 // Bytes read after [DONE] before the body is closed unread.
 const drainLimit = 4096
 
+// Bytes of a non-200 body kept, and how long after the status the read
+// may run.
+const (
+	errorBodyLimit = 4096
+	errorBodyWait  = time.Second
+)
+
 func (g *gen) classifyTransportErr(r *Request, err error) {
 	r.DoneNs = g.now()
+	r.ErrText = redact.ErrorText(err, config.PinnedClientTimeoutS*time.Second)
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		// No terminal event by the pinned timeout: censored (§3).
@@ -227,6 +251,7 @@ func (g *gen) classifyTransportErr(r *Request, err error) {
 
 func (g *gen) classifyStreamErr(r *Request, err error) {
 	r.DoneNs = g.now()
+	r.ErrText = redact.ErrorText(err, config.PinnedClientTimeoutS*time.Second)
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		r.Outcome = OutcomeCensored
@@ -267,4 +292,68 @@ func hostnameShaped(s string) bool {
 		}
 	}
 	return true
+}
+
+// secrets are the credential values a recorded header or body must not
+// carry: the bearer token and the base URL's userinfo and query values,
+// longest first, so a shorter secret never splits a longer one's match.
+func (g *gen) secrets() []string {
+	s := redact.Secrets(g.cfg.Target.BaseURL)
+	if g.apiKey != "" {
+		s = append(s, g.apiKey)
+	}
+	sort.Slice(s, func(i, j int) bool { return len(s[i]) > len(s[j]) })
+	return s
+}
+
+// allowedHeaders copies the headers the allowlist names, dropping any
+// value that contains a secret.
+func allowedHeaders(h http.Header, allow []string, secrets []string) map[string][]string {
+	var out map[string][]string
+	for name, vs := range h {
+		if !config.HeaderAllowed(allow, name) {
+			continue
+		}
+		for _, v := range vs {
+			if containsAny(v, secrets) {
+				continue
+			}
+			if out == nil {
+				out = map[string][]string{}
+			}
+			out[name] = append(out[name], v)
+		}
+	}
+	return out
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if sub != "" && strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// readErrorBody reads up to errorBodyLimit bytes, plus enough to see
+// whole any secret that starts inside them, masks each secret with
+// asterisks of the same length, and keeps the first errorBodyLimit bytes.
+// secrets must be ordered longest first. A read cut short by the request
+// context keeps what arrived.
+func readErrorBody(body io.Reader, secrets []string) []byte {
+	extra := 0
+	if len(secrets) > 0 {
+		extra = len(secrets[0])
+	}
+	b, _ := io.ReadAll(io.LimitReader(body, int64(errorBodyLimit+extra)))
+	for _, s := range secrets {
+		if s != "" {
+			b = bytes.ReplaceAll(b, []byte(s), bytes.Repeat([]byte("*"), len(s)))
+		}
+	}
+	if len(b) > errorBodyLimit {
+		b = b[:errorBodyLimit]
+	}
+	return b
 }

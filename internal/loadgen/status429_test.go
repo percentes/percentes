@@ -104,7 +104,7 @@ func TestConnectionRefusedConnect(t *testing.T) {
 }
 
 // A 429 whose body never arrives does not hold the request to the
-// deadline: the body is not read.
+// deadline.
 func TestStatus429NoBodyReturnsAtOnce(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -11,7 +11,11 @@
 // a pinned number does not load.
 package config
 
-import "github.com/percentes/percentes/internal/redact"
+import (
+	"strings"
+
+	"github.com/percentes/percentes/internal/redact"
+)
 
 // Profile selects which validation regime applies.
 //
@@ -343,6 +347,44 @@ type Target struct {
 	// TTFTHistogram names the server-side time-to-first-token histogram,
 	// in seconds, among MetricsFamilies for the §2 receive-path comparison.
 	TTFTHistogram string `yaml:"ttft_histogram,omitempty" json:"ttft_histogram,omitempty"`
+	// ResponseHeaders lists the response headers recorded per request,
+	// matched without regard to case; an entry ending in "*" matches a
+	// name prefix. Empty records none.
+	ResponseHeaders []string `yaml:"response_headers,omitempty" json:"response_headers,omitempty"`
+}
+
+// credentialHeaders are never recorded, whatever the allowlist says.
+var credentialHeaders = []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie"}
+
+// CredentialHeader reports whether name carries a credential.
+func CredentialHeader(name string) bool {
+	for _, c := range credentialHeaders {
+		if strings.EqualFold(name, c) {
+			return true
+		}
+	}
+	return false
+}
+
+// HeaderAllowed reports whether a response header name matches an entry
+// of target.response_headers and carries no credential.
+func HeaderAllowed(allow []string, name string) bool {
+	if CredentialHeader(name) {
+		return false
+	}
+	for _, e := range allow {
+		if headerMatch(e, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func headerMatch(entry, name string) bool {
+	if p, ok := strings.CutSuffix(entry, "*"); ok {
+		return len(name) >= len(p) && strings.EqualFold(name[:len(p)], p)
+	}
+	return strings.EqualFold(entry, name)
 }
 
 // Fault is the orchestrator plan (§1, §2). Timestamps for armed/fire/expiry
