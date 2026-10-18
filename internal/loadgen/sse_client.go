@@ -617,6 +617,19 @@ const (
 	errorBodyWait  = time.Second
 )
 
+// Capture is what a request keeps of a response body, the values a run's
+// manifest records.
+type Capture struct {
+	FrameLimitBytes     int   `json:"frame_limit_bytes"`
+	ErrorBodyLimitBytes int   `json:"error_body_limit_bytes"`
+	ErrorBodyWaitNs     int64 `json:"error_body_wait_ns"`
+}
+
+// CaptureLimits returns the capture limits this build applies.
+func CaptureLimits() Capture {
+	return Capture{FrameLimitBytes: frameLimit, ErrorBodyLimitBytes: errorBodyLimit, ErrorBodyWaitNs: errorBodyWait.Nanoseconds()}
+}
+
 // clientTimeout is the per-request timeout: the release hard timeout,
 // or the pinned 30 s.
 func clientTimeout(cfg *config.Config) time.Duration {

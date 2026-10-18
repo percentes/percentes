@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
@@ -36,6 +37,16 @@ type Record struct {
 	DoneNs     int64           `json:"done_ns"`
 	Outcome    loadgen.Outcome `json:"outcome"`
 	ErrClass   string          `json:"err_class,omitempty"`
+	// Shape and CeilingTokens are a release request's shape and output
+	// ceiling, Step its 1-based ladder step and Warmup whether it was sent
+	// in the warm-up (SPEC-HOSTED HA3 point 15). InTime and Late split its
+	// completions at the deadline.
+	Shape         string `json:"shape,omitempty"`
+	CeilingTokens int    `json:"ceiling_tokens,omitempty"`
+	Step          int    `json:"step,omitempty"`
+	Warmup        bool   `json:"warmup,omitempty"`
+	InTime        bool   `json:"in_time,omitempty"`
+	Late          bool   `json:"late,omitempty"`
 	// Protocol and Status are absent when no response arrived.
 	Protocol string `json:"protocol,omitempty"`
 	Status   int    `json:"status,omitempty"`
@@ -50,7 +61,11 @@ type Record struct {
 	ContentEvents int `json:"content_events"`
 	// CompletionTokens is present only when the stream carried a usage
 	// object with a completion count.
-	CompletionTokens  *int            `json:"completion_tokens,omitempty"`
+	CompletionTokens *int `json:"completion_tokens,omitempty"`
+	// ReasoningTokens is a release record's integer under a key named
+	// reasoning_tokens at any depth of Usage; absent when there is none
+	// or two disagree.
+	ReasoningTokens   *int            `json:"reasoning_tokens,omitempty"`
 	Usage             json.RawMessage `json:"usage,omitempty"`
 	FinishReason      string          `json:"finish_reason,omitempty"`
 	ReportedModel     string          `json:"reported_model,omitempty"`
@@ -58,7 +73,8 @@ type Record struct {
 	SystemFingerprint string          `json:"system_fingerprint,omitempty"`
 	StreamError       string          `json:"stream_error,omitempty"`
 	UnknownEvents     int             `json:"unknown_events,omitempty"`
-	// Answer is the visible content, present for hosted targets only.
+	// Answer is the visible content, present for hosted targets outside
+	// the release profile; a release keeps it in the frame store only.
 	// Reasoning text is never recorded here.
 	Answer           *string `json:"answer,omitempty"`
 	Reasoning        bool    `json:"reasoning"`
@@ -100,19 +116,22 @@ type Options struct {
 func Records(cfg *config.Config, res *loadgen.Result, opt Options) []Record {
 	out := make([]Record, len(res.Requests))
 	for i := range res.Requests {
-		out[i] = record(&res.Requests[i], cfg.Target.Hosted)
+		r := &res.Requests[i]
+		out[i] = record(r, cfg)
 		rec := &out[i]
 		if len(opt.RunFailures) > 0 {
 			rec.RunFailures = opt.RunFailures
 		}
 		if s := opt.Scoring; s != nil && rec.Index >= 0 && rec.Index < int64(len(s.Expected)) && s.Expected[rec.Index] != "" {
-			rec.Score = scoreOf(s.Scorer, rec, s.Expected[rec.Index])
+			a := rec.Attempt(s.Expected[rec.Index])
+			a.Answer = r.Content
+			rec.Score = scoreOf(s.Scorer, a)
 		}
 	}
 	return out
 }
 
-func record(r *loadgen.Request, hosted bool) Record {
+func record(r *loadgen.Request, cfg *config.Config) Record {
 	rec := Record{
 		Index:             r.Index,
 		IntendedNs:        r.IntendedNs,
@@ -121,6 +140,9 @@ func record(r *loadgen.Request, hosted bool) Record {
 		DoneNs:            r.DoneNs,
 		Outcome:           r.Outcome,
 		ErrClass:          r.ErrClass,
+		Step:              r.Step,
+		Warmup:            r.Warmup,
+		Late:              r.Late,
 		Protocol:          r.Proto,
 		Status:            r.Status,
 		RetryAfter:        http.Header(r.Headers).Get("Retry-After"),
@@ -144,11 +166,53 @@ func record(r *loadgen.Request, hosted bool) Record {
 		n := r.CompletionTokens
 		rec.CompletionTokens = &n
 	}
-	if hosted {
+	if cfg.Profile == config.ProfileRelease && cfg.Release != nil {
+		rec.Shape, rec.CeilingTokens = cfg.Release.Shape.Name, cfg.Release.Shape.CeilingTokens
+		rec.InTime = r.Outcome == loadgen.OutcomeCompleted && !r.Late
+		rec.ReasoningTokens = reasoningTokens(r.Usage)
+		return rec
+	}
+	if cfg.Target.Hosted {
 		a := r.Content
 		rec.Answer = &a
 	}
 	return rec
+}
+
+// reasoningTokens is the integer under a key named reasoning_tokens at
+// any depth of usage, or nil when there is none or two disagree.
+func reasoningTokens(usage json.RawMessage) *int {
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(usage))
+	dec.UseNumber()
+	if len(usage) == 0 || dec.Decode(&v) != nil {
+		return nil
+	}
+	var found []int64
+	var walk func(any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case map[string]any:
+			for k, e := range t {
+				if n, ok := e.(json.Number); ok && k == "reasoning_tokens" {
+					if i, err := n.Int64(); err == nil {
+						found = append(found, i)
+					}
+				}
+				walk(e)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(found) == 0 || slices.Min(found) != slices.Max(found) {
+		return nil
+	}
+	n := int(found[0])
+	return &n
 }
 
 // Attempt is what the scorer reads from rec. The stream ended when it
@@ -168,13 +232,13 @@ func (rec *Record) Attempt(expected string) score.Attempt {
 	return a
 }
 
-func scoreOf(s *score.Scorer, rec *Record, expected string) *Score {
-	out := &Score{Expected: expected}
+func scoreOf(s *score.Scorer, a score.Attempt) *Score {
+	out := &Score{Expected: a.Expected}
 	if s == nil {
 		out.Error = "evidence: no scorer"
 		return out
 	}
-	v, err := s.Score(rec.Attempt(expected))
+	v, err := s.Score(a)
 	if err != nil {
 		out.Error = err.Error()
 		return out
@@ -185,7 +249,7 @@ func scoreOf(s *score.Scorer, rec *Record, expected string) *Score {
 
 // Request is the request rec records. The fields the per-attempt record
 // does not carry are zero: inter-token gaps, replica, reasoning text, the
-// non-200 body and the frames.
+// non-200 body, the frames, and a release request's answer.
 func (rec *Record) Request() loadgen.Request {
 	r := loadgen.Request{
 		Index:             rec.Index,
@@ -196,6 +260,9 @@ func (rec *Record) Request() loadgen.Request {
 		Outcome:           rec.Outcome,
 		ErrClass:          rec.ErrClass,
 		Tokens:            rec.ContentEvents,
+		Step:              rec.Step,
+		Warmup:            rec.Warmup,
+		Late:              rec.Late,
 		Usage:             rec.Usage,
 		FinishReason:      rec.FinishReason,
 		ReportedModel:     rec.ReportedModel,

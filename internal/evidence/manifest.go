@@ -59,6 +59,10 @@ type Manifest struct {
 	Cell       string         `json:"cell,omitempty"`
 	Seed       int64          `json:"seed"`
 	Source     Source         `json:"source"`
+	// Capture is what the build keeps of each response body.
+	Capture loadgen.Capture `json:"capture"`
+	// Release is a release run's cell record.
+	Release *Cell `json:"release,omitempty"`
 	// Config is the configuration file as loaded, verbatim.
 	Config   FileRef  `json:"config"`
 	Endpoint Endpoint `json:"endpoint"`
@@ -235,11 +239,24 @@ type ManifestInput struct {
 	RunValid       bool
 	InvalidReasons []string
 	Replay         *run.Record
+	// Release is the cell record, required under the release profile and
+	// refused under any other.
+	Release *Cell
 }
 
 // NewManifest builds the manifest of one hosted run.
 func NewManifest(in ManifestInput) (*Manifest, error) {
 	cfg, t, res, op := in.Config, in.Target, in.Result, in.Operator
+	switch release := cfg.Profile == config.ProfileRelease && cfg.Release != nil; {
+	case release && in.Release == nil:
+		return nil, errors.New("evidence: a release run's manifest needs its cell record")
+	case !release && in.Release != nil:
+		return nil, fmt.Errorf("evidence: a cell record under the %q profile", cfg.Profile)
+	case release:
+		if err := checkCell(cfg, t, in.Release); err != nil {
+			return nil, err
+		}
+	}
 	m := &Manifest{
 		SchemaVersion:  1,
 		StartUTC:       res.EpochWall.UTC(),
@@ -248,6 +265,8 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		Cell:           op.Cell,
 		Seed:           cfg.Run.Seed,
 		Source:         SourceOf(in.Build),
+		Capture:        loadgen.CaptureLimits(),
+		Release:        in.Release,
 		Config:         refOf(in.ConfigName, cfg.Raw),
 		Operator:       op.File,
 		Roles:          op.Roles,

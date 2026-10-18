@@ -34,11 +34,19 @@ const (
 	RecordPrompt     = "prompt"
 	RecordProbe      = "probe"
 	RecordSchedule   = "schedule"
+	// RecordNotice is a notice sent to the provider with its tables and
+	// evidence pack, RecordReplicationPack the AWS replication pack's
+	// send, and RecordDisclosure an email or form that described the work
+	// to the provider before the notices (SPEC-HOSTED HA3 points 14 and
+	// 15).
+	RecordNotice          = "notice"
+	RecordReplicationPack = "replication_pack"
+	RecordDisclosure      = "disclosure"
 )
 
 var (
 	requiredRecords = []string{RecordLimits, RecordPrices, RecordQuota, RecordTerms, RecordStatusMapping, RecordEligibility, RecordDedicatedAccount, RecordAffiliation}
-	optionalRecords = []string{RecordSourceDiff, RecordCases, RecordLabels, RecordRubric, RecordScorer, RecordPrompt, RecordProbe, RecordSchedule}
+	optionalRecords = []string{RecordSourceDiff, RecordCases, RecordLabels, RecordRubric, RecordScorer, RecordPrompt, RecordProbe, RecordSchedule, RecordNotice, RecordReplicationPack, RecordDisclosure}
 	// urlRecords are the kinds taken from provider documentation.
 	urlRecords = []string{RecordLimits, RecordPrices, RecordTerms, RecordStatusMapping}
 )

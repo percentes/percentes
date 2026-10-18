@@ -28,8 +28,9 @@ type Release struct {
 // has every SPEC-HOSTED §9 artifact: the commit record (a revision, and
 // the source diff when the build was modified), the verbatim config, the
 // attempts file, the report pair, the manifest, the scorer output on
-// every measured attempt of a pilot run, and the frame store with one
-// line per attempt. Every file the manifest names must exist with the
+// every measured attempt of a pilot run, the cell record and an attempts
+// file without answer text for a release run, and the frame store with
+// one line per attempt. Every file the manifest names must exist with the
 // SHA-256 and size it records: the config, the attempts file, the report
 // pair and the clock and status records in r.Dir, and the frame store
 // and the operator copies in the run's frame directory. Otherwise it
@@ -105,6 +106,17 @@ func CheckRelease(r Release) (*Manifest, error) {
 		}
 		if measured == 0 {
 			fail("scorer output: no measured attempt")
+		}
+	}
+	if m.Profile == config.ProfileRelease {
+		if m.Release == nil {
+			fail("cell record: not in the manifest")
+		}
+		for i := range recs {
+			if recs[i].Answer != nil {
+				fail("%s: attempt %d carries answer text", AttemptsFile, recs[i].Index)
+				break
+			}
 		}
 	}
 
