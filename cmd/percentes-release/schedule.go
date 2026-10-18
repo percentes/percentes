@@ -5,13 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
 // scheduleCmd writes the committed schedule (SPEC-HOSTED HA3 point 9) of
-// the routes whose configurations are given, named by their targets. It
-// never replaces an existing file.
+// the routes whose configurations are given, named by their targets,
+// whose host groups agree. It never replaces an existing file.
 func scheduleCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("schedule", flag.ContinueOnError)
 	seed := fs.String("master-seed", "", "the release's master seed (required)")
@@ -38,6 +40,9 @@ func scheduleCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	if err := checkHostGroups(cfgs); err != nil {
+		return exitError, err
+	}
 	b, err := s.JSON()
 	if err != nil {
 		return exitError, err
@@ -60,4 +65,35 @@ func scheduleCmd(args []string) (int, error) {
 		fmt.Printf("%s: offset %d min; first cell %s at %s\n", o.Route, o.Minutes, runs[0].Label, runs[0].Start.Format("2006-01-02 15:04 UTC"))
 	}
 	return exitOK, nil
+}
+
+// checkHostGroups requires each route's other hosts to be routes given,
+// at the model their configurations send, and to name the same hosts.
+func checkHostGroups(cfgs []*config.Config) error {
+	byName := map[string]*config.Config{}
+	for _, c := range cfgs {
+		byName[c.Target.Name] = c
+	}
+	group := func(c *config.Config) []string {
+		g := []string{c.Target.Name}
+		for _, h := range c.Release.OtherHosts {
+			g = append(g, h.Route)
+		}
+		slices.Sort(g)
+		return g
+	}
+	for _, c := range cfgs {
+		for _, h := range c.Release.OtherHosts {
+			o := byName[h.Route]
+			switch {
+			case o == nil:
+				return fmt.Errorf("schedule: route %s: other host %s has no configuration given", c.Target.Name, h.Route)
+			case o.Target.ModelName != h.Model:
+				return fmt.Errorf("schedule: route %s: other host %s at model %q; its configuration sends %q", c.Target.Name, h.Route, h.Model, o.Target.ModelName)
+			case !slices.Equal(group(c), group(o)):
+				return fmt.Errorf("schedule: routes %s and %s name different hosts of their model: %v and %v", c.Target.Name, h.Route, group(c), group(o))
+			}
+		}
+	}
+	return nil
 }

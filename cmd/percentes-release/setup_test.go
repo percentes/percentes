@@ -25,13 +25,18 @@ func TestNewRouteRefusals(t *testing.T) {
 	ceiling := func(t *testing.T, f *fixture, recs ...probe.ReleaseRecord) {
 		t.Helper()
 		f.in.probeFiles = nil
-		for i := range recs {
-			b, _ := json.Marshal(&recs[i])
-			f.in.probeFiles = append(f.in.probeFiles, writeFile(t, t.TempDir(), "p.json", b))
+		for _, rec := range recs {
+			f.in.probeFiles = append(f.in.probeFiles, writeCeiling(t, rec))
 		}
 	}
-	pass := func(route string, c int, ok bool) probe.ReleaseRecord {
-		return probe.ReleaseRecord{Route: route, Ceiling: probe.CeilingCheck{Ceiling: c, Pass: ok}}
+	pass := func(f *fixture, route string, c int, ok bool) probe.ReleaseRecord {
+		return hostCeiling(f.in.cfg, f.in.byteCap, route, c, ok)
+	}
+	// with is route's passed record at 512 changed by edit.
+	with := func(f *fixture, route string, edit func(r *probe.ReleaseRecord)) probe.ReleaseRecord {
+		r := pass(f, route, 512, true)
+		edit(&r)
+		return r
 	}
 	for _, tc := range []struct {
 		name   string
@@ -82,12 +87,57 @@ func TestNewRouteRefusals(t *testing.T) {
 			}
 		}, "under the ceiling rule's US$0.0010592"},
 		{"model excluded", func(t *testing.T, f *fixture) {
-			ceiling(t, f, pass("groq", 512, false), pass("groq", 1024, false))
+			ceiling(t, f, pass(f, "groq", 512, false), pass(f, "groq", 1024, false), pass(f, "baseten", 512, true), pass(f, "baseten", 1024, true))
 		}, "the ceiling rule excludes the model"},
 		{"ceiling chosen elsewhere", func(t *testing.T, f *fixture) {
-			ceiling(t, f, pass("groq", 512, false), pass("groq", 1024, true))
-		}, "the ceiling check chose 1024"},
-		{"no own record", func(t *testing.T, f *fixture) { ceiling(t, f, pass("baseten", 512, true)) }, "no ceiling probe record of route groq at 512"},
+			ceiling(t, f, pass(f, "groq", 512, true), pass(f, "baseten", 512, false), pass(f, "groq", 1024, true), pass(f, "baseten", 1024, true))
+		}, "the ceiling check chose 1024 (baseten failed at 512"},
+		{"no own record", func(t *testing.T, f *fixture) { ceiling(t, f, pass(f, "baseten", 512, true)) }, "route groq has no check at 512"},
+		{"no other host's record", func(t *testing.T, f *fixture) { ceiling(t, f, pass(f, "groq", 512, true)) }, "route baseten has no check at 512"},
+		{"a record of no host", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), pass(f, "baseten", 512, true), pass(f, "azure", 512, true))
+		}, "route azure is not a host of the model (groq, baseten)"},
+		{"input bound failed", func(t *testing.T, f *fixture) {
+			over := with(f, "groq", func(r *probe.ReleaseRecord) {
+				r.InputBound = probe.InputCheck{BoundTokens: 1200, Reported: 10, Exceeded: 2}
+			})
+			ceiling(t, f, over, pass(f, "baseten", 512, true))
+		}, "route groq: the input bound failed at ceiling 512: 10 of 10 requests reported, 2 above 1200 tokens"},
+		{"another host's input bound failed", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) { r.InputBound = probe.InputCheck{BoundTokens: 1200, Reported: 8} }))
+		}, "route baseten: the input bound failed at ceiling 512: 8 of 10 requests reported"},
+		{"own model", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.RequestedModel = "openai/gpt-oss-20b" }), pass(f, "baseten", 512, true))
+		}, `route groq at 512: model "openai/gpt-oss-20b", want "openai/gpt-oss-120b"`},
+		{"another host's model", func(t *testing.T, f *fixture) {
+			f.in.cfg.Release.OtherHosts[0].Model = "gpt-oss-120b"
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) { r.RequestedModel = "openai/gpt-oss-120b" }))
+		}, `route baseten at 512: model "openai/gpt-oss-120b", want "gpt-oss-120b"`},
+		{"own byte cap", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.ByteCap = 2400 }), pass(f, "baseten", 512, true))
+		}, "route groq at 512: byte cap 2400, want --byte-cap 2000"},
+		{"another host's byte cap", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) { r.ByteCap = 2400 }))
+		}, "route baseten at 512: byte cap 2400, want --byte-cap 2000"},
+		{"adapter", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.Adapter = config.AdapterMessages }), pass(f, "baseten", 512, true))
+		}, `route groq at 512: adapter "messages", want "chat_completions"`},
+		{"endpoint", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.EndpointURL = "https://api.groq.com/openai/v1/chat/completions" }), pass(f, "baseten", 512, true))
+		}, "route groq at 512: endpoint https://api.groq.com/openai/v1/chat/completions, want https://api.example.test/openai/v1/chat/completions"},
+		{"body", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.BodySHA256 = strings.Repeat("0", 64) }), pass(f, "baseten", 512, true))
+		}, "route groq at 512: body sha256 0000000000000000000000000000000000000000000000000000000000000000, want target.body's"},
+		{"endpoint of the fallback's 512 check", func(t *testing.T, f *fixture) {
+			fallback(t, f.in.cfg)
+			at512 := pass(f, "groq", 512, false)
+			at512.EndpointURL = "https://api.groq.com/openai/v1/chat/completions"
+			ceiling(t, f, at512, pass(f, "groq", 1024, true), pass(f, "baseten", 512, true), pass(f, "baseten", 1024, true))
+		}, "route groq at 512: endpoint https://api.groq.com/openai/v1/chat/completions"},
+		{"fallback without the 1024 check of another host", func(t *testing.T, f *fixture) {
+			fallback(t, f.in.cfg)
+			ceiling(t, f, pass(f, "groq", 512, false), pass(f, "groq", 1024, true), pass(f, "baseten", 512, true))
+		}, "route baseten has no check at 1024; groq failed at 512"},
 		{"no ceiling probe", func(t *testing.T, f *fixture) { f.in.probeFiles = nil }, "--ceiling-probe is required"},
 		{"byte cap", func(t *testing.T, f *fixture) { f.in.byteCap = 0 }, "--byte-cap 0"},
 		{"account date", func(t *testing.T, f *fixture) { f.in.accountCreated = "15 September" }, "--account-created"},
@@ -125,6 +175,34 @@ func mustCaps(t *testing.T, cfg *config.Config) admission.Caps {
 		t.Fatal(err)
 	}
 	return c
+}
+
+// run reads a record of every host of the model: at 512 when every host
+// passed there, and for the fallback at both ceilings, the route's 512
+// check carrying the 512 body.
+func TestNewRouteCeilingRecords(t *testing.T) {
+	enoughOpenFiles(t)
+	f := newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
+	r, err := newRoute(f.in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ceiling != (probe.CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"}) || len(r.ceilingProbes) != 2 ||
+		r.ceilingProbes["ceiling-probe-groq-512.json"] == nil || r.ceilingProbes["ceiling-probe-baseten-512.json"] == nil {
+		t.Fatalf("at 512: %+v, copies %d", r.ceiling, len(r.ceilingProbes))
+	}
+
+	f = newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
+	at512 := hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, false)
+	fallback(t, f.in.cfg)
+	f.in.probeFiles = []string{writeCeiling(t, at512), writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "groq", 1024, true)),
+		writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true)), writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 1024, true))}
+	if r, err = newRoute(f.in); err != nil {
+		t.Fatal(err)
+	}
+	if r.ceiling != (probe.CeilingChoice{Ceiling: 1024, Reason: "groq failed at 512; every host passed at 1024"}) || len(r.ceilingProbes) != 4 {
+		t.Fatalf("fallback: %+v, copies %d", r.ceiling, len(r.ceilingProbes))
+	}
 }
 
 // The ceiling rule reads the schedule's seeded counts: each step's and

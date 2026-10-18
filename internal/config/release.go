@@ -19,6 +19,17 @@ type Release struct {
 	Ladder Ladder     `yaml:"ladder" json:"ladder"`
 	Shape  Shape      `yaml:"shape" json:"shape"`
 	Caps   LedgerCaps `yaml:"caps" json:"caps"`
+	// OtherHosts are the release's other routes of the target's model.
+	// The ceiling rule chooses one ceiling from a check of every host
+	// (SPEC-HOSTED HA3 point 7).
+	OtherHosts []ModelHost `yaml:"other_hosts,omitempty" json:"other_hosts,omitempty"`
+}
+
+// ModelHost is a route of the target's model: its route name and the
+// model name its requests carry.
+type ModelHost struct {
+	Route string `yaml:"route" json:"route"`
+	Model string `yaml:"model" json:"model"`
 }
 
 // LedgerCaps are the release ledger's liability caps in US dollars, as
@@ -298,6 +309,20 @@ func (c *Config) validateRelease(v *validator) {
 	}
 	pin("release.shape.deadline_s", float64(r.Shape.DeadlineS), PinnedReleaseDeadlineS)
 	validateLedgerCaps(v, "release.caps", r.Caps)
+	hosts := map[string]bool{c.Target.Name: true}
+	for i, h := range r.OtherHosts {
+		field := fmt.Sprintf("release.other_hosts[%d]", i)
+		switch {
+		case !fieldKey(h.Route):
+			v.errf("%s.route: one or more of a-z, A-Z, 0-9, _ and -, got %q", field, h.Route)
+		case hosts[h.Route]:
+			v.errf("%s.route: %q is target.name or listed twice", field, h.Route)
+		}
+		hosts[h.Route] = true
+		if strings.TrimSpace(h.Model) == "" {
+			v.errf("%s.model: required", field)
+		}
+	}
 
 	c.validateReleaseTarget(v, &c.Target)
 }

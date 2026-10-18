@@ -193,7 +193,7 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 
 	m, _ := checkRetained(t, r, run)
 	c := m.Release
-	if c == nil || c.Run != run || c.OffsetMinutes != r.offsetMinutes || c.AccountCreated != "2026-09-15" || len(c.Probes) != 1 || c.Admission.TopRPS != 1 || c.CeilingTokens != 512 {
+	if c == nil || c.Run != run || c.OffsetMinutes != r.offsetMinutes || c.AccountCreated != "2026-09-15" || len(c.Probes) != 2 || c.Admission.TopRPS != 1 || c.CeilingTokens != 512 {
 		t.Fatalf("cell record %+v", c)
 	}
 	if m.Counted() != (rec.Outcome == outcomeCounted) || c.Outcome != rec.Outcome || !c.LadderStarted || !slices.Equal(c.Reasons, rec.Reasons) {

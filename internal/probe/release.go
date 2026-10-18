@@ -43,11 +43,15 @@ type ReleaseInput struct {
 	// SnapshotDir holds the retained copies of the limits whose source is
 	// a file name; empty skips their hash check.
 	SnapshotDir string
+	// ByteCap is the Shape S ticket byte cap the texts were cut at.
+	ByteCap int
 }
 
 // ReleaseRecord is one release probe: the ceiling and input-bound checks
 // over CeilingRequests requests at the configured ceiling, the response
-// shape of each, the limits read and the recorded limit snapshots.
+// shape of each, the limits read and the recorded limit snapshots. The
+// route, adapter, endpoint, model, body hash and byte cap name the
+// request it checked.
 type ReleaseRecord struct {
 	SchemaVersion  int       `json:"schema_version"`
 	Route          string    `json:"route"`
@@ -58,7 +62,9 @@ type ReleaseRecord struct {
 	EndUTC         time.Time `json:"end_utc"`
 	// BodySHA256 is the hash of the configured body before the user text
 	// is placed.
-	BodySHA256 string         `json:"body_sha256"`
+	BodySHA256 string `json:"body_sha256"`
+	// ByteCap is the Shape S ticket byte cap the texts were cut at.
+	ByteCap    int            `json:"byte_cap"`
 	Requests   []CheckRequest `json:"requests"`
 	Ceiling    CeilingCheck   `json:"ceiling_check"`
 	InputBound InputCheck     `json:"input_bound_check"`
@@ -134,7 +140,7 @@ const (
 // another at the configured ceiling, then the limits read when
 // configured. A status the start gate blocks on ends the requests. It
 // returns an error, before any request, when the key's variable is empty
-// or the input is not a release probe.
+// or the input is not a release probe with its byte cap.
 func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 	cfg := in.Config
 	if cfg == nil || cfg.Profile != config.ProfileRelease || cfg.Release == nil {
@@ -142,6 +148,9 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 	}
 	if len(in.Texts) != CeilingRequests {
 		return nil, fmt.Errorf("probe: %d user texts, want %d", len(in.Texts), CeilingRequests)
+	}
+	if in.ByteCap <= 0 {
+		return nil, fmt.Errorf("probe: byte cap %d: the texts' ticket byte cap is required", in.ByteCap)
 	}
 	t := &cfg.Target
 	key := os.Getenv(t.APIKeyEnv)
@@ -158,6 +167,7 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 		RequestedModel: t.ModelName,
 		StartUTC:       time.Now().UTC(),
 		BodySHA256:     hex.EncodeToString(sum[:]),
+		ByteCap:        in.ByteCap,
 		Requests:       []CheckRequest{},
 		RTTNs:          []int64{},
 		Snapshots:      []Snapshot{},
@@ -381,16 +391,22 @@ type CeilingChoice struct {
 }
 
 // ChooseCeiling applies the ceiling rule (SPEC-HOSTED HA3 point 7) to the
-// release probe records of every host of one model: 512 when every host
-// passed the check at 512; otherwise 1,024 when every host passed it at
-// 1,024; otherwise the model is excluded. It returns an error when a
-// record was blocked at the start gate, a host has two records at one
-// ceiling, or a record the rule needs is missing.
-func ChooseCeiling(recs []*ReleaseRecord) (CeilingChoice, error) {
+// release probe records of hosts, every route of one model: 512 when
+// every host passed the check at 512; otherwise 1,024 when every host
+// passed it at 1,024; otherwise the model is excluded. It returns an
+// error when a record is of no host, was blocked at the start gate or
+// failed the input bound, a host has two records at one ceiling, or a
+// record the rule needs is missing.
+func ChooseCeiling(hosts []string, recs []*ReleaseRecord) (CeilingChoice, error) {
 	low, high := config.PinnedReleaseCeilings[0], config.PinnedReleaseCeilings[1]
+	if len(hosts) == 0 {
+		return CeilingChoice{}, errors.New("probe: no hosts")
+	}
 	at := map[int]map[string]*ReleaseRecord{low: {}, high: {}}
-	var routes []string
 	for _, r := range recs {
+		if !slices.Contains(hosts, r.Route) {
+			return CeilingChoice{}, fmt.Errorf("probe: route %s is not a host of the model (%s)", r.Route, strings.Join(hosts, ", "))
+		}
 		if r.Start.Blocked {
 			return CeilingChoice{}, fmt.Errorf("probe: route %s: the probe was blocked (%s); it is not a ceiling check", r.Route, r.Start.Reason)
 		}
@@ -398,17 +414,16 @@ func ChooseCeiling(recs []*ReleaseRecord) (CeilingChoice, error) {
 		if !ok {
 			return CeilingChoice{}, fmt.Errorf("probe: route %s: ceiling %d is not one of %v", r.Route, r.Ceiling.Ceiling, config.PinnedReleaseCeilings)
 		}
+		if ib := r.InputBound; !ib.Pass {
+			return CeilingChoice{}, fmt.Errorf("probe: route %s: the input bound failed at ceiling %d: %d of %d requests reported, %d above %d tokens",
+				r.Route, r.Ceiling.Ceiling, ib.Reported, CeilingRequests, ib.Exceeded, ib.BoundTokens)
+		}
 		if byRoute[r.Route] != nil {
 			return CeilingChoice{}, fmt.Errorf("probe: route %s: two records at ceiling %d", r.Route, r.Ceiling.Ceiling)
 		}
 		byRoute[r.Route] = r
-		if !slices.Contains(routes, r.Route) {
-			routes = append(routes, r.Route)
-		}
 	}
-	if len(routes) == 0 {
-		return CeilingChoice{}, errors.New("probe: no records")
-	}
+	routes := slices.Clone(hosts)
 	slices.Sort(routes)
 	failed := func(ceiling int) []string {
 		var out []string

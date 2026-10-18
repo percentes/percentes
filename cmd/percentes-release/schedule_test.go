@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/percentes/percentes/internal/schedule"
@@ -70,5 +71,47 @@ func TestScheduleCmdRefusals(t *testing.T) {
 	}
 	if code, err := scheduleCmd([]string{"--master-seed", "s", "--config", groq}); err == nil || code != exitError {
 		t.Fatalf("no --schedule: %d, %v", code, err)
+	}
+}
+
+// schedule refuses routes whose host groups disagree: an other host not
+// given, at another model, or naming other hosts.
+func TestScheduleCmdHostGroups(t *testing.T) {
+	groq := routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "10")
+	edited := func(path string, from, to string) string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(string(b), from) != 1 {
+			t.Fatalf("%q not found once", from)
+		}
+		return writeFile(t, t.TempDir(), filepath.Base(path), []byte(strings.Replace(string(b), from, to, 1)))
+	}
+	baseten := routeConfigFile(t, "baseten", "https://api.example.test/v1/chat/completions", "10")
+	for name, tc := range map[string]struct {
+		configs []string
+		want    string
+	}{
+		"other host not given": {[]string{groq}, "schedule: route groq: other host baseten has no configuration given"},
+		"other host's model": {[]string{groq, edited(baseten, "model_name: openai/gpt-oss-120b", "model_name: openai/gpt-oss-20b")},
+			`schedule: route groq: other host baseten at model "openai/gpt-oss-120b"; its configuration sends "openai/gpt-oss-20b"`},
+		"groups differ": {[]string{edited(groq, "  other_hosts:", "  other_hosts:\n    - route: azure\n      model: openai/gpt-oss-120b"), baseten,
+			edited(routeConfigFile(t, "azure", "https://api.example.test/v1/chat/completions", "10"), "    - route: baseten\n", "    - route: groq\n      model: openai/gpt-oss-120b\n    - route: baseten\n")},
+			"schedule: routes groq and baseten name different hosts of their model: [azure baseten groq] and [baseten groq]"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "schedule.json")
+			args := []string{"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--schedule", path}
+			for _, c := range tc.configs {
+				args = append(args, "--config", c)
+			}
+			if code, err := scheduleCmd(args); err == nil || code != exitError || err.Error() != tc.want {
+				t.Fatalf("%d, %v; want %q", code, err, tc.want)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("a refused schedule wrote %s: %v", path, err)
+			}
+		})
 	}
 }

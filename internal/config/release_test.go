@@ -17,6 +17,9 @@ func TestReleaseReferenceLoads(t *testing.T) {
 	if c.Target.Name != "groq" || c.Target.Adapter != AdapterChatCompletions || !c.Target.Hosted {
 		t.Errorf("target: %+v", c.Target)
 	}
+	if want := []ModelHost{{Route: "baseten", Model: "openai/gpt-oss-120b"}}; !slices.Equal(c.Release.OtherHosts, want) {
+		t.Errorf("other hosts %+v", c.Release.OtherHosts)
+	}
 	if got := c.Target.Limits[0].Retrieved; got != "2026-10-07" {
 		t.Errorf("retrieved %q", got)
 	}
@@ -73,6 +76,10 @@ func TestReleaseRefusals(t *testing.T) {
 		{"cap in exponent form", func(c *Config) { c.Release.Caps.RouteUSD = "1e1" }, "release.caps.route_usd"},
 		{"cap with a currency sign", func(c *Config) { c.Release.Caps.GlobalUSD = "$1300" }, "release.caps.global_usd"},
 		{"route cap over global", func(c *Config) { c.Release.Caps.RouteUSD = "1300.01" }, "release.caps.route_usd: 1300.01 exceeds global_usd 1300"},
+		{"other host is the route", func(c *Config) { c.Release.OtherHosts[0].Route = "groq" }, `release.other_hosts[0].route: "groq" is target.name or listed twice`},
+		{"other host twice", func(c *Config) { c.Release.OtherHosts = append(c.Release.OtherHosts, c.Release.OtherHosts[0]) }, `release.other_hosts[1].route: "baseten" is target.name or listed twice`},
+		{"other host name", func(c *Config) { c.Release.OtherHosts[0].Route = "base ten" }, "release.other_hosts[0].route: one or more of"},
+		{"other host model", func(c *Config) { c.Release.OtherHosts[0].Model = " " }, "release.other_hosts[0].model: required"},
 		{"hard timeout 30", func(c *Config) { c.Client.HTTPTimeoutS = 30 }, "client.http_timeout_s: the hard timeout, pinned 90"},
 		{"retries", func(c *Config) { c.Client.Retries = 1 }, "client.retries"},
 		{"deterministic", func(c *Config) { c.Load.ArrivalProcess = "deterministic" }, "load.arrival_process: pinned \"poisson\""},

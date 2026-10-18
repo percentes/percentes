@@ -137,8 +137,8 @@ func TestCeilingCheckCmd(t *testing.T) {
 		t.Fatalf("ceiling-check: %d, %v", code, err)
 	}
 	path, rec := f.record(t)
-	if !rec.Ceiling.Pass || rec.Ceiling.Sent != probe.CeilingRequests || !rec.InputBound.Pass || rec.Start.Blocked {
-		t.Fatalf("check %+v, input bound %+v, start %+v", rec.Ceiling, rec.InputBound, rec.Start)
+	if !rec.Ceiling.Pass || rec.Ceiling.Sent != probe.CeilingRequests || !rec.InputBound.Pass || rec.Start.Blocked || rec.ByteCap != 2000 {
+		t.Fatalf("check %+v, input bound %+v, start %+v, byte cap %d", rec.Ceiling, rec.InputBound, rec.Start, rec.ByteCap)
 	}
 	for i, r := range rec.Requests {
 		if !r.Pass || r.Index != i || r.FinishReason != "stop" {
@@ -156,9 +156,13 @@ func TestCeilingCheckCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	choice, copies, err := readCeilingProbes(cfgs[0], []string{path})
-	if err != nil || choice.Ceiling != 512 || len(copies) != 1 {
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true))
+	choice, copies, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000)
+	if err != nil || choice.Ceiling != 512 || len(copies) != 2 {
 		t.Fatalf("run reads the record: %+v, %d copies, %v", choice, len(copies), err)
+	}
+	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 1800); err == nil || !strings.Contains(err.Error(), "byte cap 2000, want --byte-cap 1800") {
+		t.Fatalf("another byte cap: %v", err)
 	}
 }
 

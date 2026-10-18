@@ -70,7 +70,7 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: *snapshots})
+	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: *snapshots, ByteCap: *byteCap})
 	sent := 0
 	if rec != nil {
 		sent = rec.Sent()

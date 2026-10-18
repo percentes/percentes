@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,7 @@ import (
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/mock"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/redact"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
 	"gopkg.in/yaml.v3"
@@ -87,9 +89,10 @@ func (f *mockForm) startMock(seed int64, ttft, itl config.LatencyDist, reasoning
 }
 
 // routeConfig is the release reference ref turned into form f's route at
-// endpoint, its key in keyEnv, with limits that admit the whole ladder at
-// the 512 ceiling, parsed from bytes that hold the route as edited, since
-// a cell's report pair is rendered from them.
+// endpoint, its key in keyEnv, the only host of its model, with limits
+// that admit the whole ladder at the 512 ceiling, parsed from bytes that
+// hold the route as edited, since a cell's report pair is rendered from
+// them.
 func (f *mockForm) routeConfig(ref []byte, endpoint, keyEnv string) (*config.Config, error) {
 	cfg, err := config.Parse(ref)
 	if err != nil {
@@ -108,6 +111,7 @@ func (f *mockForm) routeConfig(ref []byte, endpoint, keyEnv string) (*config.Con
 	}
 	tg.Naming = &config.Naming{Provider: "Mock " + f.name, Lines: []string{"A mock route served on loopback."}}
 	cfg.Release.Caps.RouteUSD = "40"
+	cfg.Release.OtherHosts = nil
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
 		return nil, err
@@ -123,6 +127,22 @@ func (f *mockForm) routeConfig(ref []byte, endpoint, keyEnv string) (*config.Con
 		return nil, err
 	}
 	return config.Parse(b)
+}
+
+// passedCeiling is a ceiling check record of cfg's request at its
+// configured ceiling, with texts cut at byteCap, that passed the ceiling
+// check and the input bound.
+func passedCeiling(cfg *config.Config, byteCap int) *probe.ReleaseRecord {
+	t := &cfg.Target
+	length := probe.LengthChatCompletions
+	if t.Adapter == config.AdapterMessages {
+		length = probe.LengthMessages
+	}
+	sum := sha256.Sum256([]byte(t.Body))
+	return &probe.ReleaseRecord{SchemaVersion: 1, Route: t.Name, Adapter: t.Adapter, EndpointURL: redact.URL(t.EndpointURL),
+		RequestedModel: t.ModelName, BodySHA256: hex.EncodeToString(sum[:]), ByteCap: byteCap,
+		Ceiling:    probe.CeilingCheck{Ceiling: cfg.Release.Shape.CeilingTokens, LengthValue: length, Sent: probe.CeilingRequests, Passed: probe.CeilingRequests, Pass: true},
+		InputBound: probe.InputCheck{BoundTokens: cfg.Release.Shape.InputBoundTokens, Reported: probe.CeilingRequests, Pass: true}}
 }
 
 // mockFinished is the count of finished requests by outcome label that
@@ -430,12 +450,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		if _, err := recordPrice(l, cfg, "0.15", "0.60", rehearsalURL, today); err != nil {
 			return exitError, err
 		}
-		length := probe.LengthChatCompletions
-		if cfg.Target.Adapter == config.AdapterMessages {
-			length = probe.LengthMessages
-		}
-		cp, err := json.Marshal(&probe.ReleaseRecord{SchemaVersion: 1, Route: name,
-			Ceiling: probe.CeilingCheck{Ceiling: cfg.Release.Shape.CeilingTokens, LengthValue: length, Sent: 10, Passed: 10, Pass: true}})
+		cp, err := json.Marshal(passedCeiling(cfg, in.byteCap))
 		if err != nil {
 			return exitError, err
 		}

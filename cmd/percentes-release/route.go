@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,6 +20,7 @@ import (
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/pilot"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/redact"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
@@ -126,7 +129,7 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	balanceCmd := fs.String("balance-cmd", "", "account balance or quota command run at each cell's start and end, split on spaces with no shell (required)")
 	opPath := fs.String("operator", "", "the route's operator file (required)")
 	var probeFiles listFlag
-	fs.Var(&probeFiles, "ceiling-probe", "a release probe record of a host of the route's model, from the ceiling check (repeatable, required)")
+	fs.Var(&probeFiles, "ceiling-probe", "a ceiling check record of a host of the route's model: every host's at 512, and at 1024 when one failed at 512 (repeatable, required)")
 	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
 	accountCreated := fs.String("account-created", "", "the account's creation date, 2006-01-02 (required)")
 	if err := fs.Parse(args); err != nil {
@@ -259,11 +262,11 @@ func newRoute(in routeInput) (*route, error) {
 	first, _ := time.Parse(schedule.DateLayout, sched.Input.First)
 	r.preWindow = sentBefore(entries, name, first)
 
-	if r.ceiling, r.ceilingProbes, err = readCeilingProbes(cfg, in.probeFiles); err != nil {
-		return nil, err
-	}
 	if in.byteCap <= 0 {
 		return nil, fmt.Errorf("run: --byte-cap %d: the Shape S ticket byte cap is required", in.byteCap)
+	}
+	if r.ceiling, r.ceilingProbes, err = readCeilingProbes(cfg, in.probeFiles, in.byteCap); err != nil {
+		return nil, err
 	}
 	if r.shape, err = pilot.GenerateShapeS(pilot.ShapeSSeed, in.byteCap); err != nil {
 		return nil, err
@@ -299,17 +302,26 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 	return p, nil
 }
 
-// readCeilingProbes reads the ceiling check's release probe records and
-// requires their choice to run the model at the configured ceiling, with
-// a record of this route among them.
-func readCeilingProbes(cfg *config.Config, files []string) (probe.CeilingChoice, map[string][]byte, error) {
+// readCeilingProbes reads the ceiling check's records of the route's
+// model, whose hosts are the target and release.other_hosts, and requires
+// their choice to run the model at the configured ceiling. Every host's
+// record carries the host's model and byteCap; this route's also carry
+// its adapter and endpoint, and the one at the configured ceiling its
+// body's hash.
+func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.CeilingChoice, map[string][]byte, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
 		return none, nil, errors.New("run: --ceiling-probe is required: the ceiling check's probe records")
 	}
+	t := &cfg.Target
+	hosts, models := []string{t.Name}, map[string]string{t.Name: t.ModelName}
+	for _, h := range cfg.Release.OtherHosts {
+		hosts, models[h.Route] = append(hosts, h.Route), h.Model
+	}
+	sum := sha256.Sum256([]byte(t.Body))
+	body := hex.EncodeToString(sum[:])
 	var recs []*probe.ReleaseRecord
 	copies := map[string][]byte{}
-	own := false
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -319,11 +331,29 @@ func readCeilingProbes(cfg *config.Config, files []string) (probe.CeilingChoice,
 		if err := json.Unmarshal(b, &rec); err != nil {
 			return none, nil, fmt.Errorf("ceiling probe %s: %w", f, err)
 		}
+		var fault string
+		model, host := models[rec.Route]
+		switch {
+		case !host:
+		case rec.RequestedModel != model:
+			fault = fmt.Sprintf("model %q, want %q", rec.RequestedModel, model)
+		case rec.ByteCap != byteCap:
+			fault = fmt.Sprintf("byte cap %d, want --byte-cap %d", rec.ByteCap, byteCap)
+		case rec.Route != t.Name:
+		case rec.Adapter != t.Adapter:
+			fault = fmt.Sprintf("adapter %q, want %q", rec.Adapter, t.Adapter)
+		case rec.EndpointURL != redact.URL(t.EndpointURL):
+			fault = fmt.Sprintf("endpoint %s, want %s", rec.EndpointURL, redact.URL(t.EndpointURL))
+		case rec.Ceiling.Ceiling == cfg.Release.Shape.CeilingTokens && rec.BodySHA256 != body:
+			fault = fmt.Sprintf("body sha256 %s, want target.body's %s", rec.BodySHA256, body)
+		}
+		if fault != "" {
+			return none, nil, fmt.Errorf("ceiling probe %s: route %s at %d: %s", f, rec.Route, rec.Ceiling.Ceiling, fault)
+		}
 		recs = append(recs, &rec)
 		copies[fmt.Sprintf("ceiling-probe-%s-%d.json", rec.Route, rec.Ceiling.Ceiling)] = b
-		own = own || (rec.Route == cfg.Target.Name && rec.Ceiling.Ceiling == cfg.Release.Shape.CeilingTokens)
 	}
-	choice, err := probe.ChooseCeiling(recs)
+	choice, err := probe.ChooseCeiling(hosts, recs)
 	if err != nil {
 		return none, nil, err
 	}
@@ -332,8 +362,6 @@ func readCeilingProbes(cfg *config.Config, files []string) (probe.CeilingChoice,
 		return none, nil, fmt.Errorf("run: the ceiling rule excludes the model: %s", choice.Reason)
 	case choice.Ceiling != cfg.Release.Shape.CeilingTokens:
 		return none, nil, fmt.Errorf("run: the ceiling check chose %d (%s); the configuration runs at %d", choice.Ceiling, choice.Reason, cfg.Release.Shape.CeilingTokens)
-	case !own:
-		return none, nil, fmt.Errorf("run: no ceiling probe record of route %s at %d", cfg.Target.Name, cfg.Release.Shape.CeilingTokens)
 	}
 	return choice, copies, nil
 }

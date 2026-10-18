@@ -95,7 +95,8 @@ func releaseConfig(t *testing.T, endpoint string) *config.Config {
 }
 
 // routeConfigFile writes the release reference as route name at endpoint
-// with routeUSD as its cap, and returns the file's path.
+// with routeUSD as its cap, and returns the file's path. The reference's
+// other host, baseten, becomes groq when name is baseten.
 func routeConfigFile(t *testing.T, name, endpoint, routeUSD string) string {
 	t.Helper()
 	b, err := os.ReadFile("../../configs/release.reference.yaml")
@@ -103,8 +104,13 @@ func routeConfigFile(t *testing.T, name, endpoint, routeUSD string) string {
 		t.Fatal(err)
 	}
 	s := string(b)
+	other := "baseten"
+	if name == other {
+		other = "groq"
+	}
 	for _, r := range [][2]string{
 		{"\n  name: groq\n", "\n  name: " + name + "\n"},
+		{"\n    - route: baseten\n", "\n    - route: " + other + "\n"},
 		{"endpoint_url: https://api.groq.com/openai/v1/chat/completions", "endpoint_url: " + endpoint},
 		{`route_usd: "10"`, `route_usd: "` + routeUSD + `"`},
 	} {
@@ -128,8 +134,8 @@ func testSchedule(t *testing.T, routes ...string) *schedule.Schedule {
 
 // newFixture writes every input of cfg's route: its schedule beside
 // "other", a ledger with the route's caps and price, an operator file, a
-// ceiling probe that passed at 512, a clock reading of offset and a
-// counting balance command.
+// ceiling probe of each host of its model that passed at 512, a clock
+// reading of offset and a counting balance command.
 func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	t.Helper()
 	dir := t.TempDir()
@@ -150,18 +156,54 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 		t.Fatal(err)
 	}
 	writeFile(t, dir, "r.txt", []byte("record"))
-	cp, err := json.Marshal(&probe.ReleaseRecord{SchemaVersion: 1, Route: cfg.Target.Name, Ceiling: probe.CeilingCheck{Ceiling: 512, LengthValue: "length", Sent: 10, Passed: 10, Pass: true}})
-	if err != nil {
-		t.Fatal(err)
+	var probeFiles []string
+	for _, route := range append([]string{cfg.Target.Name}, otherHosts(cfg)...) {
+		probeFiles = append(probeFiles, writeCeiling(t, hostCeiling(cfg, 2000, route, 512, true)))
 	}
 	return &fixture{
 		in: routeInput{
 			cfg: cfg, configName: "groq.yaml", schedulePath: writeFile(t, dir, "schedule.json", sb), out: t.TempDir(), ledgerPath: ledger,
 			framesRoot: t.TempDir(), clockSync: fakeSNTP(t, offset), statusCmd: "true", balanceCmd: fakeBalance(t), opPath: writeFile(t, dir, "operator.json", []byte(operatorJSON)),
-			probeFiles: []string{writeFile(t, dir, "ceiling.json", cp)}, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
+			probeFiles: probeFiles, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
 		},
 		ledger: ledger,
 	}
+}
+
+// otherHosts are the routes of cfg's release.other_hosts.
+func otherHosts(cfg *config.Config) []string {
+	var out []string
+	for _, h := range cfg.Release.OtherHosts {
+		out = append(out, h.Route)
+	}
+	return out
+}
+
+// hostCeiling is host route's ceiling check record at ceiling, passed or
+// not, of cfg's model at byteCap: cfg's request when route is cfg's, else
+// route's model from release.other_hosts.
+func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pass bool) probe.ReleaseRecord {
+	rec := *passedCeiling(cfg, byteCap)
+	rec.Route, rec.Ceiling.Ceiling = route, ceiling
+	for _, h := range cfg.Release.OtherHosts {
+		if h.Route == route {
+			rec.RequestedModel = h.Model
+		}
+	}
+	if !pass {
+		rec.Ceiling.Passed, rec.Ceiling.Pass = probe.CeilingRequests-1, false
+	}
+	return rec
+}
+
+// writeCeiling writes rec to a new file and returns its path.
+func writeCeiling(t *testing.T, rec probe.ReleaseRecord) string {
+	t.Helper()
+	b, err := json.Marshal(&rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return writeFile(t, t.TempDir(), probe.File, b)
 }
 
 // enoughOpenFiles stubs the open-file limit at the required value.

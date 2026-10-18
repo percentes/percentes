@@ -19,7 +19,6 @@ import (
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/mock"
-	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
 )
@@ -137,11 +136,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		if _, err := recordPrice(l, cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
 			t.Fatal(err)
 		}
-		length := probe.LengthChatCompletions
-		if cfg.Target.Adapter == config.AdapterMessages {
-			length = probe.LengthMessages
-		}
-		cp, err := json.Marshal(&probe.ReleaseRecord{SchemaVersion: 1, Route: name, Ceiling: probe.CeilingCheck{Ceiling: 512, LengthValue: length, Sent: 10, Passed: 10, Pass: true}})
+		cp, err := json.Marshal(passedCeiling(cfg, 2000))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -47,6 +47,9 @@ release:
   caps:                     # admission ledger caps, US$
     route_usd: "10"
     global_usd: "1300"      # the same in every route's file
+  other_hosts:              # the model's other routes in the release
+    - route: baseten
+      model: openai/gpt-oss-120b
 
 target:
   name: groq

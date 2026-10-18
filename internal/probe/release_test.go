@@ -25,6 +25,9 @@ import (
 
 const ticket = "My invoice was charged twice this month."
 
+// byteCap stands for the ticket byte cap the texts were cut at.
+const byteCap = 2000
+
 // releaseConfig returns the release reference config, pointed at url with
 // the test key's variable.
 func releaseConfig(t *testing.T, url string) *config.Config {
@@ -114,7 +117,7 @@ func TestReleaseProbeChatCeiling(t *testing.T) {
 	addr := startShaped(t, mock.Shape{ReasoningKey: "reasoning", ReasoningTokens: 510, Answer: answer})
 	cfg := releaseConfig(t, "http://"+addr+"/v1/chat/completions")
 	cfg.Target.ResponseShape = &config.ResponseShape{Reasoning: []string{"reasoning"}}
-	in := ReleaseInput{Config: cfg, Texts: texts(0)}
+	in := ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap}
 
 	rec := releaseProbe(t, in)
 	c := rec.Ceiling
@@ -142,8 +145,8 @@ func TestReleaseProbeChatCeiling(t *testing.T) {
 		t.Errorf("request 3 at 1024: %+v", r)
 	}
 	sum := sha256.Sum256([]byte(cfg.Target.Body))
-	if rec.BodySHA256 != hex.EncodeToString(sum[:]) || rec.Route != "groq" || rec.Adapter != config.AdapterChatCompletions || rec.Sent() != 10 {
-		t.Errorf("record %s %s %s, sent %d", rec.BodySHA256, rec.Route, rec.Adapter, rec.Sent())
+	if rec.BodySHA256 != hex.EncodeToString(sum[:]) || rec.Route != "groq" || rec.Adapter != config.AdapterChatCompletions || rec.Sent() != 10 || rec.ByteCap != byteCap {
+		t.Errorf("record %s %s %s, sent %d, byte cap %d", rec.BodySHA256, rec.Route, rec.Adapter, rec.Sent(), rec.ByteCap)
 	}
 	if len(rec.Findings) != 0 {
 		t.Errorf("findings %q", rec.Findings)
@@ -165,7 +168,7 @@ func TestReleaseProbeSendsTheConfiguredBody(t *testing.T) {
 	}))
 	defer srv.Close()
 	cfg := releaseConfig(t, srv.URL+"/openai/v1/chat/completions")
-	in := ReleaseInput{Config: cfg, Texts: texts(0)}
+	in := ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap}
 	releaseProbe(t, in)
 	mu.Lock()
 	defer mu.Unlock()
@@ -185,7 +188,7 @@ func TestReleaseProbeInputBound(t *testing.T) {
 	noSpacing(t)
 	addr := startShaped(t, mock.Shape{Answer: "Billed twice."})
 	cfg := releaseConfig(t, "http://"+addr+"/v1/chat/completions")
-	in := ReleaseInput{Config: cfg, Texts: texts(1200)}
+	in := ReleaseInput{Config: cfg, Texts: texts(1200), ByteCap: byteCap}
 	if rec := releaseProbe(t, in); rec.InputBound != (InputCheck{BoundTokens: 1200, Reported: 10, MaxPromptTokens: 1200, Pass: true}) {
 		t.Errorf("at the bound: %+v", rec.InputBound)
 	}
@@ -198,7 +201,7 @@ func TestReleaseProbeInputBound(t *testing.T) {
 	plain := httptest.NewServer(sseHandler(answerFrame, stopFrame, doneFrame))
 	defer plain.Close()
 	cfg = releaseConfig(t, plain.URL+"/v1/chat/completions")
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	if rec.InputBound != (InputCheck{BoundTokens: 1200}) || !rec.Ceiling.Pass || rec.Requests[0].PromptTokens != nil {
 		t.Errorf("no usage: %+v, ceiling %+v", rec.InputBound, rec.Ceiling)
 	}
@@ -212,7 +215,7 @@ func TestReleaseProbeMessages(t *testing.T) {
 	answer := "The customer was billed twice."
 	addr := startShaped(t, mock.Shape{Messages: true, Key: testKey, AuthHeader: config.AuthXAPIKey, ReasoningTokens: 3, Answer: answer})
 	cfg := messagesConfig(releaseConfig(t, "http://"+addr+"/v1/messages"), 512)
-	in := ReleaseInput{Config: cfg, Texts: texts(0)}
+	in := ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap}
 	rec := releaseProbe(t, in)
 	if rec.Ceiling != (CeilingCheck{Ceiling: 512, LengthValue: "max_tokens", Sent: 10, Passed: 10, Pass: true}) || !rec.InputBound.Pass {
 		t.Fatalf("check %+v, input %+v, first request %+v", rec.Ceiling, rec.InputBound, rec.Requests[0])
@@ -262,7 +265,7 @@ func TestReleaseProbeMessagesPromptTokens(t *testing.T) {
 		ev(`{"type":"message_stop"}`)))
 	defer srv.Close()
 	cfg := messagesConfig(releaseConfig(t, srv.URL+"/v1/messages"), 512)
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	r := rec.Requests[0]
 	if *r.PromptTokens != 1205 || *r.CompletionTokens != 4 || rec.InputBound.Exceeded != 10 || rec.InputBound.Pass || !rec.Ceiling.Pass {
 		t.Errorf("request %+v, input %+v, ceiling %+v", r, rec.InputBound, rec.Ceiling)
@@ -283,7 +286,7 @@ func TestReleaseProbeMessagesFindings(t *testing.T) {
 		ev(`{"type":"message_delta","delta":{"stop_reason":null}}`)))
 	defer srv.Close()
 	cfg := messagesConfig(releaseConfig(t, srv.URL+"/v1/messages"), 512)
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	if fmt.Sprint(rec.Findings) != `[the stream ended without message_stop no text_delta carried text `+
 		`event type "x_new_event" is not one the Messages adapter reads delta type "citations_delta" is not one the Messages adapter reads `+
 		`no usage object in the stream no stop_reason in the stream reported model "claude-sonnet-5-5-20261001" differs from the requested "claude-sonnet-5-5"]` {
@@ -334,7 +337,7 @@ func TestReleaseProbeFailures(t *testing.T) {
 		{"status 403", 1, true},
 	} {
 		mode.Store(c.mode)
-		rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+		rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 		if rec.Ceiling.Sent != c.sent || rec.Ceiling.Passed != 0 || rec.Ceiling.Pass || rec.Start.Blocked != c.blocked ||
 			rec.Requests[len(rec.Requests)-1].Fail != c.mode {
 			t.Errorf("%s: check %+v, start %+v, last request fail %q", c.mode, rec.Ceiling, rec.Start, rec.Requests[len(rec.Requests)-1].Fail)
@@ -351,7 +354,7 @@ func TestReleaseProbeFailures(t *testing.T) {
 	}))
 	defer one.Close()
 	cfg = releaseConfig(t, one.URL+"/v1/chat/completions")
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	if rec.Ceiling != (CeilingCheck{Ceiling: 512, LengthValue: "length", Sent: 10, Passed: 9}) || rec.Requests[5].Fail != "status 500" {
 		t.Errorf("one of ten failed: %+v, request 5 %+v", rec.Ceiling, rec.Requests[5])
 	}
@@ -363,7 +366,7 @@ func TestReleaseProbeFailures(t *testing.T) {
 	closed := ln.Addr().String()
 	ln.Close()
 	cfg = releaseConfig(t, "http://"+closed+"/v1/chat/completions")
-	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	if rec.Ceiling.Sent != 10 || rec.Requests[0].Fail != "no response" || rec.Requests[0].Exchange.Error == "" || len(rec.RTTNs) != 0 || rec.Start.Blocked {
 		t.Errorf("refused dial: %+v, rtt %v, start %+v", rec.Requests[0], rec.RTTNs, rec.Start)
 	}
@@ -385,7 +388,7 @@ func TestReleaseProbeHardTimeout(t *testing.T) {
 	defer srv.Close()
 	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
 	cfg.Client.HTTPTimeoutS = 5
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	if !rec.Requests[0].Pass || !rec.Ceiling.Pass {
 		t.Errorf("a 1 s answer under a 5 s hard timeout: %+v", rec.Requests[0])
 	}
@@ -409,7 +412,7 @@ func TestReleaseProbeSpacingAndRTT(t *testing.T) {
 	}))
 	defer srv.Close()
 	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	if hits.Load() != 10 || most.Load() != 1 {
 		t.Fatalf("%d requests, at most %d in flight", hits.Load(), most.Load())
 	}
@@ -455,7 +458,7 @@ func TestReleaseProbeLimits(t *testing.T) {
 	cfg.Target.Probe = &config.TargetProbe{LimitsURL: srv.URL + "/v1/model_apis/gpt-oss-120b", LimitsAuthScheme: "Bearer"}
 
 	limitsStatus.Store(200)
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	mu.Lock()
 	if auth != "Bearer "+testKey || path != "/v1/model_apis/gpt-oss-120b" {
 		t.Errorf("limits read: Authorization %q path %q", auth, path)
@@ -469,12 +472,12 @@ func TestReleaseProbeLimits(t *testing.T) {
 	}
 
 	limitsStatus.Store(403)
-	if rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)}); rec.LimitsFrom != LimitsFromHeaders || rec.Limits.Status != 403 || rec.Start.Blocked {
+	if rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap}); rec.LimitsFrom != LimitsFromHeaders || rec.Limits.Status != 403 || rec.Start.Blocked {
 		t.Errorf("limits refused: from %q, read status %d, start %+v", rec.LimitsFrom, rec.Limits.Status, rec.Start)
 	}
 
 	cfg.Target.ResponseHeaders = []string{"X-Other"}
-	if rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)}); rec.LimitsFrom != "" || rec.RateLimitHeaders != nil {
+	if rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap}); rec.LimitsFrom != "" || rec.RateLimitHeaders != nil {
 		t.Errorf("neither: from %q, headers %v", rec.LimitsFrom, rec.RateLimitHeaders)
 	}
 }
@@ -500,7 +503,7 @@ func TestReleaseProbeSnapshots(t *testing.T) {
 	cfg.Target.Limits = []config.Limit{lim("limits.png", good), lim("limits.png", bad), lim("missing.png", good),
 		lim("https://console.example.test/limits", good), lim("../limits.png", good)}
 
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), SnapshotDir: dir})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, SnapshotDir: dir})
 	got := make([]string, len(rec.Snapshots))
 	for i, s := range rec.Snapshots {
 		got[i] = s.RetainedError
@@ -521,7 +524,7 @@ func TestReleaseProbeSnapshots(t *testing.T) {
 		t.Errorf("findings %q", rec.Findings)
 	}
 
-	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	for i, s := range rec.Snapshots {
 		if s.Retained != nil || s.RetainedError != "" {
 			t.Errorf("no directory: snapshot %d %+v", i, s)
@@ -541,7 +544,7 @@ func TestReleaseProbeRefusalField(t *testing.T) {
 		stopFrame, doneFrame))
 	defer srv.Close()
 	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	if fmt.Sprint(rec.Requests[0].Shape.Refusals) != "[choices.0.delta.refusal]" {
 		t.Fatalf("refusals %q", rec.Requests[0].Shape.Refusals)
 	}
@@ -550,7 +553,7 @@ func TestReleaseProbeRefusalField(t *testing.T) {
 		t.Errorf("findings %q", rec.Findings)
 	}
 	cfg.Target.ResponseShape = &config.ResponseShape{Refusal: []string{"choices.0.delta.refusal"}}
-	if rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)}); fmt.Sprint(rec.Findings) != "[no usage object in the stream]" {
+	if rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap}); fmt.Sprint(rec.Findings) != "[no usage object in the stream]" {
 		t.Errorf("configured refusal path: findings %q", rec.Findings)
 	}
 }
@@ -581,7 +584,7 @@ func TestReleaseProbeNeverRecordsTheKey(t *testing.T) {
 	cfg := messagesConfig(releaseConfig(t, srv.URL+"/v1/messages"), 512)
 	cfg.Target.ResponseHeaders = []string{"Anthropic-Ratelimit-*"}
 	cfg.Target.Probe = &config.TargetProbe{LimitsURL: srv.URL + "/v1/limits", LimitsAuthScheme: "Bearer"}
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	path, err := Write(t.TempDir(), rec)
 	if err != nil {
 		t.Fatal(err)
@@ -608,8 +611,8 @@ func TestReleaseProbeNeverRecordsTheKey(t *testing.T) {
 	}
 }
 
-// Nothing is sent without the key, under another profile, or with a
-// text count other than CeilingRequests.
+// Nothing is sent without the key or the byte cap, under another
+// profile, or with a text count other than CeilingRequests.
 func TestReleaseProbeRefusesItsInput(t *testing.T) {
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
@@ -620,17 +623,18 @@ func TestReleaseProbeRefusesItsInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, in := range map[string]ReleaseInput{
-		"no config":     {Texts: texts(0)},
-		"pilot profile": {Config: pilot, Texts: texts(0)},
-		"nine texts":    {Config: cfg, Texts: texts(0)[:9]},
-		"eleven texts":  {Config: cfg, Texts: append(texts(0), "x")},
+		"no config":     {Texts: texts(0), ByteCap: byteCap},
+		"pilot profile": {Config: pilot, Texts: texts(0), ByteCap: byteCap},
+		"nine texts":    {Config: cfg, Texts: texts(0)[:9], ByteCap: byteCap},
+		"eleven texts":  {Config: cfg, Texts: append(texts(0), "x"), ByteCap: byteCap},
+		"no byte cap":   {Config: cfg, Texts: texts(0)},
 	} {
 		if rec, err := RunRelease(context.Background(), in); err == nil || rec != nil {
 			t.Errorf("%s: %v, %v", name, rec, err)
 		}
 	}
 	t.Setenv(keyEnv, "")
-	if rec, err := RunRelease(context.Background(), ReleaseInput{Config: cfg, Texts: texts(0)}); err == nil || rec != nil || !strings.Contains(err.Error(), keyEnv) {
+	if rec, err := RunRelease(context.Background(), ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap}); err == nil || rec != nil || !strings.Contains(err.Error(), keyEnv) {
 		t.Errorf("empty key: %v, %v", rec, err)
 	}
 	if hits.Load() != 0 {
@@ -638,43 +642,64 @@ func TestReleaseProbeRefusesItsInput(t *testing.T) {
 	}
 }
 
+// checked is route's record at ceiling with passed of the ten requests
+// passing the ceiling check and every one the input bound.
 func checked(route string, ceiling, passed int) *ReleaseRecord {
-	return &ReleaseRecord{Route: route, Ceiling: CeilingCheck{Ceiling: ceiling, Sent: 10, Passed: passed, Pass: passed == 10}}
+	return &ReleaseRecord{Route: route, Ceiling: CeilingCheck{Ceiling: ceiling, Sent: 10, Passed: passed, Pass: passed == 10},
+		InputBound: InputCheck{BoundTokens: 1200, Reported: 10, MaxPromptTokens: 1100, Pass: true}}
 }
 
 // The model runs at 512 when every host passes there, at 1,024 when any
 // failed at 512 and every host passes at 1,024, and is excluded when any
-// host fails at 1,024.
+// host fails at 1,024. A record of no host, one whose input bound failed
+// and a host with no record refuse the choice.
 func TestChooseCeiling(t *testing.T) {
 	blocked := checked("bedrock", 512, 0)
 	blocked.Start = Start{Blocked: true, Reason: "probe request returned 401"}
+	over := checked("baseten", 512, 10)
+	over.InputBound = InputCheck{BoundTokens: 1200, Reported: 10, MaxPromptTokens: 1205, Exceeded: 1}
+	unreported := checked("baseten", 1024, 10)
+	unreported.InputBound = InputCheck{BoundTokens: 1200, Reported: 9, MaxPromptTokens: 1100}
+	gpt, claude := []string{"groq", "baseten"}, []string{"anthropic", "bedrock"}
 	for _, c := range []struct {
-		name string
-		recs []*ReleaseRecord
-		want CeilingChoice
-		err  string
+		name  string
+		hosts []string
+		recs  []*ReleaseRecord
+		want  CeilingChoice
+		err   string
 	}{
-		{"all pass at 512", []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 10)},
+		{"all pass at 512", gpt, []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 10)},
 			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"}, ""},
-		{"512 passes, a 1024 record is not needed", []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 10), checked("groq", 1024, 0)},
+		{"one host", []string{"groq"}, []*ReleaseRecord{checked("groq", 512, 10)},
 			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"}, ""},
-		{"one fails at 512, all pass at 1024", []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 9), checked("groq", 1024, 10), checked("baseten", 1024, 10)},
+		{"512 passes, a 1024 record is not needed", gpt, []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 10), checked("groq", 1024, 0)},
+			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"}, ""},
+		{"one fails at 512, all pass at 1024", gpt, []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 9), checked("groq", 1024, 10), checked("baseten", 1024, 10)},
 			CeilingChoice{Ceiling: 1024, Reason: "baseten failed at 512; every host passed at 1024"}, ""},
-		{"one fails at 1024", []*ReleaseRecord{checked("groq", 512, 0), checked("baseten", 512, 10), checked("groq", 1024, 10), checked("baseten", 1024, 9)},
+		{"one fails at 1024", gpt, []*ReleaseRecord{checked("groq", 512, 0), checked("baseten", 512, 10), checked("groq", 1024, 10), checked("baseten", 1024, 9)},
 			CeilingChoice{Excluded: true, Reason: "baseten failed at 1024"}, ""},
-		{"a host passing at 512 still needs 1024", []*ReleaseRecord{checked("groq", 512, 0), checked("baseten", 512, 10), checked("groq", 1024, 10)},
+		{"a host passing at 512 still needs 1024", gpt, []*ReleaseRecord{checked("groq", 512, 0), checked("baseten", 512, 10), checked("groq", 1024, 10)},
 			CeilingChoice{}, "probe: route baseten has no check at 1024; groq failed at 512"},
-		{"a host without 512", []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 1024, 10)},
+		{"a host without 512", gpt, []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 1024, 10)},
 			CeilingChoice{}, "probe: route baseten has no check at 512"},
-		{"blocked", []*ReleaseRecord{checked("anthropic", 512, 10), blocked},
+		{"a host without records", gpt, []*ReleaseRecord{checked("groq", 512, 10)},
+			CeilingChoice{}, "probe: route baseten has no check at 512"},
+		{"a record of no host", []string{"groq"}, []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 0)},
+			CeilingChoice{}, "probe: route baseten is not a host of the model (groq)"},
+		{"input bound exceeded", gpt, []*ReleaseRecord{checked("groq", 512, 10), over},
+			CeilingChoice{}, "probe: route baseten: the input bound failed at ceiling 512: 10 of 10 requests reported, 1 above 1200 tokens"},
+		{"input bound unreported", gpt, []*ReleaseRecord{checked("groq", 512, 0), checked("baseten", 512, 10), checked("groq", 1024, 10), unreported},
+			CeilingChoice{}, "probe: route baseten: the input bound failed at ceiling 1024: 9 of 10 requests reported, 0 above 1200 tokens"},
+		{"blocked", claude, []*ReleaseRecord{checked("anthropic", 512, 10), blocked},
 			CeilingChoice{}, "probe: route bedrock: the probe was blocked (probe request returned 401); it is not a ceiling check"},
-		{"two at one ceiling", []*ReleaseRecord{checked("groq", 512, 10), checked("groq", 512, 0)},
+		{"two at one ceiling", gpt, []*ReleaseRecord{checked("groq", 512, 10), checked("groq", 512, 0)},
 			CeilingChoice{}, "probe: route groq: two records at ceiling 512"},
-		{"other ceiling", []*ReleaseRecord{checked("groq", 256, 10)},
+		{"other ceiling", gpt, []*ReleaseRecord{checked("groq", 256, 10)},
 			CeilingChoice{}, "probe: route groq: ceiling 256 is not one of [512 1024]"},
-		{"none", nil, CeilingChoice{}, "probe: no records"},
+		{"no records", gpt, nil, CeilingChoice{}, "probe: route baseten has no check at 512"},
+		{"no hosts", nil, []*ReleaseRecord{checked("groq", 512, 10)}, CeilingChoice{}, "probe: no hosts"},
 	} {
-		got, err := ChooseCeiling(c.recs)
+		got, err := ChooseCeiling(c.hosts, c.recs)
 		if got != c.want || fmt.Sprint(err) != map[bool]string{true: "<nil>", false: c.err}[c.err == ""] {
 			t.Errorf("%s: got %+v, %v; want %+v, %q", c.name, got, err, c.want, c.err)
 		}

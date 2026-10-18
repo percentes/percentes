@@ -37,12 +37,16 @@ func price(in, out string) Price {
 }
 
 // releaseConfig is the release reference as route name at ceiling with
-// the given limits and route cap.
+// the given limits and route cap. The reference's other host, baseten,
+// becomes groq when name is baseten.
 func releaseConfig(t *testing.T, name string, ceiling int, routeUSD string, limits ...config.Limit) *config.Config {
 	t.Helper()
 	cfg, err := config.LoadFile(releaseRef)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if name == cfg.Release.OtherHosts[0].Route {
+		cfg.Release.OtherHosts[0].Route = cfg.Target.Name
 	}
 	cfg.Target.Name = name
 	cfg.Release.Shape.CeilingTokens = ceiling
