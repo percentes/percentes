@@ -53,7 +53,7 @@ func HashFile(path, name string) (FileRef, error) {
 type Manifest struct {
 	SchemaVersion int `json:"schema_version"`
 	// StartUTC is the run epoch; for a release cell whose ladder never
-	// started, the cell's start.
+	// started, or an interrupted one, the cell's start.
 	StartUTC   time.Time      `json:"start_utc"`
 	WrittenUTC time.Time      `json:"written_utc"`
 	Profile    config.Profile `json:"profile"`
@@ -275,6 +275,9 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		}
 		if !in.Release.LadderStarted && len(res.Requests) > 0 {
 			return nil, fmt.Errorf("evidence: a release cell whose ladder never started has %d requests", len(res.Requests))
+		}
+		if in.Release.Outcome == CellInterrupted && len(res.Requests) > 0 {
+			return nil, fmt.Errorf("evidence: an interrupted release cell has %d requests", len(res.Requests))
 		}
 	}
 	m := &Manifest{

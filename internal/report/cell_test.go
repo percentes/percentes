@@ -106,3 +106,22 @@ func TestCellReport(t *testing.T) {
 		t.Errorf("no cell record: %v", err)
 	}
 }
+
+// An interrupted cell whose ladder started says its requests ended with
+// the process; one interrupted before its ladder says the ladder did not
+// start.
+func TestCellReportInterrupted(t *testing.T) {
+	reasons := []string{"the process ended during the cell"}
+	const ended = "The ladder started and its requests ended with the process; the attempts file is empty.\n"
+	for _, ladder := range []bool{true, false} {
+		m, cfg := cellManifest(t, evidence.CellInterrupted, reasons, ladder)
+		_, text, err := cellReport(m, cfg, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(text, "Outcome: interrupted; a labelled record, outside the route's frame of 12 cells\n  "+reasons[0]+"\n") ||
+			strings.Contains(text, ended) != ladder || strings.Contains(text, "The ladder did not start") == ladder {
+			t.Errorf("ladder %t: text:\n%s", ladder, text)
+		}
+	}
+}

@@ -35,13 +35,15 @@ type Release struct {
 // without answer text for a release run, and the frame store with one
 // line per attempt. A release cell that does not count passes as a
 // labelled record, which never enters its route's frame
-// (Manifest.Counted); one whose ladder never started has empty attempts
-// and frame files. Every file the manifest names must exist with the
-// SHA-256 and size it records: the config, the attempts file, the report
-// pair and the clock, status and balance records in r.Dir, a release
-// run's start balance among them, and the frame store
-// and the operator copies in the run's frame directory. Otherwise it
-// returns an error naming every missing item and every mismatch.
+// (Manifest.Counted); one whose ladder never started, and an interrupted
+// one, has empty attempts and frame files, and an interrupted cell's own
+// dispatch series need not be final or match its attempts file. Every
+// file the manifest names must exist with the SHA-256 and size it
+// records: the config, the attempts file, the report pair and the clock,
+// status and balance records in r.Dir, a release run's start balance
+// among them, and the frame store and the operator copies in the run's
+// frame directory. Otherwise it returns an error naming every missing
+// item and every mismatch.
 func CheckRelease(r Release) (*Manifest, error) {
 	m, err := ReadManifest(filepath.Join(r.Dir, ManifestFile))
 	if err != nil {
@@ -135,10 +137,13 @@ func CheckRelease(r Release) (*Manifest, error) {
 			if !c.LadderStarted && len(recs) > 0 {
 				fail("%s: %d attempts in a cell whose ladder never started", AttemptsFile, len(recs))
 			}
+			if c.Outcome == CellInterrupted && len(recs) > 0 {
+				fail("%s: %d attempts in an interrupted cell", AttemptsFile, len(recs))
+			}
 			for _, p := range c.dispatchProblems() {
 				fail("cell record: %s", p)
 			}
-			if d := c.Dispatch; d != nil && len(d.Sources) > 0 && attempts != nil {
+			if d := c.Dispatch; d != nil && len(d.Sources) > 0 && attempts != nil && c.Outcome != CellInterrupted {
 				sent := 0
 				for i := range recs {
 					if recs[i].DispatchNs != 0 {

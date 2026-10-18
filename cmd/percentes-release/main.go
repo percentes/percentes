@@ -5,8 +5,11 @@
 // the ledger, sends a one-request probe and runs the ladder up to the
 // route's top admitted step with the loopback canary, then writes the
 // cell's evidence with a labelled manifest and report pair, also for a
-// cell stopped or blocked before its ladder. A cell that does not count
-// is re-run on its attempt 2 date within the route's two re-runs.
+// cell stopped or blocked before its ladder. A missed cell, and one whose
+// process ended or failed during it, gets its labelled pair from what its
+// directory holds when the process next reads the route's records. A
+// cell that does not count is re-run on its attempt 2 date within the
+// route's two re-runs.
 // Each route of a release runs as its own process on one client host, all
 // writing under one --out directory. The key comes from the env file
 // named with --env, never from the inherited environment, and is never

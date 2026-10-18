@@ -78,8 +78,11 @@ func (r *CellReport) text() string {
 	for _, reason := range r.Reasons {
 		w("  %s", reason)
 	}
-	if !r.LadderStarted {
+	switch {
+	case !r.LadderStarted:
 		w("The ladder did not start; the attempts file is empty.")
+	case r.Outcome == evidence.CellInterrupted:
+		w("The ladder started and its requests ended with the process; the attempts file is empty.")
 	}
 	w("")
 	b.WriteString(r.Tables.text(false))

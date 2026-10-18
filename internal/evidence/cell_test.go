@@ -300,7 +300,8 @@ func TestManifestCellRefusals(t *testing.T) {
 // A release cell's label agrees with the manifest's run validity and
 // invalid reasons: a counted cell started its ladder and is valid; any
 // other outcome is invalid for the reasons it carries; a cell whose
-// ladder never started has no requests. Only a counted release cell
+// ladder never started, and an interrupted one, has no requests; a
+// missed cell never started its ladder. Only a counted release cell
 // enters its route's frame.
 func TestManifestCellLabel(t *testing.T) {
 	in, _ := manifestRun(t)
@@ -317,6 +318,8 @@ func TestManifestCellLabel(t *testing.T) {
 	stop := []string{"route stop: clock offset: 75 s from sntp exceeds 60 s"}
 	ended := []string{"ladder ended at step 4: status_429 above half the step's scheduled requests"}
 	blocked := []string{"probe request returned 401"}
+	missed := []string{"not started: 20m0s after its start at 2026-10-17T08:20:00Z, beyond the 15m0s start tolerance"}
+	gone := []string{"the process ended during the cell"}
 	for _, tc := range []struct {
 		name     string
 		outcome  string
@@ -334,7 +337,14 @@ func TestManifestCellLabel(t *testing.T) {
 		{"blocked", CellBlocked, blocked, false, false, blocked, false, ""},
 		{"client-invalid", CellInvalid, ended, true, false, ended, true, ""},
 		{"no outcome", "", nil, true, true, nil, true, `outcome "" is not counted`},
-		{"missed", "missed", stop, false, false, stop, false, `outcome "missed" is not`},
+		{"missed", CellMissed, missed, false, false, missed, false, ""},
+		{"interrupted inside the ladder", CellInterrupted, gone, true, false, gone, false, ""},
+		{"interrupted before the ladder", CellInterrupted, gone, false, false, gone, false, ""},
+		{"unknown outcome", "skipped", stop, false, false, stop, false, `outcome "skipped" is not`},
+		{"missed after its ladder started", CellMissed, missed, true, false, missed, false, "missed after its ladder started"},
+		{"missed with no reason", CellMissed, nil, false, false, nil, false, "missed with no reason"},
+		{"interrupted and valid", CellInterrupted, gone, true, true, nil, false, "and the manifest records valid=true"},
+		{"interrupted with requests", CellInterrupted, gone, true, false, gone, true, "an interrupted release cell has 4 requests"},
 		{"counted with no ladder", CellCounted, nil, false, true, nil, false, "counted with no ladder"},
 		{"counted and invalid", CellCounted, nil, true, false, stop, true, "counted, and the manifest records the run invalid"},
 		{"stopped with no reason", CellStopped, nil, true, false, nil, true, "stopped with no reason"},
@@ -367,9 +377,10 @@ func TestManifestCellLabel(t *testing.T) {
 }
 
 // A labelled release cell passes the check and does not count; one whose
-// ladder never started passes with empty attempts and frame files. The
-// check refuses a label that disagrees with the manifest and attempts in
-// a cell whose ladder never started.
+// ladder never started, and an interrupted one, passes with empty
+// attempts and frame files. The check refuses a label that disagrees with
+// the manifest, and attempts in a cell whose ladder never started or that
+// was interrupted.
 func TestCheckReleaseLabelledCell(t *testing.T) {
 	put := func(t *testing.T, dir, name string, b []byte) FileRef {
 		t.Helper()
@@ -434,6 +445,39 @@ func TestCheckReleaseLabelledCell(t *testing.T) {
 	r.write(t)
 	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), AttemptsFile+": 3 attempts in a cell whose ladder never started") {
 		t.Errorf("attempts with no ladder: %v", err)
+	}
+
+	// A missed cell passes with empty attempts and frame files.
+	r = labelled(t, false)
+	r.m.Release.Outcome = CellMissed
+	r.write(t)
+	if m, err := r.check(); err != nil || m.Counted() {
+		t.Errorf("missed cell: %v", err)
+	}
+
+	// An interrupted cell whose ladder started has empty attempts and
+	// frame files beside its own running series; a stopped one may not
+	// end on a running series, and an interrupted one with attempts is
+	// refused.
+	r = labelled(t, false)
+	c := withDispatch(r.m.Release, 3)
+	c.Dispatch.Sources[0].Final = false
+	c.Outcome, c.LadderStarted = CellInterrupted, true
+	r.write(t)
+	if m, err := r.check(); err != nil || m.Counted() || !m.Release.LadderStarted {
+		t.Errorf("interrupted cell: %v", err)
+	}
+	c.Outcome = CellStopped
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "the cell's own series is not final") ||
+		!strings.Contains(err.Error(), "own series counts 3 dispatches, "+AttemptsFile+" 0") {
+		t.Errorf("stopped cell on a running series: %v", err)
+	}
+	r = labelled(t, true)
+	r.m.Release.Outcome = CellInterrupted
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), AttemptsFile+": 3 attempts in an interrupted cell") {
+		t.Errorf("attempts in an interrupted cell: %v", err)
 	}
 }
 

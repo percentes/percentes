@@ -11,12 +11,14 @@ import (
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
 // clockRoute is a route over testSchedule with a fake clock that each
-// wait moves to its target, and a fake cell that records the outcome
-// outcomes gives a run and appends the run to ran.
+// wait moves to its target, a fake cell that records the outcome
+// outcomes gives a run and appends the run to ran, and a fake label that
+// writes an empty manifest and appends the run to r.labelled.
 func clockRoute(t *testing.T, start time.Time, outcomes func(schedule.Run) string, ran *[]schedule.Run) *route {
 	t.Helper()
 	sched := testSchedule(t, "groq", "other")
@@ -45,8 +47,15 @@ func clockRoute(t *testing.T, start time.Time, outcomes func(schedule.Run) strin
 		now = now.Add(schedule.CellLength)
 		return rec, r.writeNew(run, rec)
 	}
+	r.label = func(_ context.Context, rec *cellRecord) error {
+		labelled = append(labelled, rec.Run)
+		return os.WriteFile(filepath.Join(r.cellDir(rec.Run), evidence.ManifestFile), []byte("{}"), 0o600)
+	}
 	return r
 }
+
+// labelled are the runs clockRoute's fake label was given, in order.
+var labelled []schedule.Run
 
 func counted(schedule.Run) string { return outcomeCounted }
 
@@ -105,9 +114,12 @@ func TestLoopReruns(t *testing.T) {
 
 // A process started after some runs' tolerance records them missed and
 // re-runs the first two; a cell left running by an ended process becomes
-// interrupted and takes no re-run once the route has none left.
+// interrupted and takes no re-run once the route has none left. Each
+// missed or interrupted cell is labelled once, before the next run; one
+// whose directory holds an attempts file is not.
 func TestLoopMissedAndInterrupted(t *testing.T) {
 	var ran []schedule.Run
+	labelled = nil
 	sched := testSchedule(t, "groq", "other")
 	runs, _ := sched.Runs("groq")
 	start := runs[2].Start.Add(schedule.StartTolerance + time.Second)
@@ -141,6 +153,24 @@ func TestLoopMissedAndInterrupted(t *testing.T) {
 	}
 	if code != exitAdverse {
 		t.Fatalf("code %d", code)
+	}
+	if want := []schedule.Run{runs[3], runs[0], runs[1], runs[2]}; !slices.Equal(labelled, want) {
+		t.Fatalf("labelled %v, want the interrupted run, then each missed run", labelled)
+	}
+
+	if err := os.RemoveAll(r.cellDir(runs[4])); err != nil {
+		t.Fatal(err)
+	}
+	left = r.newRecord(runs[4])
+	left.Outcome = outcomeInterrupted
+	if err := r.writeNew(runs[4], left); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.cellDir(runs[4]), evidence.AttemptsFile), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := r.state(); err != nil || len(st.unlabelled) != 0 {
+		t.Fatalf("unlabelled %v: %v", st.unlabelled, err)
 	}
 }
 

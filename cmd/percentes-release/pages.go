@@ -35,8 +35,8 @@ type routeRecords struct {
 	verdict *admission.Verdict
 	cells   []report.CellRecords
 	// labelled counts the attempts with a manifest that do not count;
-	// unrecorded the missed and interrupted attempts, which keep their
-	// run record only.
+	// unrecorded the missed and interrupted attempts with no manifest,
+	// which keep their run record only.
 	labelled, unrecorded int
 }
 
@@ -107,7 +107,7 @@ func pagesCmd(args []string) (int, error) {
 	}
 	fmt.Printf("index written: %s; %d rows\n", filepath.Join(*pages, indexPage), len(ix.Rows))
 	for i, r := range routes {
-		fmt.Printf("%s: %d of %d cells counted, %d labelled, %d missed or interrupted; page %s\n", r.Config.Target.Name,
+		fmt.Printf("%s: %d of %d cells counted, %d labelled, %d with a run record only; page %s\n", r.Config.Target.Name,
 			len(r.Cells), admission.ReleaseCells, recs[i].labelled, recs[i].unrecorded, filepath.Join(*pages, filepath.FromSlash(r.Page)))
 	}
 	return exitOK, nil
@@ -125,10 +125,10 @@ func marshalPage(v any) ([]byte, error) {
 // a manifest must pass the completeness check against cfg's file and the
 // frame store, and every manifest must carry the same verdict. An
 // attempt enters the route's frame when its run record and its manifest
-// both count it, at most one attempt per scheduled cell; a missed or
-// interrupted attempt has its run record only. Each counted cell carries
-// its scheduled start and the documentation state its manifest records,
-// which the drift rule compares.
+// both count it, at most one attempt per scheduled cell; only a missed
+// or interrupted attempt may have its run record alone. Each counted
+// cell carries its scheduled start and the documentation state its
+// manifest records, which the drift rule compares.
 func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, error) {
 	name := cfg.Target.Name
 	paths, err := filepath.Glob(filepath.Join(out, name, "*", cellFile))

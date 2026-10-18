@@ -15,12 +15,17 @@ import (
 
 // Cell outcomes (SPEC-HOSTED HA3 point 16). A counted cell enters its
 // route's frame; a cell with any other outcome is a labelled record that
-// never does.
+// never does. A missed cell never started. An interrupted cell's process
+// ended or failed before its evidence was written: its requests went with
+// the process, so its attempts file and frame store are empty, and its
+// own dispatch series is the running one as last written.
 const (
-	CellCounted = "counted"
-	CellInvalid = "client_invalid"
-	CellBlocked = "blocked"
-	CellStopped = "stopped"
+	CellCounted     = "counted"
+	CellInvalid     = "client_invalid"
+	CellBlocked     = "blocked"
+	CellStopped     = "stopped"
+	CellMissed      = "missed"
+	CellInterrupted = "interrupted"
 )
 
 // Cell is a release run's cell record in its manifest (SPEC-HOSTED HA3
@@ -32,8 +37,8 @@ type Cell struct {
 	OffsetMinutes int          `json:"offset_minutes"`
 	// Outcome and Reasons are the cell's label: why it does not count, or
 	// where the backoff rule ended a counted cell's ladder. LadderStarted
-	// is false for a cell stopped or blocked before its ladder, whose
-	// attempts file and frame store are empty.
+	// is false for a cell stopped, blocked or missed before its ladder,
+	// whose attempts file and frame store are empty.
 	Outcome       string   `json:"outcome"`
 	Reasons       []string `json:"reasons,omitempty"`
 	LadderStarted bool     `json:"ladder_started"`
@@ -104,7 +109,7 @@ func (c *Cell) dispatchProblems() []string {
 				fail("source %d is %s %s attempt %d, want %s %s attempt %d", i, src.Run.Route, src.Run.Label, src.Run.Attempt, runs[i].Route, runs[i].Label, runs[i].Attempt)
 			}
 		}
-		if !d.Sources[0].Final {
+		if !d.Sources[0].Final && c.Outcome != CellInterrupted {
 			fail("the cell's own series is not final")
 		}
 	}
@@ -203,7 +208,7 @@ func (c *Cell) checkLabel(runValid bool, invalid []string) error {
 		if !runValid || len(invalid) > 0 {
 			fail("counted, and the manifest records the run invalid %q", invalid)
 		}
-	case CellInvalid, CellBlocked, CellStopped:
+	case CellInvalid, CellBlocked, CellStopped, CellMissed, CellInterrupted:
 		if len(c.Reasons) == 0 {
 			fail("%s with no reason", c.Outcome)
 		}
@@ -211,10 +216,10 @@ func (c *Cell) checkLabel(runValid bool, invalid []string) error {
 			fail("%s %q, and the manifest records valid=%t %q", c.Outcome, c.Reasons, runValid, invalid)
 		}
 	default:
-		fail("outcome %q is not %s, %s, %s or %s", c.Outcome, CellCounted, CellInvalid, CellBlocked, CellStopped)
+		fail("outcome %q is not %s, %s, %s, %s, %s or %s", c.Outcome, CellCounted, CellInvalid, CellBlocked, CellStopped, CellMissed, CellInterrupted)
 	}
-	if c.Outcome == CellBlocked && c.LadderStarted {
-		fail("blocked after its ladder started")
+	if (c.Outcome == CellBlocked || c.Outcome == CellMissed) && c.LadderStarted {
+		fail("%s after its ladder started", c.Outcome)
 	}
 	if len(problems) > 0 {
 		return errors.New("evidence: cell label: " + strings.Join(problems, "; "))

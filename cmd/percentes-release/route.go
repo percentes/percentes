@@ -104,6 +104,9 @@ type route struct {
 	wait func(ctx context.Context, t time.Time) error
 	// cell runs one cell attempt; runCell unless a test replaces it.
 	cell func(ctx context.Context, run schedule.Run) (*cellRecord, error)
+	// label labels a missed or interrupted cell; labelCell unless a test
+	// replaces it.
+	label func(ctx context.Context, rec *cellRecord) error
 }
 
 // runCmd reads the route's inputs, refuses to start on any defect, and
@@ -188,7 +191,7 @@ func newRoute(in routeInput) (*route, error) {
 	}
 	r := &route{cfg: cfg, configName: in.configName, sched: sched, runs: runs, out: in.out, dir: filepath.Join(in.out, name),
 		ledgerPath: in.ledgerPath, framesRoot: in.framesRoot, build: in.build, now: time.Now, wait: waitUntil}
-	r.cell = r.runCell
+	r.cell, r.label = r.runCell, r.labelCell
 	for _, o := range sched.Offsets {
 		if o.Route == name {
 			r.offsetMinutes = o.Minutes
@@ -353,11 +356,14 @@ func runDir(routeDir string, run schedule.Run) string {
 
 // routeState is the route's position read from its cell records: every
 // run it takes in start order, the attempt 1 runs and the re-runs taken,
-// and the first of them with no record.
+// and the first of them with no record; and, in start order, the missed
+// and interrupted cells whose directory holds no manifest and no
+// attempts file.
 type routeState struct {
-	runs    []schedule.Run
-	records map[string]*cellRecord
-	next    *schedule.Run
+	runs       []schedule.Run
+	records    map[string]*cellRecord
+	next       *schedule.Run
+	unlabelled []*cellRecord
 }
 
 func runKey(r schedule.Run) string { return fmt.Sprintf("%s/%d", r.Label, r.Attempt) }
@@ -391,7 +397,13 @@ func (r *route) state() (*routeState, error) {
 			}
 		}
 		st.records[runKey(rec.Run)] = &rec
+		dir := filepath.Dir(p)
+		if (rec.Outcome == outcomeMissed || rec.Outcome == outcomeInterrupted) &&
+			!fileExists(filepath.Join(dir, evidence.ManifestFile)) && !fileExists(filepath.Join(dir, evidence.AttemptsFile)) {
+			st.unlabelled = append(st.unlabelled, &rec)
+		}
 	}
+	slices.SortFunc(st.unlabelled, func(a, b *cellRecord) int { return a.Run.Start.Compare(b.Run.Start) })
 	st.runs = slices.Clone(r.runs)
 	taken := 0
 	for _, a := range r.runs {
@@ -427,12 +439,19 @@ func (r *route) hasAttempt2(label string) bool {
 
 // loop runs the route's cells in start order until none is left, the
 // route stops, or ctx ends. A run whose start passed more than the start
-// tolerance ago is recorded as missed.
+// tolerance ago is recorded as missed. Each missed or interrupted cell is
+// labelled before the next run.
 func (r *route) loop(ctx context.Context) (int, error) {
 	for {
 		st, err := r.state()
 		if err != nil {
 			return exitError, err
+		}
+		for _, rec := range st.unlabelled {
+			if err := r.label(ctx, rec); err != nil {
+				return exitError, fmt.Errorf("%s %s attempt %d: label: %w", rec.Run.Route, rec.Run.Label, rec.Run.Attempt, err)
+			}
+			fmt.Printf("%s %s attempt %d: %s, labelled\n", rec.Run.Route, rec.Run.Label, rec.Run.Attempt, rec.Outcome)
 		}
 		if st.next == nil {
 			return r.finish(st), nil

@@ -150,9 +150,10 @@ func (l *liveSeries) stop() {
 
 // hostDispatch is the host's aggregate dispatch series over a cell, from
 // the second of from through the second of to on the host's wall clock:
-// the cell's own final series and each concurrent run's, read from its
-// cell directory once it is final or counts every dispatch through to,
-// or as it stands after dispatchWaitMax.
+// the cell's own series, final unless the cell was interrupted, and each
+// concurrent run's, read from its cell directory once it is final or
+// counts every dispatch through to, or as it stands after
+// dispatchWaitMax.
 func (r *route) hostDispatch(from, to time.Time, own *dispatchSeries, runs []schedule.Run) (*evidence.Dispatch, error) {
 	from, to = from.UTC(), to.UTC()
 	lo := from.Truncate(time.Second)
@@ -167,7 +168,11 @@ func (r *route) hostDispatch(from, to time.Time, own *dispatchSeries, runs []sch
 		}
 		return n
 	}
-	d.Sources = append(d.Sources, evidence.DispatchSource{Run: own.Run, Dispatches: sum(own), Final: true})
+	src := evidence.DispatchSource{Run: own.Run, Dispatches: sum(own), Final: own.Final}
+	if !own.Final {
+		src.ThroughUTC = own.ThroughUTC
+	}
+	d.Sources = append(d.Sources, src)
 	deadline := time.Now().Add(dispatchWaitMax)
 	for _, run := range runs {
 		s, err := waitSeries(filepath.Join(runDir(filepath.Join(r.out, run.Route), run), dispatchFile), run, to, deadline)

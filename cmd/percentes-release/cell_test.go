@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -376,5 +377,159 @@ func TestCellBalanceRecords(t *testing.T) {
 	}
 	if n := e.hits.Load(); n != 0 {
 		t.Fatalf("server saw %d requests", n)
+	}
+}
+
+// A missed cell and a cell whose process ended or failed during it each
+// get a labelled manifest and report pair, without a request, that pass
+// the completeness check outside the route's frame. A cell left running
+// mid-ladder keeps the start records, probe record and running series it
+// wrote, reads
+// its end records, and has empty attempts and frame files; a cell failed
+// before its records reads them when labelled, with its error as its
+// reason; a missed cell reads its start records when labelled, with no
+// end records and no concurrent runs, while the interrupted cells list
+// another route's cell running over them. No cell is labelled twice.
+func TestLabelMissedAndInterrupted(t *testing.T) {
+	fastDispatch(t)
+	e := newEndpoint(t, always200)
+	r, _ := newTestRoute(t, releaseConfig(t, e.url()), "+0.005032")
+	missed, gone, failed := r.runs[0], r.runs[1], r.runs[2]
+	now := gone.Start.Add(time.Minute)
+	r.now = func() time.Time {
+		now = now.Add(time.Second)
+		return now
+	}
+	r.wait = func(context.Context, time.Time) error { return errors.New("operator abort") }
+	ctx := context.Background()
+
+	other := schedule.Run{Route: "other", Label: gone.Label, Attempt: 1, Date: gone.Date, Start: gone.Start.Add(-time.Minute)}
+	otherEnd := gone.Start.Add(time.Hour)
+	if err := replaceJSON(filepath.Join(r.out, "other", cellLabel(other), cellFile),
+		&cellRecord{Run: other, Outcome: outcomeCounted, StartUTC: other.Start, EndUTC: &otherEnd}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := r.newRecord(gone)
+	rec.Outcome, rec.StartUTC = outcomeRunning, gone.Start
+	if err := r.writeNew(gone, rec); err != nil {
+		t.Fatal(err)
+	}
+	dir := r.cellDir(gone)
+	if _, err := evidence.WriteClock(dir, evidence.ReadClock(ctx, r.clock)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evidence.WriteStatus(dir, evidence.StatusStartFile, evidence.ReadStatus(ctx, r.status)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evidence.WriteStatus(dir, evidence.BalanceStartFile, evidence.ReadBalance(ctx, r.balance)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := probe.Write(dir, &probe.Record{}); err != nil {
+		t.Fatal(err)
+	}
+	through := gone.Start.Add(3 * time.Second)
+	if err := replaceJSON(filepath.Join(dir, dispatchFile), &dispatchSeries{Run: gone, StartUTC: gone.Start, Counts: []int{0, 3, 2}, ThroughUTC: &through}); err != nil {
+		t.Fatal(err)
+	}
+	rec = r.newRecord(failed)
+	rec.Outcome, rec.Error = outcomeInterrupted, "probe: connection refused"
+	if err := r.writeNew(failed, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	code, err := r.loop(ctx)
+	if err != nil || code != exitStopped {
+		t.Fatalf("loop: %d, %v", code, err)
+	}
+	if n := e.hits.Load(); n != 0 {
+		t.Fatalf("server saw %d requests", n)
+	}
+	balance := func(t *testing.T, run schedule.Run, ref *evidence.FileRef, read int) {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(r.cellDir(run), ref.Name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got evidence.StatusRecord
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := fmt.Sprintf("balance USD 30.00, read %d\n", read); got.Stdout.Text != want {
+			t.Errorf("%s %s: stdout %q, want %q", run.Label, ref.Name, got.Stdout.Text, want)
+		}
+	}
+	for _, tc := range []struct {
+		run             schedule.Run
+		outcome, reason string
+		ladder, end     bool
+		concurrent      bool
+		dispatches      int
+		balances        []int
+		text            string
+	}{
+		{gone, outcomeInterrupted, "the process ended during the cell", true, true, true, 5, []int{1, 2},
+			"The ladder started and its requests ended with the process; the attempts file is empty.\n"},
+		{failed, outcomeInterrupted, "execution error: probe: connection refused", false, true, true, 0, []int{3, 4},
+			"The ladder did not start; the attempts file is empty.\n"},
+		{missed, outcomeMissed, "not started: ", false, false, false, 0, []int{5},
+			"The ladder did not start; the attempts file is empty.\n"},
+	} {
+		got := readCell(t, r, tc.run)
+		if got.Outcome != tc.outcome || len(got.Reasons) != 1 || !strings.HasPrefix(got.Reasons[0], tc.reason) {
+			t.Fatalf("%s: cell record %s %q", tc.run.Label, got.Outcome, got.Reasons)
+		}
+		m, text := checkRetained(t, r, tc.run)
+		c := m.Release
+		if m.Counted() || m.RunValid || c.Outcome != tc.outcome || c.LadderStarted != tc.ladder || !slices.Equal(c.Reasons, got.Reasons) || !slices.Equal(m.InvalidReasons, got.Reasons) {
+			t.Fatalf("%s: manifest valid %t %q, cell %+v", tc.run.Label, m.RunValid, m.InvalidReasons, c)
+		}
+		if !strings.Contains(text, "Outcome: "+tc.outcome+"; a labelled record, outside the route's frame of 12 cells\n  "+got.Reasons[0]+"\n"+tc.text) {
+			t.Errorf("%s: report text:\n%s", tc.run.Label, text)
+		}
+		if b, err := os.ReadFile(filepath.Join(r.cellDir(tc.run), evidence.AttemptsFile)); err != nil || len(b) != 0 {
+			t.Fatalf("%s: attempts file %q: %v", tc.run.Label, b, err)
+		}
+		if (m.Artifact(probe.File) != nil) != (tc.run == gone) {
+			t.Fatalf("%s: artifacts %+v", tc.run.Label, m.Artifacts)
+		}
+		if m.Frames == nil || filepath.Dir(filepath.Join(r.framesRoot, m.Frames.Name)) != evidence.FramesDir(r.framesRoot, got.StartUTC) || m.Frames.Bytes != 0 {
+			t.Fatalf("%s: frame store %+v", tc.run.Label, m.Frames)
+		}
+		var concurrent []schedule.Run
+		if tc.concurrent {
+			concurrent = []schedule.Run{other}
+		}
+		if d := c.Dispatch; len(d.Sources) != 1+len(concurrent) || d.Sources[0].Dispatches != tc.dispatches || d.Sources[0].Final != (tc.dispatches == 0) ||
+			!slices.Equal(c.Concurrent, concurrent) || !slices.Equal(got.Concurrent, concurrent) {
+			t.Fatalf("%s: aggregate dispatch series %+v, concurrent %v", tc.run.Label, d, c.Concurrent)
+		}
+		if d := c.Dispatch; tc.dispatches > 0 && (d.Sources[0].ThroughUTC == nil || !d.Sources[0].ThroughUTC.Equal(through) || !d.EndUTC.Equal(through)) {
+			t.Fatalf("%s: aggregate dispatch series %+v", tc.run.Label, d)
+		}
+		if (m.StatusEnd != nil) != tc.end || (m.BalanceEnd != nil) != tc.end || m.BalanceStart == nil {
+			t.Fatalf("%s: end status %v, balances %v and %v", tc.run.Label, m.StatusEnd, m.BalanceStart, m.BalanceEnd)
+		}
+		balance(t, tc.run, m.BalanceStart, tc.balances[0])
+		if tc.end {
+			balance(t, tc.run, m.BalanceEnd, tc.balances[1])
+		}
+	}
+
+	before := map[string][]byte{}
+	for _, run := range []schedule.Run{missed, gone, failed} {
+		b, err := os.ReadFile(filepath.Join(r.cellDir(run), evidence.ManifestFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[run.Label] = b
+	}
+	if code, err := r.loop(ctx); err != nil || code != exitStopped {
+		t.Fatalf("loop again: %d, %v", code, err)
+	}
+	for _, run := range []schedule.Run{missed, gone, failed} {
+		if b, err := os.ReadFile(filepath.Join(r.cellDir(run), evidence.ManifestFile)); err != nil || !bytes.Equal(b, before[run.Label]) {
+			t.Fatalf("%s labelled again: %v", run.Label, err)
+		}
 	}
 }
