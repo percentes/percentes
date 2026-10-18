@@ -155,7 +155,8 @@ func (a *Artifacts) AttachObservations(o Observed) {
 	}
 }
 
-// Execute performs one full run.
+// Execute performs one full run. An error after load generation also
+// returns the artifacts so far, with the error among InvalidReasons.
 func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts, error) {
 	art := &Artifacts{Config: cfg, Windows: map[string]*collect.Stats{}}
 
@@ -227,12 +228,15 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 			opts.OnEpoch(e)
 		}
 	}})
-	if err != nil {
+	if res == nil {
 		return nil, fmt.Errorf("run: loadgen: %w", err)
 	}
 	art.Loadgen = res
+	if err != nil {
+		return art.failed(fmt.Errorf("run: loadgen: %w", err))
+	}
 	if err := <-orchDone; err != nil {
-		return nil, fmt.Errorf("run: orchestrator: %w", err)
+		return art.failed(fmt.Errorf("run: orchestrator: %w", err))
 	}
 	art.Orchestration = orch
 
@@ -256,7 +260,7 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	for _, w := range windows {
 		st, err := collect.Collect(cfg, res.Requests, w)
 		if err != nil {
-			return nil, fmt.Errorf("run: collect %s: %w", w.Name, err)
+			return art.failed(fmt.Errorf("run: collect %s: %w", w.Name, err))
 		}
 		art.Windows[w.Name] = st
 	}
@@ -296,7 +300,7 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	for _, w := range split {
 		st, err := collect.Collect(cfg, res.Requests, w)
 		if err != nil {
-			return nil, fmt.Errorf("run: collect %s: %w", w.Name, err)
+			return art.failed(fmt.Errorf("run: collect %s: %w", w.Name, err))
 		}
 		art.Windows[w.Name] = st
 	}
@@ -345,6 +349,13 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	}
 	art.RunValid, art.InvalidReasons = validity(art)
 	return art, nil
+}
+
+// failed marks the run invalid with err as a reason.
+func (a *Artifacts) failed(err error) (*Artifacts, error) {
+	a.RunValid = false
+	a.InvalidReasons = append(a.InvalidReasons, err.Error())
+	return a, err
 }
 
 // shareGate computes per-replica request share over the guard-bounded

@@ -1,7 +1,8 @@
 // percentes runs one full experiment from one config file and writes the
-// JavaScript Object Notation (JSON) and human-readable report pair. Exit
-// codes: 0 = run valid, 2 = run completed but a run-failing gate marked
-// it invalid, 1 = execution error.
+// JavaScript Object Notation (JSON) and human-readable report pair, and
+// the per-attempt JSON Lines file of every run that dispatched, failed
+// runs included. Exit codes: 0 = run valid, 2 = run completed but a
+// run-failing gate marked it invalid, 1 = execution error.
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/run"
@@ -26,7 +28,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "path to the run config YAML (required)")
-	outDir := flag.String("out", "results", "output directory for report.json and report.txt")
+	outDir := flag.String("out", "results", "output directory for report.json, report.txt and "+evidence.AttemptsFile)
 	adminURL := flag.String("admin-url", "", "victim replica admin endpoint; when set the orchestrator pre-arms the fault there")
 	injectMode := flag.String("inject-mode", config.MockFaultError, "mock fault mode to arm (stall|error|throttle|stream_abort|silent_hang)")
 	injectDuration := flag.Float64("inject-duration-s", 10, "armed fault window duration")
@@ -93,6 +95,13 @@ func main() {
 		if sampler != nil {
 			sampler.Stop()
 		}
+		if art != nil {
+			if path, werr := evidence.WriteRun(*outDir, cfg, art.Loadgen, evidence.Options{RunFailures: art.InvalidReasons}); werr != nil {
+				log.Printf("percentes: %v", werr)
+			} else if path != "" {
+				log.Printf("percentes: attempts written: %s", path)
+			}
+		}
 		log.Fatalf("percentes: %v", err)
 	}
 	if canaryErr != nil {
@@ -118,6 +127,11 @@ func main() {
 		art.InvalidReasons = append(art.InvalidReasons, reasons...)
 	}
 
+	attemptsPath, err := evidence.WriteRun(*outDir, cfg, art.Loadgen, evidence.Options{RunFailures: art.InvalidReasons})
+	if err != nil {
+		log.Fatalf("percentes: %v", err)
+	}
+
 	rawJSON, humanText, err := report.Generate(art, &gates)
 	if err != nil {
 		log.Fatalf("percentes: %v", err)
@@ -135,7 +149,7 @@ func main() {
 	}
 
 	fmt.Println(humanText)
-	fmt.Printf("\nreports written: %s, %s\n", jsonPath, txtPath)
+	fmt.Printf("\nreports written: %s, %s\nattempts written: %s\n", jsonPath, txtPath, attemptsPath)
 	if !art.RunValid {
 		fmt.Println("RUN INVALID (run-failing gate):", art.InvalidReasons)
 		os.Exit(2)

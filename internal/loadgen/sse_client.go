@@ -135,8 +135,8 @@ func (g *gen) execute(r *Request) {
 }
 
 // recordChunk keeps a chunk's usage, finish reason, reported model and
-// any mismatch with the requested one, in-band error and reasoning
-// arrival on r.
+// any mismatch with the requested one, system fingerprint, in-band error
+// and reasoning arrival on r.
 func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	if !c.known {
 		r.UnknownEvents++
@@ -152,6 +152,9 @@ func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	}
 	if c.model != "" && r.ReportedModel == "" {
 		r.ReportedModel = c.model
+	}
+	if c.fingerprint != "" && r.SystemFingerprint == "" {
+		r.SystemFingerprint = c.fingerprint
 	}
 	if c.model != "" && c.model != g.model &&
 		len(r.ModelMismatch) < modelMismatchLimit && !slices.Contains(r.ModelMismatch, c.model) {
@@ -174,6 +177,7 @@ func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 type chunk struct {
 	content, reasoning string
 	finish, model      string
+	fingerprint        string
 	usage, err         json.RawMessage
 	// known: the event carried choices, a usage object or an error.
 	known bool
@@ -216,7 +220,8 @@ func parseChunk(payload []byte, sh config.ResponseShape) (c chunk, ok bool) {
 			}
 		}
 	}
-	json.Unmarshal(orNull(lookup(root, sh.Model)), &c.model) //nolint:errcheck
+	json.Unmarshal(orNull(lookup(root, sh.Model)), &c.model)           //nolint:errcheck
+	json.Unmarshal(orNull(root["system_fingerprint"]), &c.fingerprint) //nolint:errcheck
 	for _, p := range sh.Usage {
 		if v := lookup(root, p); v != nil {
 			c.usage, c.known = v, true

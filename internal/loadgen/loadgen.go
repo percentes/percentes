@@ -78,6 +78,9 @@ type Request struct {
 	// ReportedModel is the first model id a chunk reported.
 	FinishReason  string `json:"finish_reason,omitempty"`
 	ReportedModel string `json:"reported_model,omitempty"`
+	// SystemFingerprint is the first top-level system_fingerprint a chunk
+	// carried.
+	SystemFingerprint string `json:"system_fingerprint,omitempty"`
 	// ModelMismatch lists, in arrival order, each distinct model id a
 	// chunk reported that differs from the requested one, up to
 	// modelMismatchLimit ids.
