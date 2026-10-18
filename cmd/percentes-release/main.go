@@ -16,7 +16,9 @@
 // whose configurations it is given, ledger create starts the release
 // ledger with their caps, ledger price records a route's prices at its
 // shape, and ceiling-check sends a route's ceiling check, admitted in the
-// ledger, and writes the record run reads with --ceiling-probe.
+// ledger, and writes the record run reads with --ceiling-probe. After
+// the window, pages writes the index page and each route's page from the
+// cells' records.
 //
 //	percentes-release schedule --master-seed SEED --first DATE --last DATE
 //	    --config FILE ... --schedule FILE
@@ -30,6 +32,8 @@
 //	    --status-cmd CMD --operator FILE --ceiling-probe FILE ...
 //	    --byte-cap N --account-created DATE
 //	percentes-release dispatch --out DIR
+//	percentes-release pages --out DIR --frames DIR --config FILE ...
+//	    --pages DIR
 //	percentes-release check-cpu
 //
 // Exit codes: 0 = the route's runs are over and every cell counts, or
@@ -72,6 +76,7 @@ commands:
   ceiling-check   send a route's ceiling check and write its record
   run             run one route's cells over the committed window
   dispatch        sum every cell's dispatch series under --out
+  pages           write the index page and each route's page
   check-cpu       whether this build measures host CPU
 
 Run percentes-release <command> -h for the command's flags.
@@ -103,6 +108,8 @@ func dispatch(args []string) int {
 		code, err = runCmd(ctx, args[1:])
 	case "dispatch":
 		code, err = dispatchCmd(args[1:])
+	case "pages":
+		code, err = pagesCmd(args[1:])
 	case "check-cpu":
 		code, err = checkCPUCmd(args[1:])
 	default:
@@ -174,11 +181,17 @@ func replaceJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
+	return replaceFile(path, append(b, '\n'))
+}
+
+// replaceFile writes b to path through a temporary file, so a reader
+// never sees a partial file.
+func replaceFile(path string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
