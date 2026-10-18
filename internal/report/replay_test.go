@@ -178,16 +178,20 @@ func replayReproduces(t *testing.T, dir string, cfgRaw []byte, m *evidence.Manif
 		}
 		return c.String()
 	}
+	if string(rep["caveat"]) != compact(CaveatHosted) {
+		t.Errorf("caveat %s, want the hosted caveat", rep["caveat"])
+	}
+	if bytes.Contains(raw, []byte("goodput")) || strings.Contains(text, "goodput") {
+		t.Error("the hosted pair carries a goodput field")
+	}
 	for key, v := range map[string]any{
-		"windows":            art.Windows,
-		"in_flight_at_fire":  art.InFlight,
-		"detector":           art.Detector,
-		"threshold_analysis": art.ThresholdAnalysis,
-		"receive_path":       art.ReceivePath,
-		"share_gate":         art.ShareGate,
-		"run_valid":          art.RunValid,
-		"invalid_reasons":    art.InvalidReasons,
-		"validity_gates":     gates,
+		"windows":           newHostedReport(&Report{Artifacts: art}).Windows,
+		"in_flight_at_fire": art.InFlight,
+		"receive_path":      art.ReceivePath,
+		"share_gate":        art.ShareGate,
+		"run_valid":         art.RunValid,
+		"invalid_reasons":   art.InvalidReasons,
+		"validity_gates":    gates,
 	} {
 		var got bytes.Buffer
 		if err := json.Compact(&got, rep[key]); err != nil {

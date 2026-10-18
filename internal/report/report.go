@@ -24,12 +24,31 @@ import (
 	"github.com/percentes/percentes/internal/validity"
 )
 
-// Caveat is printed in every report and in the acceptance-criteria (AC)
-// output itself (§8).
+// Caveat is CaveatFor's default report caveat, also printed in the
+// acceptance-criteria (AC) output itself (§8).
 const Caveat = "CAVEAT: passing AC1-AC7 certifies the instrument against the mock, not any claim about real GPU behaviour. Small N, injected-fault-versus-reality gaps, and mock fidelity limits remain; they are scoped in the claims and named in the report."
 
 // CaveatProcessKill is the caveat of a process-kill experiment run.
 const CaveatProcessKill = "CAVEAT: one vLLM replica on one GPU, killed and restarted in place; no two-replica or Kubernetes claim. N=5 runs on rented hardware; the acceptance criteria (§8) certified the instrument against the mock; injected-fault-versus-reality gaps are named in the report."
+
+// CaveatHosted is the caveat of a hosted run, in place of Caveat.
+const CaveatHosted = "CAVEAT: one hosted endpoint measured from one client host. Every timing is client-observed, and the model weights and serving stack behind the model identifier are not verifiable (SPEC-HOSTED §6). No service-level objective (SLO) is defined for hosted data, so latency is reported as distributions with no pass bar (SPEC-HOSTED §7)."
+
+// HostedPinsNotVerifiable is the SPEC-HOSTED §6 list of SPEC.md §6 pins
+// that are not applicable or not verifiable against a hosted endpoint.
+var HostedPinsNotVerifiable = []string{
+	"ignore_eos and any output-length forcing",
+	"the model weights and revision behind the identifier",
+	"KV (key-value) cache budget",
+	"prefix-caching state",
+	"continuous-batching verification",
+	"serving-stack version and image digest",
+	"scheduler settings",
+	"CUDA (Compute Unified Device Architecture) graph enablement",
+	"GPU (graphics processing unit) SKU (stock-keeping unit), driver, and clock and power fingerprints",
+	"the Kubernetes, CNI (Container Network Interface), dataplane, kube-proxy, and node-monitor-grace-period pins",
+	"per-replica request counters",
+}
 
 // CaveatFor is CaveatProcessKill for process_kill under the experiment
 // profile and Caveat otherwise.
@@ -38,6 +57,12 @@ func CaveatFor(variant string, profile config.Profile) string {
 		return CaveatProcessKill
 	}
 	return Caveat
+}
+
+// hosted reports whether c configures a hosted run: a hosted target, or
+// the pilot profile, whose targets are all hosted.
+func hosted(c *config.Config) bool {
+	return c.Target.Hosted || c.Profile == config.ProfilePilot
 }
 
 // Report is the JSON artifact: the parsed config plus every run
@@ -56,6 +81,57 @@ type Report struct {
 	// ValidityGates is the §10 G1-G7 evaluation for this run.
 	ValidityGates *validity.Report `json:"validity_gates,omitempty"`
 	*run.Artifacts
+}
+
+// hostedReport is the JSON artifact of a hosted run. A field declared
+// here hides the embedded field of the same JSON name, and a nil one is
+// omitted: a hosted report carries no conditional headline, goodput, SLO
+// sweep, threshold analysis, goodput recovery detector, recovery
+// decomposition or SPEC.md §6 infrastructure pin (SPEC-HOSTED §6, §7, §9).
+type hostedReport struct {
+	SchemaVersion     int                           `json:"schema_version"`
+	ConfigSHA256      string                        `json:"config_sha256"`
+	InstrumentCommit  string                        `json:"instrument_commit"`
+	Caveat            string                        `json:"caveat"`
+	PinsNotVerifiable []string                      `json:"pins_not_verifiable"`
+	ValidityGates     *validity.Report              `json:"validity_gates,omitempty"`
+	Config            hostedReportConfig            `json:"config"`
+	Windows           map[string]hostedReportWindow `json:"windows"`
+	Detector          *struct{}                     `json:"detector,omitempty"`
+	Decomposition     *struct{}                     `json:"decomposition,omitempty"`
+	ThresholdAnalysis *struct{}                     `json:"threshold_analysis,omitempty"`
+	*run.Artifacts
+}
+
+type hostedReportConfig struct {
+	*config.Config
+	SLO  *struct{} `json:"slo,omitempty"`
+	Pins *struct{} `json:"pins,omitempty"`
+}
+
+type hostedReportWindow struct {
+	*collect.Stats
+	GoodputRPS   *struct{} `json:"goodput_rps,omitempty"`
+	GoodputFrac  *struct{} `json:"goodput_frac,omitempty"`
+	GoodputSweep *struct{} `json:"goodput_sweep,omitempty"`
+}
+
+func newHostedReport(r *Report) *hostedReport {
+	ws := make(map[string]hostedReportWindow, len(r.Windows))
+	for name, st := range r.Windows {
+		ws[name] = hostedReportWindow{Stats: st}
+	}
+	return &hostedReport{
+		SchemaVersion:     r.SchemaVersion,
+		ConfigSHA256:      r.ConfigSHA256,
+		InstrumentCommit:  r.InstrumentCommit,
+		Caveat:            r.Caveat,
+		PinsNotVerifiable: HostedPinsNotVerifiable,
+		ValidityGates:     r.ValidityGates,
+		Config:            hostedReportConfig{Config: r.Config},
+		Windows:           ws,
+		Artifacts:         r.Artifacts,
+	}
 }
 
 // InstrumentCommit is the build's VCS stamp as the reports record it.
@@ -112,12 +188,18 @@ func generate(art *run.Artifacts, gates *validity.Report, commit string) ([]byte
 		SchemaVersion:    2,
 		ConfigSHA256:     fmt.Sprintf("%x", sha256.Sum256(cfgRaw)),
 		InstrumentCommit: commit,
-		Caveat:           CaveatFor(art.Config.Fault.Variant, art.Config.Profile),
-		Headline:         headline(art),
 		ValidityGates:    gates,
 		Artifacts:        &pub,
 	}
-	raw, err := json.MarshalIndent(rep, "", "  ")
+	var out any = rep
+	if hosted(art.Config) {
+		rep.Caveat = CaveatHosted
+		out = newHostedReport(rep)
+	} else {
+		rep.Caveat = CaveatFor(art.Config.Fault.Variant, art.Config.Profile)
+		rep.Headline = headline(art)
+	}
+	raw, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return nil, "", fmt.Errorf("report: marshal: %w", err)
 	}
@@ -254,6 +336,7 @@ func measuredSegments(art *run.Artifacts) string {
 func human(r *Report) string {
 	var b strings.Builder
 	art := r.Artifacts
+	h := hosted(art.Config)
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 
 	w("Percentes run report: %s", art.Config.Run.Name)
@@ -262,9 +345,11 @@ func human(r *Report) string {
 	w("")
 	w("%s", r.Caveat)
 	w("")
-	w("== Conditional headline (appendix template) ==")
-	w("%s", r.Headline)
-	w("")
+	if !h {
+		w("== Conditional headline (appendix template) ==")
+		w("%s", r.Headline)
+		w("")
+	}
 
 	w("== Run validity ==")
 	w("valid: %v", art.RunValid)
@@ -293,11 +378,16 @@ func human(r *Report) string {
 	}
 	w("")
 
-	w("== Environment pins (§6) ==")
-	if pinsJSON, err := json.Marshal(art.Config.Pins); err != nil {
-		w("pins: <unavailable: %v>", err)
+	if h {
+		w("== Environment pins (SPEC-HOSTED §6) ==")
+		w("not applicable or not verifiable against a hosted endpoint: %s", strings.Join(HostedPinsNotVerifiable, "; "))
 	} else {
-		w("%s", pinsJSON)
+		w("== Environment pins (§6) ==")
+		if pinsJSON, err := json.Marshal(art.Config.Pins); err != nil {
+			w("pins: <unavailable: %v>", err)
+		} else {
+			w("%s", pinsJSON)
+		}
 	}
 	w("")
 
@@ -338,13 +428,14 @@ func human(r *Report) string {
 		for _, replica := range sortedKeys(art.ServerSide[name]) {
 			w("server-side %s: %s", replica, reductionText(art.ServerSide[name][replica]))
 		}
-		if art.Config.Target.Hosted {
-			w("the §4 thresholds below are the self-hosted objective applied descriptively; §6 defines no hosted objective")
-		}
-		w("throughput=%.2f rps goodput=%.2f rps goodput-frac=%.4f", st.ThroughputRPS, st.GoodputRPS, st.GoodputFrac)
-		w("goodput-versus-threshold sweep (§4):")
-		for _, sp := range st.GoodputSweep {
-			w("  TTFT<=%4dms & e2e<=%5dms: goodput %.4f", sp.TTFTMs, sp.E2EMs, sp.GoodputFrac)
+		if h {
+			w("throughput=%.2f rps", st.ThroughputRPS)
+		} else {
+			w("throughput=%.2f rps goodput=%.2f rps goodput-frac=%.4f", st.ThroughputRPS, st.GoodputRPS, st.GoodputFrac)
+			w("goodput-versus-threshold sweep (§4):")
+			for _, sp := range st.GoodputSweep {
+				w("  TTFT<=%4dms & e2e<=%5dms: goodput %.4f", sp.TTFTMs, sp.E2EMs, sp.GoodputFrac)
+			}
 		}
 		if st.ConditionalCaveat {
 			w("CONDITIONAL CAVEAT: error+censored fraction exceeds 5%%; read the completed-only percentiles against the completion-incidence curve below (§3).")
@@ -375,86 +466,88 @@ func human(r *Report) string {
 	}
 	w("")
 
-	ta := art.ThresholdAnalysis
-	w("== Modal during-fault latency vs thresholds (§4) ==")
-	if ta.Valid {
-		w("baseline SD: TTFT %.2fms, e2e %.2fms; modal during-fault: TTFT %.1fms, e2e %.1fms", ta.BaselineTTFTSDMs, ta.BaselineE2ESDMs, ta.ModalFaultTTFTMs, ta.ModalFaultE2EMs)
-		w("TTFT threshold distances (baseline SDs, signed modal-threshold): %v", ta.TTFTThresholdSDs)
-		w("e2e  threshold distances (baseline SDs, signed modal-threshold): %v", ta.E2EThresholdSDs)
-	} else {
-		w("not computable: %s", ta.Note)
-	}
-	w("")
-
-	d := art.Detector
-	w("== Recovery (two baselines, hysteresis; §5) ==")
-	w("pre-fault baseline goodput: %.4f", d.PreFaultBaseline)
-	if d.EquilibriumEstimable {
-		w("single-replica equilibrium baseline: %.4f (degraded plateau [%.0fs, %.0fs) of run time)", d.EquilibriumBaseline, d.EquilibriumWindowStartS, d.EquilibriumWindowEndS)
-	} else {
-		w("single-replica equilibrium baseline: NOT ESTIMABLE (%s)", d.EquilibriumNote)
-	}
-	// TTR and deficit against a non-estimable equilibrium are N/A (§5).
-	eqTTR := "n/a (" + d.EquilibriumNote + ")"
-	eqDeficit := "n/a"
-	if d.EquilibriumEstimable {
-		eqTTR = ttrText(d.ToEquilibrium)
-		eqDeficit = fmt.Sprintf("%.2f", d.DeficitToEquilibrium)
-	}
-	if d.PartitionHealRecovery != nil {
-		w("goodput-threshold crossing:   %s (raw; may precede the heal)", ttrText(d.ToPreFault))
-		w("partition-heal recovery:      %s (first held entry at or after the heal anchor, +%.0fs; §5)", ttrText(*d.PartitionHealRecovery), float64(*d.HealAnchorNs-fireAnchorNs(art))/1e9)
-		if d.DeficitToPartitionHeal != nil {
-			w("integrated goodput deficit to partition-heal recovery: %.2f goodput-seconds", *d.DeficitToPartitionHeal)
-		}
-	} else {
-		w("TTR to pre-fault baseline:    %s", ttrText(d.ToPreFault))
-	}
-	if art.Config.Fault.Variant == config.VariantProcessKill {
-		w("TTR to equilibrium baseline:  not applicable under process kill, which has no survivor (§5)")
-	} else {
-		w("TTR to equilibrium baseline:  %s; the baseline is a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout (§5)", eqTTR)
-	}
-	w("integrated goodput deficit: %.2f (vs pre-fault), %s (vs equilibrium) goodput-seconds", d.DeficitToPreFault, eqDeficit)
-	compNames := make([]string, 0, len(d.Components))
-	for n := range d.Components {
-		compNames = append(compNames, n)
-	}
-	sort.Strings(compNames)
-	for _, n := range compNames {
-		w("component %-11s %s", n+":", ttrText(d.Components[n]))
-	}
-	w("backlog drain: measured=%v (%s)", d.BacklogDrainMeasured, d.BacklogDrainNote)
-	w("")
-	w("== Sensitivity table (X x R x H; §5) ==")
-	if d.PartitionHealRecovery != nil {
-		w("%-6s %-4s %-4s | %-22s %-22s %-22s", "entry", "R", "H", "crossing (raw)", "partition-heal", "TTR->equilibrium")
-	} else {
-		w("%-6s %-4s %-4s | %-22s %-22s", "entry", "R", "H", "TTR->prefault", "TTR->equilibrium")
-	}
-	for _, row := range d.Sensitivity {
-		if d.PartitionHealRecovery != nil {
-			w("%-6d %-4d %-4d | %-22s %-22s %-22s", row.Params.EntryPct, row.Params.WindowS, row.Params.HoldS,
-				ttrCell(row.TTRToPreFault, row.NotRecoveredPre, row.HoldUnobservedPre), ttrCell(row.TTRPartitionHeal, row.NotRecoveredHeal, row.HoldUnobservedHeal), ttrCell(row.TTRToEquilibrium, row.NotRecoveredEq, row.HoldUnobservedEq))
-			continue
-		}
-		w("%-6d %-4d %-4d | %-22s %-22s", row.Params.EntryPct, row.Params.WindowS, row.Params.HoldS,
-			ttrCell(row.TTRToPreFault, row.NotRecoveredPre, row.HoldUnobservedPre), ttrCell(row.TTRToEquilibrium, row.NotRecoveredEq, row.HoldUnobservedEq))
-	}
-	w("")
-
-	w("== Recovery decomposition (§5: only measured boundaries are claimed) ==")
-	for _, seg := range art.Decomposition.Segments {
-		if seg.Measured {
-			w("%-20s [%s] measured: %.2fs", seg.Name, seg.Source, *seg.DurationS())
+	if !h {
+		ta := art.ThresholdAnalysis
+		w("== Modal during-fault latency vs thresholds (§4) ==")
+		if ta.Valid {
+			w("baseline SD: TTFT %.2fms, e2e %.2fms; modal during-fault: TTFT %.1fms, e2e %.1fms", ta.BaselineTTFTSDMs, ta.BaselineE2ESDMs, ta.ModalFaultTTFTMs, ta.ModalFaultE2EMs)
+			w("TTFT threshold distances (baseline SDs, signed modal-threshold): %v", ta.TTFTThresholdSDs)
+			w("e2e  threshold distances (baseline SDs, signed modal-threshold): %v", ta.E2EThresholdSDs)
 		} else {
-			w("%-20s [%s] N/A: %s", seg.Name, seg.Source, seg.Note)
+			w("not computable: %s", ta.Note)
 		}
+		w("")
+
+		d := art.Detector
+		w("== Recovery (two baselines, hysteresis; §5) ==")
+		w("pre-fault baseline goodput: %.4f", d.PreFaultBaseline)
+		if d.EquilibriumEstimable {
+			w("single-replica equilibrium baseline: %.4f (degraded plateau [%.0fs, %.0fs) of run time)", d.EquilibriumBaseline, d.EquilibriumWindowStartS, d.EquilibriumWindowEndS)
+		} else {
+			w("single-replica equilibrium baseline: NOT ESTIMABLE (%s)", d.EquilibriumNote)
+		}
+		// TTR and deficit against a non-estimable equilibrium are N/A (§5).
+		eqTTR := "n/a (" + d.EquilibriumNote + ")"
+		eqDeficit := "n/a"
+		if d.EquilibriumEstimable {
+			eqTTR = ttrText(d.ToEquilibrium)
+			eqDeficit = fmt.Sprintf("%.2f", d.DeficitToEquilibrium)
+		}
+		if d.PartitionHealRecovery != nil {
+			w("goodput-threshold crossing:   %s (raw; may precede the heal)", ttrText(d.ToPreFault))
+			w("partition-heal recovery:      %s (first held entry at or after the heal anchor, +%.0fs; §5)", ttrText(*d.PartitionHealRecovery), float64(*d.HealAnchorNs-fireAnchorNs(art))/1e9)
+			if d.DeficitToPartitionHeal != nil {
+				w("integrated goodput deficit to partition-heal recovery: %.2f goodput-seconds", *d.DeficitToPartitionHeal)
+			}
+		} else {
+			w("TTR to pre-fault baseline:    %s", ttrText(d.ToPreFault))
+		}
+		if art.Config.Fault.Variant == config.VariantProcessKill {
+			w("TTR to equilibrium baseline:  not applicable under process kill, which has no survivor (§5)")
+		} else {
+			w("TTR to equilibrium baseline:  %s; the baseline is a within-run operating point under deliberate overload, shaped by the pinned 30 s client timeout (§5)", eqTTR)
+		}
+		w("integrated goodput deficit: %.2f (vs pre-fault), %s (vs equilibrium) goodput-seconds", d.DeficitToPreFault, eqDeficit)
+		compNames := make([]string, 0, len(d.Components))
+		for n := range d.Components {
+			compNames = append(compNames, n)
+		}
+		sort.Strings(compNames)
+		for _, n := range compNames {
+			w("component %-11s %s", n+":", ttrText(d.Components[n]))
+		}
+		w("backlog drain: measured=%v (%s)", d.BacklogDrainMeasured, d.BacklogDrainNote)
+		w("")
+		w("== Sensitivity table (X x R x H; §5) ==")
+		if d.PartitionHealRecovery != nil {
+			w("%-6s %-4s %-4s | %-22s %-22s %-22s", "entry", "R", "H", "crossing (raw)", "partition-heal", "TTR->equilibrium")
+		} else {
+			w("%-6s %-4s %-4s | %-22s %-22s", "entry", "R", "H", "TTR->prefault", "TTR->equilibrium")
+		}
+		for _, row := range d.Sensitivity {
+			if d.PartitionHealRecovery != nil {
+				w("%-6d %-4d %-4d | %-22s %-22s %-22s", row.Params.EntryPct, row.Params.WindowS, row.Params.HoldS,
+					ttrCell(row.TTRToPreFault, row.NotRecoveredPre, row.HoldUnobservedPre), ttrCell(row.TTRPartitionHeal, row.NotRecoveredHeal, row.HoldUnobservedHeal), ttrCell(row.TTRToEquilibrium, row.NotRecoveredEq, row.HoldUnobservedEq))
+				continue
+			}
+			w("%-6d %-4d %-4d | %-22s %-22s", row.Params.EntryPct, row.Params.WindowS, row.Params.HoldS,
+				ttrCell(row.TTRToPreFault, row.NotRecoveredPre, row.HoldUnobservedPre), ttrCell(row.TTRToEquilibrium, row.NotRecoveredEq, row.HoldUnobservedEq))
+		}
+		w("")
+
+		w("== Recovery decomposition (§5: only measured boundaries are claimed) ==")
+		for _, seg := range art.Decomposition.Segments {
+			if seg.Measured {
+				w("%-20s [%s] measured: %.2fs", seg.Name, seg.Source, *seg.DurationS())
+			} else {
+				w("%-20s [%s] N/A: %s", seg.Name, seg.Source, seg.Note)
+			}
+		}
+		if len(art.Decomposition.LogFigures) > 0 {
+			w("figures printed in the server log: %s", figuresText(art.Decomposition.LogFigures))
+		}
+		w("")
 	}
-	if len(art.Decomposition.LogFigures) > 0 {
-		w("figures printed in the server log: %s", figuresText(art.Decomposition.LogFigures))
-	}
-	w("")
 	if r.ValidityGates != nil {
 		w("== Run-validity gates (§10 G1-G7) ==")
 		for _, g := range r.ValidityGates.Gates {
