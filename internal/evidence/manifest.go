@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +17,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/redact"
+	"github.com/percentes/percentes/internal/run"
 	"github.com/percentes/percentes/internal/validity"
 )
 
@@ -76,6 +78,38 @@ type Manifest struct {
 	RunValid       bool            `json:"run_valid"`
 	InvalidReasons []string        `json:"invalid_reasons,omitempty"`
 	Gates          []validity.Gate `json:"gates,omitempty"`
+	// Replay is what the report pair reads beside the config and the
+	// attempts file; absent for a run that ended in an error.
+	Replay *run.Record `json:"replay,omitempty"`
+}
+
+// Artifact returns the reference of the published file name, or nil.
+func (m *Manifest) Artifact(name string) *FileRef {
+	for i := range m.Artifacts {
+		if m.Artifacts[i].Name == name {
+			return &m.Artifacts[i]
+		}
+	}
+	return nil
+}
+
+// ReadManifest reads a manifest file, refusing fields Manifest does not
+// define and data after it.
+func ReadManifest(path string) (*Manifest, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("evidence: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var m Manifest
+	if err := dec.Decode(&m); err != nil {
+		return nil, fmt.Errorf("evidence: %s: %w", ManifestFile, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("evidence: %s: data after the manifest", ManifestFile)
+	}
+	return &m, nil
 }
 
 // Source is the instrument build. Diff is the operator's source_diff
@@ -176,7 +210,8 @@ func CheckSource(info *debug.BuildInfo, op *Operator) error {
 }
 
 // ManifestInput is what a run's manifest is built from. The paths name
-// files already written; Gates is nil for a run that ended in an error.
+// files already written; Gates and Replay are nil for a run that ended in
+// an error.
 type ManifestInput struct {
 	Config *config.Config
 	// ConfigName names the configuration file.
@@ -199,6 +234,7 @@ type ManifestInput struct {
 	Gates          *validity.Report
 	RunValid       bool
 	InvalidReasons []string
+	Replay         *run.Record
 }
 
 // NewManifest builds the manifest of one hosted run.
@@ -220,6 +256,7 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		Artifacts:      []FileRef{},
 		RunValid:       in.RunValid,
 		InvalidReasons: in.InvalidReasons,
+		Replay:         in.Replay,
 	}
 	if d := op.find(RecordSourceDiff); d != nil {
 		ref := d.FileRef

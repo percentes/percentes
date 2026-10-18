@@ -7,6 +7,7 @@
 package evidence
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -181,6 +182,74 @@ func scoreOf(s *score.Scorer, rec *Record, expected string) *Score {
 	out.Class, out.Route, out.Reason, out.Late = v.Class, v.Route, v.Reason, v.Late
 	return out
 }
+
+// Request is the request rec records. The fields the per-attempt record
+// does not carry are zero: inter-token gaps, replica, reasoning text, the
+// non-200 body and the frames.
+func (rec *Record) Request() loadgen.Request {
+	r := loadgen.Request{
+		Index:             rec.Index,
+		IntendedNs:        rec.IntendedNs,
+		DispatchNs:        rec.DispatchNs,
+		FirstTokNs:        rec.FirstTokNs,
+		DoneNs:            rec.DoneNs,
+		Outcome:           rec.Outcome,
+		ErrClass:          rec.ErrClass,
+		Tokens:            rec.ContentEvents,
+		Usage:             rec.Usage,
+		FinishReason:      rec.FinishReason,
+		ReportedModel:     rec.ReportedModel,
+		SystemFingerprint: rec.SystemFingerprint,
+		ModelMismatch:     rec.ModelMismatch,
+		StreamError:       rec.StreamError,
+		ReasoningChunks:   rec.ReasoningChunks,
+		FirstReasoningNs:  rec.FirstReasoningNs,
+		UnknownEvents:     rec.UnknownEvents,
+		Proto:             rec.Protocol,
+		Status:            rec.Status,
+		Headers:           rec.Headers,
+		PeerAddr:          rec.PeerAddr,
+		ConnReused:        rec.ConnReused,
+		ErrText:           rec.ErrText,
+	}
+	if rec.CompletionTokens != nil {
+		r.CompletionTokens, r.UsageSeen = *rec.CompletionTokens, true
+	}
+	if rec.Answer != nil {
+		r.Content = *rec.Answer
+	}
+	return r
+}
+
+// ReadRecords reads a per-attempt file: one record per line, in index
+// order from 0, with no field Record does not define.
+func ReadRecords(r io.Reader) ([]Record, error) {
+	var out []Record
+	sc := bufio.NewScanner(r)
+	sc.Buffer(nil, recordLineLimit)
+	for sc.Scan() {
+		dec := json.NewDecoder(bytes.NewReader(sc.Bytes()))
+		dec.DisallowUnknownFields()
+		var rec Record
+		if err := dec.Decode(&rec); err != nil {
+			return nil, fmt.Errorf("evidence: attempts line %d: %w", len(out)+1, err)
+		}
+		if _, err := dec.Token(); err != io.EOF {
+			return nil, fmt.Errorf("evidence: attempts line %d: data after the record", len(out)+1)
+		}
+		if rec.Index != int64(len(out)) {
+			return nil, fmt.Errorf("evidence: attempts line %d: index %d, want %d", len(out)+1, rec.Index, len(out))
+		}
+		out = append(out, rec)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("evidence: attempts line %d: %w", len(out)+1, err)
+	}
+	return out, nil
+}
+
+// recordLineLimit bounds one per-attempt line.
+const recordLineLimit = 16 << 20
 
 // Write writes recs to w, one JSON object per line.
 func Write(w io.Writer, recs []Record) error {

@@ -119,6 +119,23 @@ type Observed struct {
 // AttachObservations keeps the sample series and reduces it with the
 // canary streams over every collected window (§2).
 func (a *Artifacts) AttachObservations(o Observed) {
+	canaryError := ""
+	if o.CanaryErr != nil {
+		canaryError = o.CanaryErr.Error()
+	}
+	a.attach(o, canaryError, func(w collect.Window) *loadgen.CanarySummary {
+		if o.Canary == nil {
+			return nil
+		}
+		s := loadgen.SummarizeCanary(o.Canary, w.StartNs, w.EndNs)
+		return &s
+	})
+}
+
+// attach keeps o's samples and builds the receive-path report of every
+// window not filtered to one replica, with canary giving the window's
+// canary summary; o's canary fields are not read.
+func (a *Artifacts) attach(o Observed, canaryError string, canary func(collect.Window) *loadgen.CanarySummary) {
 	a.ServerSamples, a.FamilyErrors = o.Samples, o.FamilyErrors
 	a.ReceivePath = map[string]*collect.ReceivePath{}
 	families := false
@@ -142,15 +159,8 @@ func (a *Artifacts) AttachObservations(o Observed) {
 			server = serverstats.ReduceWindow(o.Samples, a.Loadgen.EpochWall, w.StartNs, w.EndNs)
 			a.ServerSide[name] = server
 		}
-		var summary *loadgen.CanarySummary
-		if o.Canary != nil {
-			s := loadgen.SummarizeCanary(o.Canary, w.StartNs, w.EndNs)
-			summary = &s
-		}
-		rp := collect.ReceivePathFor(st, server, o.TTFTFamily, summary)
-		if o.CanaryErr != nil {
-			rp.CanaryError = o.CanaryErr.Error()
-		}
+		rp := collect.ReceivePathFor(st, server, o.TTFTFamily, canary(w))
+		rp.CanaryError = canaryError
 		a.ReceivePath[name] = rp
 	}
 }
@@ -188,11 +198,6 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	// §5 decomposition probes run DURING the fault window: they start at
 	// the planned fire time and poll until first success or the window
 	// timeout. Launched here so their clocks share the run epoch.
-	type probeOutcome struct {
-		name string
-		at   time.Time
-		err  error
-	}
 	probeCh := make(chan probeOutcome, 2)
 	probes := 0
 	probeTarget := probeTargetFor(cfg)
@@ -238,6 +243,44 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	if err := <-orchDone; err != nil {
 		return art.failed(fmt.Errorf("run: orchestrator: %w", err))
 	}
+	in := runInputs{orch: orch, victim: opts.VictimReplica}
+	for i := 0; i < probes; i++ {
+		select {
+		case p := <-probeCh:
+			in.probes = append(in.probes, p)
+		case <-time.After(10 * time.Second):
+			// Probe goroutines are deadline-bounded before run end; this
+			// is a defensive backstop only.
+		}
+	}
+	if scheduleDriven && opts.AdminURL != "" {
+		if n, ferr := scheduleFires(ctx, opts.AdminURL, epoch); ferr == nil {
+			in.scheduleFired = &n
+		}
+	}
+	return analyze(art, in)
+}
+
+// probeOutcome is one §5 probe's first success, or its failure.
+type probeOutcome struct {
+	name string
+	at   time.Time
+	err  error
+}
+
+// runInputs are what the analysis reads beside the config and the
+// loadgen result.
+type runInputs struct {
+	orch          *orchestrator.Timestamps
+	victim        string
+	probes        []probeOutcome
+	scheduleFired *int
+}
+
+// analyze computes art's windows, detector, accounting, gates and
+// decomposition from art.Config, art.Loadgen and inputs.
+func analyze(art *Artifacts, inputs runInputs) (*Artifacts, error) {
+	cfg, res, orch := art.Config, art.Loadgen, inputs.orch
 	art.Orchestration = orch
 
 	// Actual fire time: injector-observed when orchestrated, planned
@@ -289,7 +332,7 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	}
 	var split []collect.Window
 	// The §3 survivor cohort.
-	if survivor := survivorOf(res.Requests, res.WarmupEndNs, guardStartNs, opts.VictimReplica); survivor != "" {
+	if survivor := survivorOf(res.Requests, res.WarmupEndNs, guardStartNs, inputs.victim); survivor != "" {
 		split = append(split, collect.Window{Name: "fault_survivor", StartNs: res.TInjectNs, EndNs: res.FaultEndNs, Replica: survivor})
 	}
 	if at := recovery.RecoveredAtNs; at != nil && *at > res.TInjectNs && *at < res.FaultEndNs {
@@ -305,9 +348,9 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 		art.Windows[w.Name] = st
 	}
 
-	art.VictimReplica = opts.VictimReplica
-	art.InFlight = collect.AccountInFlight(res.Requests, art.ActualFireNs, opts.VictimReplica)
-	art.ShareGate = shareGate(cfg, res, guardStartNs, opts.VictimReplica)
+	art.VictimReplica = inputs.victim
+	art.InFlight = collect.AccountInFlight(res.Requests, art.ActualFireNs, inputs.victim)
+	art.ShareGate = shareGate(cfg, res, guardStartNs, inputs.victim)
 	art.ThresholdAnalysis = collect.AnalyzeThresholds(cfg, art.Windows["baseline"], art.Windows["fault"])
 
 	// §5 decomposition: the probes launched at fire time report their
@@ -315,14 +358,8 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 	// N/A); goodput-restored comes from the detector.
 	art.Decomposition = detect.NewDecomposition(cfg.Fault.Variant)
 	fireWall := res.EpochWall.Add(time.Duration(art.ActualFireNs))
-	for i := 0; i < probes; i++ {
-		select {
-		case p := <-probeCh:
-			recordProbe(art.Decomposition, p.name, fireWall, p.at, p.err)
-		case <-time.After(10 * time.Second):
-			// Probe goroutines are deadline-bounded before run end; this
-			// is a defensive backstop only.
-		}
+	for _, p := range inputs.probes {
+		recordProbe(art.Decomposition, p.name, fireWall, p.at, p.err)
 	}
 	if at := recovery.RecoveredAtNs; at != nil {
 		art.Decomposition.SetMeasured("goodput_restored", fireWall, res.EpochWall.Add(time.Duration(*at)))
@@ -342,11 +379,7 @@ func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts,
 		art.Decomposition.SetMeasured("routing_propagation", *ready.EndAt, *traffic.EndAt)
 	}
 
-	if scheduleDriven && opts.AdminURL != "" {
-		if n, ferr := scheduleFires(ctx, opts.AdminURL, epoch); ferr == nil {
-			art.ScheduleFired = &n
-		}
-	}
+	art.ScheduleFired = inputs.scheduleFired
 	art.RunValid, art.InvalidReasons = validity(art)
 	return art, nil
 }

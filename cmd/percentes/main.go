@@ -6,13 +6,20 @@
 // clock offset that --clock-sync reads at run start, the endpoint status
 // that --status-cmd reads at run start and end, and the run manifest,
 // which hashes those files, the config, the --operator records and the
-// --ledger position. Exit codes:
-// 0 = run valid, 2 = run completed but a run-failing gate marked it
-// invalid, 1 = execution error.
+// --ledger position. A hosted run's report pair is rendered from its
+// manifest, its per-attempt file and the config file alone; --replay DIR
+// renders it again from those three, writes it to --out and compares it
+// with the pair DIR's manifest names. Exit codes:
+// 0 = run valid, or the replayed pair matches byte for byte; 2 = run
+// completed but a run-failing gate marked it invalid; 1 = execution
+// error, or a replayed pair that differs.
 package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -47,7 +54,19 @@ func main() {
 	statusCmd := flag.String("status-cmd", "", "endpoint-status command run at run start and at run end, split on spaces with no shell (hosted targets, required); writes "+evidence.StatusStartFile+" and "+evidence.StatusEndFile+" to --out")
 	operatorPath := flag.String("operator", "", "operator file naming the provider, account tier, client host and the record files the run relies on, hashed at start and copied beside the frames (hosted targets, required)")
 	ledgerPath := flag.String("ledger", "", "admission ledger whose position at run start "+evidence.ManifestFile+" records (hosted targets)")
+	replayDir := flag.String("replay", "", "output directory of a finished hosted run: render its report pair again from "+evidence.ManifestFile+", "+evidence.AttemptsFile+" and --config into --out, and compare it with the pair the manifest names")
 	flag.Parse()
+	if *replayDir != "" {
+		if *configPath == "" {
+			log.Fatal("percentes: --replay needs --config, the run's configuration file")
+		}
+		jsonPath, txtPath, err := replay(*replayDir, *configPath, *outDir)
+		if err != nil {
+			log.Fatalf("percentes: %v", err)
+		}
+		fmt.Printf("report pair reproduced byte for byte: %s, %s\n", jsonPath, txtPath)
+		return
+	}
 	for name, u := range map[string]string{"--probe-direct": *probeDirect, "--probe-service": *probeService} {
 		if u == "" {
 			continue
@@ -85,6 +104,9 @@ func main() {
 		}
 		if err := evidence.CheckSource(build, op); err != nil {
 			log.Fatalf("percentes: %v", err)
+		}
+		if *adminURL != "" || *victim != "" || *probeDirect != "" || *probeService != "" {
+			log.Fatal("percentes: --admin-url, --victim, --probe-direct and --probe-service apply to self-hosted targets only")
 		}
 	} else if *framesRoot != "" || *clockSync != "" || *statusCmd != "" || *operatorPath != "" || *ledgerPath != "" {
 		log.Fatal("percentes: --frames, --clock-sync, --status-cmd, --operator and --ledger apply to hosted targets only")
@@ -183,8 +205,8 @@ func main() {
 			log.Printf("percentes: frames and operator records written: %s", filepath.Dir(framesPath))
 		}
 	}
-	writeManifest := func(gates *validity.Report, artifacts ...string) (string, error) {
-		m, merr := evidence.NewManifest(evidence.ManifestInput{
+	newManifest := func(gates *validity.Report, rec *run.Record, artifacts ...string) (*evidence.Manifest, error) {
+		return evidence.NewManifest(evidence.ManifestInput{
 			Config:          cfg,
 			ConfigName:      filepath.Base(*configPath),
 			Target:          &cfg.Target,
@@ -202,11 +224,8 @@ func main() {
 			Gates:           gates,
 			RunValid:        art.RunValid,
 			InvalidReasons:  art.InvalidReasons,
+			Replay:          rec,
 		})
-		if merr != nil {
-			return "", merr
-		}
-		return evidence.WriteManifest(*outDir, m)
 	}
 	if err != nil {
 		if sampler != nil {
@@ -225,7 +244,12 @@ func main() {
 				if path != "" {
 					written = append(written, path)
 				}
-				if mpath, merr := writeManifest(nil, written...); merr != nil {
+				m, merr := newManifest(nil, nil, written...)
+				var mpath string
+				if merr == nil {
+					mpath, merr = evidence.WriteManifest(*outDir, m)
+				}
+				if merr != nil {
 					log.Printf("percentes: %v", merr)
 				} else {
 					log.Printf("percentes: manifest written: %s", mpath)
@@ -263,28 +287,31 @@ func main() {
 		log.Fatalf("percentes: %v", err)
 	}
 
-	rawJSON, humanText, err := report.Generate(art, &gates)
-	if err != nil {
-		log.Fatalf("percentes: %v", err)
-	}
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		log.Fatalf("percentes: %v", err)
-	}
-	jsonPath := filepath.Join(*outDir, "report.json")
-	txtPath := filepath.Join(*outDir, "report.txt")
-	if err := os.WriteFile(jsonPath, rawJSON, 0o644); err != nil {
-		log.Fatalf("percentes: %v", err)
-	}
-	if err := os.WriteFile(txtPath, []byte(humanText), 0o644); err != nil {
-		log.Fatalf("percentes: %v", err)
-	}
-
+	var jsonPath, txtPath, humanText string
 	if cfg.Target.Hosted {
-		mpath, merr := writeManifest(&gates, attemptsPath, jsonPath, txtPath)
+		m, merr := newManifest(&gates, art.Record(), attemptsPath)
 		if merr != nil {
 			log.Fatalf("percentes: %v", merr)
 		}
-		log.Printf("percentes: manifest written: %s", mpath)
+		if jsonPath, txtPath, humanText, err = report.WriteHostedPair(*outDir, cfg.Raw, m); err != nil {
+			log.Fatalf("percentes: %v", err)
+		}
+		log.Printf("percentes: manifest written: %s", filepath.Join(*outDir, evidence.ManifestFile))
+	} else {
+		rawJSON, text, err := report.Generate(art, &gates)
+		if err != nil {
+			log.Fatalf("percentes: %v", err)
+		}
+		if err := os.MkdirAll(*outDir, 0o755); err != nil {
+			log.Fatalf("percentes: %v", err)
+		}
+		jsonPath, txtPath, humanText = filepath.Join(*outDir, report.JSONFile), filepath.Join(*outDir, report.TextFile), text
+		if err := os.WriteFile(jsonPath, rawJSON, 0o644); err != nil {
+			log.Fatalf("percentes: %v", err)
+		}
+		if err := os.WriteFile(txtPath, []byte(humanText), 0o644); err != nil {
+			log.Fatalf("percentes: %v", err)
+		}
 	}
 
 	fmt.Println(humanText)
@@ -293,4 +320,54 @@ func main() {
 		fmt.Println("RUN INVALID (run-failing gate):", art.InvalidReasons)
 		os.Exit(2)
 	}
+}
+
+// replay renders the report pair of the hosted run in dir from its
+// manifest, its attempts file and the config at cfgPath, writes it to
+// out, and returns an error unless both files match the manifest's
+// references byte for byte.
+func replay(dir, cfgPath, out string) (string, string, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", "", err
+	}
+	absOut, err := filepath.Abs(out)
+	if err != nil {
+		return "", "", err
+	}
+	if absDir == absOut {
+		return "", "", errors.New("--out must differ from the --replay directory")
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return "", "", err
+	}
+	rawJSON, text, err := report.FromRun(dir, raw)
+	if err != nil {
+		return "", "", err
+	}
+	m, err := evidence.ReadManifest(filepath.Join(dir, evidence.ManifestFile))
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		return "", "", err
+	}
+	var differ []string
+	for _, f := range []struct {
+		name string
+		b    []byte
+	}{{report.JSONFile, rawJSON}, {report.TextFile, []byte(text)}} {
+		if err := os.WriteFile(filepath.Join(out, f.name), f.b, 0o644); err != nil {
+			return "", "", err
+		}
+		sum := sha256.Sum256(f.b)
+		if ref := m.Artifact(f.name); ref == nil || ref.SHA256 != hex.EncodeToString(sum[:]) {
+			differ = append(differ, f.name)
+		}
+	}
+	if len(differ) > 0 {
+		return "", "", fmt.Errorf("replayed %v in %s differ from the manifest's references", differ, out)
+	}
+	return filepath.Join(out, report.JSONFile), filepath.Join(out, report.TextFile), nil
 }

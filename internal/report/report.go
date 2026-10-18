@@ -76,6 +76,11 @@ func instrumentCommit() string {
 			dirty = s.Value == "true"
 		}
 	}
+	return commitText(rev, dirty)
+}
+
+// commitText is a VCS revision as the reports record it.
+func commitText(rev string, dirty bool) string {
 	if rev == "" {
 		return "unknown"
 	}
@@ -87,6 +92,12 @@ func instrumentCommit() string {
 
 // Generate renders both artifacts from one run.
 func Generate(art *run.Artifacts, gates *validity.Report) ([]byte, string, error) {
+	return generate(art, gates, instrumentCommit())
+}
+
+// generate renders both artifacts from one run produced by the instrument
+// at commit.
+func generate(art *run.Artifacts, gates *validity.Report, commit string) ([]byte, string, error) {
 	cfgRaw := art.Config.Raw
 	if len(cfgRaw) == 0 {
 		var err error
@@ -100,7 +111,7 @@ func Generate(art *run.Artifacts, gates *validity.Report) ([]byte, string, error
 	rep := &Report{
 		SchemaVersion:    2,
 		ConfigSHA256:     fmt.Sprintf("%x", sha256.Sum256(cfgRaw)),
-		InstrumentCommit: instrumentCommit(),
+		InstrumentCommit: commit,
 		Caveat:           CaveatFor(art.Config.Fault.Variant, art.Config.Profile),
 		Headline:         headline(art),
 		ValidityGates:    gates,

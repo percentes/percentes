@@ -312,10 +312,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	provision := int(cfg.Load.RateRPS*float64(config.PinnedClientTimeoutS)*2) + cfg.Load.Connections
 	transport := NewTransport(provision)
 	defer transport.CloseIdleConnections()
-	model := cfg.Target.ModelName
-	if model == "" {
-		model = "percentes-mock"
-	}
+	model := RequestedModel(cfg)
 	var apiKey string
 	if cfg.Target.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Target.APIKeyEnv)
@@ -333,14 +330,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		trip:   newTripwire(cfg, len(schedule)),
 	}
 
-	p := cfg.Run.Phases
-	res := &Result{
-		WarmupEndNs:   int64(p.WarmupS * 1e9),
-		BaselineEndNs: int64((p.WarmupS + p.BaselineS) * 1e9),
-		FaultEndNs:    int64((p.WarmupS + p.BaselineS + p.FaultWindowTimeoutS) * 1e9),
-		RunEndNs:      int64((p.WarmupS + p.BaselineS + p.FaultWindowTimeoutS + p.CooldownS) * 1e9),
-		TInjectNs:     int64((p.WarmupS + cfg.Fault.TInjectOffsetS) * 1e9),
-	}
+	res := NewResult(cfg)
 
 	requests := make([]Request, len(schedule))
 	for i, off := range schedule {
@@ -420,6 +410,31 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		return res, err
 	}
 	return res, nil
+}
+
+// NewResult returns an empty result carrying cfg's phase boundaries.
+func NewResult(cfg *config.Config) *Result {
+	p := cfg.Run.Phases
+	return &Result{
+		WarmupEndNs:   int64(p.WarmupS * 1e9),
+		BaselineEndNs: int64((p.WarmupS + p.BaselineS) * 1e9),
+		FaultEndNs:    int64((p.WarmupS + p.BaselineS + p.FaultWindowTimeoutS) * 1e9),
+		RunEndNs:      int64((p.WarmupS + p.BaselineS + p.FaultWindowTimeoutS + p.CooldownS) * 1e9),
+		TInjectNs:     int64((p.WarmupS + cfg.Fault.TInjectOffsetS) * 1e9),
+	}
+}
+
+// RequestedModel is the model id every request of a run under cfg sends.
+func RequestedModel(cfg *config.Config) string {
+	if cfg.Target.ModelName == "" {
+		return "percentes-mock"
+	}
+	return cfg.Target.ModelName
+}
+
+// CompareModels fills res's model fields from its requests, as Run does.
+func CompareModels(cfg *config.Config, res *Result) {
+	compareModels(cfg, RequestedModel(cfg), res)
 }
 
 // interruption counts a stopped run's requests.
