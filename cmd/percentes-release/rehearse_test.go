@@ -134,8 +134,8 @@ func TestRehearse(t *testing.T) {
 // The rehearse command refuses a missing flag, a scale whose step is
 // shorter than the CPU window, a missing byte cap, a frame store in the
 // source tree, an empty master seed, a clock-sync command it cannot
-// parse, too few open files and a build from a modified tree without its
-// diff, and writes nothing.
+// parse, an --out path holding white space, too few open files and a
+// build from a modified tree without its diff, and writes nothing.
 func TestRehearseRefusals(t *testing.T) {
 	enoughOpenFiles(t)
 	out := filepath.Join(t.TempDir(), "rehearsal")
@@ -156,6 +156,7 @@ func TestRehearseRefusals(t *testing.T) {
 		{[]string{"--out", out, "--frames", ".", "--clock-sync", "chronyc tracking", "--byte-cap", "2000"}, minOpenFiles, "inside the instrument source tree"},
 		{[]string{"--out", out, "--frames", frames, "--clock-sync", "ntpdate -q pool", "--byte-cap", "2000"}, minOpenFiles, "clock-sync command"},
 		{with("--byte-cap", "2000", "--master-seed", ""), minOpenFiles, "--master-seed is empty"},
+		{[]string{"--out", out + " two", "--frames", frames, "--clock-sync", "chronyc tracking", "--byte-cap", "2000"}, minOpenFiles, "holds white space"},
 		{with("--byte-cap", "2000"), 10240, "open-file limit 10240"},
 	} {
 		openFilesLimit = func() (uint64, error) { return tc.files, nil }
@@ -170,7 +171,9 @@ func TestRehearseRefusals(t *testing.T) {
 	if _, err := rehearse(context.Background(), in); err == nil || !strings.Contains(err.Error(), "--source-diff is required") {
 		t.Errorf("modified build: %v", err)
 	}
-	if _, err := os.Stat(out); !os.IsNotExist(err) {
-		t.Errorf("%s: %v, want nothing written", out, err)
+	for _, p := range []string{out, out + " two"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s: %v, want nothing written", p, err)
+		}
 	}
 }

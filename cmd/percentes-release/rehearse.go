@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/percentes/percentes/configs"
 	"github.com/percentes/percentes/internal/admission"
@@ -39,6 +40,10 @@ const rehearsalFile = "rehearsal.json"
 
 // rehearsalURL stands in for every documentation URL of a mock route.
 const rehearsalURL = "https://mock.invalid/percentes-rehearsal"
+
+// rehearsalNote is the file every record of the mock routes' operator
+// file names.
+const rehearsalNote = "rehearsal.txt"
 
 // mockForm is one of the release's request forms: a route name, its
 // adapter, credential header, URL path and literal body, and whether its
@@ -368,6 +373,9 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	if _, err := evidence.ParseClockCommand(in.clockSync); err != nil {
 		return exitError, err
 	}
+	if strings.ContainsFunc(in.out, unicode.IsSpace) {
+		return exitError, fmt.Errorf("rehearse: --out %q holds white space, which the mock routes' refresh command, split on spaces, cannot carry", in.out)
+	}
 	if _, err := checkOpenFiles(); err != nil {
 		return exitError, err
 	}
@@ -390,6 +398,8 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	// The mock routes' refresh command touches the note every record names.
+	refreshCmd := "touch " + filepath.Join(inputs, rehearsalNote)
 
 	n := len(releaseForms)
 	mocks := make([]*mock.Server, 0, n)
@@ -466,7 +476,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		}
 		r, err := newRoute(routeInput{
 			cfg: cfg, configName: name + ".yaml", schedulePath: schedulePath, out: in.out, ledgerPath: ledgerPath,
-			framesRoot: in.frames, clockSync: in.clockSync, statusCmd: "true", balanceCmd: mockBalanceCmd(cfg), opPath: opPath,
+			framesRoot: in.frames, clockSync: in.clockSync, statusCmd: "true", balanceCmd: mockBalanceCmd(cfg), refreshCmd: refreshCmd, opPath: opPath,
 			probeFiles: []string{probePath}, byteCap: in.byteCap, accountCreated: today, build: in.build,
 		})
 		if err != nil {
@@ -649,8 +659,7 @@ func newDir(dir string) error {
 // every required record naming one note file, with the source diff
 // copied beside it when one is given, and returns the file's path.
 func writeRehearsalOperator(dir, today, sourceDiff string) (string, error) {
-	const note = "rehearsal.txt"
-	if err := os.WriteFile(filepath.Join(dir, note), []byte("Percentes rehearsal: mock routes served on loopback by the runner's own process. This file stands in for every provider record.\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, rehearsalNote), []byte("Percentes rehearsal: mock routes served on loopback by the runner's own process. This file stands in for every provider record.\n"), 0o644); err != nil {
 		return "", err
 	}
 	type record struct {
@@ -662,7 +671,7 @@ func writeRehearsalOperator(dir, today, sourceDiff string) (string, error) {
 	var recs []record
 	for _, k := range []string{evidence.RecordLimits, evidence.RecordPrices, evidence.RecordQuota, evidence.RecordTerms, evidence.RecordStatusMapping,
 		evidence.RecordEligibility, evidence.RecordDedicatedAccount, evidence.RecordAffiliation} {
-		recs = append(recs, record{Kind: k, Path: note, URL: rehearsalURL, Retrieved: today})
+		recs = append(recs, record{Kind: k, Path: rehearsalNote, URL: rehearsalURL, Retrieved: today})
 	}
 	if sourceDiff != "" {
 		b, err := os.ReadFile(sourceDiff)

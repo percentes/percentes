@@ -144,6 +144,7 @@ func TestNewRouteRefusals(t *testing.T) {
 		{"unstamped build", func(t *testing.T, f *fixture) { f.in.build = nil }, "no version-control revision"},
 		{"frames in the tree", func(t *testing.T, f *fixture) { f.in.framesRoot = "." }, "frame"},
 		{"no balance command", func(t *testing.T, f *fixture) { f.in.balanceCmd = " " }, "no balance command"},
+		{"no refresh command", func(t *testing.T, f *fixture) { f.in.refreshCmd = "" }, "no operator-records refresh command"},
 		{"caps differ", func(t *testing.T, f *fixture) { f.in.cfg.Release.Caps.RouteUSD = "9" }, "ledger cap for route groq"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -13,8 +13,8 @@ import (
 const DocTier = "account_tier"
 
 // driftKinds are the operator record kinds the drift rule compares: the
-// tier's published limits and the model documentation.
-var driftKinds = []string{evidence.RecordLimits, evidence.RecordEligibility}
+// kinds a release cell re-records at its start.
+var driftKinds = evidence.RefreshedRecords
 
 // DocRecord is one entry of the documentation state a cell recorded at
 // its start under SPEC-HOSTED §4's drift rule: the account tier, or a

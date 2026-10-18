@@ -198,6 +198,54 @@ func TestOperatorCopies(t *testing.T) {
 	}
 }
 
+// Refreshed refuses the records whose limits or eligibility file was
+// last modified before the refresh started, to the second, naming each
+// and dating none; otherwise it dates those two by their files'
+// modification times and leaves the other records' dates as written.
+func TestOperatorRefreshed(t *testing.T) {
+	path := writeOperator(t, operatorJSON)
+	start := time.Date(2026, 10, 17, 6, 0, 0, 500_000_000, time.UTC)
+	touch := func(name string, at time.Time) {
+		t.Helper()
+		if err := os.Chtimes(filepath.Join(filepath.Dir(path), name), at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refreshed := func() (*Operator, error) {
+		t.Helper()
+		op, err := LoadOperator(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return op, op.Refreshed(start)
+	}
+	for name := range recordFiles {
+		touch(name, start.Add(-5*time.Second))
+	}
+	op, err := refreshed()
+	if err == nil || !strings.Contains(err.Error(), "limits record limits.png last modified 2026-10-17T05:59:55Z") ||
+		!strings.Contains(err.Error(), "eligibility record eligibility.md") || strings.Contains(err.Error(), "quota") {
+		t.Fatalf("all stale: %v", err)
+	}
+	if r := op.find(RecordLimits); r.Retrieved != "2026-10-06" {
+		t.Errorf("stale limits dated %s", r.Retrieved)
+	}
+	touch("limits.png", start.Add(3*time.Second))
+	if _, err := refreshed(); err == nil || strings.Contains(err.Error(), "limits") || !strings.Contains(err.Error(), "eligibility") {
+		t.Fatalf("eligibility stale: %v", err)
+	}
+	touch("eligibility.md", start.Add(-300*time.Millisecond))
+	op, err = refreshed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, want := range map[string]string{RecordLimits: "2026-10-17T06:00:03Z", RecordEligibility: "2026-10-17T06:00:00Z", RecordQuota: "2026-10-06", RecordPrices: "2026-10-06T19:40:00Z"} {
+		if r := op.find(kind); r.Retrieved != want {
+			t.Errorf("%s retrieved %s, want %s", kind, r.Retrieved, want)
+		}
+	}
+}
+
 func buildInfo(settings ...string) *debug.BuildInfo {
 	info := &debug.BuildInfo{GoVersion: runtime.Version()}
 	for i := 0; i+1 < len(settings); i += 2 {

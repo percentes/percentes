@@ -20,16 +20,20 @@ const (
 	BalanceEndFile   = "balance-end.json"
 )
 
+// RefreshFile is the record of the operator-records refresh command's run
+// at a release cell's start, in the cell's directory.
+const RefreshFile = "refresh.json"
+
 // statusTimeout bounds the endpoint-status command's run time.
 var statusTimeout = 30 * time.Second
 
 // statusOutputLimit bounds each of the command's output streams.
 const statusOutputLimit = 1 << 20
 
-// StatusRecord is one run of the operator's endpoint-status command, or
-// of its balance command, at run start or run end, with its output
-// verbatim and unparsed. Error is set when the command failed, timed out,
-// or printed past the size limit.
+// StatusRecord is one run of the operator's endpoint-status command or
+// balance command, at run start or run end, or of its operator-records
+// refresh command, with its output verbatim and unparsed. Error is set
+// when the command failed, timed out, or printed past the size limit.
 type StatusRecord struct {
 	Command  []string  `json:"command"`
 	StartUTC time.Time `json:"start_utc"`
@@ -63,6 +67,16 @@ func ParseBalanceCommand(s string) ([]string, error) {
 	args := strings.Fields(s)
 	if len(args) == 0 {
 		return nil, errors.New("evidence: no balance command")
+	}
+	return args, nil
+}
+
+// ParseRefreshCommand splits s on white space into the operator-records
+// refresh command's arguments.
+func ParseRefreshCommand(s string) ([]string, error) {
+	args := strings.Fields(s)
+	if len(args) == 0 {
+		return nil, errors.New("evidence: no operator-records refresh command")
 	}
 	return args, nil
 }

@@ -34,7 +34,8 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 
 // runCell runs one cell attempt (SPEC-HOSTED HA3 point 16) and returns its
 // record, also written to the cell's directory. A clock offset above the
-// pinned bound or a ledger refusal stops the route before any request; a
+// pinned bound or a ledger refusal stops the route before any request;
+// operator records not refreshed at the cell's start (cellOperator), a
 // failed balance check, a balance below the cell's reservation, or a
 // balance unavailable where the route records no balance_unavailable
 // ruling blocks the start before admission; a probe status that blocks
@@ -81,6 +82,17 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if ev.statusStart, err = evidence.WriteStatus(dir, evidence.StatusStartFile, evidence.ReadStatus(ctx, r.status)); err != nil {
 		return rec, err
 	}
+	refresh := evidence.ReadStatus(ctx, r.refresh)
+	if ev.refreshPath, err = evidence.WriteStatus(dir, evidence.RefreshFile, refresh); err != nil {
+		return rec, err
+	}
+	op, oerr := r.cellOperator(refresh)
+	var opFault string
+	if oerr != nil {
+		op = r.op
+		opFault = fmt.Sprintf("operator records not refreshed at the cell's start (SPEC-HOSTED §4): %v; the manifest carries the records read when the route started", oerr)
+	}
+	ev.op = op
 	offsets := loadgen.BuildSchedule(cfg)
 	tok := admission.ReleaseTokens(cfg)
 	st, err := r.ledger.State()
@@ -98,6 +110,10 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	}
 	if c := ev.clock; c.AbsOffsetS != nil && *c.AbsOffsetS > config.PinnedClockOffsetMaxS {
 		finish(outcomeStopped, (&routeStop{c.Flag}).Error())
+		return rec, r.retain(ctx, ev, rec, nil)
+	}
+	if opFault != "" {
+		finish(outcomeBlocked, opFault)
 		return rec, r.retain(ctx, ev, rec, nil)
 	}
 	if reason := balance.Check.Blocks(); reason != "" {
@@ -214,11 +230,12 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 
 // cellFiles are what a cell has recorded before its evidence is
 // retained: the running dispatch series, the clock record, the start
-// status and balance, the ledger position and the probe record where the
-// cell reached them. A missed or interrupted cell that labelCell labels
-// has no running series: own is its series as last written, lastUTC the
-// latest time its records show it running, and dispatched whether it
-// sent a ladder request.
+// status, refresh record and balance, the operator records it read, the
+// ledger position and the probe record where the cell reached them. A
+// missed or interrupted cell that labelCell labels has no running
+// series: own is its series as last written, lastUTC the latest time its
+// records show it running, and dispatched whether it sent a ladder
+// request.
 type cellFiles struct {
 	dir                    string
 	run                    schedule.Run
@@ -226,7 +243,9 @@ type cellFiles struct {
 	live                   *liveSeries
 	clock                  *evidence.ClockRecord
 	clockPath, statusStart string
+	refreshPath            string
 	balanceStart           string
+	op                     *evidence.Operator
 	ledger                 *evidence.LedgerRef
 	probePath              string
 
@@ -276,7 +295,7 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	}
 	framesPath, ferr := evidence.WriteRunFrames(r.framesRoot, res)
 	if ferr == nil {
-		ferr = r.op.WriteCopies(filepath.Dir(framesPath))
+		ferr = ev.op.WriteCopies(filepath.Dir(framesPath))
 	}
 	invalid := slices.Clone(rec.Reasons)
 	if rec.Outcome == outcomeCounted {
@@ -287,6 +306,9 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 		return errors.Join(ferr, err)
 	}
 	artifacts := []string{attempts}
+	if ev.refreshPath != "" {
+		artifacts = append(artifacts, ev.refreshPath)
+	}
 	if ev.probePath != "" {
 		artifacts = append(artifacts, ev.probePath)
 	}
@@ -315,7 +337,7 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 		Target:           &ev.cfg.Target,
 		Result:           res,
 		Build:            r.build,
-		Operator:         r.op,
+		Operator:         ev.op,
 		Ledger:           ev.ledger,
 		Clock:            ev.clock,
 		ClockPath:        ev.clockPath,
@@ -339,11 +361,38 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	return ferr
 }
 
+// cellOperator reads the operator file and every record it names again
+// after the cell's refresh command ran (SPEC-HOSTED §4 drift inside the
+// window), with each limits and eligibility record dated by its file's
+// modification time. It refuses a failed command, a file that does not
+// load or does not cover the build, and a limits or eligibility record
+// whose file was not rewritten since the command started. A nil refresh
+// reads the file as it stands.
+func (r *route) cellOperator(refresh *evidence.StatusRecord) (*evidence.Operator, error) {
+	if refresh != nil && refresh.Error != "" {
+		return nil, fmt.Errorf("refresh command: %s", refresh.Error)
+	}
+	op, err := evidence.LoadOperator(r.opPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := evidence.CheckSource(r.build, op); err != nil {
+		return nil, err
+	}
+	if refresh != nil {
+		if err := op.Refreshed(refresh.StartUTC); err != nil {
+			return nil, err
+		}
+	}
+	return op, nil
+}
+
 // labelCell writes the labelled manifest and report pair of a missed or
 // interrupted cell (SPEC-HOSTED HA3 point 16) from what its directory
-// holds: the clock record, start status and balance, probe record and
-// dispatch series the cell wrote, and each start record it did not write
-// read now. The empty attempts file is written first, so a label that
+// holds: the clock record, start status and balance, refresh record,
+// probe record and dispatch series the cell wrote, each start record it
+// did not write read now, and the operator file and its records as they
+// stand (cellOperator, with no refresh). The empty attempts file is written first, so a label that
 // fails part-way is never written again and the cell keeps its record.
 func (r *route) labelCell(ctx context.Context, rec *cellRecord) error {
 	run := rec.Run
@@ -391,6 +440,15 @@ func (r *route) labelCell(ctx context.Context, rec *cellRecord) error {
 	if p := filepath.Join(dir, probe.File); fileExists(p) {
 		ev.probePath = p
 	}
+	if p := filepath.Join(dir, evidence.RefreshFile); fileExists(p) {
+		ev.refreshPath = p
+	}
+	op, err := r.cellOperator(nil)
+	if err != nil {
+		op = r.op
+		rec.Reasons = append(rec.Reasons, fmt.Sprintf("operator records not read when the cell was labelled: %v; the manifest carries the records read when the route started", err))
+	}
+	ev.op = op
 
 	path := filepath.Join(dir, dispatchFile)
 	switch b, err := os.ReadFile(path); {

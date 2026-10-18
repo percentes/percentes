@@ -139,7 +139,8 @@ func testSchedule(t *testing.T, routes ...string) *schedule.Schedule {
 // newFixture writes every input of cfg's route: its schedule beside
 // "other", a ledger with the route's caps and price, an operator file, a
 // ceiling probe of each host of its model that passed at 512, a clock
-// reading of offset and a counting balance command.
+// reading of offset, a counting balance command and a refresh command
+// that touches the record file.
 func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	t.Helper()
 	dir := t.TempDir()
@@ -168,7 +169,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 		in: routeInput{
 			cfg: cfg, configName: "groq.yaml", schedulePath: writeFile(t, dir, "schedule.json", sb), out: t.TempDir(), ledgerPath: ledger,
 			framesRoot: t.TempDir(), clockSync: fakeSNTP(t, offset), statusCmd: "true", balanceCmd: fakeBalance(t), opPath: writeFile(t, dir, "operator.json", []byte(operatorJSON)),
-			probeFiles: probeFiles, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
+			refreshCmd: "touch " + filepath.Join(dir, "r.txt"), probeFiles: probeFiles, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
 		},
 		ledger: ledger,
 	}

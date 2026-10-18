@@ -102,8 +102,12 @@ type route struct {
 	clock      evidence.ClockCommand
 	status     []string
 	balance    []string
-	op         *evidence.Operator
-	build      *debug.BuildInfo
+	refresh    []string
+	// opPath is the operator file each cell reads again; op is the file
+	// as read when the route started.
+	opPath string
+	op     *evidence.Operator
+	build  *debug.BuildInfo
 
 	now  func() time.Time
 	wait func(ctx context.Context, t time.Time) error
@@ -127,7 +131,8 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	clockSync := fs.String("clock-sync", "", "host clock-sync command run before each cell, split on spaces with no shell (required)")
 	statusCmd := fs.String("status-cmd", "", "endpoint-status command run at each cell's start and end, split on spaces with no shell (required)")
 	balanceCmd := fs.String("balance-cmd", "", "account balance or quota command run at each cell's start and end, split on spaces with no shell, printing {\"amount_usd\": \"<decimal>\"} or {\"unavailable\": \"<reason>\"} (required)")
-	opPath := fs.String("operator", "", "the route's operator file (required)")
+	refreshCmd := fs.String("refresh-cmd", "", "operator-records refresh command run at each cell's start, split on spaces with no shell, rewriting the files of the operator file's limits and eligibility records (required)")
+	opPath := fs.String("operator", "", "the route's operator file, read again at each cell's start (required)")
 	var probeFiles listFlag
 	fs.Var(&probeFiles, "ceiling-probe", "a ceiling check record of a host of the route's model: every host's at 512, and at 1024 when one failed at 512 (repeatable, required)")
 	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
@@ -148,7 +153,7 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	build, _ := debug.ReadBuildInfo()
 	r, err := newRoute(routeInput{
 		cfg: cfg, configName: filepath.Base(*cfgPath), schedulePath: *schedulePath, out: *out, ledgerPath: *ledgerPath,
-		framesRoot: *framesRoot, clockSync: *clockSync, statusCmd: *statusCmd, balanceCmd: *balanceCmd, opPath: *opPath, probeFiles: probeFiles,
+		framesRoot: *framesRoot, clockSync: *clockSync, statusCmd: *statusCmd, balanceCmd: *balanceCmd, refreshCmd: *refreshCmd, opPath: *opPath, probeFiles: probeFiles,
 		byteCap: *byteCap, accountCreated: *accountCreated, build: build,
 	})
 	if err != nil {
@@ -166,7 +171,7 @@ type routeInput struct {
 	cfg                                       *config.Config
 	configName, schedulePath, out, ledgerPath string
 	framesRoot, clockSync, statusCmd, opPath  string
-	balanceCmd                                string
+	balanceCmd, refreshCmd                    string
 	probeFiles                                []string
 	byteCap                                   int
 	accountCreated                            string
@@ -195,7 +200,7 @@ func newRoute(in routeInput) (*route, error) {
 		return nil, err
 	}
 	r := &route{cfg: cfg, configName: in.configName, sched: sched, runs: runs, out: in.out, dir: filepath.Join(in.out, name),
-		ledgerPath: in.ledgerPath, framesRoot: in.framesRoot, build: in.build, now: time.Now, wait: waitUntil}
+		ledgerPath: in.ledgerPath, framesRoot: in.framesRoot, opPath: in.opPath, build: in.build, now: time.Now, wait: waitUntil}
 	r.cell, r.label = r.runCell, r.labelCell
 	for _, o := range sched.Offsets {
 		if o.Route == name {
@@ -222,6 +227,9 @@ func newRoute(in routeInput) (*route, error) {
 		return nil, err
 	}
 	if r.balance, err = evidence.ParseBalanceCommand(in.balanceCmd); err != nil {
+		return nil, err
+	}
+	if r.refresh, err = evidence.ParseRefreshCommand(in.refreshCmd); err != nil {
 		return nil, err
 	}
 

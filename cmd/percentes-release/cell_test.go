@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -829,5 +832,205 @@ func TestLabelMissedAndInterrupted(t *testing.T) {
 		if b, err := os.ReadFile(filepath.Join(r.cellDir(run), evidence.ManifestFile)); err != nil || !bytes.Equal(b, before[run.Label]) {
 			t.Fatalf("%s labelled again: %v", run.Label, err)
 		}
+	}
+}
+
+// refreshFixture gives f's operator file a limits record of its own,
+// limits.txt, and a refresh command that copies page over it and
+// touches the file of the other records, and returns the operator file's
+// directory.
+func refreshFixture(t *testing.T, f *fixture, page string) string {
+	t.Helper()
+	dir := filepath.Dir(f.in.opPath)
+	old := `{"kind": "limits", "path": "r.txt"`
+	if strings.Count(operatorJSON, old) != 1 {
+		t.Fatalf("operator fixture: %q not found once", old)
+	}
+	writeFile(t, dir, "operator.json", []byte(strings.Replace(operatorJSON, old, `{"kind": "limits", "path": "limits.txt"`, 1)))
+	writeFile(t, dir, "limits.txt", []byte("limits at the freeze"))
+	script := filepath.Join(t.TempDir(), "refresh")
+	body := "#!/bin/sh\ncat '" + page + "' > '" + filepath.Join(dir, "limits.txt") + "' && touch '" + filepath.Join(dir, "r.txt") + "'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.in.refreshCmd = script
+	return dir
+}
+
+// limitsRecord is m's limits record.
+func limitsRecord(t *testing.T, m *evidence.Manifest) evidence.OperatorRecord {
+	t.Helper()
+	for _, rec := range m.Records {
+		if rec.Kind == evidence.RecordLimits {
+			return rec
+		}
+	}
+	t.Fatalf("manifest records %+v: no limits record", m.Records)
+	return evidence.OperatorRecord{}
+}
+
+func sha(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// Each cell runs the refresh command and reads the operator file and its
+// records again: a limits page that changes between two cells of one
+// process reaches each cell's manifest and its record copies, dated when
+// the cell's refresh wrote it, and the route page names the change at the
+// second cell. A missed cell labelled later reads the file as it stands.
+func TestCellOperatorRefreshed(t *testing.T) {
+	fastDispatch(t)
+	enoughOpenFiles(t)
+	e := newEndpoint(t, always200)
+	cfgPath := routeConfigFile(t, "groq", e.url(), "10")
+	cfg, err := config.LoadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(cfg.Target.APIKeyEnv, testKey)
+	f := newFixture(t, cfg, "+0.005032")
+	page := writeFile(t, t.TempDir(), "page", []byte("limits v1"))
+	dir := refreshFixture(t, f, page)
+	r, err := newRoute(f.in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortLadder(r)
+	first, second, missed := r.runs[0], r.runs[1], r.runs[2]
+	var notCounted []string
+	for _, c := range []struct {
+		run    schedule.Run
+		limits string
+	}{{first, "limits v1"}, {second, "limits v2"}} {
+		writeFile(t, filepath.Dir(page), "page", []byte(c.limits))
+		begun := time.Now().Add(-2 * time.Second)
+		rec := runCellOK(t, r, c.run)
+		if rec.Outcome != outcomeCounted {
+			for _, reason := range rec.Reasons {
+				if !strings.HasPrefix(reason, "client-validity gate failed") && !strings.HasPrefix(reason, "ladder ended at step") {
+					t.Fatalf("%s: outcome %s, reason %q", c.run.Label, rec.Outcome, reason)
+				}
+			}
+			notCounted = append(notCounted, fmt.Sprintf("%s %q", c.run.Label, rec.Reasons))
+		}
+		m, _ := checkRetained(t, r, c.run)
+		lim := limitsRecord(t, m)
+		at, err := time.Parse(time.RFC3339, lim.Retrieved)
+		if lim.Name != "limits.txt" || lim.SHA256 != sha(c.limits) || err != nil || at.Before(begun) || at.After(time.Now().Add(2*time.Second)) {
+			t.Fatalf("%s: limits record %+v, want %s retrieved during the cell", c.run.Label, lim, sha(c.limits))
+		}
+		copied, err := os.ReadFile(filepath.Join(r.framesRoot, filepath.Dir(filepath.FromSlash(m.Frames.Name)), evidence.RecordsCopyDir, "limits.txt"))
+		if err != nil || string(copied) != c.limits {
+			t.Fatalf("%s: limits copy %q: %v", c.run.Label, copied, err)
+		}
+		if m.Artifact(evidence.RefreshFile) == nil {
+			t.Fatalf("%s: artifacts %+v", c.run.Label, m.Artifacts)
+		}
+	}
+
+	writeFile(t, dir, "limits.txt", []byte("limits v3"))
+	rec := r.newRecord(missed)
+	rec.Outcome, rec.Reasons = outcomeMissed, []string{"not started"}
+	if err := r.writeNew(missed, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.labelCell(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := checkRetained(t, r, missed)
+	if lim := limitsRecord(t, m); lim.SHA256 != sha("limits v3") || !slices.Equal(m.Release.Reasons, []string{"not started"}) {
+		t.Fatalf("missed cell: limits record %+v, reasons %q", lim, m.Release.Reasons)
+	}
+
+	if len(notCounted) > 0 {
+		t.Skipf("client-validity gate failed (%s); no two counted cells to page", strings.Join(notCounted, "; "))
+	}
+	pages := t.TempDir()
+	if code, err := pagesCmd([]string{"--out", r.out, "--frames", r.framesRoot, "--config", cfgPath, "--pages", pages}); code != exitOK || err != nil {
+		t.Fatalf("pages: exit %d: %v", code, err)
+	}
+	b, err := os.ReadFile(filepath.Join(pages, routesDir, "groq.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st report.StepTables
+	if err := json.Unmarshal(b, &st); err != nil {
+		t.Fatal(err)
+	}
+	doc := func(limits string) []report.DocRecord {
+		return []report.DocRecord{{Kind: evidence.RecordLimits, URL: "https://example.test/limits", SHA256: sha(limits)}}
+	}
+	want := []report.DriftChange{{Cell: cellLabel(second), StartUTC: second.Start.UTC(), Removed: doc("limits v1"), Added: doc("limits v2")}}
+	if !reflect.DeepEqual(st.DriftChanges, want) {
+		t.Fatalf("drift changes %+v, want %+v", st.DriftChanges, want)
+	}
+}
+
+// A refresh command that fails, one that leaves a limits or eligibility
+// file unwritten, and one that leaves the operator file unreadable each
+// block the cell before admission: no ledger line, no request, and a
+// manifest carrying the records read when the route started. The
+// endpoint answers 401, so a cell let through ends at its probe.
+func TestCellRefreshBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script func(opPath string) string
+		reason string
+	}{
+		{"command fails", func(string) string { return "exit 4" }, "refresh command: exit status 4"},
+		{"records not rewritten", func(string) string { return "exit 0" }, "not rewritten since"},
+		{"operator file unreadable", func(op string) string { return "echo '{' > '" + op + "'" }, "evidence: operator file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+			enoughOpenFiles(t)
+			f := newFixture(t, releaseConfig(t, e.url()), "+0.005")
+			script := filepath.Join(t.TempDir(), "refresh")
+			if err := os.WriteFile(script, []byte("#!/bin/sh\n"+tc.script(f.in.opPath)+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			f.in.refreshCmd = script
+			r, err := newRoute(f.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().Add(-time.Minute)
+			if err := os.Chtimes(filepath.Join(filepath.Dir(f.in.opPath), "r.txt"), old, old); err != nil {
+				t.Fatal(err)
+			}
+			before, err := ledgerEntries(f.ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := r.runs[0]
+			rec, err := r.runCell(context.Background(), run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.HasPrefix(rec.Reasons[0], "operator records not refreshed at the cell's start (SPEC-HOSTED §4): ") ||
+				!strings.Contains(rec.Reasons[0], tc.reason) || !strings.HasSuffix(rec.Reasons[0], "; the manifest carries the records read when the route started") {
+				t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, tc.reason)
+			}
+			if n := e.hits.Load(); n != 0 || rec.Sent != (admission.Counts{}) {
+				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
+			}
+			if after, err := ledgerEntries(f.ledger); err != nil || len(after) != len(before) {
+				t.Fatalf("ledger lines %d, were %d: %v", len(after), len(before), err)
+			}
+			m, _ := checkRetained(t, r, run)
+			if m.Counted() || m.Release.Outcome != outcomeBlocked || m.Operator != r.op.File ||
+				!slices.EqualFunc(m.Records, r.op.Records, func(a, b evidence.OperatorRecord) bool {
+					return a.Kind == b.Kind && a.FileRef == b.FileRef && a.URL == b.URL && a.Retrieved == b.Retrieved && a.Note == b.Note
+				}) {
+				t.Fatalf("manifest: outcome %s, operator %+v, records %+v", m.Release.Outcome, m.Operator, m.Records)
+			}
+			if lim := limitsRecord(t, m); lim.Retrieved != "2026-10-07" {
+				t.Fatalf("limits record %+v", lim)
+			}
+			if m.Artifact(evidence.RefreshFile) == nil {
+				t.Fatalf("artifacts %+v", m.Artifacts)
+			}
+		})
 	}
 }
