@@ -4,7 +4,7 @@ Every change to a measurement or reporting rule since first publication, newest 
 
 ## 2026-10-11
 
-- §3, §6: SPEC-HOSTED HA3 releases publish pointwise bands and an unranked per-step index; rate, shape, timeout and body follow HA1 and HA3.
+- §3, §6: a release under SPEC-HOSTED HA3 publishes pointwise interval bands on each route's completion curve and an index table of counts per offered-load step with no ranking; its rate, request shape, timeout and body follow HA1 and HA3, and hosted G6 counts completion within the amendment's 30 s deadline.
 
 ## 2026-10-02
 

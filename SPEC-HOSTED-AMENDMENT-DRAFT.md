@@ -10,7 +10,9 @@ unless prefixed SPEC.md.
 
 Drafted 24 August 2026, revised 26 September 2026. It replaces the single
 pinned rate and the headroom rule of §3 with a ladder of rates and a
-ceiling rule.
+ceiling rule. You need this text when reading SPEC-HOSTED.md §0 point 5,
+which adopts it with the changes listed there; a release runs under the
+adopted form, and the text below is the source it modifies.
 
 Adopted 2026-10-11 as modified by HA3 point 5 (SPEC-HOSTED.md §0), which
 governs where the two differ: the drain, the backoff and G2 evaluation at
@@ -94,7 +96,9 @@ Drafted 26 September 2026; not adopted. It authorizes one kind of run the
 protocol as written does not: a paired, task-scored, descriptive comparison of two
 endpoints for one named reader, reported privately. It changes nothing for
 a characterization under §1 to §9; a pilot run is labelled as one and
-enters no characterization.
+enters no characterization. You need this text only to read a pilot
+report or the `cmd/percentes-pilot` command that runs one; nothing in a
+release depends on it.
 
 ## What a pilot is
 

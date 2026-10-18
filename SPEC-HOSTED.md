@@ -1,8 +1,54 @@
 # Hosted Measurement Protocol: Managed Inference Endpoints
 ### Project: Percentes. This document is the pre-registered protocol SPEC.md §6 requires before any hosted-provider data is collected.
-### Status: drafted 2026-08-19, revised 2026-09-26, amended 2026-10-11 by HA1 as modified by HA3, and by HA3; pre-data. No provider data has been collected under this document.
+### Status: drafted 2026-08-19, revised 2026-09-26; amendments HA1, as modified by HA3, and HA3 adopted 2026-10-11. Pre-data: no provider data has been collected under this document, and no release has published.
+
+## Read this first
+
+This part is written for an engineer who runs large language model (LLM) APIs in production and has not met Percentes before. It says what the protocol measures, how, what it publishes and how to read a result. The normative text starts at §0; this part adds nothing to it and changes nothing in it.
+
+**What is measured.** One model behind one provider's hosted API, reached from one client machine through one ordinary paid account. The protocol calls that combination a route. For every request it sends to a route it records one of four endings: completed within 30 s, completed late, failed (with the failure classed), or still unanswered at 90 s; a scheduled request a stop left unsent is counted on its own line. It also records how long each completion took to start and to finish.
+
+**Against which providers.** This document carries no list of providers. A release's routes are the routes whose configuration files are frozen, with their recorded limits, before its collection window opens, and its dated page names each one. Where a rule depends on one provider's own documentation, §0 names that provider (points 2, 3 and 14); those names attach the rule and do not list a release's routes. A provider whose terms do not permit the planned traffic and the publication is not measured (§2, terms review); where its terms permit publication only with its written permission, its route enters only with that permission in hand. Each route must use one of two recognised streaming request shapes: the chat-completions shape, whose stream the instrument reads to its `data: [DONE]` frame, or the Anthropic Messages shape, whose stream ends at `message_stop`. A provider with another shape is measured only after a numbered amendment adds its shape.
+
+**How.** The client sends requests on a schedule fixed in advance and never retries. That schedule is open loop: a slow answer never delays the next send, so a stalled endpoint cannot hide its own stall. One cell is one run of a route's ladder, 48.5 minutes when all five steps are admitted: a 60 s warm-up, then five steps of offered load at 0.25, 0.5, 1, 2 and 4 requests per second, 480 s each, with a 90 s drain after every step in which nothing is sent, so every request of a step has ended before the next step starts. Twelve cells per route cover six Coordinated Universal Time (UTC) start times, each once on a weekday and once on a weekend day. Before a route runs, three kinds of limit are recorded: every limit the provider publishes for the account, every value its console shows, and every limit the operator set. A step is admitted only where its demand is at most half of each rate, token, concurrency, daily and spend-window limit, and where the monthly and liability caps cover the route's worst case over its twelve cells, two re-runs and probe requests, and a prepaid account's auto-reload threshold its costliest cell. That is the ceiling rule. A limit the provider documents without a published value caps the route at 0.5 requests per second or excludes it. A step that fails a test is excluded, and the page names the limit that excluded it. The request body is one fixed JSON (JavaScript Object Notation) document per route; the only part that changes per request is the user text: a unique prefix `cs-<seed>-<index>`, a space and a synthetic support ticket. Before the window, a ten-request check per route chooses the output ceiling for the model, 512 tokens or the 1,024-token fallback.
+
+**What publishes, and what does not.** Published per cell: the configuration file, one record per request (`attempts.jsonl`), the probe, clock, status and balance records, the dispatch series, the report pair, and a manifest carrying the instrument commit and the SHA-256 (256-bit Secure Hash Algorithm) hash of every file; per route, its page; per release, the index. The route page shows, per step and per cell, each outcome as a count over the step's scheduled requests with a 95 percent interval; each step pooled over the cells that attempted it; the completion curve with its bands; and the time to first token and whole-answer distributions. One index table across routes carries counts only, in alphabetical order, with no ranking. Not published: the model's answers (kept 12 months, unpublished), response header values a provider's terms keep confidential, request identifiers where terms restrict them, and the legal name on the account, unless the operator's dated record publishes it. The page carries no quality score and no price comparison, and it estimates no provider-wide reliability: it describes the dated runs it reports.
+
+**Fixed in advance.** This document, with every amendment its log lists as adopted, is public in this repository before a release sends its first paid request, which is a ceiling-check request. Before the collection window opens, the following are committed here: the master seed and the schedule it derives (each cell's date and slot, and each route's offset); each route's configuration file, with its request body frozen by hash; the recorded limits with their hashes; the ceiling each model runs at, with the check records that chose it; and the admitted steps. Changing a date and slot after the window opens is a numbered amendment (§4), and a change of limits or model documentation inside the window splits the pooled figures and changes no admitted step (§4, drift; point 9). These are fixed before any cell runs, so no rate, step, date or ceiling is chosen after a cell's result is seen.
+
+**How to read a result.** A per-cell line on a route page prints as `count/scheduled rate [low, high]`: a count over the step's scheduled requests, the rate, and a 95 percent Wilson interval. The Wilson interval is the range of rates consistent with the count. A pooled line adds the range of cell rates, the cells with events, the design effect (DEFF) and the effective sample size its interval uses. A rate pooled over several cells prints a wider interval when its events bunch in a few cells, because requests inside one cell share its hour and conditions. Example, twelve cells of 120 requests at one step: one event in each cell gives a DEFF of 1.00 and an interval of 0.48 to 1.45 percent; all twelve events in one cell give a DEFF of 12.10, an effective sample of 119 requests, and an interval of 0.15 to 4.60 percent. §0 point 13 gives the formula. The index sets two routes' counts side by side only at the same step, and the protocol makes no ranked claim between routes (HA3 point 12). SPEC.md §11 bars winner language until a comparison has a measured noise floor (how much the same measurement varies from run to run) and a pre-registered minimum detectable effect (the smallest difference the comparison is built to detect), and a release has neither. A test fails the build if the index carries any of the strings rank, winner, best, worst, interval, sort key or p99 (the 99th percentile). A step marked "excluded, binding limit X" was never sent: its demand failed the test against limit X: at most half of X for a rate, token, concurrency, daily or spend-window limit, at most X for a cap, and at most 0.5 requests per second for a limit the provider documents without a value. A zero count gives an upper bound: 0 events in the 120 requests expected at the lowest step leave an upper bound of 3.10 percent. Two checks apply to every cell whose ladder runs. They carry the numbers of SPEC.md §10's run-validity gates, G1 to G7, of which only these two can be evaluated against a hosted endpoint. G2, the client-validity gate, withholds a cell and has it re-run when the client machine was the bottleneck: requests sent late (send skew, the time from intended to actual send, above 5 ms at the 99th percentile or above 50 ms for any request), a scheduled request never sent, central processing unit (CPU) use above 70 percent over any 5 s window, or a garbage-collection pause 99th percentile of 1 ms or more. Hosted-G6 is the fraction of scheduled requests completed within the 30 s deadline, printed against a 0.99 line; it never withholds a cell.
+
+**Terms used below.** Each is defined again where it first governs.
+
+| Term | Meaning |
+|---|---|
+| Route | one provider, one model identifier, one endpoint and one account tier; for example, one model identifier sent to one provider's complete chat-completions URL from an account on one tier |
+| Cell | one run of a route's ladder in one UTC slot on one day type; for example, with all five steps admitted, a route with a 20-minute offset runs its weekday 08:00 UTC cell from 08:20 to 09:08:30 UTC on its drawn weekday |
+| Step | one rung of the ladder: one offered load for 480 s; for example, the 1 request per second step, about 480 scheduled requests, then a 90 s drain |
+| Ladder | the five steps of one cell, climbed in ascending order: 0.25, 0.5, 1, 2 and 4 requests per second |
+| Drain | the 90 s after a step in which nothing is sent |
+| Warm-up | the first 60 s of a cell, at the lowest step's rate, discarded |
+| Frame | a route's twelve cells, each of the six slots once on a weekday and once on a weekend day: about 44,640 measured requests when every step is admitted |
+| Offset | a route's fixed start inside every slot, so two routes never start together |
+| Deadline | 30 s from intended dispatch; a later completion is late and stays completed |
+| Hard timeout | 90 s from actual dispatch; a request with no terminal event by then is censored |
+| Censored | observed to the hard timeout with no terminal event; counted on the curve, left out of latency figures |
+| Ceiling | the output token limit sent with every request, 512 or 1,024 |
+| Ceiling rule | the admission test: each step at most half of every rate, token, concurrency, daily and spend-window limit, within every cap |
+| Ceiling check | the ten-request probe that chooses 512 or 1,024 for a model |
+| Binding limit | the recorded limit whose test an excluded step failed first |
+| G2 | the client-validity gate: the client machine was not the bottleneck |
+| Hosted-G6 | completion within the deadline over scheduled requests, against 0.99, reported only |
+| Wilson interval | a 95 percent score interval for a proportion |
+| DEFF | the design effect: how much clustering across cells shrinks a pooled sample |
+| Attempts file | `attempts.jsonl`, one record per scheduled request |
+| Manifest | `manifest.json`, every file of a run by hash with the run's records |
+| Frame store | the raw response bodies, kept outside the published set |
+| Index | the one table across routes: counts per step, alphabetical, unranked |
 
 ## 0. Scope, subordination, and amendment log
+
+This section fixes which document governs when two disagree, and lists the amendments adopted. You need it to know which text applies to a release. The body sections §1 to §9 keep the original single-rate text (0.5 requests per second for 1,200 s, a 256-token ceiling, a 30 s timeout), which no configuration profile can now load (§3, schema note); the HA3 points below replace parts of it for a release. To read for a release, read these points, the note at the start of each body section, which names the points that change it, and the release column of each section's summary table.
 
 This document specifies how the Percentes harness measures a managed inference endpoint (`target.hosted`). It is subordinate to SPEC.md v0.2: SPEC.md §6's Hosted targets subsection fixes which pins apply, which cannot be verified, and which run-validity gates are evaluable, and this document adds the numbers that paragraph defers. Where the two disagree, SPEC.md governs and this document is amended.
 
@@ -13,19 +59,40 @@ A hosted run is not a run of the SPEC.md §1 experiment (SPEC.md §6). It inject
 ### Versions
 
 - **v0.1** (2026-08-19, revised through 2026-09-26).
-- **v0.2** (2026-10-11): amendments HA1, as modified by HA3, and HA3 adopted. The amendment log below carries the adoption lines and the HA3 text; the body sections keep the v0.1 text; the note opening each names the HA3 points that replace it for a release.
+- **v0.2** (2026-10-11): amendments HA1, as modified by HA3, and HA3 adopted. The amendment log below carries the adoption lines and the HA3 text; the body sections keep the v0.1 normative text. Each body section opens with a plain note naming the HA3 points that replace parts of it for a release, and with a summary table; the note and the table describe the normative text and do not change it.
 
 Change history: the git log of this file.
 
 ### Amendment log
 
-An amendment is adopted, with its date and number, before any data it could affect is collected. HA1, HA2 and HA3 are hosted amendments 1, 2 and 3. HA2, the descriptive pilot, is drafted in SPEC-HOSTED-AMENDMENT-DRAFT.md and not adopted.
+An amendment is adopted, with its date and number, before any data it could affect is collected. HA1, HA2 and HA3 are hosted amendments 1, 2 and 3. HA1 and HA3 are adopted. HA1's adopted text is the HA1 section of SPEC-HOSTED-AMENDMENT-DRAFT.md, whose header records the adoption, and point 5 below states what HA3 changes in it. HA2, the descriptive pilot, is drafted in the same file and not adopted: the `pilot` profile and `percentes-pilot` carry its draft numbers, a pilot reports privately to one named reader, and nothing in a release depends on it.
 
 HA1 (2026-10-11, pre-data): load axis adopted as modified by HA3.
 
 HA3 (2026-10-11, pre-data): public descriptive release authorized; path shapes, body and credential per target, usage, shape, ceiling rule, frame, intervals and bands, index, publication steps.
 
-HA1's text is the HA1 section of SPEC-HOSTED-AMENDMENT-DRAFT.md; point 5 below states what HA3 changes in it. HA3's text follows. A release is run under §1 to §9 as these points amend them.
+HA3's text follows. A release is run under §1 to §9 as these points amend them.
+
+The table is a reading guide to the sixteen points. The points themselves are the rule.
+
+| Point | In plain words | Replaces or adds |
+|---|---|---|
+| 1 Scope | a release is several routes published together on one dated page | adds |
+| 2 Path shapes | the whole request URL is configured per route; two stream shapes are recognised | §1, the target's path shape |
+| 3 Body and credential | the whole request body is fixed JSON per route; the key travels in the one header the provider documents | §3, the sampling bullet |
+| 4 Usage and reasoning | token counts are requested or read where the provider places them; reasoning text is recorded apart and never counts as the answer | §6, the usage sentences; §2, the reasoning exclusion |
+| 5 Ladder | five steps of offered load with a drain after each; the 429 backoff rule and the client gate are judged at each drain's end | §3, the single rate and duration, through HA1 as modified |
+| 6 Ceiling rule | every limit is recorded; a step is admitted only at or below half of each rate, token, concurrency, daily and spend-window limit, and within every cap | §3, the headroom rule |
+| 7 Shape | one request shape; a 1,200-token input bound; a 512- or 1,024-token ceiling chosen by a ten-request check; a 30 s deadline; a 90 s hard timeout | §3 input, output and timeout; §5 censoring; §2 probe; §6 and §7 wording |
+| 8 Terminators | which event ends each stream shape; how cut, empty and in-band-error streams are classed and printed | §5, the streams paragraph |
+| 9 Frame | the window is committed with the schedule; per-route offsets; concurrent runs listed; two re-runs per route | §4, the collection window |
+| 10 Client host | one dedicated virtual machine, named, with its open-file limit recorded | adds to §2 |
+| 11 Accounts | one account, organisation and key per provider; the account type and age publish | adds |
+| 12 Comparison scope | one alphabetical index table with counts only and no ranking | §1, the comparison scope |
+| 13 Intervals and bands | Wilson intervals per cell; pooled intervals widened for clustering (DEFF); bands on every curve | adds to §8 |
+| 14 Publication steps | each provider sees its own tables first and can correct facts; a reply publishes verbatim only with consent | adds |
+| 15 Artifacts | extra JSONL and manifest fields; what is redacted and what is retained | adds to §9 |
+| 16 Blocks, ladder ends and stops | what blocks a cell before it starts, what ends a ladder early, what stops a route | §5, the setup-defect sentence |
 
 1. **Scope.** A release is a set of route characterizations under §1 to §9 as amended here, published together on one dated page with the index of point 12. A route is one provider, one model identifier, one endpoint and one account tier. A characterization enters a release only with every artifact of §9 and the publication steps of point 14.
 
@@ -61,6 +128,8 @@ HA1's text is the HA1 section of SPEC-HOSTED-AMENDMENT-DRAFT.md; point 5 below s
 
 ## 1. The measurement
 
+This section states the question the protocol answers and what one measurement covers. You need it to know what a route is, what the harness sends, and what the page may set side by side.
+
 For a release, HA3 points 2 and 12 (§0) replace the target's path shape and the comparison scope below.
 
 **Question:** for one model on one managed endpoint, what fraction of scheduled requests complete within the pinned client timeout, and what are the client-observed distributions of TTFT, end-to-end latency, and completion length, sampled across a fixed grid of times of day and day types?
@@ -73,7 +142,21 @@ For a release, HA3 points 2 and 12 (§0) replace the target's path shape and the
 
 ## 2. Endpoint, model, and client host
 
-For a release, HA3 point 7 (§0) replaces the single probe request below with the ten-request ceiling check, point 4 deletes the exclusion of a model that reasons on a separate field, and point 11 adds the account records.
+This section lists what is recorded about the endpoint, the model, the account and the client machine before and during a run. You need it when preparing a route, and when checking what a published run pinned. The table summarises the records; the bullets below are the rule.
+
+| Record | What it fixes | When |
+|---|---|---|
+| Model identifier | the exact string sent, and whether the provider documents it as one fixed build | before the first run; per run |
+| Reported identifier | the model name each response carries, against the expected one | every response |
+| Response shape | which field carries the answer, which carries reasoning, and the finish reasons seen | the probe before the first run |
+| Endpoint and account | base URL, the provider's declared region, the account tier, the published status at start and end | per run |
+| Terms review | automated access, publication of results, republishing response metadata | before the first run |
+| Dedicated account | the account and key serve no other workload during the window | per run |
+| Documentation snapshots | a retained copy and SHA-256 hash of every page a record relies on | every documentation record |
+| Client host | one dedicated non-spot cloud instance, pinned and published, with its vendor affiliation and round-trip time | per characterization; per run |
+| Credentials | the environment variable's name only; the key is never written | per run |
+
+For a release, HA3 point 7 (§0) replaces the single probe request below with the ten-request ceiling check, point 4 deletes the exclusion of a model that reasons on a separate field, point 10 adds the client host's virtual-machine and open-file-limit records and makes an `EMFILE` error client-invalid, and point 11 adds the account records.
 
 - **Exact model identifier, recorded, no aliases.** The identifier sent on the wire (`target.model_name`) is recorded per run. An identifier the provider's published documentation describes as a pointer that can resolve to different underlying builds over time is ineligible, because the measurement would not name what it measured. Eligibility is checked against the provider's model documentation and recorded per run with the documentation URL and the retrieval date. Where the documentation does not state whether the identifier is fixed to one build, the identifier is recorded as stability-not-documented and the characterization publishes with that label.
 - **Reported identifier.** Where a response carries a model identifier, it is recorded and compared with the expected one, per response. The expected identifier is the requested one, unless the probe below returns a different string and the provider's model documentation, recorded with URL and retrieval date, states that both names refer to one fixed build; the probe's string is then the expected value. Where the probe's string differs and the documentation is silent, the provider-model is recorded as identifier-not-documented and is not characterized. A run in which any response's reported identifier differs from the expected one publishes with the expected identifier and every distinct reported identifier, is excluded from pooled figures, does not count toward frame completeness (§4), and has its cell re-run.
@@ -88,6 +171,22 @@ For a release, HA3 point 7 (§0) replaces the single probe request below with th
 - **One target per run.** A run addresses one endpoint and one model. Runs are never merged across endpoints, models, or account tiers.
 
 ## 3. Load profile (pinned)
+
+This section pins what the client sends and how fast. You need it to know the offered load, the request shape, the timeouts and the admission test a route must pass. The bullets below are the v0.1 single-rate text; a release runs under the values in the table's right-hand column, which the HA3 points of §0 set. Where a bullet below names a required instrument change, §9 "Implemented in the instrument" records whether the tree carries it.
+
+| Setting | §3 text below (v0.1, single rate) | For a release (HA1 as modified by HA3) |
+|---|---|---|
+| Offered load | 0.5 requests per second, Poisson arrivals, open loop | a ladder of 0.25, 0.5, 1, 2 and 4 requests per second, ascending, Poisson arrivals, open loop (point 5) |
+| Duration | 60 s warm-up, then 1,200 s measured | 60 s warm-up, then 480 s per step with a 90 s drain after each (point 5) |
+| Expected requests | 600 per run | 120, 240, 480, 960 and 1,920 per step; 3,720 measured per cell (point 5) |
+| Input | the unique prefix, then 512 repeats of a filler token | Shape S: the unique prefix, a space and a synthetic ticket, under a 1,200-token bound (point 7) |
+| Output ceiling | `max_tokens` 256 | 512 tokens, or the pinned fallback of 1,024, chosen by the ceiling check (point 7) |
+| Client timeout | 30 s | a 90 s hard timeout, with a 30 s deadline splitting completions into in time and late (point 7) |
+| Retries | zero | zero |
+| Request body | generated by the client: model, messages, stream and max_tokens; no usage requested | literal JSON per route, frozen by hash, with one placeholder for the user text; usage requested on chat-completions targets (points 3 and 4) |
+| Credential header | `Authorization: Bearer` | the one header the provider documents: `Authorization: Bearer`, `x-api-key` or `api-key` (point 3) |
+| Transport | HTTP/1.1; an idle pool of 62 connections | HTTP/1.1; an idle pool of 752 connections (point 5) |
+| Admission | the headroom rule: at most half of each published limit | the ceiling rule: at most half of every recorded rate, token, concurrency, daily and spend-window limit, with cover tests for the caps and for a limit documented without a value (point 6) |
 
 For a release, HA1 as modified by HA3 point 5 (§0) replaces the single rate and duration below with the ladder, point 6 replaces the headroom rule with the ceiling rule, point 3 replaces the sampling bullet with the per-target body and credential, and point 7 replaces the input, output-ceiling and timeout pins with Shape S.
 
@@ -109,6 +208,21 @@ For a release, HA1 as modified by HA3 point 5 (§0) replaces the single rate and
 
 ## 4. Temporal sampling frame
 
+This section fixes when a route's cells run: the grid of start times and day types, how the dates are drawn, and what happens when a cell fails or the provider changes something inside the window. You need it to read a schedule file and to see why a route has twelve cells.
+
+| Element | Value |
+|---|---|
+| Slots | 00:00, 04:00, 08:00, 12:00, 16:00 and 20:00 UTC |
+| Day types | weekday (Monday to Friday) and weekend (Saturday or Sunday); the six weekend cells include at least one Saturday and one Sunday |
+| Cells per route | 12, one per slot and day type |
+| Dates and seeds | drawn from one master seed by the fixed procedure below, committed before the window opens |
+| Start tolerance | 15 minutes; for a release it applies to the route's offset start (point 9) |
+| Collection window | 14 days in the text below; for a release, the dates committed with the schedule, at most 14 days (point 9) |
+| Re-runs | a cell is attempted at most twice; for a release, a route takes at most two re-runs (point 9) |
+| Offsets | for a release, each route starts at its own pinned offset inside the slot; the offsets are distinct multiples of 10 minutes drawn from the master seed (point 9) |
+| Drift | a change to the limits or the model documentation inside the window splits the pooled figures and names the change |
+| Completeness | fewer than 12 completed cells publish as labelled runs with no pooled figure |
+
 For a release, HA3 point 9 (§0) replaces the collection-window length below and adds the per-route offsets, the concurrent-run record and the per-route re-run bound.
 
 - **Grid: 12 cells.** Six start slots in UTC, at 00:00, 04:00, 08:00, 12:00, 16:00, and 20:00, each executed twice: once on a weekday (Monday to Friday) and once on a weekend day (Saturday or Sunday). Day type is the UTC calendar day of the slot start, and the six weekend draws must include at least one Saturday and at least one Sunday. One run per cell, so 12 runs and an expected 7,200 scheduled requests per provider-model characterization.
@@ -123,6 +237,19 @@ For a release, HA3 point 9 (§0) replaces the collection-window length below and
 - **Grid limits.** It is a UTC grid: it does not equalize local business hours across providers, and no claim about a provider's peak or quiet period is made from it. A cell's figures describe that dated run and carry no run-to-run variance estimate.
 
 ## 5. Outcome model and the treatment of 429
+
+This section says how every scheduled request ends and which line of the report it lands on. You need it to read any count on a route page. The table summarises the classes; the paragraphs below are the rule.
+
+| Outcome | Meaning | Where it shows |
+|---|---|---|
+| completed | the stream reached its terminator with at least one content event; under a release, in time when the whole answer arrived within the 30 s deadline, late otherwise | the completed lines; only completions enter the latency figures |
+| status_429 | an HTTP 429 response; never retried; `Retry-After` recorded and never honoured | its own line, a headline for the cell |
+| status_other | any other non-200 status, 503 and 529 included, with the provider's documented meaning annotated | one line per status code |
+| connect | a failure before any status arrived, in DNS, the dial or the TLS handshake | its own line, attributed to neither side |
+| reset | the connection was reset | its own line |
+| empty_stream | HTTP 200 and the terminator, with no content event | its own line; under a release, split by finish reason |
+| malformed_stream | a stream cut before its terminator, an undecodable event, or an in-band error object | its own line; under a release, a sub-line per in-band error type |
+| censored | no terminal event by the timeout: 30 s in the text below, the 90 s hard timeout under a release | the censored rate; a censored observation on the curve |
 
 For a release, HA3 point 8 (§0) names the terminator of each request shape and the in-band error sub-lines, point 7 replaces the censoring paragraph, and point 16 replaces the setup-defect sentence with the blocks, ladder ends and stops.
 
@@ -146,7 +273,15 @@ The per-request HTTP status code is recorded in the run artifact (§9).
 
 ## 6. Pins: applied, and not verifiable
 
-For a release, HA3 point 7 (§0) replaces the output-ceiling, input-length and timeout items of the applied list, point 3 replaces the sampling pin, and point 4 replaces the last two sentences of the tokenizer-and-usage paragraph.
+This section sorts the SPEC.md §6 pins into those the client can apply against a provider, those this document adds, and those nobody outside the provider can verify. You need it to know what a hosted figure does and does not hold fixed. The table summarises the three groups; the paragraphs below are the rule.
+
+| Group | Pins |
+|---|---|
+| Applied unchanged, all client-side | the output ceiling, the input length, the prompt body with unique prefixes, open-loop arrivals, the client timeout, zero retries, the monotonic clock, the client-validity gate, the histogram configuration, the three-state outcome model (point 7 replaces the ceiling, the input length and the timeout for a release) |
+| Added by this document | the rate and arrival process, the warm-up and window durations, the transport and connection figure, the per-cell seeds, the grid and its tolerances, the collection window, the client host, the headroom rule (the ceiling rule for a release), the treatment of 429 and the probe rule |
+| Not applicable or not verifiable | output-length forcing, the weights and revision behind the identifier, the KV cache, prefix caching, batching, the serving stack and image, the scheduler, CUDA graphs, the GPU and driver fingerprints, the cluster network pins, per-replica counters |
+
+For a release, HA3 point 7 (§0) replaces the output-ceiling, input-length and timeout items of the applied list, point 3 replaces the sampling pin, and point 4 replaces the last two sentences of the tokenizer-and-usage paragraph. Where a paragraph below names a required instrument change, §9 "Implemented in the instrument" records whether the tree carries it.
 
 This section restates SPEC.md §6's hosted-target lists and adds this document's own pins. Unverifiable items publish as unverifiable.
 
@@ -164,7 +299,14 @@ This section restates SPEC.md §6's hosted-target lists and adds this document's
 
 ## 7. Run validity and the reported criterion
 
-For a release, HA3 point 7 (§0) makes hosted-G6 completion within the 30 s deadline, and point 13 fixes its interval per step and per cell.
+This section names the two checks a hosted run carries: one that can withhold a run because the client machine was the bottleneck, and one that is only reported. You need it to know why a cell was re-run, and what the hosted-G6 line means.
+
+| Gate | What it tests | Consequence |
+|---|---|---|
+| G2, client validity | send skew p99 at most 5 ms and max at most 50 ms; no scheduled request left undispatched; client CPU at most 70 percent over any 5 s window; Go garbage-collection pause p99 under 1 ms | run-failing: the run does not publish and its cell is re-run; under a release it is judged per step at each drain's end (point 5) |
+| Hosted-G6, completion within the deadline | the fraction of scheduled requests completed within the 30 s timeout, or the 30 s deadline under a release, against 0.99 | reported only, never run-invalidating |
+
+For a release, HA3 point 5 (§0) judges G2 per step at each drain's end, point 7 makes hosted-G6 completion within the 30 s deadline, and point 13 fixes its interval per step and per cell.
 
 **No SLO transfer.** The SPEC.md §4 SLO derives its end-to-end threshold from a forced 256-token budget (1000 ms plus 256 tokens at a 20 tokens-per-second floor, rounded up to 14 s), which hosted requests do not carry. Neither SPEC.md §4 threshold is applied to hosted data, and no hosted SLO is defined here. Latency publishes as distributions with no pass bar.
 
@@ -176,6 +318,18 @@ For a release, HA3 point 7 (§0) makes hosted-G6 completion within the 30 s dead
 **Hosted-G6 is reported, never run-invalidating.** A hosted run whose completion-within-timeout falls below 0.99 publishes with the gate marked failed (SPEC.md §6).
 
 ## 8. Reporting
+
+This section lists the figures a route page carries and the denominator of each. You need it to know which figures are over every scheduled request and which are over completions only.
+
+| Figure | Over | Form |
+|---|---|---|
+| Completion within the deadline | scheduled requests | numerator and denominator; with its Wilson interval under a release |
+| Error rate by class, and the censored rate | scheduled requests | one line per class, a count per HTTP status |
+| Completion-incidence curve | scheduled requests | Aalen-Johansen point estimates with the SPEC.md §3 quantile refusals; pointwise bands under a release |
+| TTFT and end-to-end latency | completions only | distributions labelled conditional on completion |
+| Completion length | completions | content-event counts, and provider-reported tokens where the response carries them |
+| Inter-chunk latency | completions | pooled histograms of the gaps between content events |
+| Throughput | the window | completions per second |
 
 For a release, every figure below publishes per ladder step, and HA3 point 13 (§0) fixes the intervals and bands.
 
@@ -192,6 +346,17 @@ Pooled figures across the 12 cells publish with the per-cell table (§4); they a
 
 ## 9. Required artifacts and the publication rule
 
+This section lists the files a run must publish, what each holds, and what the instrument already produces. You need it to check a published run, and to see which parts of this protocol the code does not yet carry. The table summarises the artifacts; the numbered list below is the rule.
+
+| Artifact | Contents | Published |
+|---|---|---|
+| Instrument commit | the revision that produced the run, and the source diff of a modified build | yes |
+| Configuration | the file, verbatim | yes |
+| Per-request record, `attempts.jsonl` | one JSON object per scheduled request: times, outcome, class, status, allowed headers, counts | yes |
+| Report pair | the metric set as JSON and the text report, from one configuration | yes |
+| Run manifest | the run's records, every file by hash, the gates, and under a release the cell record | yes |
+| Raw response frames | each response body as read, up to the capture limits the manifest records, credentials redacted | retained 12 months, unpublished |
+
 For a release, HA3 point 15 (§0) adds fields to the JSONL artifact and the manifest, and point 9 publishes an incomplete frame's cells labelled incomplete.
 
 **Published per run:**
@@ -203,39 +368,30 @@ For a release, HA3 point 15 (§0) adds fields to the JSONL artifact and the mani
 
 **Retained, unpublished:** the raw response frames per request, credentials redacted, kept for 12 months from the characterization's publication date.
 
-**Implemented in the instrument**, as the tree stands at this amendment's adoption (docs/ARCHITECTURE.md names the packages and commands):
-- the hosted configuration switch `target.hosted`, which pins ignore_eos false, requires the model identifier and the credential variable name, and refuses replica metrics endpoints; the `pilot` profile (HA2) and the `release` profile (HA1 as modified by HA3), each pin checked at load; a release configuration holds one route with its complete request URL, its adapter (chat completions or Messages), its literal body frozen by hash with the ceiling key equal to the shape's ceiling and no sampling control or output-length forcing, its credential header, its recorded limits with source, retrieval date and SHA-256, its naming record, documented status and in-band error meanings, and documented billing refusals;
-- HTTP/1.1 pinned in the client transport, the negotiated protocol recorded per request, and a hosted run failed on a response over any other protocol;
-- the chat-completions parser reading the per-target response shape (the content, reasoning, model, usage, error and refusal paths), the Messages adapter (text and thinking deltas, usage in `message_start` and `message_delta`, the stop reason, error events, `message_stop`), and the reported model identifier compared with the expected one per response;
-- per request: the HTTP status, the response headers the configuration allows (`Retry-After` among them, and a request identifier or region header where the allowlist names it), the connect and reset error string, the resolved peer address, connection reuse, the system-fingerprint field, the finish reason, the usage object, the first in-band error object, reasoning presence, and refusal presence and length where the shape names a refusal field;
-- the pre-run probe of §5 with its start gate, the response-shape record, the optional wrong-model request and limits read, and the per-target record of documented status-code meanings; the release probe's ten-request ceiling check and input-bound check, and the ceiling choice across the records given for one model's hosts (HA3 point 7);
-- the clock-offset record from the host's clock-sync tool with the 60 s bound, and the endpoint-status records at run start and end;
-- the raw-frame store, retained outside the source tree, with the operator file and its records copied beside it;
-- the per-request JSONL export, with the HA3 point 15 fields under the release profile and no answer text there, and the scorer's verdict on each labelled attempt;
-- the run manifest with the operator records (the required kinds, and the optional notice, replication-pack and disclosure kinds), the ledger position, every artifact by hash, and the release cell record: the scheduled run, the offset, the concurrent runs, the ceiling rule's verdict, the ceiling in force and the probe records that chose it, the account creation date, the requests sent before the window, and the cell's label;
-- the report pair rendered from the manifest, the JSONL artifact and the configuration alone, reproduced byte for byte on replay; the hosted report without SLO, goodput, headline, detector or decomposition fields; the release cell report with its per-step tables: each rate over scheduled requests with its Wilson interval, the pooled figures over a complete frame with the design-effect interval of HA3 point 13, hosted-G6 per step and per cell, the completion-incidence curve with pointwise bands, the time to the failure signal per error class, completions split by connection reuse, the `Retry-After` record and the in-band error sub-lines; the index table of HA3 point 12 with the forbidden-string check, as library code;
-- the admission ledger, hash-chained, with the pilot caps and the release caps from configuration, reserving every request before it is sent and settled after; the ceiling rule of HA3 point 6 over the configured limits at the schedule's exact counts;
-- the schedule of HA3 point 9: twelve cells per route from the master seed, the Saturday-and-Sunday counter, the per-route offsets, the attempt seeds, the re-run bound, and a committed file re-derived and checked on load;
-- the ladder of HA3 point 5: per-step windows and drains, the backoff rule and G2 evaluated per step at the drain's end, the per-step tripwires, the deadline split and the 90 s hard timeout;
-- the release runner of HA3 point 16: one process per route at its offset; the clock bound, the ledger admission, the probe gate, documented billing refusals and `EMFILE` as stops, blocks or client-invalid outcomes; every finished cell retained with a labelled manifest and report pair; the per-cell dispatch series and the host's aggregate;
-- the completeness check, which refuses a run unless every artifact above exists with the hash and size its manifest records;
-- the loopback canary of SPEC.md §2, and the hosted gate evaluation of §7 (G1, G3, G4, G5 and G7 reported as not applicable; hosted-G6 reported, never run-invalidating).
+**Implemented in the instrument**, as the tree stands at this amendment's adoption. docs/ARCHITECTURE.md names the packages and commands, and its release section follows one request through them. Each item names the protocol clause it carries.
+
+- Configuration (§2, §3; HA3 points 2, 3, 6, 15): the hosted switch `target.hosted`, which pins ignore_eos false, requires the model identifier and the credential variable name, and refuses replica metrics endpoints; the `pilot` profile (HA2) and the `release` profile (HA1 as modified by HA3), each pin checked at load. A release configuration holds one route: its complete request URL; its adapter, chat completions or Messages; its literal body frozen by hash, with the adapter's ceiling key equal to the shape's ceiling and no sampling control or output-length forcing; its credential header; its recorded limits, each with a dimension, a counting rule for token limits, a source, a retrieval date and a SHA-256 hash; the operator's dated records that cap a documented but unpublished dimension at 0.5 requests per second; the recorded response headers whose values the provider's terms keep unpublished; the body parameters the target rejects, recorded as not applied; its naming record; documented status and in-band error meanings; documented billing refusals; and the route and global liability caps.
+- Transport (§3): HTTP/1.1 pinned in the client transport, the negotiated protocol recorded per request, and a hosted run failed on a response over any other protocol.
+- Stream parsing (§6; HA3 points 2, 4 and 8): the chat-completions parser reading the per-target response shape (the content, reasoning, model, usage, error and refusal paths); the Messages adapter (text and thinking deltas, usage in `message_start` and `message_delta`, the stop reason, error events, `message_stop`); the reported model identifier compared with the expected one per response.
+- Per request (§9; HA3 point 15): the HTTP status; the response headers the configuration allows, among them `Retry-After`, a request identifier or a region header where the allowlist names it; a retained header's values moved to the frame store with a stand-in left in the published record; the connect and reset error string; the resolved peer address; connection reuse; the system-fingerprint field; the finish reason; the usage object; the first in-band error object; reasoning presence and the reasoning token count; refusal presence and length where the shape names a refusal field; and, under the release profile, the shape, step, ceiling, warm-up, in-time and late fields, with no answer text.
+- Probes (§5; HA3 point 7): the pre-run probe with its start gate, the response-shape record, the optional wrong-model request and limits read, and the per-target record of documented status-code meanings; the release ceiling check, ten requests at least 4 s apart at the configured ceiling, with the ceiling and input-bound checks, the round-trip time of each connect, the limits read or the rate-limit headers, and the hash check of each retained limit copy; the ceiling choice across the records of one model's hosts; `percentes-release ceiling-check`, which admits the check in the ledger and writes its record also when the check fails or is blocked.
+- Clock, status and balance (§9; HA3 point 16): the clock-offset record from the host's clock-sync tool with the 60 s bound; the endpoint-status records at run start and end; the account balance or quota records at each release cell's start and end, read by the operator's command, with a release manifest refused without the start record.
+- The frame store (§9), retained outside the source tree, with the operator file and its records copied beside it.
+- The per-request JSONL export (§9; HA3 point 15), with the scorer's verdict on each labelled pilot attempt.
+- The manifest (§9; HA3 points 9, 11, 13, 15 and 16): the operator records (the required kinds, and the optional notice, replication-pack and disclosure kinds), the ledger position, every artifact by hash, the balance records, and the release cell record: the scheduled run, the offset, the concurrent runs of other routes, the host's aggregate dispatch series over the cell (the cell's own run, then each concurrent run, per UTC second), the inter-chunk gap histograms per step, the ceiling rule's verdict, the ceiling in force and the probe records that chose it, the account creation date, the requests sent before the window, and the cell's label (counted, client_invalid, blocked, stopped, missed or interrupted) with its reasons. The gates field carries G2 at each attempted step and hosted-G6 at each attempted step, and G2 over the whole ladder where no stop interrupted it.
+- The report pair (§8; HA3 points 8, 12 and 13), rendered from the manifest, the JSONL artifact and the configuration alone and reproduced byte for byte on replay; the hosted report without SLO, goodput, headline, detector or decomposition fields; the release cell report with its per-step tables: each line as a count over scheduled requests with its Wilson interval; the completed sub-lines for completions at the length value and completions with no finish reason; `empty_stream` split by finish reason; status lines and in-band error sub-lines annotated with the documented meanings; hosted-G6 per step; the completion-incidence curve with pointwise bands and the SPEC.md §3 quantile refusals inside the hard timeout; the time to the failure signal per error class; the TTFT and whole-answer distributions, with the SPEC.md §7 order-statistic intervals on the 95th and 99th percentiles and the median and 90th percentile by connection reuse; the content-event, completion-token and reasoning-token distributions; the inter-chunk gap histograms; the `Retry-After` record; the pooled figures over a complete frame with the design-effect interval; the §4 drift rule, which splits the pooled figures at a change of account tier, limits or model documentation between cells and names the change; and the index table with the forbidden-string check. `percentes-release pages` writes the index page and each route's page from the cells' records, after every manifest passes the completeness check.
+- Admission (HA3 point 6): the ledger, hash-chained, with the pilot caps or the release caps from configuration, reserving every request before it is sent and settled after; `percentes-release ledger create` and `ledger price`; the ceiling rule over the recorded limits at the schedule's exact counts, with the unpublished-limit records as cover tests at 0.5 requests per second.
+- The schedule (§4; HA3 point 9): twelve cells per route from the master seed, the Saturday-and-Sunday counter, the per-route offsets, the attempt seeds and the re-run bound; `percentes-release schedule` writes the committed file, which is re-derived and checked on load and never replaced.
+- The ladder (HA3 point 5): per-step windows and drains, the backoff rule and G2 evaluated per step at the drain's end, the per-step tripwires, the deadline split and the 90 s hard timeout.
+- The release runner (HA3 point 16): one process per route at its offset; the clock bound, the ledger admission and the probe gate; documented billing refusals, `EMFILE` and a probe 401 or 403 that the route's previous probed cell also saw, on its probe or inside its ladder, as stops, blocks or client-invalid outcomes; every finished cell retained with a labelled manifest and report pair; a missed or interrupted cell labelled from what its directory holds when the process next reads the route's records; the per-cell dispatch series and the host's aggregate (`percentes-release dispatch`).
+- The completeness check (§9), which refuses a run unless every artifact above exists with the hash and size its manifest records, the cell's label is consistent with its gates, the cell's own part of the aggregate dispatch series counts the attempts file's dispatches, the gap histograms agree with the completions, and a release attempts file carries no answer text; the replay of a release cell checks its hosted-G6 results against the records.
+- The loopback canary of SPEC.md §2, and the hosted gate evaluation of §7 (G1, G3, G4, G5 and G7 reported as not applicable; hosted-G6 reported, never run-invalidating).
 
 **Required instrument changes.** These land separately from this document, and a run executed while one it needs is absent does not publish:
-- a command that writes the index page and each route's page from the cells' records; both are library code;
-- commands that run the ceiling check, write the committed schedule and create a ledger with the release caps: `probe.RunRelease`, `schedule.New` and `admission.ReleaseCaps` are library code, and `percentes-pilot ledger create` writes the pilot caps;
-- the aggregate dispatch series in each cell's manifest: `percentes-release dispatch` writes it afterwards to `dispatch-aggregate.json`, and a manifest names its own cell's series only;
-- beside a release route's curve, the SPEC.md §3 quantile refusals; per step, the TTFT and whole-answer distributions with the SPEC.md §7 order-statistic intervals (the tables carry the median and 90th percentile by connection), the completion-length, provider-reported and reasoning token distributions, and the inter-chunk gap histograms;
-- the `empty_stream` split by finish reason, the line for completions at the length value, and the unknown-termination note of HA3 point 8;
-- a configuration field for the operator's dated record that caps a documented, unpublished dimension at 0.5 requests per second (HA3 point 6);
-- the §4 drift rule for a release: nothing splits the pooled figures at a change of limits or documentation inside the window, though the per-cell status records are kept;
-- the redaction of HA3 point 15: the response-header allowlist records a header or omits it, and nothing moves a recorded value to the retained store;
-- the record of a parameter a target rejects as not applied on a release target (HA3 point 3); the pilot's `not_applied` field is refused there;
-- the account balance or quota at each cell's start and end: the operator's quota record is read once when a route's process starts;
-- a labelled manifest and report pair for a cell interrupted mid-run or missed (HA3 point 16); each keeps its cell record only;
-- the automatic stop on a 401 or 403 with independent evidence of a credential or account fault (HA3 point 16): the operator stops the route, and the next cell's probe blocks;
-- the G2 and hosted-G6 records in a release cell's manifest: its gates field is empty, and the verdicts are in the cell record and the report pair;
 - the full-length acceptance run on the client host as an evidence file: the runner runs only at the committed schedule's slots;
+- throughput as completions per second (§8) on the release tables: the per-step tables print counts over scheduled requests and no completions-per-second figure;
+- a G2 line per step in the release cell's text report: the per-step verdicts are in the manifest and the cell's label names a failure, and the text report prints hosted-G6 only;
+- a release configuration check that `target.response_headers` records `Retry-After`: the release profile does not require it, so a configuration can omit the record §5 requires;
 - for the pilot: the report pair of a window and the paired report; a window's manifest names no pair, so the completeness check and the replay do not apply to it.
 
 **Publication rule.** A run publishes only with all five artifacts above and the retained frame store. A characterization publishes only with 12 complete cells inside one collection window; under HA3 point 9 an incomplete frame's cells publish labelled incomplete, with no pooled figures.
