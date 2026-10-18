@@ -285,6 +285,8 @@ type gen struct {
 	model  string
 	apiKey string
 	trip   *tripwire
+	// cases are a pilot run's user texts by request index.
+	cases []string
 }
 
 // now returns nanoseconds since the run epoch (monotonic).
@@ -295,15 +297,26 @@ type Hooks struct {
 	// OnEpoch fires once the run epoch is anchored, before the first
 	// dispatch; the orchestrator uses it to pre-arm T_inject.
 	OnEpoch func(epoch time.Time)
+	// Cases are the user texts of a run whose config carries a pilot
+	// body, one per scheduled request, by index.
+	Cases []string
 }
 
-// Run executes the full scheduled load against cfg.Target.BaseURL.
+// Run executes the full scheduled load against cfg.Target.EndpointURL,
+// or cfg.Target.BaseURL plus /v1/chat/completions when that is empty.
 // It returns when every scheduled request has reached a terminal state
 // (which can be up to the 30 s timeout after the last dispatch).
 func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error) {
 	schedule := BuildSchedule(cfg)
 	if len(schedule) == 0 {
 		return nil, fmt.Errorf("loadgen: empty schedule")
+	}
+	var cases []string
+	if hooks != nil {
+		cases = hooks.Cases
+	}
+	if cfg.Pilot != nil && len(cases) != len(schedule) {
+		return nil, fmt.Errorf("loadgen: pilot body: %d case texts for %d scheduled requests", len(cases), len(schedule))
 	}
 
 	// Provision connections above lambda x worst-case latency: lifetime
@@ -328,6 +341,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		model:  model,
 		apiKey: apiKey,
 		trip:   newTripwire(cfg, len(schedule)),
+		cases:  cases,
 	}
 
 	res := NewResult(cfg)

@@ -392,8 +392,12 @@ func completionTokens(usage json.RawMessage) (n int, ok bool) {
 // budget (§6); a hosted target omits it, since a provider's handling of
 // the field is not pinned, and accepts natural stops. A self-hosted target
 // is asked for the usage object in the stream's last chunk; the hosted
-// body carries no such request.
+// body carries no such request. A config with a pilot body sends that
+// body with the request's case text instead.
 func (g *gen) requestBody(r *Request) string {
+	if g.cfg.Pilot != nil {
+		return string(g.cfg.Pilot.RequestBody(&g.cfg.Target, g.cases[r.Index]))
+	}
 	type message struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -442,7 +446,11 @@ func (g *gen) roundTrip(req *http.Request) (*http.Response, error) {
 // newRequest attaches the fixed headers. The bearer token is added only
 // when resolved (hosted targets); it exists nowhere but this header.
 func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.cfg.Target.BaseURL+"/v1/chat/completions", bytes.NewReader([]byte(body)))
+	endpoint := g.cfg.Target.EndpointURL
+	if endpoint == "" {
+		endpoint = g.cfg.Target.BaseURL + "/v1/chat/completions"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader([]byte(body)))
 	if err != nil {
 		return nil, err
 	}

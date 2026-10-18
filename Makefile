@@ -11,7 +11,7 @@ KIND    ?= $(shell command -v kind 2>/dev/null || echo $(HOME)/go/bin/kind)
 CLUSTER ?= percentes
 IMAGE   ?= percentes/mockserver:dev
 
-.PHONY: all build bins test test-unit test-ac docker-build kind-up kind-down kind-smoke reproduce campaign-e2e process-kill-e2e clean hooks
+.PHONY: all build bins percentes-pilot test test-unit test-ac docker-build kind-up kind-down kind-smoke reproduce campaign-e2e process-kill-e2e clean hooks
 
 all: build
 
@@ -32,6 +32,16 @@ bins:
 	CGO_ENABLED=0 $(GO) build -o bin/percentes-campaign ./cmd/percentes-campaign
 	CGO_ENABLED=0 $(GO) build -o bin/mockserver ./cmd/mockserver
 	CGO_ENABLED=0 $(GO) build -o bin/percentes-calibrate ./cmd/percentes-calibrate
+
+# The pilot command's client-validity gate reads host CPU, which needs
+# cgo on darwin; Linux reads /proc without it. -w drops the DWARF tables:
+# with them, a darwin cgo build linked by Xcode ld-1167.5 failed its code
+# signature check and was killed at launch (recorded 2026-10-07).
+PILOT_BIN ?= bin/percentes-pilot
+PILOT_CGO := $(if $(filter Darwin,$(shell uname -s)),1,0)
+
+percentes-pilot:
+	CGO_ENABLED=$(PILOT_CGO) $(GO) build -ldflags=-w -o $(PILOT_BIN) ./cmd/percentes-pilot
 
 test-unit:
 	$(GO) test -race -short ./... -count=1

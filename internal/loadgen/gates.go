@@ -196,6 +196,19 @@ func startCPUMonitor() *cpuMonitor {
 	return m
 }
 
+// CPUMeasured samples host CPU with a run's monitor for window+1 seconds
+// and reports whether window samples arrived, the least a run's
+// client-validity gate needs to measure CPU.
+func CPUMeasured(window int) bool {
+	m := startCPUMonitor()
+	time.Sleep(time.Duration(window+1) * time.Second)
+	close(m.stop)
+	<-m.done
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.samples) >= window
+}
+
 func (m *cpuMonitor) stopAndCollect(g *gen) []cpuSample {
 	close(m.stop)
 	<-m.done
