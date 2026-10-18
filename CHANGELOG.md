@@ -2,6 +2,10 @@
 
 Every change to a measurement or reporting rule since first publication, newest first. Entries dated before 15 September 2026 were compiled on that date from the commit history of SPEC.md, which is the primary record; the commits are listed in the private register and can be re-derived with `git log -p -- SPEC.md`. Each entry states the rule as that change left it, so an entry a later change supersedes is history and the newest entry for a rule is the one in force. Wording, structure, status lines and code are in the git log.
 
+## 2026-10-11
+
+- §3, §6: SPEC-HOSTED HA3 releases publish pointwise bands and an unranked per-step index; rate, shape, timeout and body follow HA1 and HA3.
+
 ## 2026-10-02
 
 - Status: the process-kill variant runs a new standalone container under the §6 engine, model and GPU pins of the 16 September 2026 calibration; its runs and the two-replica Kubernetes runs are pending.
