@@ -22,15 +22,16 @@ import (
 	"github.com/percentes/percentes/internal/sse"
 )
 
-// execute runs one scheduled request to its terminal state. The pinned
-// 30 s client timeout runs from actual dispatch (a real client timeout);
-// latency re-basing to intended time happens at read-out, and the send-
-// skew gate bounds the difference.
+// execute runs one scheduled request to its terminal state. The client
+// timeout (clientTimeout) runs from actual dispatch (a real client
+// timeout); latency re-basing to intended time happens at read-out, and
+// the send-skew gate bounds the difference.
 func (g *gen) execute(r *Request) {
 	r.DispatchNs = g.now()
-	g.trip.start(r.DispatchNs)
+	g.trip.start(r.DispatchNs, r.Step)
 	defer g.trip.end()
-	deadline := g.epoch.Add(time.Duration(r.DispatchNs) + time.Duration(config.PinnedClientTimeoutS)*time.Second)
+	timeout := clientTimeout(g.cfg)
+	deadline := g.epoch.Add(time.Duration(r.DispatchNs) + timeout)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	conns := 0
@@ -39,7 +40,7 @@ func (g *gen) execute(r *Request) {
 			r.PeerAddr, r.ConnReused = info.Conn.RemoteAddr().String(), info.Reused
 			// Each further connection for this request is a further send.
 			if conns++; conns > 1 {
-				g.trip.send(g.now())
+				g.trip.send(g.now(), r.Step)
 			}
 		},
 	})
@@ -47,7 +48,7 @@ func (g *gen) execute(r *Request) {
 	req, err := g.newRequest(ctx, g.requestBody(r))
 	if err != nil {
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrConnect, g.now()
-		r.ErrText = redact.ErrorText(err, config.PinnedClientTimeoutS*time.Second)
+		r.ErrText = redact.ErrorText(err, timeout)
 		return
 	}
 
@@ -139,6 +140,9 @@ func (g *gen) execute(r *Request) {
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrEmptyStream, g.now()
 	default:
 		r.Outcome, r.DoneNs = OutcomeCompleted, g.now()
+		if d := releaseDeadline(g.cfg); d > 0 {
+			r.Late = r.E2ENs() > d.Nanoseconds()
+		}
 	}
 	// The transport reuses the connection only once the body reads to
 	// its end, which [DONE] precedes.
@@ -487,12 +491,30 @@ const (
 	errorBodyWait  = time.Second
 )
 
+// clientTimeout is the per-request timeout: the release hard timeout,
+// or the pinned 30 s.
+func clientTimeout(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.Profile == config.ProfileRelease {
+		return time.Duration(cfg.Client.HTTPTimeoutS) * time.Second
+	}
+	return config.PinnedClientTimeoutS * time.Second
+}
+
+// releaseDeadline is the release deadline that splits completions into
+// in time and late (0 = none).
+func releaseDeadline(cfg *config.Config) time.Duration {
+	if cfg.Profile != config.ProfileRelease || cfg.Release == nil {
+		return 0
+	}
+	return time.Duration(cfg.Release.Shape.DeadlineS) * time.Second
+}
+
 func (g *gen) classifyTransportErr(r *Request, err error) {
 	r.DoneNs = g.now()
-	r.ErrText = redact.ErrorText(err, config.PinnedClientTimeoutS*time.Second)
+	r.ErrText = redact.ErrorText(err, clientTimeout(g.cfg))
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		// No terminal event by the pinned timeout: censored (§3).
+		// No terminal event by the client timeout: censored (§3).
 		r.Outcome = OutcomeCensored
 	case isReset(err):
 		r.Outcome, r.ErrClass = OutcomeErrored, ErrReset
@@ -503,7 +525,7 @@ func (g *gen) classifyTransportErr(r *Request, err error) {
 
 func (g *gen) classifyStreamErr(r *Request, err error) {
 	r.DoneNs = g.now()
-	r.ErrText = redact.ErrorText(err, config.PinnedClientTimeoutS*time.Second)
+	r.ErrText = redact.ErrorText(err, clientTimeout(g.cfg))
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		r.Outcome = OutcomeCensored

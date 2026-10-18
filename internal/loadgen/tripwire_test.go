@@ -47,14 +47,14 @@ func TestTripwireCounts(t *testing.T) {
 
 	tw := newTripwire(&config.Config{Profile: config.ProfilePilot}, 126)
 	for i := int64(1); i <= 4; i++ {
-		tw.start(i)
+		tw.start(i, 0)
 	}
 	if r := tw.report(); r.Fired || r.MaxInFlight != 4 || r.OverInFlightNs != 0 || r.InFlightLimit != 4 {
 		t.Fatalf("four in flight: %+v", r)
 	}
 	started := make(chan struct{})
 	go func() {
-		tw.start(5)
+		tw.start(5, 0)
 		close(started)
 	}()
 	select {
@@ -68,13 +68,13 @@ func TestTripwireCounts(t *testing.T) {
 
 	tw = newTripwire(&config.Config{Profile: config.ProfilePilot}, 126)
 	for i := int64(1); i <= 126; i++ {
-		tw.start(i)
+		tw.start(i, 0)
 		tw.end()
 	}
 	if r := tw.report(); r.Fired || r.Dispatches != 126 || r.ExtraDispatchNs != 0 || r.MaxInFlight != 1 {
 		t.Fatalf("126 dispatches: %+v", r)
 	}
-	tw.start(999)
+	tw.start(999, 0)
 	if r := tw.report(); !r.Fired || r.Dispatches != 127 || r.ExtraDispatchNs != 999 || r.Scheduled != 126 {
 		t.Fatalf("127th dispatch: %+v", r)
 	}

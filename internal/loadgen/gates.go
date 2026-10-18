@@ -212,11 +212,16 @@ func CPUMeasured(window int) bool {
 func (m *cpuMonitor) stopAndCollect(g *gen) []cpuSample {
 	close(m.stop)
 	<-m.done
+	return m.collect(g.epoch)
+}
+
+// collect returns the samples taken so far as offsets from epoch.
+func (m *cpuMonitor) collect(epoch time.Time) []cpuSample {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]cpuSample, 0, len(m.samples))
 	for _, s := range m.samples {
-		out = append(out, cpuSample{atNs: s.at.Sub(g.epoch).Nanoseconds(), pct: s.pct})
+		out = append(out, cpuSample{atNs: s.at.Sub(epoch).Nanoseconds(), pct: s.pct})
 	}
 	return out
 }
@@ -265,6 +270,15 @@ func startGCMonitor(startNs, endNs int64) *gcMonitor {
 			m.mu.Unlock()
 		}))
 	return m
+}
+
+// stop cancels the snapshots not yet taken.
+func (m *gcMonitor) stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.timers {
+		t.Stop()
+	}
 }
 
 // stopAndP99Ms returns the edges, in milliseconds, of the runtime

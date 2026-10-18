@@ -9,8 +9,8 @@
 //     plain HdrHistogram recordValue() only (in the collector); the
 //     correction APIs are forbidden (lint-enforced).
 //   - Concurrency is provisioned above lambda x worst-case latency (the
-//     pinned 30 s timeout bounds request lifetime, so max in-flight is
-//     lambda x 30; connections are provisioned at 2x that) and nothing on
+//     client timeout bounds request lifetime, so max in-flight is lambda x
+//     timeout; connections are provisioned at 2x that) and nothing on
 //     the dispatch path blocks: a request that cannot reuse an idle
 //     connection dials a new one, and a dial failure fails that request.
 //   - No retries anywhere. Go's transport never silently retries a POST
@@ -68,6 +68,13 @@ type Request struct {
 	Outcome    Outcome `json:"outcome"`
 	ErrClass   string  `json:"err_class,omitempty"`
 	Tokens     int     `json:"tokens"`
+	// Step is a release request's 1-based ladder step (0 = no ladder);
+	// Warmup marks the warm-up requests sent at the first step's rate.
+	// Late marks a completion whose whole answer arrived after the
+	// release deadline, counted from intended dispatch.
+	Step   int  `json:"step,omitempty"`
+	Warmup bool `json:"warmup,omitempty"`
+	Late   bool `json:"late,omitempty"`
 	// CompletionTokens is the completion token count from a usage object
 	// in the stream; UsageSeen says one arrived.
 	CompletionTokens int    `json:"completion_tokens,omitempty"`
@@ -169,29 +176,74 @@ type Result struct {
 	ModelMismatches int      `json:"model_mismatches,omitempty"`
 	SplitSeries     bool     `json:"split_series,omitempty"`
 
-	// Tripwires is set for a pilot run only. Interrupted is set when a
-	// safety stop cancelled the run's context.
+	// Tripwires is set for a pilot or release run only. Interrupted is
+	// set when a safety stop cancelled the run's context.
 	Tripwires   *Tripwires    `json:"tripwires,omitempty"`
 	Interrupted *Interruption `json:"interrupted,omitempty"`
+
+	// Ladder is set for a release run only.
+	Ladder *LadderRecord `json:"ladder,omitempty"`
 }
 
-// Tripwires are the pilot's two local dispatch checks (SPEC-HOSTED HA2
-// §3). They record and never block or delay a dispatch; either one
-// firing makes the window client-invalid.
+// Tripwires are the local dispatch checks of a pilot (SPEC-HOSTED HA2
+// §3) and a release (HA3 point 16). They record and never block or
+// delay a dispatch; either one firing makes the window client-invalid.
 type Tripwires struct {
 	// Dispatches counts every request sent, including a further
 	// connection taken by one request. ExtraDispatchNs is the first send
-	// beyond Scheduled (0 = none).
+	// beyond the schedule (0 = none): beyond Scheduled for a pilot, beyond
+	// the request's own step's scheduled count for a release.
 	Scheduled       int   `json:"scheduled"`
 	Dispatches      int64 `json:"dispatches"`
 	ExtraDispatchNs int64 `json:"extra_dispatch_ns,omitempty"`
 	// MaxInFlight is the most requests between dispatch and terminal
 	// state at once. OverInFlightNs is the first dispatch that took the
-	// count above InFlightLimit (0 = none).
-	InFlightLimit  int   `json:"in_flight_limit"`
+	// count above the limit (0 = none): InFlightLimit for a pilot, the
+	// dispatching request's step's entry of InFlightLimits for a release.
+	InFlightLimit  int   `json:"in_flight_limit,omitempty"`
+	InFlightLimits []int `json:"in_flight_limits,omitempty"`
 	MaxInFlight    int64 `json:"max_in_flight"`
 	OverInFlightNs int64 `json:"over_in_flight_ns,omitempty"`
 	Fired          bool  `json:"fired"`
+}
+
+// LadderRecord is a release cell's ladder as run. EndStep is the 1-based
+// step at whose drain the ladder ended (0 = every step ran to its drain's
+// end) and End the reason, one of the LadderEnd* values.
+type LadderRecord struct {
+	WarmupScheduled int          `json:"warmup_scheduled"`
+	Steps           []StepRecord `json:"steps"`
+	EndStep         int          `json:"end_step,omitempty"`
+	End             string       `json:"end,omitempty"`
+}
+
+// Reasons a ladder ends before its top step (SPEC-HOSTED HA3 point 16).
+// The backoff rule leaves the cell counting; the other two make it
+// client-invalid.
+const (
+	LadderEndClientValidity = "client_validity"
+	LadderEndTripwire       = "tripwire"
+	LadderEndBackoff        = "backoff"
+)
+
+// StepRecord is one ladder step. A step not attempted carries its
+// schedule only. An attempted step's verdict is taken at its drain's end
+// once every request of the step is terminal: Status429 over Scheduled
+// is the backoff fraction, Gates the client-validity gate over the
+// step's measured window, Tripwire whether either tripwire had fired by
+// then. A run stopped by its context leaves the step it was in without a
+// verdict.
+type StepRecord struct {
+	RateRPS       float64     `json:"rate_rps"`
+	StartNs       int64       `json:"start_ns"`
+	EndNs         int64       `json:"end_ns"`
+	DrainEndNs    int64       `json:"drain_end_ns"`
+	Scheduled     int         `json:"scheduled"`
+	InFlightLimit int         `json:"in_flight_limit"`
+	Attempted     bool        `json:"attempted"`
+	Status429     int         `json:"status_429"`
+	Gates         *GateReport `json:"gates,omitempty"`
+	Tripwire      bool        `json:"tripwire,omitempty"`
 }
 
 // Safety stops: the causes a caller cancels Run's context with
@@ -212,42 +264,78 @@ type Interruption struct {
 	Unsent     int    `json:"unsent"`
 }
 
-// tripwire holds a pilot run's counts in atomics only, so a dispatch
-// never waits on it. A nil tripwire records nothing.
+// tripwire holds a run's counts in atomics only, so a dispatch never
+// waits on it. A nil tripwire records nothing. A pilot has one slot; a
+// release has one per ladder step, the warm-up counted in the first.
 type tripwire struct {
-	scheduled, limit                  int64
-	dispatches, inFlight, maxInFlight atomic.Int64
-	extraNs, overNs                   atomic.Int64
+	scheduled, limit      []int64
+	dispatches            []atomic.Int64
+	inFlight, maxInFlight atomic.Int64
+	extraNs, overNs       atomic.Int64
+	extra, over           atomic.Bool
+	ladder                bool
 }
 
 func newTripwire(cfg *config.Config, scheduled int) *tripwire {
 	if cfg.Profile != config.ProfilePilot {
 		return nil
 	}
-	return &tripwire{scheduled: int64(scheduled), limit: config.PinnedPilotInFlightTripwire}
+	return &tripwire{
+		scheduled:  []int64{int64(scheduled)},
+		limit:      []int64{config.PinnedPilotInFlightTripwire},
+		dispatches: make([]atomic.Int64, 1),
+	}
 }
 
-// send counts one request sent at now.
-func (t *tripwire) send(now int64) {
+// newLadderTripwire bounds each step's sends by its scheduled count and
+// its requests in flight by two times its rate times the hard timeout
+// (SPEC-HOSTED HA3 point 16).
+func newLadderTripwire(cfg *config.Config, l *Ladder) *tripwire {
+	t := &tripwire{dispatches: make([]atomic.Int64, len(l.Steps)), ladder: true}
+	for k, st := range l.Steps {
+		n := st.End - st.First
+		if k == 0 {
+			n = st.End
+		}
+		t.scheduled = append(t.scheduled, int64(n))
+		t.limit = append(t.limit, int64(inFlightLimit(cfg, st.RateRPS)))
+	}
+	return t
+}
+
+func inFlightLimit(cfg *config.Config, rate float64) int {
+	return int(2 * rate * float64(cfg.Client.HTTPTimeoutS))
+}
+
+// slot is the index a request of 1-based ladder step step counts under.
+func (t *tripwire) slot(step int) int {
+	return max(step-1, 0)
+}
+
+// send counts one request of step sent at now.
+func (t *tripwire) send(now int64, step int) {
 	if t == nil {
 		return
 	}
-	if t.dispatches.Add(1) > t.scheduled {
+	k := t.slot(step)
+	if t.dispatches[k].Add(1) > t.scheduled[k] {
+		t.extra.Store(true)
 		t.extraNs.CompareAndSwap(0, now)
 	}
 }
 
-// start counts a dispatch at now and its request in flight; end counts
-// its terminal state.
-func (t *tripwire) start(now int64) {
+// start counts a dispatch of step at now and its request in flight; end
+// counts its terminal state.
+func (t *tripwire) start(now int64, step int) {
 	if t == nil {
 		return
 	}
-	t.send(now)
+	t.send(now, step)
 	n := t.inFlight.Add(1)
 	for m := t.maxInFlight.Load(); n > m && !t.maxInFlight.CompareAndSwap(m, n); m = t.maxInFlight.Load() {
 	}
-	if n > t.limit {
+	if n > t.limit[t.slot(step)] {
+		t.over.Store(true)
 		t.overNs.CompareAndSwap(0, now)
 	}
 }
@@ -258,19 +346,32 @@ func (t *tripwire) end() {
 	}
 }
 
+// fired reports whether either check has fired so far.
+func (t *tripwire) fired() bool {
+	return t != nil && (t.extra.Load() || t.over.Load())
+}
+
 func (t *tripwire) report() *Tripwires {
 	if t == nil {
 		return nil
 	}
 	w := &Tripwires{
-		Scheduled:       int(t.scheduled),
-		Dispatches:      t.dispatches.Load(),
 		ExtraDispatchNs: t.extraNs.Load(),
-		InFlightLimit:   int(t.limit),
 		MaxInFlight:     t.maxInFlight.Load(),
 		OverInFlightNs:  t.overNs.Load(),
+		Fired:           t.fired(),
 	}
-	w.Fired = w.Dispatches > t.scheduled || w.MaxInFlight > t.limit
+	for k := range t.scheduled {
+		w.Scheduled += int(t.scheduled[k])
+		w.Dispatches += t.dispatches[k].Load()
+	}
+	if t.ladder {
+		for _, l := range t.limit {
+			w.InFlightLimits = append(w.InFlightLimits, int(l))
+		}
+	} else {
+		w.InFlightLimit = int(t.limit[0])
+	}
 	return w
 }
 
@@ -287,7 +388,12 @@ type gen struct {
 	trip   *tripwire
 	// cases are a pilot run's user texts by request index.
 	cases []string
+	// gates evaluates the client-validity gate; a ladder step's verdict
+	// uses it too.
+	gates gateFunc
 }
+
+type gateFunc func(cfg *config.Config, requests []Request, samples []cpuSample, gcLoMs, gcHiMs float64, measStartNs, measEndNs int64) GateReport
 
 // now returns nanoseconds since the run epoch (monotonic).
 func (g *gen) now() int64 { return time.Since(g.epoch).Nanoseconds() }
@@ -306,8 +412,19 @@ type Hooks struct {
 // Run executes the full scheduled load against cfg.Target.EndpointURL,
 // or cfg.Target.BaseURL plus /v1/chat/completions when that is empty.
 // It returns when every scheduled request has reached a terminal state
-// (which can be up to the 30 s timeout after the last dispatch).
+// (which can be up to the client timeout after the last dispatch), and
+// for a release run once the last attempted step's drain has ended.
 func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error) {
+	return run(ctx, cfg, hooks, evaluateGates)
+}
+
+func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) (*Result, error) {
+	var ladder *Ladder
+	if cfg.Profile == config.ProfileRelease {
+		if ladder = BuildLadder(cfg); ladder == nil {
+			return nil, fmt.Errorf("loadgen: release run without a ladder")
+		}
+	}
 	schedule := BuildSchedule(cfg)
 	if len(schedule) == 0 {
 		return nil, fmt.Errorf("loadgen: empty schedule")
@@ -332,9 +449,12 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	}
 
 	// Provision connections above lambda x worst-case latency: lifetime
-	// is bounded by the pinned 30 s timeout, so 2x lambda x timeout can
-	// absorb every request blackholing simultaneously.
+	// is bounded by the client timeout, so 2x lambda x timeout can absorb
+	// every request blackholing simultaneously.
 	provision := int(cfg.Load.RateRPS*float64(config.PinnedClientTimeoutS)*2) + cfg.Load.Connections
+	if ladder != nil {
+		provision = cfg.ReleaseConnectionProvision()
+	}
 	transport := NewTransport(provision)
 	defer transport.CloseIdleConnections()
 	model := RequestedModel(cfg)
@@ -354,6 +474,10 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		apiKey: apiKey,
 		trip:   newTripwire(cfg, len(schedule)),
 		cases:  cases,
+		gates:  gates,
+	}
+	if ladder != nil {
+		g.trip = newLadderTripwire(cfg, ladder)
 	}
 
 	res := NewResult(cfg)
@@ -362,9 +486,21 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	for i, off := range schedule {
 		requests[i] = Request{Index: int64(i), IntendedNs: off}
 	}
+	if ladder != nil {
+		res.WarmupEndNs, res.RunEndNs = ladder.Steps[0].StartNs, ladder.EndNs
+		res.Ladder = newLadderRecord(cfg, ladder)
+		lo := 0
+		for k, st := range ladder.Steps {
+			for i := lo; i < st.End; i++ {
+				requests[i].Step, requests[i].Warmup = k+1, i < st.First
+			}
+			lo = st.End
+		}
+	}
 
 	// Epoch first, then gate monitors (their timers are epoch-relative).
-	// The measurement span is [warmup end, cooldown start].
+	// The measurement span is [warmup end, cooldown start], or for a
+	// release run each step's window.
 	g.epoch = time.Now()
 	res.EpochWall = g.epoch
 	if hooks != nil && hooks.OnEpoch != nil {
@@ -378,7 +514,10 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	})
 	defer unwatch()
 	cpuMon := startCPUMonitor()
-	gcMon := startGCMonitor(res.WarmupEndNs, res.FaultEndNs)
+	var gcMon *gcMonitor
+	if ladder == nil {
+		gcMon = startGCMonitor(res.WarmupEndNs, res.FaultEndNs)
+	}
 
 	// Pacer: time-driven only. It spawns each worker a small lead ahead
 	// of t_i and the worker performs its own final precise wait, so the
@@ -388,23 +527,16 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	const spawnLeadNs = int64(10 * time.Millisecond)
 	var wg sync.WaitGroup
 	var aborted bool
-	for i := range requests {
-		delta := requests[i].IntendedNs - spawnLeadNs - g.now()
-		if delta > 0 {
-			timer := time.NewTimer(time.Duration(delta))
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				timer.Stop()
-				aborted = true
-			}
-		}
-		if aborted {
-			break // remaining requests stay undispatched -> gate fails
+	pace := func(r *Request, step *sync.WaitGroup) bool {
+		delta := r.IntendedNs - spawnLeadNs - g.now()
+		if delta > 0 && !g.sleep(ctx, time.Duration(delta)) {
+			return false // remaining requests stay undispatched -> gate fails
 		}
 		wg.Add(1)
-		go func(r *Request) {
+		step.Add(1)
+		go func() {
 			defer wg.Done()
+			defer step.Done()
 			// Final precise wait: timer to within ~1.5 ms of t_i, then a
 			// short spin; dispatch precision must not depend on runtime
 			// timer wakeup latency under read-burst load. Cost: ~1.5 ms of
@@ -417,14 +549,29 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 			for g.now() < r.IntendedNs {
 			}
 			g.execute(r)
-		}(&requests[i])
+		}()
+		return true
+	}
+	if ladder == nil {
+		var all sync.WaitGroup
+		for i := range requests {
+			if aborted = !pace(&requests[i], &all); aborted {
+				break
+			}
+		}
+	} else {
+		aborted, gcMon = g.runLadder(ctx, ladder, requests, res.Ladder, pace, cpuMon)
 	}
 	wg.Wait()
 
 	cpuSamples := cpuMon.stopAndCollect(g)
 	gcLoMs, gcHiMs := gcMon.stopAndP99Ms()
 	res.Requests = requests
-	res.Gates = evaluateGates(cfg, requests, cpuSamples, gcLoMs, gcHiMs, res.WarmupEndNs, res.FaultEndNs)
+	if ladder == nil {
+		res.Gates = g.gates(cfg, requests, cpuSamples, gcLoMs, gcHiMs, res.WarmupEndNs, res.FaultEndNs)
+	} else {
+		res.Gates = ladderGates(g, res.Ladder, requests, cpuSamples, gcLoMs, gcHiMs)
+	}
 	compareModels(cfg, g.model, res)
 	res.Tripwires = g.trip.report()
 	if aborted || ctx.Err() != nil {
@@ -436,6 +583,125 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		return res, err
 	}
 	return res, nil
+}
+
+func newLadderRecord(cfg *config.Config, l *Ladder) *LadderRecord {
+	rec := &LadderRecord{WarmupScheduled: l.Steps[0].First}
+	for _, st := range l.Steps {
+		rec.Steps = append(rec.Steps, StepRecord{
+			RateRPS: st.RateRPS, StartNs: st.StartNs, EndNs: st.EndNs, DrainEndNs: st.DrainEndNs,
+			Scheduled: st.End - st.First, InFlightLimit: inFlightLimit(cfg, st.RateRPS),
+		})
+	}
+	return rec
+}
+
+// runLadder dispatches the ladder step by step and reports whether ctx
+// stopped it, with the GC pause snapshots from the first step's start to
+// the last attempted step's end. At each drain's end, once every request
+// of the step (and of the warm-up, at the first step) is terminal, it
+// takes the step's verdict; a verdict that ends the ladder leaves every
+// later request unsent.
+func (g *gen) runLadder(ctx context.Context, l *Ladder, requests []Request, rec *LadderRecord,
+	pace func(*Request, *sync.WaitGroup) bool, cpuMon *cpuMonitor) (bool, *gcMonitor) {
+	gcMons := make([]*gcMonitor, len(l.Steps))
+	for k, st := range l.Steps {
+		gcMons[k] = startGCMonitor(st.StartNs, st.EndNs)
+	}
+	done := func(aborted bool, k int) (bool, *gcMonitor) {
+		for _, m := range gcMons {
+			m.stop()
+		}
+		span := &gcMonitor{}
+		gcMons[0].mu.Lock()
+		span.start = gcMons[0].start
+		gcMons[0].mu.Unlock()
+		gcMons[k].mu.Lock()
+		span.end = gcMons[k].end
+		gcMons[k].mu.Unlock()
+		return aborted, span
+	}
+	lo := 0
+	for k, st := range l.Steps {
+		sr := &rec.Steps[k]
+		sr.Attempted = true
+		var step sync.WaitGroup
+		for i := lo; i < st.End; i++ {
+			if !pace(&requests[i], &step) {
+				return done(true, k)
+			}
+		}
+		lo = st.End
+		if d := st.DrainEndNs - g.now(); d > 0 && !g.sleep(ctx, time.Duration(d)) {
+			return done(true, k)
+		}
+		step.Wait()
+		measured := requests[st.First:st.End]
+		for i := range measured {
+			if measured[i].ErrClass == ErrStatus429 {
+				sr.Status429++
+			}
+		}
+		gcLoMs, gcHiMs := gcMons[k].stopAndP99Ms()
+		gates := g.gates(g.cfg, measured, cpuMon.collect(g.epoch), gcLoMs, gcHiMs, st.StartNs, st.EndNs)
+		sr.Gates = &gates
+		sr.Tripwire = g.trip.fired()
+		if end := stepEnd(sr); end != "" {
+			rec.EndStep, rec.End = k+1, end
+			return done(false, k)
+		}
+	}
+	return done(false, len(l.Steps)-1)
+}
+
+// stepEnd is the reason a step's verdict ends the ladder, or "". The
+// backoff rule ends it at a status_429 fraction of the step's scheduled
+// requests above 0.5 (SPEC-HOSTED HA1, HA3 point 16).
+func stepEnd(s *StepRecord) string {
+	switch {
+	case !s.Gates.Pass:
+		return LadderEndClientValidity
+	case s.Tripwire:
+		return LadderEndTripwire
+	case 2*s.Status429 > s.Scheduled:
+		return LadderEndBackoff
+	}
+	return ""
+}
+
+// ladderGates evaluates the client-validity gate over every attempted
+// step's measured windows, from the first step's start to the last
+// attempted step's end; it fails when any step's verdict failed.
+func ladderGates(g *gen, rec *LadderRecord, requests []Request, samples []cpuSample, gcLoMs, gcHiMs float64) GateReport {
+	last, end := 0, 0
+	for k, sr := range rec.Steps {
+		if sr.Attempted {
+			last = k
+		}
+	}
+	for _, sr := range rec.Steps[:last+1] {
+		end += sr.Scheduled
+	}
+	end += rec.WarmupScheduled
+	rep := g.gates(g.cfg, requests[:end], samples, gcLoMs, gcHiMs, rec.Steps[0].StartNs, rec.Steps[last].EndNs)
+	for _, sr := range rec.Steps {
+		if sr.Gates != nil && !sr.Gates.Pass {
+			rep.Pass = false
+		}
+	}
+	return rep
+}
+
+// sleep waits d, and reports false if ctx ended first.
+func (g *gen) sleep(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // NewResult returns an empty result carrying cfg's phase boundaries.
