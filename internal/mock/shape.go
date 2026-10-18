@@ -3,11 +3,15 @@ package mock
 import (
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/percentes/percentes/internal/config"
 )
 
-// UsageMode selects when a shaped stream sends its usage-only chunk.
+// UsageMode selects when a shaped stream sends its usage-only chunk. On
+// a Messages shape usage is unrequested: UsageOnRequest and UsageAlways
+// place it in message_start and message_delta, UsageStart and UsageDelta
+// in one of them, UsageNever in neither.
 type UsageMode string
 
 const (
@@ -16,6 +20,9 @@ const (
 	UsageOnRequest UsageMode = ""
 	UsageAlways    UsageMode = "always"
 	UsageNever     UsageMode = "never"
+	// UsageStart and UsageDelta apply to a Messages shape only.
+	UsageStart UsageMode = "start"
+	UsageDelta UsageMode = "delta"
 )
 
 // unknownKey is the chunk and delta key a shaped stream adds when
@@ -58,6 +65,25 @@ type Shape struct {
 
 	// UnknownKeys adds x_mock_unknown to every chunk and every delta.
 	UnknownKeys bool
+
+	// Messages serves the Anthropic Messages stream at /v1/messages and
+	// /anthropic/v1/messages in place of /v1/chat/completions: message_start,
+	// reasoning as a thinking block, the answer as a text block, then
+	// message_delta and message_stop. The ceiling is max_tokens.
+	// FinishReason is the stop_reason, "end_turn" when empty and
+	// "max_tokens" when capped; OmitFinish sends stop_reason null. An
+	// Error replaces message_delta. A request without anthropic-version
+	// config.MessagesVersion is refused with 400.
+	Messages bool
+
+	// Cut ends the body cleanly without the terminator.
+	Cut bool
+
+	// Key, when set, must arrive in the header AuthHeader names (a
+	// target.auth_header value; bearer when empty) and in no other
+	// credential header, or the request is refused with 401.
+	Key        string
+	AuthHeader string
 }
 
 // NewShaped builds a server that answers in the form sh describes. Fault
@@ -72,7 +98,15 @@ func (sh *Shape) validate() error {
 	switch {
 	case sh.ReasoningTokens < 0:
 		return errors.New("reasoning tokens must be >= 0")
-	case sh.ReasoningTokens > 0 && sh.ReasoningKey == "":
+	case sh.Messages && sh.ReasoningKey != "":
+		return errors.New("a messages shape sends reasoning in a thinking block, not under a reasoning key")
+	case sh.Messages && sh.UnknownKeys:
+		return errors.New("unknown keys apply to the chat shape only")
+	case !sh.Messages && (sh.Usage == UsageStart || sh.Usage == UsageDelta):
+		return fmt.Errorf("usage mode %q applies to a messages shape only", sh.Usage)
+	case sh.AuthHeader != "" && sh.Key == "":
+		return errors.New("auth header set without a key")
+	case sh.ReasoningTokens > 0 && sh.ReasoningKey == "" && !sh.Messages:
 		return errors.New("reasoning tokens need a reasoning key")
 	case sh.ReasoningKey == "content":
 		return errors.New(`reasoning key must not be "content"`)
@@ -84,11 +118,36 @@ func (sh *Shape) validate() error {
 		return errors.New("error after content set without an error object")
 	}
 	switch sh.Usage {
-	case UsageOnRequest, UsageAlways, UsageNever:
+	case UsageOnRequest, UsageAlways, UsageNever, UsageStart, UsageDelta:
 	default:
 		return fmt.Errorf("unknown usage mode %q", sh.Usage)
 	}
+	switch sh.AuthHeader {
+	case "", config.AuthBearer, config.AuthXAPIKey, config.AuthAPIKey:
+	default:
+		return fmt.Errorf("unknown auth header %q", sh.AuthHeader)
+	}
 	return nil
+}
+
+// credentialHeaders are the headers a key can travel in.
+var credentialHeaders = []string{"Authorization", "X-Api-Key", "Api-Key"}
+
+// keyArrived reports whether h carries sh.Key in exactly the one header
+// sh.AuthHeader names and in no other credential header; true when no
+// key is set.
+func (sh *Shape) keyArrived(h http.Header) bool {
+	if sh == nil || sh.Key == "" {
+		return true
+	}
+	name, value := (&config.Target{AuthHeader: sh.AuthHeader}).KeyHeader(sh.Key)
+	for _, k := range credentialHeaders {
+		v := h.Values(k)
+		if k == name && (len(v) != 1 || v[0] != value) || k != name && len(v) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // piece is one streamed delta: its key and text.
@@ -100,7 +159,7 @@ type piece struct {
 // in-band error or the finish and usage chunks.
 type streamPlan struct {
 	pieces []piece
-	finish string // empty: no finish chunk
+	finish string // empty: no finish chunk, or stop_reason null
 	usage  bool
 	err    map[string]any
 }
@@ -117,9 +176,13 @@ func (s *Server) plan(req *chatRequest, limit int) streamPlan {
 		return p
 	}
 
+	reasoningKey, capped, done := sh.ReasoningKey, "length", "stop"
+	if sh.Messages {
+		reasoningKey, capped, done = thinkingKey, "max_tokens", "end_turn"
+	}
 	var pieces []piece
 	for i := 1; i <= sh.ReasoningTokens; i++ {
-		pieces = append(pieces, piece{sh.ReasoningKey, fmt.Sprintf("r%d ", i)})
+		pieces = append(pieces, piece{reasoningKey, fmt.Sprintf("r%d ", i)})
 	}
 	answer, ok := sh.Routes[req.Messages[len(req.Messages)-1].Content]
 	if !ok {
@@ -137,14 +200,14 @@ func (s *Server) plan(req *chatRequest, limit int) streamPlan {
 	switch {
 	case len(pieces) > limit:
 		p.pieces = pieces[:limit]
-		p.finish = "length"
+		p.finish = capped
 	case sh.Error != nil:
 		p.err = sh.Error
 		return p
 	case !sh.OmitFinish:
 		p.finish = sh.FinishReason
 		if p.finish == "" {
-			p.finish = "stop"
+			p.finish = done
 		}
 	}
 	switch sh.Usage {

@@ -66,12 +66,12 @@ type chatUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// handleChatCompletions is the OpenAI-compatible streaming endpoint. The
-// mock is streaming-only (the harness client reads Server-Sent Events,
-// §2). Unshaped, it always emits exactly max_tokens content tokens:
-// ignore_eos semantics, there is no early stop. A shaped server streams
-// the plan its Shape gives.
-func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+// handleStream is the streaming endpoint, OpenAI-compatible unless the
+// Shape is a Messages one. The mock is streaming-only (the harness client
+// reads Server-Sent Events, §2). Unshaped, it always emits exactly
+// max_tokens content tokens: ignore_eos semantics, there is no early
+// stop. A shaped server streams the plan its Shape gives.
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	// Silent-hang outranks everything, including the slow-reload 503 and
 	// request validation: during a full-node partition nothing on the
 	// node answers anything, correct or malformed.
@@ -83,23 +83,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	if !s.ready() {
 		s.requestsTotal.WithLabelValues("503").Inc()
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "model is reloading"})
+		s.writeError(w, http.StatusServiceUnavailable, "model is reloading")
+		return
+	}
+	if !s.shape.keyArrived(r.Header) {
+		s.requestsTotal.WithLabelValues("401").Inc()
+		s.writeError(w, http.StatusUnauthorized, "key not in the expected header alone")
+		return
+	}
+	if s.messages() && r.Header.Get("anthropic-version") != config.MessagesVersion {
+		s.requestsTotal.WithLabelValues("400").Inc()
+		s.writeError(w, http.StatusBadRequest, "anthropic-version "+config.MessagesVersion+" required")
 		return
 	}
 
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.requestsTotal.WithLabelValues("400").Inc()
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "malformed request body"})
+		s.writeError(w, http.StatusBadRequest, "malformed request body")
 		return
 	}
 	limit := req.MaxTokens
-	if s.shape != nil && req.MaxCompletionTokens > 0 {
+	if s.shape != nil && !s.shape.Messages && req.MaxCompletionTokens > 0 {
 		limit = req.MaxCompletionTokens
 	}
 	if !req.Stream || limit < 1 || len(req.Messages) == 0 {
 		s.requestsTotal.WithLabelValues("400").Inc()
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "stream must be true, max_tokens >= 1, messages required"})
+		s.writeError(w, http.StatusBadRequest, "stream must be true, max_tokens >= 1, messages required")
 		return
 	}
 
@@ -107,7 +117,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case verdict.httpError != 0:
 		s.requestsTotal.WithLabelValues(fmt.Sprint(verdict.httpError)).Inc()
-		writeJSON(w, verdict.httpError, map[string]any{"error": fmt.Sprintf("injected fault: status %d", verdict.httpError)})
+		s.writeError(w, verdict.httpError, fmt.Sprintf("injected fault: status %d", verdict.httpError))
 		return
 	case verdict.act == actHang:
 		// The window fired between the check above and admit: same fate.
@@ -167,6 +177,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := fmt.Sprintf("chatcmpl-mock-%d", reqID)
+	if s.messages() {
+		id = fmt.Sprintf("msg_mock_%d", reqID)
+	}
 	model := req.Model
 	if model == "" {
 		model = "percentes-mock"
@@ -182,17 +195,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.Set("X-Percentes-Replica", hostname())
 		w.WriteHeader(http.StatusOK)
 	}
-	var unknown *string
-	if s.shape != nil && s.shape.UnknownKeys {
-		v := "mock"
-		unknown = &v
-	}
-	delta := func(m map[string]any) map[string]any {
-		if unknown != nil {
-			m[unknownKey] = *unknown
-		}
-		return m
-	}
+	out := s.newStreamWriter(w, rc, id, model, &req)
 
 	for token := 1; token <= len(plan.pieces); token++ {
 		if token > 1 {
@@ -242,11 +245,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			writeHeader()
 		}
 		p := plan.pieces[token-1]
-		if err := writeChunk(w, rc, chatChunk{
-			ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
-			Choices: []chunkChoice{{Index: 0, Delta: delta(map[string]any{p.key: p.text}), FinishReason: nil}},
-			Unknown: unknown,
-		}); err != nil {
+		if err := out.piece(p); err != nil {
 			s.requestsTotal.WithLabelValues("abandoned").Inc()
 			return
 		}
@@ -266,45 +265,89 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if len(plan.pieces) == 0 {
 		writeHeader()
 	}
-	if plan.err != nil {
-		raw, err := json.Marshal(map[string]any{"error": plan.err})
-		if err == nil {
-			_, err = fmt.Fprintf(w, "data: %s\n\n", raw)
-		}
-		if err != nil {
-			s.requestsTotal.WithLabelValues("abandoned").Inc()
-			return
-		}
-	}
-	if plan.finish != "" {
-		finish := plan.finish
-		if err := writeChunk(w, rc, chatChunk{
-			ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
-			Choices: []chunkChoice{{Index: 0, Delta: delta(map[string]any{}), FinishReason: &finish}},
-			Unknown: unknown,
-		}); err != nil {
-			s.requestsTotal.WithLabelValues("abandoned").Inc()
-			return
-		}
-	}
-	if plan.usage {
-		prompt := len(strings.Fields(req.Messages[len(req.Messages)-1].Content))
-		completion := len(plan.pieces)
-		if err := writeChunk(w, rc, chatChunk{
-			ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
-			Choices: []chunkChoice{}, Usage: &chatUsage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: prompt + completion},
-			Unknown: unknown,
-		}); err != nil {
-			s.requestsTotal.WithLabelValues("abandoned").Inc()
-			return
-		}
-	}
-	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
+	if err := out.end(plan); err != nil {
 		s.requestsTotal.WithLabelValues("abandoned").Inc()
 		return
 	}
-	rc.Flush() //nolint:errcheck
 	s.requestsTotal.WithLabelValues("200").Inc()
+}
+
+// streamWriter writes one request's events in its shape's wire form.
+type streamWriter interface {
+	piece(p piece) error
+	// end writes the in-band error or the finish, then the terminator.
+	end(p streamPlan) error
+}
+
+func (s *Server) newStreamWriter(w http.ResponseWriter, rc *http.ResponseController, id, model string, req *chatRequest) streamWriter {
+	prompt := len(strings.Fields(req.Messages[len(req.Messages)-1].Content))
+	if s.messages() {
+		return &messagesWriter{w: w, rc: rc, id: id, model: model, usage: s.shape.Usage, prompt: prompt, cut: s.shape.Cut}
+	}
+	c := &chatWriter{w: w, rc: rc, id: id, model: model, prompt: prompt, cut: s.shape != nil && s.shape.Cut}
+	if s.shape != nil && s.shape.UnknownKeys {
+		v := "mock"
+		c.unknown = &v
+	}
+	return c
+}
+
+// chatWriter writes a chat-completions stream: a chunk per piece, then
+// the in-band error or the finish and usage chunks, then [DONE].
+type chatWriter struct {
+	w         http.ResponseWriter
+	rc        *http.ResponseController
+	id, model string
+	unknown   *string
+	prompt    int
+	cut       bool
+}
+
+func (c *chatWriter) chunk(choices []chunkChoice, usage *chatUsage) chatChunk {
+	return chatChunk{ID: c.id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: c.model,
+		Choices: choices, Usage: usage, Unknown: c.unknown}
+}
+
+func (c *chatWriter) delta(m map[string]any) map[string]any {
+	if c.unknown != nil {
+		m[unknownKey] = *c.unknown
+	}
+	return m
+}
+
+func (c *chatWriter) piece(p piece) error {
+	return writeChunk(c.w, c.rc, c.chunk([]chunkChoice{{Index: 0, Delta: c.delta(map[string]any{p.key: p.text}), FinishReason: nil}}, nil))
+}
+
+func (c *chatWriter) end(p streamPlan) error {
+	if p.err != nil {
+		raw, err := json.Marshal(map[string]any{"error": p.err})
+		if err == nil {
+			_, err = fmt.Fprintf(c.w, "data: %s\n\n", raw)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if p.finish != "" {
+		finish := p.finish
+		if err := writeChunk(c.w, c.rc, c.chunk([]chunkChoice{{Index: 0, Delta: c.delta(map[string]any{}), FinishReason: &finish}}, nil)); err != nil {
+			return err
+		}
+	}
+	if p.usage {
+		completion := len(p.pieces)
+		if err := writeChunk(c.w, c.rc, c.chunk([]chunkChoice{}, &chatUsage{PromptTokens: c.prompt, CompletionTokens: completion, TotalTokens: c.prompt + completion})); err != nil {
+			return err
+		}
+	}
+	if !c.cut {
+		if _, err := fmt.Fprint(c.w, "data: [DONE]\n\n"); err != nil {
+			return err
+		}
+	}
+	c.rc.Flush() //nolint:errcheck
+	return nil
 }
 
 func writeChunk(w http.ResponseWriter, rc *http.ResponseController, c chatChunk) error {

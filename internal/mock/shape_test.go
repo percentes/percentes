@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/percentes/percentes/internal/config"
 )
 
 // frame is one SSE data line of a shaped stream, decoded.
@@ -236,12 +238,18 @@ func TestShapedUsageNeverIgnoresTheRequest(t *testing.T) {
 
 func TestShapeRefusedAtStart(t *testing.T) {
 	for name, sh := range map[string]Shape{
-		"reasoning without key": {ReasoningTokens: 1},
-		"reasoning as content":  {ReasoningKey: "content", ReasoningTokens: 1},
-		"negative reasoning":    {ReasoningKey: "reasoning", ReasoningTokens: -1},
-		"finish and omit":       {FinishReason: "stop", OmitFinish: true},
-		"error offset alone":    {ErrorAfterContent: 1},
-		"unknown usage mode":    {Usage: "sometimes"},
+		"reasoning without key":  {ReasoningTokens: 1},
+		"reasoning as content":   {ReasoningKey: "content", ReasoningTokens: 1},
+		"negative reasoning":     {ReasoningKey: "reasoning", ReasoningTokens: -1},
+		"finish and omit":        {FinishReason: "stop", OmitFinish: true},
+		"error offset alone":     {ErrorAfterContent: 1},
+		"unknown usage mode":     {Usage: "sometimes"},
+		"messages reasoning key": {Messages: true, ReasoningKey: "reasoning"},
+		"messages unknown keys":  {Messages: true, UnknownKeys: true},
+		"start usage on chat":    {Usage: UsageStart},
+		"delta usage on chat":    {Usage: UsageDelta},
+		"auth header alone":      {AuthHeader: config.AuthXAPIKey},
+		"unknown auth header":    {Key: "k", AuthHeader: "cookie"},
 	} {
 		s := NewShaped(baseMockCfg(), sh)
 		if err := s.Start(); err == nil {

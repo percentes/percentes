@@ -6,7 +6,8 @@
 // sends no Transmission Control Protocol (TCP) reset (RST). NewShaped
 // serves the hosted-provider stream form a Shape describes.
 //
-// The data plane is /v1/chat/completions and /health. /admin and /metrics
+// The data plane is /v1/chat/completions (or, for a Messages Shape,
+// /v1/messages and /anthropic/v1/messages) and /health. /admin and /metrics
 // are out-of-band harness instrumentation and stay reachable during
 // every fault mode.
 package mock
@@ -110,7 +111,12 @@ func (s *Server) Start() error {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
+	if s.messages() {
+		mux.HandleFunc("/v1/messages", s.handleStream)
+		mux.HandleFunc("/anthropic/v1/messages", s.handleStream)
+	} else {
+		mux.HandleFunc("/v1/chat/completions", s.handleStream)
+	}
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/admin/faults", s.handleAdminFaults)
 	mux.Handle("/metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
