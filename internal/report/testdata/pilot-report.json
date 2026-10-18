@@ -1,0 +1,1569 @@
+{
+  "schema_version": 1,
+  "instrument_commit": "0123456789abcdef0123456789abcdef01234567",
+  "config_sha256": "abababababababababababababababababababababababababababababababab",
+  "demonstration": "DEMONSTRATION: Percentes chose this pair to show the report and its method. A pair named by a reader replaces it.",
+  "caveat": "CAVEAT: two hosted endpoints measured from one client host, in consecutive windows on each session date. Every timing is client-observed from intended dispatch, and the model weights and serving stack behind each model identifier are not verifiable (SPEC-HOSTED §6). No service-level objective (SLO) is defined for hosted data, so latency is reported as distributions with no pass bar (SPEC-HOSTED §7).",
+  "disclosures": [
+    "One author: Percentes has one author. No second person checked the instrument, the cases, the labels or this report.",
+    "Roles: task chosen by Percentes; cases and labels supplied by a deterministic generator; rubric written by Percentes; interest of the person who named the pair: none; Percentes chose the pair.",
+    "Cases: synthetic support tickets from a deterministic generator, labelled by construction. Their realism is limited, and they are not validated as production quality.",
+    "The same measured cases run in every session, in a per-session order, so the sessions are not independent task examples.",
+    "Output ceiling, the same value on both endpoints: groq max_completion_tokens=4096; baseten max_tokens=4096.",
+    "Both endpoints were sent the model identifier openai/gpt-oss-120b. A shared identifier does not establish identical weights, numerical precision or backend versions."
+  ],
+  "pins_not_verifiable": [
+    "ignore_eos and any output-length forcing",
+    "the model weights and revision behind the identifier",
+    "KV (key-value) cache budget",
+    "prefix-caching state",
+    "continuous-batching verification",
+    "serving-stack version and image digest",
+    "scheduler settings",
+    "CUDA (Compute Unified Device Architecture) graph enablement",
+    "GPU (graphics processing unit) SKU (stock-keeping unit), driver, and clock and power fingerprints",
+    "the Kubernetes, CNI (Container Network Interface), dataplane, kube-proxy, and node-monitor-grace-period pins",
+    "per-replica request counters"
+  ],
+  "cutoff_s": 10,
+  "timeout_s": 30,
+  "labels": [
+    "billing",
+    "technical",
+    "account",
+    "escalation"
+  ],
+  "endpoints": [
+    {
+      "name": "groq",
+      "provider": "Groq",
+      "account_tier": "Developer",
+      "requested_model": "openai/gpt-oss-120b",
+      "params": {
+        "max_completion_tokens": 4096,
+        "reasoning_effort": "low",
+        "reasoning_format": "parsed",
+        "stream_options": {
+          "include_usage": true
+        }
+      }
+    },
+    {
+      "name": "baseten",
+      "provider": "Baseten",
+      "account_tier": "Basic",
+      "requested_model": "openai/gpt-oss-120b",
+      "params": {
+        "max_tokens": 4096,
+        "reasoning_effort": "low",
+        "stream_options": {
+          "include_usage": true
+        }
+      }
+    }
+  ],
+  "pairs": [
+    {
+      "session": "weekday-1",
+      "date": "2026-10-13",
+      "first": "groq",
+      "segment": 1,
+      "valid": true,
+      "difference": -1,
+      "windows": [
+        {
+          "endpoint": "groq",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 115,
+          "scheduled": 120,
+          "correct_by_timeout": 115,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 0,
+            "length_limit": 1,
+            "no_answer": 1,
+            "partial_answer": 1,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 115,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "censored": 1,
+            "completed": 117,
+            "errored": 2
+          },
+          "error_classes": {
+            "empty_stream": 1,
+            "status_429": 1
+          },
+          "http_statuses": {
+            "200": 119,
+            "429": 1
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 118,
+            "min_ns": 300000000,
+            "median_ns": 360000000,
+            "max_ns": 420000000,
+            "excluded": {
+              "errored": 2
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 117,
+            "min_ns": 700000000,
+            "median_ns": 820000000,
+            "max_ns": 940000000,
+            "excluded": {
+              "censored": 1,
+              "errored": 2
+            }
+          },
+          "provider_usage": {
+            "responses": 117,
+            "prompt_tokens": 40950,
+            "completion_tokens": 7020
+          },
+          "content_chunks": 586,
+          "reasoning_chunks": 8776,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 29,
+              "escalation": 0,
+              "none": 0,
+              "technical": 1
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 29,
+              "none": 1,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 2,
+              "technical": 28
+            }
+          }
+        },
+        {
+          "endpoint": "baseten",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 116,
+          "scheduled": 120,
+          "correct_by_timeout": 117,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 1,
+            "length_limit": 1,
+            "no_answer": 0,
+            "partial_answer": 0,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 116,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "completed": 119,
+            "errored": 1
+          },
+          "error_classes": {
+            "empty_stream": 1
+          },
+          "http_statuses": {
+            "200": 120
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 119,
+            "min_ns": 350000000,
+            "median_ns": 410000000,
+            "max_ns": 470000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 119,
+            "min_ns": 750000000,
+            "median_ns": 870000000,
+            "max_ns": 12000000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "provider_usage": {
+            "responses": 119,
+            "prompt_tokens": 41650,
+            "completion_tokens": 7140
+          },
+          "content_chunks": 595,
+          "reasoning_chunks": 8856,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 30,
+              "escalation": 0,
+              "none": 0,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 1,
+              "escalation": 29,
+              "none": 0,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 29
+            }
+          }
+        }
+      ]
+    },
+    {
+      "session": "weekend-1",
+      "date": "2026-10-17",
+      "first": "baseten",
+      "segment": 1,
+      "valid": true,
+      "difference": -1,
+      "windows": [
+        {
+          "endpoint": "groq",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 115,
+          "scheduled": 120,
+          "correct_by_timeout": 115,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 0,
+            "length_limit": 1,
+            "no_answer": 1,
+            "partial_answer": 1,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 115,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "censored": 1,
+            "completed": 117,
+            "errored": 2
+          },
+          "error_classes": {
+            "empty_stream": 1,
+            "status_429": 1
+          },
+          "http_statuses": {
+            "200": 119,
+            "429": 1
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 118,
+            "min_ns": 300000000,
+            "median_ns": 360000000,
+            "max_ns": 420000000,
+            "excluded": {
+              "errored": 2
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 117,
+            "min_ns": 700000000,
+            "median_ns": 820000000,
+            "max_ns": 940000000,
+            "excluded": {
+              "censored": 1,
+              "errored": 2
+            }
+          },
+          "provider_usage": {
+            "responses": 117,
+            "prompt_tokens": 40950,
+            "completion_tokens": 7020
+          },
+          "content_chunks": 586,
+          "reasoning_chunks": 8776,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 1,
+              "none": 0,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 29,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 28,
+              "none": 2,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 29
+            }
+          }
+        },
+        {
+          "endpoint": "baseten",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 116,
+          "scheduled": 120,
+          "correct_by_timeout": 117,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 1,
+            "length_limit": 1,
+            "no_answer": 0,
+            "partial_answer": 0,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 116,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "completed": 119,
+            "errored": 1
+          },
+          "error_classes": {
+            "empty_stream": 1
+          },
+          "http_statuses": {
+            "200": 120
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 119,
+            "min_ns": 350000000,
+            "median_ns": 410000000,
+            "max_ns": 470000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 119,
+            "min_ns": 750000000,
+            "median_ns": 870000000,
+            "max_ns": 12000000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "provider_usage": {
+            "responses": 119,
+            "prompt_tokens": 41650,
+            "completion_tokens": 7140
+          },
+          "content_chunks": 595,
+          "reasoning_chunks": 8856,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 30,
+              "billing": 0,
+              "escalation": 0,
+              "none": 0,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 29,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 29,
+              "none": 1,
+              "technical": 0
+            },
+            "technical": {
+              "account": 1,
+              "billing": 0,
+              "escalation": 0,
+              "none": 0,
+              "technical": 29
+            }
+          }
+        }
+      ]
+    },
+    {
+      "session": "weekend-2",
+      "date": "2026-10-18",
+      "first": "groq",
+      "replaced_by": "reserve-weekend",
+      "segment": 1,
+      "valid": false,
+      "reasons": [
+        "baseten window client-invalid: G2: send skew max 61 ms above 50 ms"
+      ],
+      "windows": [
+        {
+          "endpoint": "groq",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 115,
+          "scheduled": 120,
+          "correct_by_timeout": 115,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 0,
+            "length_limit": 1,
+            "no_answer": 1,
+            "partial_answer": 1,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 115,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "censored": 1,
+            "completed": 117,
+            "errored": 2
+          },
+          "error_classes": {
+            "empty_stream": 1,
+            "status_429": 1
+          },
+          "http_statuses": {
+            "200": 119,
+            "429": 1
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 118,
+            "min_ns": 300000000,
+            "median_ns": 360000000,
+            "max_ns": 420000000,
+            "excluded": {
+              "errored": 2
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 117,
+            "min_ns": 700000000,
+            "median_ns": 820000000,
+            "max_ns": 940000000,
+            "excluded": {
+              "censored": 1,
+              "errored": 2
+            }
+          },
+          "provider_usage": {
+            "responses": 117,
+            "prompt_tokens": 40950,
+            "completion_tokens": 7020
+          },
+          "content_chunks": 586,
+          "reasoning_chunks": 8776,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 29,
+              "escalation": 0,
+              "none": 0,
+              "technical": 1
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 29,
+              "none": 1,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 2,
+              "technical": 28
+            }
+          }
+        },
+        {
+          "endpoint": "baseten",
+          "client_valid": false,
+          "invalid_reasons": [
+            "G2: send skew max 61 ms above 50 ms"
+          ],
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 116,
+          "scheduled": 120,
+          "correct_by_timeout": 117,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 1,
+            "length_limit": 1,
+            "no_answer": 0,
+            "partial_answer": 0,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 116,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "completed": 119,
+            "errored": 1
+          },
+          "error_classes": {
+            "empty_stream": 1
+          },
+          "http_statuses": {
+            "200": 120
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 119,
+            "min_ns": 350000000,
+            "median_ns": 410000000,
+            "max_ns": 470000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 119,
+            "min_ns": 750000000,
+            "median_ns": 870000000,
+            "max_ns": 12000000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "provider_usage": {
+            "responses": 119,
+            "prompt_tokens": 41650,
+            "completion_tokens": 7140
+          },
+          "content_chunks": 595,
+          "reasoning_chunks": 8856,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 30,
+              "escalation": 0,
+              "none": 0,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 1,
+              "escalation": 29,
+              "none": 0,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 29
+            }
+          }
+        }
+      ]
+    },
+    {
+      "session": "weekday-2",
+      "date": "2026-10-19",
+      "first": "baseten",
+      "segment": 1,
+      "valid": true,
+      "difference": 1,
+      "windows": [
+        {
+          "endpoint": "groq",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 115,
+          "scheduled": 120,
+          "correct_by_timeout": 115,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 0,
+            "length_limit": 1,
+            "no_answer": 1,
+            "partial_answer": 1,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 115,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "censored": 1,
+            "completed": 117,
+            "errored": 2
+          },
+          "error_classes": {
+            "empty_stream": 1,
+            "status_429": 1
+          },
+          "http_statuses": {
+            "200": 119,
+            "429": 1
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 118,
+            "min_ns": 300000000,
+            "median_ns": 360000000,
+            "max_ns": 420000000,
+            "excluded": {
+              "errored": 2
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 117,
+            "min_ns": 700000000,
+            "median_ns": 820000000,
+            "max_ns": 940000000,
+            "excluded": {
+              "censored": 1,
+              "errored": 2
+            }
+          },
+          "provider_usage": {
+            "responses": 117,
+            "prompt_tokens": 40950,
+            "completion_tokens": 7020
+          },
+          "content_chunks": 586,
+          "reasoning_chunks": 8776,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 1,
+              "none": 0,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 29,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 28,
+              "none": 2,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 29
+            }
+          }
+        },
+        {
+          "endpoint": "baseten",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 114,
+          "scheduled": 120,
+          "correct_by_timeout": 115,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 1,
+            "length_limit": 1,
+            "no_answer": 2,
+            "partial_answer": 0,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 114,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "completed": 117,
+            "errored": 3
+          },
+          "error_classes": {
+            "connect": 2,
+            "empty_stream": 1
+          },
+          "http_statuses": {
+            "200": 118
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 117,
+            "min_ns": 350000000,
+            "median_ns": 410000000,
+            "max_ns": 470000000,
+            "excluded": {
+              "errored": 3
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 117,
+            "min_ns": 750000000,
+            "median_ns": 870000000,
+            "max_ns": 12000000000,
+            "excluded": {
+              "errored": 3
+            }
+          },
+          "provider_usage": {
+            "responses": 117,
+            "prompt_tokens": 40950,
+            "completion_tokens": 7020
+          },
+          "content_chunks": 585,
+          "reasoning_chunks": 8776,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 30,
+              "billing": 0,
+              "escalation": 0,
+              "none": 0,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 28,
+              "escalation": 0,
+              "none": 2,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 29,
+              "none": 1,
+              "technical": 0
+            },
+            "technical": {
+              "account": 1,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 28
+            }
+          }
+        }
+      ]
+    },
+    {
+      "session": "weekday-3",
+      "date": "2026-10-22",
+      "first": "groq",
+      "segment": 1,
+      "valid": true,
+      "difference": -1,
+      "windows": [
+        {
+          "endpoint": "groq",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 115,
+          "scheduled": 120,
+          "correct_by_timeout": 115,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 0,
+            "length_limit": 1,
+            "no_answer": 1,
+            "partial_answer": 1,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 115,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "censored": 1,
+            "completed": 117,
+            "errored": 2
+          },
+          "error_classes": {
+            "empty_stream": 1,
+            "status_429": 1
+          },
+          "http_statuses": {
+            "200": 119,
+            "429": 1
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 118,
+            "min_ns": 300000000,
+            "median_ns": 360000000,
+            "max_ns": 420000000,
+            "excluded": {
+              "errored": 2
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 117,
+            "min_ns": 700000000,
+            "median_ns": 820000000,
+            "max_ns": 940000000,
+            "excluded": {
+              "censored": 1,
+              "errored": 2
+            }
+          },
+          "provider_usage": {
+            "responses": 117,
+            "prompt_tokens": 40950,
+            "completion_tokens": 7020
+          },
+          "content_chunks": 586,
+          "reasoning_chunks": 8776,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 29,
+              "escalation": 0,
+              "none": 0,
+              "technical": 1
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 29,
+              "none": 1,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 2,
+              "technical": 28
+            }
+          }
+        },
+        {
+          "endpoint": "baseten",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 116,
+          "scheduled": 120,
+          "correct_by_timeout": 117,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 1,
+            "length_limit": 1,
+            "no_answer": 0,
+            "partial_answer": 0,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 116,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "completed": 119,
+            "errored": 1
+          },
+          "error_classes": {
+            "empty_stream": 1
+          },
+          "http_statuses": {
+            "200": 120
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 119,
+            "min_ns": 350000000,
+            "median_ns": 410000000,
+            "max_ns": 470000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 119,
+            "min_ns": 750000000,
+            "median_ns": 870000000,
+            "max_ns": 12000000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "provider_usage": {
+            "responses": 119,
+            "prompt_tokens": 41650,
+            "completion_tokens": 7140
+          },
+          "content_chunks": 595,
+          "reasoning_chunks": 8856,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 30,
+              "escalation": 0,
+              "none": 0,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 1,
+              "escalation": 29,
+              "none": 0,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 29
+            }
+          }
+        }
+      ]
+    },
+    {
+      "session": "weekend-3",
+      "date": "2026-10-24",
+      "first": "baseten",
+      "segment": 1,
+      "valid": true,
+      "difference": -1,
+      "windows": [
+        {
+          "endpoint": "groq",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 115,
+          "scheduled": 120,
+          "correct_by_timeout": 115,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 0,
+            "length_limit": 1,
+            "no_answer": 1,
+            "partial_answer": 1,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 115,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "censored": 1,
+            "completed": 117,
+            "errored": 2
+          },
+          "error_classes": {
+            "empty_stream": 1,
+            "status_429": 1
+          },
+          "http_statuses": {
+            "200": 119,
+            "429": 1
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 118,
+            "min_ns": 300000000,
+            "median_ns": 360000000,
+            "max_ns": 420000000,
+            "excluded": {
+              "errored": 2
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 117,
+            "min_ns": 700000000,
+            "median_ns": 820000000,
+            "max_ns": 940000000,
+            "excluded": {
+              "censored": 1,
+              "errored": 2
+            }
+          },
+          "provider_usage": {
+            "responses": 117,
+            "prompt_tokens": 40950,
+            "completion_tokens": 7020
+          },
+          "content_chunks": 586,
+          "reasoning_chunks": 8776,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 1,
+              "none": 0,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 29,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 28,
+              "none": 2,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 29
+            }
+          }
+        },
+        {
+          "endpoint": "baseten",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 116,
+          "scheduled": 120,
+          "correct_by_timeout": 117,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 1,
+            "length_limit": 1,
+            "no_answer": 0,
+            "partial_answer": 0,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 116,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "completed": 119,
+            "errored": 1
+          },
+          "error_classes": {
+            "empty_stream": 1
+          },
+          "http_statuses": {
+            "200": 120
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 119,
+            "min_ns": 350000000,
+            "median_ns": 410000000,
+            "max_ns": 470000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 119,
+            "min_ns": 750000000,
+            "median_ns": 870000000,
+            "max_ns": 12000000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "provider_usage": {
+            "responses": 119,
+            "prompt_tokens": 41650,
+            "completion_tokens": 7140
+          },
+          "content_chunks": 595,
+          "reasoning_chunks": 8856,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 30,
+              "billing": 0,
+              "escalation": 0,
+              "none": 0,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 29,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 29,
+              "none": 1,
+              "technical": 0
+            },
+            "technical": {
+              "account": 1,
+              "billing": 0,
+              "escalation": 0,
+              "none": 0,
+              "technical": 29
+            }
+          }
+        }
+      ]
+    },
+    {
+      "session": "reserve-weekend",
+      "date": "2026-10-31",
+      "first": "groq",
+      "replaces": "weekend-2",
+      "segment": 1,
+      "valid": true,
+      "difference": -1,
+      "windows": [
+        {
+          "endpoint": "groq",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 115,
+          "scheduled": 120,
+          "correct_by_timeout": 115,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 0,
+            "length_limit": 1,
+            "no_answer": 1,
+            "partial_answer": 1,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 115,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "censored": 1,
+            "completed": 117,
+            "errored": 2
+          },
+          "error_classes": {
+            "empty_stream": 1,
+            "status_429": 1
+          },
+          "http_statuses": {
+            "200": 119,
+            "429": 1
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 118,
+            "min_ns": 300000000,
+            "median_ns": 360000000,
+            "max_ns": 420000000,
+            "excluded": {
+              "errored": 2
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 117,
+            "min_ns": 700000000,
+            "median_ns": 820000000,
+            "max_ns": 940000000,
+            "excluded": {
+              "censored": 1,
+              "errored": 2
+            }
+          },
+          "provider_usage": {
+            "responses": 117,
+            "prompt_tokens": 40950,
+            "completion_tokens": 7020
+          },
+          "content_chunks": 586,
+          "reasoning_chunks": 8776,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 29,
+              "escalation": 0,
+              "none": 0,
+              "technical": 1
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 29,
+              "none": 1,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 2,
+              "technical": 28
+            }
+          }
+        },
+        {
+          "endpoint": "baseten",
+          "client_valid": true,
+          "reported_models": [
+            "openai/gpt-oss-120b"
+          ],
+          "correct_by_cutoff": 116,
+          "scheduled": 120,
+          "correct_by_timeout": 117,
+          "task_classes": {
+            "instrument_incompatible": 0,
+            "late_correct": 1,
+            "length_limit": 1,
+            "no_answer": 0,
+            "partial_answer": 0,
+            "refusal": 0,
+            "schema_failure": 1,
+            "success": 116,
+            "unknown_termination": 0,
+            "wrong_label": 1
+          },
+          "schema_failure_reasons": {
+            "extra_key": 1
+          },
+          "transport_outcomes": {
+            "completed": 119,
+            "errored": 1
+          },
+          "error_classes": {
+            "empty_stream": 1
+          },
+          "http_statuses": {
+            "200": 120
+          },
+          "first_visible_content": {
+            "cohort": "measured requests with visible content",
+            "n": 119,
+            "min_ns": 350000000,
+            "median_ns": 410000000,
+            "max_ns": 470000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "completed_answer": {
+            "cohort": "completed measured requests",
+            "n": 119,
+            "min_ns": 750000000,
+            "median_ns": 870000000,
+            "max_ns": 12000000000,
+            "excluded": {
+              "errored": 1
+            }
+          },
+          "provider_usage": {
+            "responses": 119,
+            "prompt_tokens": 41650,
+            "completion_tokens": 7140
+          },
+          "content_chunks": 595,
+          "reasoning_chunks": 8856,
+          "label_counts": {
+            "account": 30,
+            "billing": 30,
+            "escalation": 30,
+            "technical": 30
+          },
+          "confusion": {
+            "account": {
+              "account": 29,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 0
+            },
+            "billing": {
+              "account": 0,
+              "billing": 30,
+              "escalation": 0,
+              "none": 0,
+              "technical": 0
+            },
+            "escalation": {
+              "account": 0,
+              "billing": 1,
+              "escalation": 29,
+              "none": 0,
+              "technical": 0
+            },
+            "technical": {
+              "account": 0,
+              "billing": 0,
+              "escalation": 0,
+              "none": 1,
+              "technical": 29
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "index": 1,
+      "first_session": "weekday-1",
+      "sessions": 7,
+      "valid_pairs": 6,
+      "mean_difference": -0.6666666666666666,
+      "min_difference": -1,
+      "max_difference": 1,
+      "differences": [
+        -1,
+        -1,
+        1,
+        -1,
+        -1,
+        -1
+      ],
+      "reported_models": [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-120b"
+      ]
+    }
+  ],
+  "valid_pairs": 6
+}

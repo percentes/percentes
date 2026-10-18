@@ -1,0 +1,335 @@
+Percentes pilot report (SPEC-HOSTED HA2)
+instrument commit: 0123456789abcdef0123456789abcdef01234567
+config sha256: abababababababababababababababababababababababababababababababab
+
+DEMONSTRATION: Percentes chose this pair to show the report and its method. A pair named by a reader replaces it.
+
+CAVEAT: two hosted endpoints measured from one client host, in consecutive windows on each session date. Every timing is client-observed from intended dispatch, and the model weights and serving stack behind each model identifier are not verifiable (SPEC-HOSTED §6). No service-level objective (SLO) is defined for hosted data, so latency is reported as distributions with no pass bar (SPEC-HOSTED §7).
+
+== Disclosures ==
+- One author: Percentes has one author. No second person checked the instrument, the cases, the labels or this report.
+- Roles: task chosen by Percentes; cases and labels supplied by a deterministic generator; rubric written by Percentes; interest of the person who named the pair: none; Percentes chose the pair.
+- Cases: synthetic support tickets from a deterministic generator, labelled by construction. Their realism is limited, and they are not validated as production quality.
+- The same measured cases run in every session, in a per-session order, so the sessions are not independent task examples.
+- Output ceiling, the same value on both endpoints: groq max_completion_tokens=4096; baseten max_tokens=4096.
+- Both endpoints were sent the model identifier openai/gpt-oss-120b. A shared identifier does not establish identical weights, numerical precision or backend versions.
+
+== Environment pins (SPEC-HOSTED §6) ==
+not applicable or not verifiable against a hosted endpoint: ignore_eos and any output-length forcing; the model weights and revision behind the identifier; KV (key-value) cache budget; prefix-caching state; continuous-batching verification; serving-stack version and image digest; scheduler settings; CUDA (Compute Unified Device Architecture) graph enablement; GPU (graphics processing unit) SKU (stock-keeping unit), driver, and clock and power fingerprints; the Kubernetes, CNI (Container Network Interface), dataplane, kube-proxy, and node-monitor-grace-period pins; per-replica request counters
+
+== Endpoints ==
+groq: provider Groq, account tier Developer, requested model openai/gpt-oss-120b, params {"max_completion_tokens":4096,"reasoning_effort":"low","reasoning_format":"parsed","stream_options":{"include_usage":true}}
+baseten: provider Baseten, account tier Basic, requested model openai/gpt-oss-120b, params {"max_tokens":4096,"reasoning_effort":"low","stream_options":{"include_usage":true}}
+frozen labels: billing, technical, account, escalation
+
+== Paired table ==
+headline: correct complete answers by the 10s cutoff from intended dispatch / all scheduled measured requests
+session          date       first      groq       baseten    difference  segment  pair
+weekday-1        2026-10-13 groq       115/120    116/120    -1          1        valid
+weekend-1        2026-10-17 baseten    115/120    116/120    -1          1        valid
+weekend-2        2026-10-18 groq       115/120    116/120    -           1        excluded: baseten window client-invalid: G2: send skew max 61 ms above 50 ms (replaced by reserve-weekend)
+weekday-2        2026-10-19 baseten    115/120    114/120    1           1        valid
+weekday-3        2026-10-22 groq       115/120    116/120    -1          1        valid
+weekend-3        2026-10-24 baseten    115/120    116/120    -1          1        valid
+reserve-weekend  2026-10-31 groq       115/120    116/120    -1          1        valid (replaces weekend-2)
+difference = groq numerator minus baseten numerator
+
+== Across pairs ==
+segment 1 (from weekday-1, 7 sessions, reported models openai/gpt-oss-120b | openai/gpt-oss-120b): 6 valid pairs; differences -1, -1, 1, -1, -1, -1; mean -0.67; range -1 to 1
+
+== Session weekday-1 (2026-10-13) ==
+groq: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 115/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 115/120 (late correct 0)
+  task outcomes: success=115 late_correct=0 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=1 no_answer=1 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: censored=1 completed=117 errored=2
+  error classes: empty_stream=1 status_429=1
+  HTTP statuses: 200=119 429=1
+  time to first visible content, client-observed: measured requests with visible content, n=118, min 300.0 ms, median 360.0 ms, max 420.0 ms; excluded: errored=2
+  completed-answer latency, client-observed: completed measured requests, n=117, min 700.0 ms, median 820.0 ms, max 940.0 ms; excluded: censored=1 errored=2
+  provider-reported usage: 117 responses carried usage; prompt tokens 40950; completion tokens 7020
+  chunks: content chunks 586; reasoning chunks 8776
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              29          1          0          0          0
+    technical             0         28          0          0          2
+    account               0          0         29          0          1
+    escalation            0          0          0         29          1
+baseten: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 116/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 117/120 (late correct 1)
+  task outcomes: success=116 late_correct=1 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=0 no_answer=0 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: completed=119 errored=1
+  error classes: empty_stream=1
+  HTTP statuses: 200=120
+  time to first visible content, client-observed: measured requests with visible content, n=119, min 350.0 ms, median 410.0 ms, max 470.0 ms; excluded: errored=1
+  completed-answer latency, client-observed: completed measured requests, n=119, min 750.0 ms, median 870.0 ms, max 12000.0 ms; excluded: errored=1
+  provider-reported usage: 119 responses carried usage; prompt tokens 41650; completion tokens 7140
+  chunks: content chunks 595; reasoning chunks 8856
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              30          0          0          0          0
+    technical             0         29          0          0          1
+    account               0          0         29          0          1
+    escalation            1          0          0         29          0
+
+== Session weekend-1 (2026-10-17) ==
+groq: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 115/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 115/120 (late correct 0)
+  task outcomes: success=115 late_correct=0 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=1 no_answer=1 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: censored=1 completed=117 errored=2
+  error classes: empty_stream=1 status_429=1
+  HTTP statuses: 200=119 429=1
+  time to first visible content, client-observed: measured requests with visible content, n=118, min 300.0 ms, median 360.0 ms, max 420.0 ms; excluded: errored=2
+  completed-answer latency, client-observed: completed measured requests, n=117, min 700.0 ms, median 820.0 ms, max 940.0 ms; excluded: censored=1 errored=2
+  provider-reported usage: 117 responses carried usage; prompt tokens 40950; completion tokens 7020
+  chunks: content chunks 586; reasoning chunks 8776
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              29          0          0          0          1
+    technical             0         29          0          0          1
+    account               0          0         29          1          0
+    escalation            0          0          0         28          2
+baseten: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 116/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 117/120 (late correct 1)
+  task outcomes: success=116 late_correct=1 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=0 no_answer=0 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: completed=119 errored=1
+  error classes: empty_stream=1
+  HTTP statuses: 200=120
+  time to first visible content, client-observed: measured requests with visible content, n=119, min 350.0 ms, median 410.0 ms, max 470.0 ms; excluded: errored=1
+  completed-answer latency, client-observed: completed measured requests, n=119, min 750.0 ms, median 870.0 ms, max 12000.0 ms; excluded: errored=1
+  provider-reported usage: 119 responses carried usage; prompt tokens 41650; completion tokens 7140
+  chunks: content chunks 595; reasoning chunks 8856
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              29          0          0          0          1
+    technical             0         29          1          0          0
+    account               0          0         30          0          0
+    escalation            0          0          0         29          1
+
+== Session weekend-2 (2026-10-18) ==
+groq: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 115/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 115/120 (late correct 0)
+  task outcomes: success=115 late_correct=0 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=1 no_answer=1 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: censored=1 completed=117 errored=2
+  error classes: empty_stream=1 status_429=1
+  HTTP statuses: 200=119 429=1
+  time to first visible content, client-observed: measured requests with visible content, n=118, min 300.0 ms, median 360.0 ms, max 420.0 ms; excluded: errored=2
+  completed-answer latency, client-observed: completed measured requests, n=117, min 700.0 ms, median 820.0 ms, max 940.0 ms; excluded: censored=1 errored=2
+  provider-reported usage: 117 responses carried usage; prompt tokens 40950; completion tokens 7020
+  chunks: content chunks 586; reasoning chunks 8776
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              29          1          0          0          0
+    technical             0         28          0          0          2
+    account               0          0         29          0          1
+    escalation            0          0          0         29          1
+baseten: client-valid no: G2: send skew max 61 ms above 50 ms
+  reported models: openai/gpt-oss-120b
+  headline: 116/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 117/120 (late correct 1)
+  task outcomes: success=116 late_correct=1 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=0 no_answer=0 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: completed=119 errored=1
+  error classes: empty_stream=1
+  HTTP statuses: 200=120
+  time to first visible content, client-observed: measured requests with visible content, n=119, min 350.0 ms, median 410.0 ms, max 470.0 ms; excluded: errored=1
+  completed-answer latency, client-observed: completed measured requests, n=119, min 750.0 ms, median 870.0 ms, max 12000.0 ms; excluded: errored=1
+  provider-reported usage: 119 responses carried usage; prompt tokens 41650; completion tokens 7140
+  chunks: content chunks 595; reasoning chunks 8856
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              30          0          0          0          0
+    technical             0         29          0          0          1
+    account               0          0         29          0          1
+    escalation            1          0          0         29          0
+
+== Session weekday-2 (2026-10-19) ==
+groq: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 115/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 115/120 (late correct 0)
+  task outcomes: success=115 late_correct=0 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=1 no_answer=1 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: censored=1 completed=117 errored=2
+  error classes: empty_stream=1 status_429=1
+  HTTP statuses: 200=119 429=1
+  time to first visible content, client-observed: measured requests with visible content, n=118, min 300.0 ms, median 360.0 ms, max 420.0 ms; excluded: errored=2
+  completed-answer latency, client-observed: completed measured requests, n=117, min 700.0 ms, median 820.0 ms, max 940.0 ms; excluded: censored=1 errored=2
+  provider-reported usage: 117 responses carried usage; prompt tokens 40950; completion tokens 7020
+  chunks: content chunks 586; reasoning chunks 8776
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              29          0          0          0          1
+    technical             0         29          0          0          1
+    account               0          0         29          1          0
+    escalation            0          0          0         28          2
+baseten: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 114/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 115/120 (late correct 1)
+  task outcomes: success=114 late_correct=1 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=0 no_answer=2 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: completed=117 errored=3
+  error classes: connect=2 empty_stream=1
+  HTTP statuses: 200=118
+  connect fraction above 1 percent: 2/120
+  time to first visible content, client-observed: measured requests with visible content, n=117, min 350.0 ms, median 410.0 ms, max 470.0 ms; excluded: errored=3
+  completed-answer latency, client-observed: completed measured requests, n=117, min 750.0 ms, median 870.0 ms, max 12000.0 ms; excluded: errored=3
+  provider-reported usage: 117 responses carried usage; prompt tokens 40950; completion tokens 7020
+  chunks: content chunks 585; reasoning chunks 8776
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              28          0          0          0          2
+    technical             0         28          1          0          1
+    account               0          0         30          0          0
+    escalation            0          0          0         29          1
+
+== Session weekday-3 (2026-10-22) ==
+groq: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 115/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 115/120 (late correct 0)
+  task outcomes: success=115 late_correct=0 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=1 no_answer=1 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: censored=1 completed=117 errored=2
+  error classes: empty_stream=1 status_429=1
+  HTTP statuses: 200=119 429=1
+  time to first visible content, client-observed: measured requests with visible content, n=118, min 300.0 ms, median 360.0 ms, max 420.0 ms; excluded: errored=2
+  completed-answer latency, client-observed: completed measured requests, n=117, min 700.0 ms, median 820.0 ms, max 940.0 ms; excluded: censored=1 errored=2
+  provider-reported usage: 117 responses carried usage; prompt tokens 40950; completion tokens 7020
+  chunks: content chunks 586; reasoning chunks 8776
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              29          1          0          0          0
+    technical             0         28          0          0          2
+    account               0          0         29          0          1
+    escalation            0          0          0         29          1
+baseten: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 116/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 117/120 (late correct 1)
+  task outcomes: success=116 late_correct=1 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=0 no_answer=0 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: completed=119 errored=1
+  error classes: empty_stream=1
+  HTTP statuses: 200=120
+  time to first visible content, client-observed: measured requests with visible content, n=119, min 350.0 ms, median 410.0 ms, max 470.0 ms; excluded: errored=1
+  completed-answer latency, client-observed: completed measured requests, n=119, min 750.0 ms, median 870.0 ms, max 12000.0 ms; excluded: errored=1
+  provider-reported usage: 119 responses carried usage; prompt tokens 41650; completion tokens 7140
+  chunks: content chunks 595; reasoning chunks 8856
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              30          0          0          0          0
+    technical             0         29          0          0          1
+    account               0          0         29          0          1
+    escalation            1          0          0         29          0
+
+== Session weekend-3 (2026-10-24) ==
+groq: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 115/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 115/120 (late correct 0)
+  task outcomes: success=115 late_correct=0 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=1 no_answer=1 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: censored=1 completed=117 errored=2
+  error classes: empty_stream=1 status_429=1
+  HTTP statuses: 200=119 429=1
+  time to first visible content, client-observed: measured requests with visible content, n=118, min 300.0 ms, median 360.0 ms, max 420.0 ms; excluded: errored=2
+  completed-answer latency, client-observed: completed measured requests, n=117, min 700.0 ms, median 820.0 ms, max 940.0 ms; excluded: censored=1 errored=2
+  provider-reported usage: 117 responses carried usage; prompt tokens 40950; completion tokens 7020
+  chunks: content chunks 586; reasoning chunks 8776
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              29          0          0          0          1
+    technical             0         29          0          0          1
+    account               0          0         29          1          0
+    escalation            0          0          0         28          2
+baseten: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 116/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 117/120 (late correct 1)
+  task outcomes: success=116 late_correct=1 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=0 no_answer=0 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: completed=119 errored=1
+  error classes: empty_stream=1
+  HTTP statuses: 200=120
+  time to first visible content, client-observed: measured requests with visible content, n=119, min 350.0 ms, median 410.0 ms, max 470.0 ms; excluded: errored=1
+  completed-answer latency, client-observed: completed measured requests, n=119, min 750.0 ms, median 870.0 ms, max 12000.0 ms; excluded: errored=1
+  provider-reported usage: 119 responses carried usage; prompt tokens 41650; completion tokens 7140
+  chunks: content chunks 595; reasoning chunks 8856
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              29          0          0          0          1
+    technical             0         29          1          0          0
+    account               0          0         30          0          0
+    escalation            0          0          0         29          1
+
+== Session reserve-weekend (2026-10-31) ==
+groq: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 115/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 115/120 (late correct 0)
+  task outcomes: success=115 late_correct=0 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=1 no_answer=1 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: censored=1 completed=117 errored=2
+  error classes: empty_stream=1 status_429=1
+  HTTP statuses: 200=119 429=1
+  time to first visible content, client-observed: measured requests with visible content, n=118, min 300.0 ms, median 360.0 ms, max 420.0 ms; excluded: errored=2
+  completed-answer latency, client-observed: completed measured requests, n=117, min 700.0 ms, median 820.0 ms, max 940.0 ms; excluded: censored=1 errored=2
+  provider-reported usage: 117 responses carried usage; prompt tokens 40950; completion tokens 7020
+  chunks: content chunks 586; reasoning chunks 8776
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              29          1          0          0          0
+    technical             0         28          0          0          2
+    account               0          0         29          0          1
+    escalation            0          0          0         29          1
+baseten: client-valid yes
+  reported models: openai/gpt-oss-120b
+  headline: 116/120 correct complete answers by the 10s cutoff
+  correct by the 30s timeout: 117/120 (late correct 1)
+  task outcomes: success=116 late_correct=1 wrong_label=1 schema_failure=1 refusal=0 length_limit=1 partial_answer=0 no_answer=0 unknown_termination=0 instrument_incompatible=0
+  schema failures by reason: extra_key=1
+  transport outcomes: completed=119 errored=1
+  error classes: empty_stream=1
+  HTTP statuses: 200=120
+  time to first visible content, client-observed: measured requests with visible content, n=119, min 350.0 ms, median 410.0 ms, max 470.0 ms; excluded: errored=1
+  completed-answer latency, client-observed: completed measured requests, n=119, min 750.0 ms, median 870.0 ms, max 12000.0 ms; excluded: errored=1
+  provider-reported usage: 119 responses carried usage; prompt tokens 41650; completion tokens 7140
+  chunks: content chunks 595; reasoning chunks 8856
+  frozen label counts: billing=30 technical=30 account=30 escalation=30
+  answer label (columns) against frozen label (rows):
+                    billing  technical    account escalation       none
+    billing              30          0          0          0          0
+    technical             0         29          0          0          1
+    account               0          0         29          0          1
+    escalation            1          0          0         29          0
+
+CAVEAT: two hosted endpoints measured from one client host, in consecutive windows on each session date. Every timing is client-observed from intended dispatch, and the model weights and serving stack behind each model identifier are not verifiable (SPEC-HOSTED §6). No service-level objective (SLO) is defined for hosted data, so latency is reported as distributions with no pass bar (SPEC-HOSTED §7).
