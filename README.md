@@ -122,7 +122,7 @@ cmd/percentes            single-run harness command-line interface (CLI); hosted
 cmd/percentes-campaign   N-run campaign runner (SPEC §5 repetition, §10 gates)
 cmd/percentes-calibrate  SPEC §10 capacity ramp and §5 single-replica reference
 cmd/percentes-pilot      the SPEC-HOSTED HA2 pilot: ledger, probe, dev, session, check-cpu
-cmd/percentes-release    a SPEC-HOSTED HA3 release: schedule, ledger, ceiling-check, run, dispatch, pages, check-cpu
+cmd/percentes-release    a SPEC-HOSTED HA3 release: schedule, ledger, ceiling-check, run, dispatch, pages, rehearse, check-cpu
 cmd/mockserver           fault-injectable mock inference server
 cmd/naivesweep           standalone reconnaissance probe, outside the instrument
 internal/                loadgen, collect, detect, orchestrator, validity, ...
@@ -215,6 +215,7 @@ that does not count is kept as a record outside the route's frame.
 | `percentes-release run` | from the first scheduled slot, one process per route | runs the route's cells over the window and writes each cell's evidence, labelled manifest and report pair |
 | `percentes-release dispatch` | after the window | sums every cell's dispatch series into the host's requests per second |
 | `percentes-release pages` | after the window | writes the index page and each route's page from the cells' records |
+| `percentes-release rehearse` | before the window, on the client host | the acceptance run: one cell of each of six mock routes, which the command serves itself on loopback, run at their offsets up the whole ladder; writes `rehearsal.json`, which says whether the rehearsal is green (among [its checks](docs/ARCHITECTURE.md#the-rehearsal), every cell counted with G2, the check that the client machine was not the bottleneck, passing at every step); at full length, the default, that file is the run's evidence |
 | `percentes --replay`, `percentes --check-release` | any time after a cell | render a cell's report pair again and compare it byte for byte; refuse a cell whose files, the unpublished frame store among them, are missing or differ from their recorded hashes |
 
 ```
@@ -254,7 +255,8 @@ line in the published tables.
    censored line, of the cell's `report.json`, over the step's scheduled
    requests with a 95 percent binomial (Wilson score) interval; if it
    completed, it also raises the step's completion curve at its
-   completion time.
+   completion time and counts toward the step's throughput, the
+   completions per second over the step's 480 s window.
 8. **Pages.** The route's page pools that line over the cells that
    attempted the step. The index row for the route and step prints one
    column per outcome line, each the line's pooled count over the pooled
