@@ -5,7 +5,9 @@
 // an account-side limit the operator set, blocks the window's start; any
 // other outcome is recorded and the window starts on schedule. The
 // optional wrong-model request and limits read are recorded and never
-// gate the start.
+// gate the start. RunRelease is a release route's probe (SPEC-HOSTED HA3
+// point 7): ten requests at the configured ceiling, checked for visible
+// content within the ceiling and for the input bound, with the same gate.
 package probe
 
 import (
@@ -37,7 +39,7 @@ import (
 // File is the probe record's file name in a window's output directory.
 const File = "probe.json"
 
-// requestTimeout bounds each exchange from its dispatch.
+// requestTimeout bounds each exchange of a pilot probe from its dispatch.
 var requestTimeout = time.Duration(config.PinnedClientTimeoutS) * time.Second
 
 // newTransport is the session's transport.
@@ -210,7 +212,7 @@ func Run(ctx context.Context, in Input) (*Record, error) {
 	}
 	transport := newTransport(1)
 	defer transport.CloseIdleConnections()
-	p := &prober{rt: transport, target: t, mask: m}
+	p := &prober{rt: transport, target: t, mask: m, timeout: requestTimeout}
 
 	dispatched := time.Now()
 	req := p.post(ctx, t.EndpointURL, t.ModelName, body, key)
@@ -218,7 +220,7 @@ func Run(ctx context.Context, in Input) (*Record, error) {
 	rec.Start = Gate(t, rec.Request.Status)
 
 	if t.Probe != nil && t.Probe.LimitsURL != "" {
-		ex := p.exchange(ctx, http.MethodGet, t.Probe.LimitsURL, nil, [2]string{"Authorization", t.Probe.LimitsAuthScheme + " " + key}, limitsBodyLimit, nil)
+		ex := p.limits(ctx, key)
 		rec.Limits = &ex
 	}
 
@@ -235,13 +237,14 @@ func Run(ctx context.Context, in Input) (*Record, error) {
 			rec.WrongModel = &Exchange{Method: http.MethodPost, URL: redact.URL(t.EndpointURL), Model: m.str(in.WrongModel), Error: "not sent: " + ctx.Err().Error()}
 		}
 	}
-	rec.Findings = findings(t, rec)
+	rec.Findings = findings(t, rec.Request, rec.Shape, rec.RequestedModel)
 	rec.EndUTC = time.Now().UTC()
 	return rec, nil
 }
 
-// Write writes rec, indented, to File in dir and returns the file's path.
-func Write(dir string, rec *Record) (string, error) {
+// Write writes rec, a *Record or a *ReleaseRecord, indented, to File in
+// dir and returns the file's path.
+func Write(dir string, rec any) (string, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
@@ -263,6 +266,8 @@ type prober struct {
 	rt     http.RoundTripper
 	target *config.Target
 	mask   masker
+	// timeout bounds each exchange from its dispatch.
+	timeout time.Duration
 }
 
 type posted struct {
@@ -270,27 +275,32 @@ type posted struct {
 	shape *Shape
 }
 
-// post sends one chat-completion request and reads a 200 stream to
-// [DONE] through the shape reader.
+// post sends one inference request in the target's adapter shape and
+// reads a 200 stream to its terminator through the shape reader.
 func (p *prober) post(ctx context.Context, url, model string, body []byte, key string) posted {
 	var out posted
 	name, value := p.target.KeyHeader(key)
-	out.ex = p.exchange(ctx, http.MethodPost, url, body, [2]string{name, value}, errorBodyLimit, func(r io.Reader, since func() int64) {
-		out.shape = readShape(r, p.target.Shape(), p.mask, since)
+	headers := [][2]string{{name, value}}
+	if p.target.Adapter == config.AdapterMessages {
+		headers = append(headers, [2]string{"anthropic-version", config.MessagesVersion})
+	}
+	out.ex = p.exchange(ctx, http.MethodPost, url, body, headers, errorBodyLimit, func(r io.Reader, since func() int64) {
+		out.shape = readShape(r, p.target.Adapter, p.target.Shape(), p.mask, since, p.timeout)
 	})
 	out.ex.Model = p.mask.str(model)
 	return out
 }
 
 // exchange sends one request with the run's transport, never following
-// a redirect or retrying, and records it. auth is the credential
-// header's name and value. A 200 body goes to stream when set; any other
-// body is kept up to limit bytes.
-func (p *prober) exchange(ctx context.Context, method, url string, body []byte, auth [2]string, limit int, stream func(io.Reader, func() int64)) Exchange {
+// a redirect or retrying, and records it. headers are names and values
+// set on the request, the credential header first. A 200 body goes to
+// stream when set; any other body is kept up to limit bytes.
+func (p *prober) exchange(ctx context.Context, method, url string, body []byte, headers [][2]string, limit int, stream func(io.Reader, func() int64)) Exchange {
 	ex := Exchange{Method: method, URL: redact.URL(url), DispatchUTC: time.Now().UTC()}
 	start := time.Now()
 	since := func() int64 { return time.Since(start).Nanoseconds() }
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	timeout := p.timeout
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// A dial can outlive the request; closed stops its callbacks writing
@@ -323,7 +333,7 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 				ex.DNS.Addrs = append(ex.DNS.Addrs, a.String())
 			}
 			if info.Err != nil {
-				ex.DNS.Error = redact.ErrorText(info.Err, requestTimeout)
+				ex.DNS.Error = redact.ErrorText(info.Err, timeout)
 			}
 		},
 		ConnectStart: func(_, addr string) {
@@ -342,7 +352,7 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 			}
 			c := Connect{Addr: addr, DurationNs: since() - connStart[addr]}
 			if err != nil {
-				c.Error = redact.ErrorText(err, requestTimeout)
+				c.Error = redact.ErrorText(err, timeout)
 			}
 			ex.Connects = append(ex.Connects, c)
 		},
@@ -360,7 +370,7 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 			if closed {
 				return
 			}
-			ex.TLS = tlsOf(st, err, since()-tlsStart)
+			ex.TLS = tlsOf(st, err, since()-tlsStart, timeout)
 		},
 		GotConn: func(info httptrace.GotConnInfo) {
 			mu.Lock()
@@ -389,7 +399,7 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
-		ex.Error = redact.ErrorText(err, requestTimeout)
+		ex.Error = redact.ErrorText(err, timeout)
 		return done()
 	}
 	if body != nil {
@@ -397,12 +407,14 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 	} else {
 		req.Header.Set("Accept", "application/json")
 	}
-	req.Header.Set(auth[0], auth[1])
+	for _, h := range headers {
+		req.Header.Set(h[0], h[1])
+	}
 	req.GetBody = nil
 	resp, err := p.rt.RoundTrip(req)
 	if err != nil {
 		mu.Lock()
-		ex.Error = redact.ErrorText(err, requestTimeout)
+		ex.Error = redact.ErrorText(err, timeout)
 		mu.Unlock()
 		return done()
 	}
@@ -425,7 +437,7 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 	mu.Lock()
 	ex.Body = bodyOf(b, truncated)
 	if rerr != nil {
-		ex.Error = redact.ErrorText(rerr, requestTimeout)
+		ex.Error = redact.ErrorText(rerr, timeout)
 	}
 	mu.Unlock()
 	return done()
@@ -457,10 +469,17 @@ func (p *prober) headers(h http.Header) (map[string][]string, []string) {
 	return out, names
 }
 
-func tlsOf(st tls.ConnectionState, err error, ns int64) *TLS {
+// limits reads target.probe.limits_url with the key after the configured
+// Authorization scheme.
+func (p *prober) limits(ctx context.Context, key string) Exchange {
+	t := p.target
+	return p.exchange(ctx, http.MethodGet, t.Probe.LimitsURL, nil, [][2]string{{"Authorization", t.Probe.LimitsAuthScheme + " " + key}}, limitsBodyLimit, nil)
+}
+
+func tlsOf(st tls.ConnectionState, err error, ns int64, timeout time.Duration) *TLS {
 	t := &TLS{DurationNs: ns}
 	if err != nil {
-		t.Error = redact.ErrorText(err, requestTimeout)
+		t.Error = redact.ErrorText(err, timeout)
 		return t
 	}
 	t.Version = tls.VersionName(st.Version)
@@ -523,15 +542,16 @@ func (m masker) longest() int {
 }
 
 // findings compares the observed shape with the target's configuration.
-func findings(t *config.Target, rec *Record) []string {
+func findings(t *config.Target, ex Exchange, s *Shape, requested string) []string {
 	var f []string
-	ex := rec.Request
 	if ex.Proto != "" && ex.Proto != "HTTP/1.1" {
 		f = append(f, fmt.Sprintf("response over %s, not HTTP/1.1", ex.Proto))
 	}
-	s := rec.Shape
 	if s == nil {
 		return f
+	}
+	if t.Adapter == config.AdapterMessages {
+		return append(f, messagesFindings(s, requested)...)
 	}
 	sh := t.Shape()
 	if !s.Done {
@@ -544,7 +564,8 @@ func findings(t *config.Target, rec *Record) []string {
 		f = append(f, fmt.Sprintf("no event carried text in the configured content key %q", sh.Content))
 	}
 	for _, k := range sortedKeys(s.DeltaKeys) {
-		if s.DeltaKeys[k].StringBytes > 0 && k != sh.Content && k != "role" && !slices.Contains(sh.Reasoning, k) {
+		if s.DeltaKeys[k].StringBytes > 0 && k != sh.Content && k != "role" && !slices.Contains(sh.Reasoning, k) &&
+			!slices.Contains(sh.Refusal, "choices.0.delta."+k) {
 			f = append(f, fmt.Sprintf("delta key %q carries text and is neither the content key nor a configured reasoning key", k))
 		}
 	}
@@ -556,19 +577,81 @@ func findings(t *config.Target, rec *Record) []string {
 	if len(s.Usage) == 0 {
 		f = append(f, "no usage object in the stream")
 	}
+	for _, r := range s.Refusals {
+		if !slices.Contains(sh.Refusal, r) {
+			f = append(f, fmt.Sprintf("refusal field at %q, not a configured refusal path", r))
+		}
+	}
 	if len(s.FinishReasons) == 0 {
 		f = append(f, "no finish_reason in the stream")
 	}
 	if len(s.Models) == 0 {
 		f = append(f, fmt.Sprintf("no model id at the configured path %q", sh.Model))
 	}
+	return append(f, sharedFindings(s, requested)...)
+}
+
+// messagesEvents and messagesDeltas are the event and delta types the
+// Messages adapter reads.
+var (
+	messagesEvents = []string{"message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "ping", "error"}
+	messagesDeltas = []string{"text_delta", "thinking_delta", "signature_delta"}
+)
+
+func messagesFindings(s *Shape, requested string) []string {
+	var f []string
+	if !s.Done {
+		f = append(f, "the stream ended without message_stop")
+	}
+	if s.Undecodable > 0 {
+		f = append(f, fmt.Sprintf("%d events did not decode as a JSON object", s.Undecodable))
+	}
+	if s.ContentEvents == 0 {
+		f = append(f, "no text_delta carried text")
+	}
+	for _, k := range sortedCounts(s.EventTypes) {
+		if !slices.Contains(messagesEvents, k) {
+			f = append(f, fmt.Sprintf("event type %q is not one the Messages adapter reads", k))
+		}
+	}
+	for _, k := range sortedCounts(s.DeltaTypes) {
+		if !strings.HasPrefix(k, "block:") && !slices.Contains(messagesDeltas, k) {
+			f = append(f, fmt.Sprintf("delta type %q is not one the Messages adapter reads", k))
+		}
+	}
+	if len(s.Usage) == 0 {
+		f = append(f, "no usage object in the stream")
+	}
+	for _, r := range s.Refusals {
+		f = append(f, fmt.Sprintf("refusal field at %q", r))
+	}
+	if len(s.FinishReasons) == 0 {
+		f = append(f, "no stop_reason in the stream")
+	}
+	if len(s.Models) == 0 {
+		f = append(f, "no model id in message_start")
+	}
+	return append(f, sharedFindings(s, requested)...)
+}
+
+func sharedFindings(s *Shape, requested string) []string {
+	var f []string
 	for _, mdl := range s.Models {
-		if mdl != rec.RequestedModel {
-			f = append(f, fmt.Sprintf("reported model %q differs from the requested %q", mdl, rec.RequestedModel))
+		if mdl != requested {
+			f = append(f, fmt.Sprintf("reported model %q differs from the requested %q", mdl, requested))
 		}
 	}
 	if s.Error != "" {
 		f = append(f, "the stream carried an in-band error object")
 	}
 	return f
+}
+
+func sortedCounts(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
