@@ -475,6 +475,9 @@ type Target struct {
 	// starts without a balance amount; without it, a balance command
 	// that prints unavailable blocks the cell's start.
 	BalanceUnavailable *BalanceUnavailable `yaml:"balance_unavailable,omitempty" json:"balance_unavailable,omitempty"`
+	// Retention records whether the frame store keeps the route's model
+	// output and the terms that setting rests on.
+	Retention *Retention `yaml:"retention,omitempty" json:"retention,omitempty"`
 }
 
 // ResponseShape names where a target's stream chunks carry each field.

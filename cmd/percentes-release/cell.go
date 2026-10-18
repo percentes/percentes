@@ -296,7 +296,7 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 			balanceEnd = ""
 		}
 	}
-	framesPath, ferr := evidence.WriteRunFrames(r.framesRoot, res)
+	framesPath, ferr := evidence.WriteRunFrames(r.framesRoot, &ev.cfg.Target, res)
 	if ferr == nil {
 		ferr = ev.op.WriteCopies(filepath.Dir(framesPath))
 	}

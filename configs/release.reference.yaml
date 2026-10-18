@@ -96,3 +96,18 @@ target:
     lines:
       - Percentes is not affiliated with or endorsed by Groq LLC.
       - Groq is a trademark of Groq LLC and/or its affiliates.
+  # What the frame store keeps of each 200 body (HA3 point 15):
+  # protocol_period keeps the bytes as read, none keeps their count only.
+  retention:
+    model_output: protocol_period
+    provision: >-
+      Groq Services Agreement, section 1: "Outputs are Customer Data";
+      section 8.1: Customer retains all Intellectual Property Rights in
+      Customer Data, including Outputs.
+    deletion: >-
+      None on the customer: section 10 sets no return or destruction of
+      Confidential Information, and section 11.5 puts the deletion of
+      Customer Data on Groq.
+    source: https://console.groq.com/docs/legal/services-agreement
+    retrieved: 2026-10-12
+    sha256: "727045f737d464adbef1293fdf3b1239c580eace536ebc112e71bb918433976b"

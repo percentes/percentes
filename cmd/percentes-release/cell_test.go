@@ -605,6 +605,45 @@ func TestCellProbeWithholds(t *testing.T) {
 	}
 }
 
+// A route whose retention keeps no model output runs its cell with a
+// frame store that counts each answer's bytes and keeps none of them.
+func TestCellRetainsNoModelOutput(t *testing.T) {
+	e := newEndpoint(t, always200)
+	cfg := releaseConfig(t, e.url())
+	cfg.Target.Retention.ModelOutput = config.RetainNone
+	r, _ := newTestRoute(t, cfg, "+0.005032")
+	shortLadder(r)
+	run := r.runs[0]
+	if _, err := r.runCell(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := checkRetained(t, r, run)
+	b, err := os.ReadFile(filepath.Join(r.framesRoot, filepath.FromSlash(m.Frames.Name)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte("sentences.")) {
+		t.Fatal("frame store keeps the answer")
+	}
+	answered := 0
+	for _, line := range bytes.Split(bytes.TrimSuffix(b, []byte("\n")), []byte("\n")) {
+		var rec evidence.FrameRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Status != http.StatusOK {
+			continue
+		}
+		answered++
+		if rec.Frames != nil || rec.DroppedBytes != int64(len(chatStream)) {
+			t.Fatalf("request %d: %d frames, dropped %d of %d", rec.Index, len(rec.Frames), rec.DroppedBytes, len(chatStream))
+		}
+	}
+	if answered == 0 {
+		t.Fatalf("no answered request in the frame store:\n%s", b)
+	}
+}
+
 // A failed balance check, a balance below the cell's reservation, and a
 // balance unavailable where the route records no balance_unavailable
 // ruling each block the cell before admission: the ledger gains no line

@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
 )
 
@@ -68,12 +69,18 @@ func (b Bytes) Raw() []byte {
 }
 
 // FrameRecords returns one record per request of res, in index order.
-func FrameRecords(res *loadgen.Result) []FrameRecord {
+// Without output, each 200 body's reads are counted in DroppedBytes and
+// not kept.
+func FrameRecords(res *loadgen.Result, output bool) []FrameRecord {
 	out := make([]FrameRecord, len(res.Requests))
 	for i := range res.Requests {
 		r := &res.Requests[i]
 		rec := FrameRecord{Index: r.Index, Status: r.Status, Headers: r.RetainedHeaders, DroppedBytes: r.FrameBytesDropped}
 		for _, f := range r.Frames {
+			if !output {
+				rec.DroppedBytes += int64(len(f.Data))
+				continue
+			}
 			rec.Frames = append(rec.Frames, Frame{Ns: f.Ns, Bytes: bytesOf(f.Data)})
 		}
 		if len(r.ErrorBody) > 0 {
@@ -103,12 +110,12 @@ func FramesDir(root string, epoch time.Time) string {
 	return filepath.Join(root, epoch.UTC().Format("20060102T150405.000000000Z"))
 }
 
-// WriteRunFrames writes the frame records of res to FramesFile in the
-// run's frame directory under root, readable by the owner only, and
-// returns the file's path. It refuses a root inside the instrument's
-// source tree and an existing file. A nil res writes nothing and returns
-// "".
-func WriteRunFrames(root string, res *loadgen.Result) (string, error) {
+// WriteRunFrames writes the frame records of res, keeping the 200 bodies
+// where target t keeps model output, to FramesFile in the run's frame
+// directory under root, readable by the owner only, and returns the
+// file's path. It refuses a root inside the instrument's source tree and
+// an existing file. A nil res writes nothing and returns "".
+func WriteRunFrames(root string, t *config.Target, res *loadgen.Result) (string, error) {
 	if res == nil {
 		return "", nil
 	}
@@ -117,7 +124,7 @@ func WriteRunFrames(root string, res *loadgen.Result) (string, error) {
 	}
 	dir := FramesDir(root, res.EpochWall)
 	var b bytes.Buffer
-	if err := WriteFrames(&b, FrameRecords(res)); err != nil {
+	if err := WriteFrames(&b, FrameRecords(res, t.KeepsModelOutput())); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {

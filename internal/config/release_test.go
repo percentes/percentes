@@ -470,6 +470,51 @@ func TestReleaseBody(t *testing.T) {
 	}
 }
 
+// The reference keeps model output under a Groq terms record; none
+// stops the frame store keeping it; each part of the record is required
+// under the release profile. A target with no retention keeps output.
+func TestReleaseRetention(t *testing.T) {
+	c := loadRef(t, releaseRef)
+	r := c.Target.Retention
+	if r == nil || r.ModelOutput != RetainProtocolPeriod || r.Source != "https://console.groq.com/docs/legal/services-agreement" || r.Retrieved != "2026-10-12" ||
+		!strings.HasPrefix(r.Provision, "Groq Services Agreement, section 1:") || !strings.HasPrefix(r.Deletion, "None on the customer:") || !c.Target.KeepsModelOutput() {
+		t.Fatalf("reference retention %+v", r)
+	}
+	c.Target.Retention.ModelOutput = RetainNone
+	if err := c.Validate(); err != nil || c.Target.KeepsModelOutput() {
+		t.Fatalf("none: %v, keeps %v", err, c.Target.KeepsModelOutput())
+	}
+	if !(&Target{}).KeepsModelOutput() {
+		t.Error("a target with no retention keeps no output")
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*Target)
+		want string
+	}{
+		{"absent", func(t *Target) { t.Retention = nil }, "target.retention: required under the release profile"},
+		{"model_output empty", func(t *Target) { t.Retention.ModelOutput = "" }, `target.retention.model_output: must be one of ["protocol_period" "none"], got ""`},
+		{"model_output unknown", func(t *Target) { t.Retention.ModelOutput = "12_months" }, `target.retention.model_output: must be one of ["protocol_period" "none"], got "12_months"`},
+		{"no provision", func(t *Target) { t.Retention.Provision = " " }, "target.retention.provision: required"},
+		{"no deletion", func(t *Target) { t.Retention.Deletion = "" }, "target.retention.deletion: required"},
+		{"no source", func(t *Target) { t.Retention.Source = "" }, "target.retention.source: required"},
+		{"bad source", func(t *Target) { t.Retention.Source = "https://" }, `target.retention.source: "https://" is not an http or https URL with a host`},
+		{"bad date", func(t *Target) { t.Retention.Retrieved = "12 Oct 2026" }, `target.retention.retrieved: a date as YYYY-MM-DD required, got "12 Oct 2026"`},
+		{"bad hash", func(t *Target) { t.Retention.SHA256 = strings.Repeat("A", 64) }, "target.retention.sha256: 64 lowercase hex characters required"},
+	} {
+		c := loadRef(t, releaseRef)
+		tc.edit(&c.Target)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want %q, got %v", tc.name, tc.want, err)
+		}
+	}
+	c = loadRef(t, releaseRef)
+	c.Target.Retention.Source = "groq-services-agreement.html"
+	if err := c.Validate(); err != nil {
+		t.Errorf("retained copy as source: %v", err)
+	}
+}
+
 // The release section and the release-only target fields refuse to load
 // under every other profile.
 func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
@@ -506,17 +551,18 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 			t.BillingRefusals = []BillingRefusal{{Status: 402, Meaning: "balance exhausted", Source: "errors.png", Retrieved: "2026-10-07"}}
 		},
 		func(t *Target) { t.BalanceUnavailable = rel.Target.BalanceUnavailable },
+		func(t *Target) { t.Retention = rel.Target.Retention },
 	} {
 		for _, ref := range []string{acRef, experimentRef} {
 			c := loadRef(t, ref)
 			f(&c.Target)
-			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals and balance_unavailable are set on the release profile's target only") {
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals, balance_unavailable and retention are set on the release profile's target only") {
 				t.Errorf("%s: got %v", ref, err)
 			}
 		}
 		p := loadRef(t, pilotRef)
 		f(&p.Pilot.Targets[1])
-		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals and balance_unavailable are set on the release profile's target only") {
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals, balance_unavailable and retention are set on the release profile's target only") {
 			t.Errorf("pilot: got %v", err)
 		}
 	}

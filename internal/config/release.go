@@ -164,6 +164,41 @@ type BalanceUnavailable struct {
 	Ruling string `yaml:"ruling" json:"ruling"`
 }
 
+// Retention is the route's retention of model output in the frame store
+// and the terms record it rests on (SPEC-HOSTED HA3 point 15).
+type Retention struct {
+	// ModelOutput is one of the Retain* values.
+	ModelOutput string `yaml:"model_output" json:"model_output"`
+	// Provision cites the terms that permit or restrict keeping the
+	// route's model output; Deletion states the deletion duties those
+	// terms put on the customer, on request or at termination, or that
+	// they state none.
+	Provision string `yaml:"provision" json:"provision"`
+	Deletion  string `yaml:"deletion" json:"deletion"`
+	// Source, Retrieved and SHA256 record the terms page as a Limit's.
+	Source    string `yaml:"source" json:"source"`
+	Retrieved string `yaml:"retrieved" json:"retrieved"`
+	SHA256    string `yaml:"sha256" json:"sha256"`
+}
+
+// Values of a retention's model_output.
+const (
+	// RetainProtocolPeriod keeps each 200 body as read for the protocol's
+	// retention period.
+	RetainProtocolPeriod = "protocol_period"
+	// RetainNone keeps no 200 body bytes: the frame store counts them.
+	RetainNone = "none"
+)
+
+var retentions = []string{RetainProtocolPeriod, RetainNone}
+
+// KeepsModelOutput reports whether the frame store keeps the target's 200
+// bodies, which it does unless target.retention.model_output is
+// RetainNone.
+func (t *Target) KeepsModelOutput() bool {
+	return t.Retention == nil || t.Retention.ModelOutput != RetainNone
+}
+
 // Naming is the route's provider-naming record.
 type Naming struct {
 	// Provider is the word mark printed for the route, as plain text.
@@ -438,6 +473,11 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	} else {
 		validateNaming(v, field+".naming", t.Naming)
 	}
+	if t.Retention == nil {
+		v.errf("%s.retention: required under the release profile (SPEC-HOSTED HA3 point 15)", field)
+	} else {
+		validateRetention(v, field+".retention", t.Retention)
+	}
 	seen := map[int]bool{}
 	for i := range t.StatusDocs {
 		validateStatusDoc(v, fmt.Sprintf("%s.status_docs[%d]", field, i), &t.StatusDocs[i], seen)
@@ -608,6 +648,33 @@ func validateBalanceUnavailable(v *validator, field string, b *BalanceUnavailabl
 	}
 }
 
+// validateRetention requires one of the Retain* values, the provision,
+// the deletion duties, and the terms page's source, retrieval date and
+// hash.
+func validateRetention(v *validator, field string, r *Retention) {
+	if !slices.Contains(retentions, r.ModelOutput) {
+		v.errf("%s.model_output: must be one of %q, got %q", field, retentions, r.ModelOutput)
+	}
+	if strings.TrimSpace(r.Provision) == "" {
+		v.errf("%s.provision: required (the terms that permit or restrict keeping model output)", field)
+	}
+	if strings.TrimSpace(r.Deletion) == "" {
+		v.errf("%s.deletion: required (the customer's deletion duties under those terms, or that they state none)", field)
+	}
+	switch src := strings.TrimSpace(r.Source); {
+	case src == "":
+		v.errf("%s.source: required (the terms page's URL or the retained copy's file name)", field)
+	case strings.Contains(src, "://") && !parsesAsURL(src):
+		v.errf("%s.source: %q is not an http or https URL with a host", field, r.Source)
+	}
+	if _, err := time.Parse(time.DateOnly, r.Retrieved); err != nil {
+		v.errf("%s.retrieved: a date as YYYY-MM-DD required, got %q", field, r.Retrieved)
+	}
+	if !sha256Hex(r.SHA256) {
+		v.errf("%s.sha256: 64 lowercase hex characters required, got %q", field, r.SHA256)
+	}
+}
+
 // validateStatusDoc requires a status other than 200 that no earlier
 // entry documents, a meaning, a source and a retrieval date.
 func validateStatusDoc(v *validator, field string, d *StatusDoc, seen map[int]bool) {
@@ -722,8 +789,8 @@ func validateRetainedHeaders(v *validator, field string, t *Target) {
 // outside the release profile.
 func refuseReleaseFields(v *validator, field string, t *Target) {
 	if t.Adapter != "" || len(t.Limits) > 0 || len(t.UnpublishedLimits) > 0 || len(t.RetainedHeaders) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 ||
-		len(t.BillingRefusals) > 0 || t.BalanceUnavailable != nil {
-		v.errf("%s: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals and balance_unavailable are set on the release profile's target only", field)
+		len(t.BillingRefusals) > 0 || t.BalanceUnavailable != nil || t.Retention != nil {
+		v.errf("%s: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals, balance_unavailable and retention are set on the release profile's target only", field)
 	}
 }
 

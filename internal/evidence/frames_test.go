@@ -93,7 +93,7 @@ func TestFrameStoreHoldsNoCredentials(t *testing.T) {
 	if !sawAuth.Load() {
 		t.Fatal("server did not receive the bearer token; the test proves nothing")
 	}
-	path, err := WriteRunFrames(t.TempDir(), res)
+	path, err := WriteRunFrames(t.TempDir(), &cfg.Target, res)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,11 +163,12 @@ func TestFramesAreTheBodyBytes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := loadgen.Run(context.Background(), hostedCfg(srv.URL), nil)
+	cfg := hostedCfg(srv.URL)
+	res, err := loadgen.Run(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, err := WriteRunFrames(t.TempDir(), res)
+	path, err := WriteRunFrames(t.TempDir(), &cfg.Target, res)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,6 +181,53 @@ func TestFramesAreTheBodyBytes(t *testing.T) {
 		}
 		if string(got) != strings.Join(parts, "") || !b64 || rec.DroppedBytes != 0 {
 			t.Errorf("request %d: %q (base64 frame %v, dropped %d)", i, got, b64, rec.DroppedBytes)
+		}
+	}
+}
+
+// A target whose retention keeps no model output has each 200 body's
+// bytes counted and none kept, beside the withheld header values and a
+// non-200 body; one with no retention, or protocol_period, keeps them.
+func TestFrameStoreRetention(t *testing.T) {
+	headers := map[string][]string{"X-Ratelimit-Limit-Tokens": {"limit-tokens-250000"}}
+	res := &loadgen.Result{EpochWall: time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC), Requests: []loadgen.Request{
+		{Index: 0, Status: http.StatusOK, RetainedHeaders: headers, FrameBytesDropped: 7,
+			Frames: []loadgen.Frame{{Ns: 10, Data: []byte(`data: {"choices":[{"delta":{"content":"answer-qz31"}}]}` + "\n\n")}, {Ns: 20, Data: []byte("data: [DONE]\n\n")}}},
+		{Index: 1, Status: http.StatusTooManyRequests, RetainedHeaders: headers, ErrorBody: []byte(`{"error":"slow down"}`)},
+	}}
+	body := int64(len(res.Requests[0].Frames[0].Data) + len(res.Requests[0].Frames[1].Data))
+	for _, tc := range []struct {
+		name      string
+		retention *config.Retention
+		keep      bool
+	}{
+		{"no retention", nil, true},
+		{"protocol_period", &config.Retention{ModelOutput: config.RetainProtocolPeriod}, true},
+		{"none", &config.Retention{ModelOutput: config.RetainNone}, false},
+	} {
+		path, err := WriteRunFrames(t.TempDir(), &config.Target{Retention: tc.retention}, res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs := readFrames(t, path)
+		if len(recs) != 2 {
+			t.Fatalf("%s: %d records", tc.name, len(recs))
+		}
+		ok, refused := recs[0], recs[1]
+		if tc.keep {
+			if len(ok.Frames) != 2 || ok.DroppedBytes != 7 || !bytes.Contains(b, []byte("answer-qz31")) {
+				t.Errorf("%s: %d frames, dropped %d", tc.name, len(ok.Frames), ok.DroppedBytes)
+			}
+		} else if ok.Frames != nil || ok.DroppedBytes != 7+body || bytes.Contains(b, []byte("answer-qz31")) {
+			t.Errorf("%s: %d frames, dropped %d, want none and %d", tc.name, len(ok.Frames), ok.DroppedBytes, 7+body)
+		}
+		if ok.Status != http.StatusOK || !reflect.DeepEqual(ok.Headers, headers) || !reflect.DeepEqual(refused.Headers, headers) ||
+			refused.ErrorBody == nil || string(refused.ErrorBody.Raw()) != `{"error":"slow down"}` || refused.DroppedBytes != 0 {
+			t.Errorf("%s: records %+v %+v", tc.name, ok, refused)
 		}
 	}
 }
@@ -213,7 +261,7 @@ func TestRetainedHeadersInTheFrameStoreOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	framesPath, err := WriteRunFrames(t.TempDir(), res)
+	framesPath, err := WriteRunFrames(t.TempDir(), &cfg.Target, res)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +299,7 @@ func TestFrameStorePlacement(t *testing.T) {
 	}
 	inRepo := filepath.Join(wd, "frames-must-not-exist")
 	t.Cleanup(func() { os.RemoveAll(inRepo) })
-	if _, err := WriteRunFrames(inRepo, res); err == nil {
+	if _, err := WriteRunFrames(inRepo, &config.Target{}, res); err == nil {
 		t.Errorf("frame store written inside the repository at %s", inRepo)
 	}
 
@@ -259,7 +307,7 @@ func TestFrameStorePlacement(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tree, "go.mod"), []byte("// clone\nmodule github.com/percentes/percentes\n\ngo 1.21\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := WriteRunFrames(filepath.Join(tree, "a", "b"), res); err == nil {
+	if _, err := WriteRunFrames(filepath.Join(tree, "a", "b"), &config.Target{}, res); err == nil {
 		t.Error("frame store written inside a source tree")
 	}
 	if _, err := os.Stat(filepath.Join(tree, "a")); !os.IsNotExist(err) {
@@ -273,7 +321,7 @@ func TestFrameStorePlacement(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(other, "go.mod"), []byte("module example.com/estate\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	path, err := WriteRunFrames(filepath.Join(other, "frames"), res)
+	path, err := WriteRunFrames(filepath.Join(other, "frames"), &config.Target{}, res)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +336,7 @@ func TestFrameStorePlacement(t *testing.T) {
 	if b, _ := os.ReadFile(path); string(b) != `{"index":0}`+"\n" {
 		t.Errorf("file %q", b)
 	}
-	if _, err := WriteRunFrames(filepath.Join(other, "frames"), res); err == nil {
+	if _, err := WriteRunFrames(filepath.Join(other, "frames"), &config.Target{}, res); err == nil {
 		t.Error("existing frame store overwritten")
 	}
 }

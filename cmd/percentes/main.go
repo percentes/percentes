@@ -223,7 +223,7 @@ func main() {
 			log.Printf("percentes: endpoint status written: %s", path)
 		}
 		var ferr error
-		if framesPath, ferr = evidence.WriteRunFrames(*framesRoot, art.Loadgen); ferr == nil && framesPath != "" {
+		if framesPath, ferr = evidence.WriteRunFrames(*framesRoot, &cfg.Target, art.Loadgen); ferr == nil && framesPath != "" {
 			ferr = op.WriteCopies(filepath.Dir(framesPath))
 		}
 		if ferr != nil {

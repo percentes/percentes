@@ -169,7 +169,7 @@ func (d *windowDeps) run(ctx context.Context, w window) (rec *windowRecord, err 
 	}
 	// A frame store that fails to write leaves the attempts and manifest
 	// to be written; the failure is returned after them.
-	framesPath, ferr := evidence.WriteRunFrames(d.framesRoot, res)
+	framesPath, ferr := evidence.WriteRunFrames(d.framesRoot, &w.cfg.Target, res)
 	if ferr == nil {
 		ferr = w.op.WriteCopies(filepath.Dir(framesPath))
 	}
