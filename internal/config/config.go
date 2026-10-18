@@ -26,11 +26,15 @@ import (
 //     scenario-scale, but every normative pin is still enforced: client
 //     timeout, retries, max_tokens, the service-level objective (SLO),
 //     detector numbers and validity gates.
+//   - "pilot": the SPEC-HOSTED HA2 descriptive pilot: two hosted
+//     endpoints sent one literal request body at deterministic arrivals,
+//     with no replicas, SLO, fault or §6 infrastructure pins.
 type Profile string
 
 const (
 	ProfileExperiment Profile = "experiment"
 	ProfileAC         Profile = "ac"
+	ProfilePilot      Profile = "pilot"
 )
 
 // Fault variants (§1). VariantMock is the Phase 0 injector family; the
@@ -134,6 +138,16 @@ const (
 	PinnedHistogramLowest     = 1
 	PinnedHistogramSigFigs    = 3
 	PinnedHistogramMinHighest = int64(PinnedFaultWindowTimeoutS) * 1_000_000 // ≥ run timeout
+
+	// SPEC-HOSTED HA2 pilot: two endpoints, one request every 10 s
+	// over a 60 s warm-up and a 1,200 s measured window, a 4,096-token
+	// completion ceiling (§3), and the SPEC-HOSTED §3 connection floor.
+	PinnedPilotTargets           = 2
+	PinnedPilotRateRPS           = 0.1
+	PinnedPilotWarmupS           = 60
+	PinnedPilotMeasuredS         = 1200
+	PinnedPilotCompletionCeiling = 4096
+	PinnedPilotConnections       = 32
 )
 
 // Pre-registered sweep grids (§4 SLO sweep, §5 detector sensitivity).
@@ -170,6 +184,10 @@ type Config struct {
 	// Calibration records the §10 result the experiment runs at (§6).
 	// Absent until calibration has run.
 	Calibration *Calibration `yaml:"calibration,omitempty" json:"calibration,omitempty"`
+
+	// Pilot carries the pilot profile's request body and endpoints.
+	// Required under that profile and absent otherwise.
+	Pilot *Pilot `yaml:"pilot,omitempty" json:"pilot,omitempty"`
 
 	// Raw holds the configuration file bytes as parsed, so the report's
 	// config hash covers the published file.
@@ -354,12 +372,25 @@ type Target struct {
 	// ResponseShape names the stream-chunk fields read per request; nil
 	// reads the OpenAI chat-completion chunk with no reasoning field.
 	ResponseShape *ResponseShape `yaml:"response_shape,omitempty" json:"response_shape,omitempty"`
+
+	// The fields below are set on pilot.targets entries only.
+
+	// Name labels the endpoint.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+	// EndpointURL is the complete request URL, in place of BaseURL plus
+	// /v1/chat/completions; nothing is appended to it.
+	EndpointURL string `yaml:"endpoint_url,omitempty" json:"endpoint_url,omitempty"`
+	// Params are the generation settings added to pilot.body.
+	Params *Params `yaml:"params,omitempty" json:"params,omitempty"`
+	// NotApplied lists settings the other endpoint sends that this one
+	// does not support.
+	NotApplied []string `yaml:"not_applied,omitempty" json:"not_applied,omitempty"`
 }
 
 // ResponseShape names where a target's stream chunks carry each field.
-// Content and Reasoning are keys of choices[0].delta. Model, Usage and
-// Error are paths from the chunk root, segments joined by ".", where a
-// segment of digits indexes an array. An empty field takes its default.
+// Content and Reasoning are keys of choices[0].delta. Model, Usage, Error
+// and Refusal are paths from the chunk root, segments joined by ".", where
+// a segment of digits indexes an array. An empty field takes its default.
 type ResponseShape struct {
 	// Content is the visible-answer key (default "content").
 	Content string `yaml:"content,omitempty" json:"content,omitempty"`
@@ -373,6 +404,8 @@ type ResponseShape struct {
 	// Error lists where an in-band error object may appear (default
 	// "error").
 	Error []string `yaml:"error,omitempty" json:"error,omitempty"`
+	// Refusal lists where a refusal field may appear (default none).
+	Refusal []string `yaml:"refusal,omitempty" json:"refusal,omitempty"`
 }
 
 // Shape returns the target's response shape with defaults filled in.
@@ -394,6 +427,7 @@ func (t *Target) Shape() ResponseShape {
 	if len(t.ResponseShape.Error) > 0 {
 		s.Error = t.ResponseShape.Error
 	}
+	s.Refusal = t.ResponseShape.Refusal
 	return s
 }
 

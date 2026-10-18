@@ -12,12 +12,12 @@ func TestResponseShapeParsesAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	withShape := strings.Replace(string(raw), "target:\n", "target:\n  response_shape:\n    reasoning: [reasoning]\n    usage: [usage, x_groq.usage]\n", 1)
+	withShape := strings.Replace(string(raw), "target:\n", "target:\n  response_shape:\n    reasoning: [reasoning]\n    usage: [usage, x_groq.usage]\n    refusal: [choices.0.delta.refusal]\n", 1)
 	c, err := Parse([]byte(withShape))
 	if err != nil {
 		t.Fatalf("config with a response shape must load: %v", err)
 	}
-	want := ResponseShape{Content: "content", Reasoning: []string{"reasoning"}, Model: "model", Usage: []string{"usage", "x_groq.usage"}, Error: []string{"error"}}
+	want := ResponseShape{Content: "content", Reasoning: []string{"reasoning"}, Model: "model", Usage: []string{"usage", "x_groq.usage"}, Error: []string{"error"}, Refusal: []string{"choices.0.delta.refusal"}}
 	if got := c.Target.Shape(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("shape %+v, want %+v", got, want)
 	}
@@ -42,6 +42,7 @@ func TestResponseShapeValidation(t *testing.T) {
 		Model:     "x_groq.model",
 		Usage:     []string{"usage", "x_groq.usage", "choices.0.usage"},
 		Error:     []string{"error", "x_groq.error"},
+		Refusal:   []string{"choices.0.delta.refusal", "refusal"},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("response shape must validate: %v", err)
@@ -58,6 +59,8 @@ func TestResponseShapeValidation(t *testing.T) {
 		"usage repeated":              {Usage: []string{"usage", "usage"}},
 		"error empty":                 {Error: []string{""}},
 		"error with a slash":          {Error: []string{"x/error"}},
+		"refusal empty segment":       {Refusal: []string{"choices.0..refusal"}},
+		"refusal repeated":            {Refusal: []string{"refusal", "refusal"}},
 	} {
 		s := s
 		c.Target.ResponseShape = &s

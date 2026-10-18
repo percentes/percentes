@@ -1,0 +1,73 @@
+# Percentes pilot reference configuration (SPEC-HOSTED amendment HA2).
+# Two hosted endpoints serving openai/gpt-oss-120b, one literal request
+# body, one request every 10 s: six warm-up requests, then 120 measured.
+# The system text, the reasoning_format value, the usage request, the
+# temperature and the header allowlists are frozen before collection; the
+# values given here for them are placeholders. The file holds no keys:
+# api_key_env names the environment variable that holds each one.
+schema_version: 1
+profile: pilot
+
+run:
+  name: percentes-pilot-reference
+  phases:
+    warmup_s: 60          # pinned (HA2 §3)
+    baseline_s: 1200      # the measured window, pinned (HA2 §3)
+
+load:
+  rate_rps: 0.1           # pinned (HA2 §3)
+  arrival_process: deterministic
+  ignore_eos: false       # pinned
+  unique_prefixes: false  # pinned (HA2 §3)
+  connections: 32         # pinned (SPEC-HOSTED §3)
+
+client:
+  http_timeout_s: 30      # pinned (§6)
+  retries: 0              # pinned (§6, §2)
+
+histogram:
+  unit: us
+  lowest_discernible_value: 1
+  highest_trackable_value: 600000000
+  significant_figures: 3
+
+client_validity:
+  send_skew_p99_ms: 5
+  send_skew_max_ms: 50
+  max_cpu_pct: 70
+  cpu_window_s: 5
+  go_gc_pause_p99_ms: 1
+
+pilot:
+  # One body for both endpoints. The case text replaces "{{case}}";
+  # each target's model and params are added first.
+  body: |
+    {"messages": [
+      {"role": "system", "content": "System text: frozen at L1."},
+      {"role": "user", "content": "{{case}}"}
+    ], "stream": true}
+  targets:
+    - name: groq
+      hosted: true
+      endpoint_url: https://api.groq.com/openai/v1/chat/completions
+      model_name: openai/gpt-oss-120b
+      api_key_env: GROQ_API_KEY
+      params:
+        max_completion_tokens: 4096   # pinned (HA2 §3)
+        reasoning_effort: low
+        reasoning_format: parsed
+        stream_options:
+          include_usage: true
+      response_headers: [Retry-After, x-ratelimit-*]
+    - name: baseten
+      hosted: true
+      endpoint_url: https://inference.baseten.co/v1/chat/completions
+      model_name: openai/gpt-oss-120b
+      api_key_env: BASETEN_API_KEY
+      params:
+        max_tokens: 4096              # pinned (HA2 §3)
+        reasoning_effort: low
+        stream_options:
+          include_usage: true
+      not_applied: [reasoning_format]
+      response_headers: [Retry-After, x-ratelimit-*]

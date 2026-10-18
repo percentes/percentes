@@ -54,8 +54,14 @@ func (c *Config) Validate() error {
 	}
 	switch c.Profile {
 	case ProfileExperiment, ProfileAC:
+	case ProfilePilot:
+		c.validatePilot(v)
+		return v.result()
 	default:
-		v.errf("profile: must be %q or %q, got %q", ProfileExperiment, ProfileAC, c.Profile)
+		v.errf("profile: must be %q, %q or %q, got %q", ProfileExperiment, ProfileAC, ProfilePilot, c.Profile)
+	}
+	if c.Pilot != nil {
+		v.errf("pilot: must be absent unless profile is %q", ProfilePilot)
 	}
 
 	c.validateRun(v)
@@ -247,8 +253,11 @@ func (c *Config) validateTarget(v *validator) {
 			v.errf("target.api_key_env: required for a hosted target (name of the env var holding the bearer token; never the token itself)")
 		}
 	}
-	c.validateResponseHeaders(v)
-	c.validateResponseShape(v)
+	if t := c.Target; t.Name != "" || t.EndpointURL != "" || t.Params != nil || len(t.NotApplied) > 0 {
+		v.errf("target: name, endpoint_url, params and not_applied are set on pilot.targets entries only")
+	}
+	validateResponseHeaders(v, "target", &c.Target)
+	validateResponseShape(v, "target", &c.Target)
 	// §10 G7: the scrape needs one endpoint per replica and a gauge name;
 	// a hosted target has no replica endpoints (§6).
 	if n := len(c.Target.MetricsURLs); n > 0 {
@@ -295,22 +304,22 @@ func (c *Config) validateTarget(v *validator) {
 // validateResponseHeaders refuses an allowlist entry that is not a header
 // name (with an optional trailing "*"), repeats another, or could match a
 // credential header.
-func (c *Config) validateResponseHeaders(v *validator) {
+func validateResponseHeaders(v *validator, field string, t *Target) {
 	seen := map[string]bool{}
-	for i, e := range c.Target.ResponseHeaders {
+	for i, e := range t.ResponseHeaders {
 		name := strings.TrimSuffix(e, "*")
 		if !headerToken(name) {
-			v.errf("target.response_headers[%d]: %q is not a header name, optionally ending in *", i, e)
+			v.errf("%s.response_headers[%d]: %q is not a header name, optionally ending in *", field, i, e)
 			continue
 		}
 		key := strings.ToLower(e)
 		if seen[key] {
-			v.errf("target.response_headers[%d]: %q listed twice", i, e)
+			v.errf("%s.response_headers[%d]: %q listed twice", field, i, e)
 		}
 		seen[key] = true
 		for _, cred := range credentialHeaders {
 			if headerMatch(e, cred) {
-				v.errf("target.response_headers[%d]: %q matches %s, which is never recorded", i, e, cred)
+				v.errf("%s.response_headers[%d]: %q matches %s, which is never recorded", field, i, e, cred)
 			}
 		}
 	}
@@ -319,41 +328,41 @@ func (c *Config) validateResponseHeaders(v *validator) {
 // validateResponseShape refuses a key or path segment outside
 // [A-Za-z0-9_-], a repeated entry, and a reasoning key equal to the
 // content key.
-func (c *Config) validateResponseShape(v *validator) {
-	s := c.Target.ResponseShape
+func validateResponseShape(v *validator, field string, t *Target) {
+	s := t.ResponseShape
 	if s == nil {
 		return
 	}
-	content := c.Target.Shape().Content
+	content := t.Shape().Content
 	if s.Content != "" && !fieldKey(s.Content) {
-		v.errf("target.response_shape.content: %q is not a key", s.Content)
+		v.errf("%s.response_shape.content: %q is not a key", field, s.Content)
 	}
 	seen := map[string]bool{}
 	for i, k := range s.Reasoning {
 		switch {
 		case !fieldKey(k):
-			v.errf("target.response_shape.reasoning[%d]: %q is not a key", i, k)
+			v.errf("%s.response_shape.reasoning[%d]: %q is not a key", field, i, k)
 		case k == content:
-			v.errf("target.response_shape.reasoning[%d]: %q is the content key", i, k)
+			v.errf("%s.response_shape.reasoning[%d]: %q is the content key", field, i, k)
 		case seen[k]:
-			v.errf("target.response_shape.reasoning[%d]: %q listed twice", i, k)
+			v.errf("%s.response_shape.reasoning[%d]: %q listed twice", field, i, k)
 		}
 		seen[k] = true
 	}
 	if s.Model != "" && !fieldPath(s.Model) {
-		v.errf("target.response_shape.model: %q is not a path", s.Model)
+		v.errf("%s.response_shape.model: %q is not a path", field, s.Model)
 	}
 	for _, f := range []struct {
 		name  string
 		paths []string
-	}{{"usage", s.Usage}, {"error", s.Error}} {
+	}{{"usage", s.Usage}, {"error", s.Error}, {"refusal", s.Refusal}} {
 		seen := map[string]bool{}
 		for i, p := range f.paths {
 			switch {
 			case !fieldPath(p):
-				v.errf("target.response_shape.%s[%d]: %q is not a path", f.name, i, p)
+				v.errf("%s.response_shape.%s[%d]: %q is not a path", field, f.name, i, p)
 			case seen[p]:
-				v.errf("target.response_shape.%s[%d]: %q listed twice", f.name, i, p)
+				v.errf("%s.response_shape.%s[%d]: %q listed twice", field, f.name, i, p)
 			}
 			seen[p] = true
 		}
