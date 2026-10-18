@@ -67,7 +67,7 @@ type timing struct {
 
 func newStepTally() stepTally {
 	return stepTally{
-		lines: map[string]int{}, statuses: map[int]int{}, inBand: map[string]int{},
+		lines: map[string]int{}, statuses: map[int]int{}, inBand: map[string]int{}, empty: map[string]int{},
 		timing: timing{failure: map[string][]int64{}, retry: map[string]int{}, gaps: make([]int64, len(evidence.GapEdgesUs))},
 	}
 }

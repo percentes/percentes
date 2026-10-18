@@ -98,7 +98,7 @@ func TestIndexRows(t *testing.T) {
 			names = append(names, c.Line)
 			sum += c.Count
 			for _, l := range ps.Lines {
-				if l.Name == c.Line && l.InBand == "" && (l.Status == 0 || l.Name == loadgen.ErrStatus429) && l.Count != c.Count {
+				if l.Name == c.Line && l.InBand == "" && l.Finish == "" && (l.Status == 0 || l.Name == loadgen.ErrStatus429) && l.Count != c.Count {
 					t.Errorf("groq step %d %s: %d, the route page %d", k+1, c.Line, c.Count, l.Count)
 				}
 			}

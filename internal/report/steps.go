@@ -11,6 +11,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/probe"
 )
 
 // Outcome lines of a per-step table beside the error classes. Every
@@ -26,6 +27,34 @@ const (
 var errClasses = []string{
 	loadgen.ErrStatus429, loadgen.ErrStatusOther, loadgen.ErrConnect,
 	loadgen.ErrReset, loadgen.ErrEmptyStream, loadgen.ErrMalformedStream,
+}
+
+// Finish-reason sub-lines (SPEC-HOSTED HA3 point 8). Two LineCompleted
+// sub-lines follow completed_late, each counting completions in time or
+// late: those at the provider's length value, and those with no finish
+// reason (unknown termination). One empty_stream sub-line per finish
+// reason follows the empty_stream line. FinishNone labels a request
+// whose stream carried no finish reason.
+const (
+	LineCompleted = "completed"
+	FinishNone    = "(none)"
+)
+
+// finishLabel is the finish-reason label of a record's finish_reason.
+func finishLabel(reason string) string {
+	if reason == "" {
+		return FinishNone
+	}
+	return reason
+}
+
+// lengthValue is the finish reason an adapter reports when the output
+// ceiling stopped the answer.
+func lengthValue(adapter string) string {
+	if adapter == config.AdapterMessages {
+		return probe.LengthMessages
+	}
+	return probe.LengthChatCompletions
 }
 
 // stepLines is the print order. One line per status follows the
@@ -103,13 +132,15 @@ func newRate(k, n int) Rate {
 // target.status_docs records none. InBand is a malformed_stream
 // sub-line's in-band error label (inBandLabel) and ErrorDoc the
 // provider's documented meaning of it, nil where target.error_docs
-// records none.
+// records none. Finish is a finish-reason sub-line's finish reason or
+// FinishNone.
 type Line struct {
 	Name     string            `json:"name"`
 	Status   int               `json:"status,omitempty"`
 	Doc      *config.StatusDoc `json:"documented,omitempty"`
 	InBand   string            `json:"in_band_error,omitempty"`
 	ErrorDoc *config.ErrorDoc  `json:"documented_error,omitempty"`
+	Finish   string            `json:"finish_reason,omitempty"`
 	Rate
 }
 
@@ -195,6 +226,7 @@ type PooledLine struct {
 	Doc      *config.StatusDoc `json:"documented,omitempty"`
 	InBand   string            `json:"in_band_error,omitempty"`
 	ErrorDoc *config.ErrorDoc  `json:"documented_error,omitempty"`
+	Finish   string            `json:"finish_reason,omitempty"`
 	Pooled
 }
 
@@ -227,10 +259,13 @@ type PooledStep struct {
 // complete frame of admission.ReleaseCells cells, the cells pooled per
 // step. Pooled is nil for an incomplete frame. Each attempted step
 // carries its completion-incidence curve with pointwise bands and its
-// quantiles inside the hard timeout.
+// quantiles inside the hard timeout. LengthValue is the finish reason
+// the route's adapter reports when the output ceiling stopped the
+// answer.
 type StepTables struct {
 	Route         string           `json:"route"`
 	CeilingTokens int              `json:"ceiling_tokens"`
+	LengthValue   string           `json:"length_value"`
 	DeadlineS     int              `json:"deadline_s"`
 	HardTimeoutS  int              `json:"hard_timeout_s"`
 	Limits        []admission.Step `json:"limits"`
@@ -250,17 +285,24 @@ type CellRecords struct {
 }
 
 // stepTally counts one step's requests per line, the status_other
-// requests per status and the malformed_stream requests per in-band
-// error label. Codes and labels list those in ascending order;
-// reachable counts the requests that were not connect or reset errors.
-// It also keeps the durations and Retry-After values signals reads.
+// requests per status, the malformed_stream requests per in-band error
+// label and the empty_stream requests per finish-reason label. Codes,
+// labels and reasons list those in ascending order; atLength counts the
+// completions at the length value and unknownEnd those with no finish
+// reason; reachable counts the requests that were not connect or reset
+// errors. It also keeps the durations and Retry-After values signals
+// reads.
 type stepTally struct {
-	lines     map[string]int
-	statuses  map[int]int
-	codes     []int
-	inBand    map[string]int
-	labels    []string
-	reachable int
+	lines      map[string]int
+	statuses   map[int]int
+	codes      []int
+	inBand     map[string]int
+	labels     []string
+	empty      map[string]int
+	reasons    []string
+	atLength   int
+	unknownEnd int
+	reachable  int
 	timing
 }
 
@@ -345,8 +387,8 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 	}
 	t := &tables{
 		StepTables: &StepTables{
-			Route: cfg.Target.Name, CeilingTokens: rel.Shape.CeilingTokens, DeadlineS: rel.Shape.DeadlineS,
-			HardTimeoutS: cfg.Client.HTTPTimeoutS, Limits: v.Steps, FrameCells: admission.ReleaseCells,
+			Route: cfg.Target.Name, CeilingTokens: rel.Shape.CeilingTokens, LengthValue: lengthValue(cfg.Target.Adapter),
+			DeadlineS: rel.Shape.DeadlineS, HardTimeoutS: cfg.Client.HTTPTimeoutS, Limits: v.Steps, FrameCells: admission.ReleaseCells,
 		},
 		docs:          map[int]*config.StatusDoc{},
 		errorDocs:     map[string]*config.ErrorDoc{},
@@ -414,8 +456,18 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 		if line == loadgen.ErrStatusOther {
 			tl.statuses[r.Status]++
 		}
-		if line == loadgen.ErrMalformedStream {
+		switch line {
+		case loadgen.ErrMalformedStream:
 			tl.inBand[inBandLabel(r.StreamError)]++
+		case loadgen.ErrEmptyStream:
+			tl.empty[finishLabel(r.FinishReason)]++
+		case LineInTime, LineLate:
+			switch r.FinishReason {
+			case t.LengthValue:
+				tl.atLength++
+			case "":
+				tl.unknownEnd++
+			}
 		}
 		if err := tl.add(line, r, int64(t.HardTimeoutS)*1_000_000); err != nil {
 			return ct, nil, fmt.Errorf("record %d: %w", r.Index, err)
@@ -455,6 +507,10 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 			tl.labels = append(tl.labels, label)
 		}
 		slices.Sort(tl.labels)
+		for reason := range tl.empty {
+			tl.reasons = append(tl.reasons, reason)
+		}
+		slices.Sort(tl.reasons)
 		tl.reachable = s.Scheduled - tl.lines[loadgen.ErrConnect] - tl.lines[loadgen.ErrReset]
 		s.Lines = t.lines(tl, func(k int) Rate { return newRate(k, s.Scheduled) })
 		s.Signals = signals([]*stepTally{tl}, s.Scheduled, t.retryRecorded)
@@ -470,9 +526,10 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 	return ct, tally, nil
 }
 
-// lines builds a step's outcome lines in print order, a status line per
-// code after status_other and an in-band error line per label after
-// malformed_stream.
+// lines builds a step's outcome lines in print order, the two
+// LineCompleted sub-lines after completed_late, a status line per code
+// after status_other, a finish-reason line per label after empty_stream
+// and an in-band error line per label after malformed_stream.
 func (t *tables) lines(c *stepTally, rate func(int) Rate) []Line {
 	var out []Line
 	for _, name := range stepLines {
@@ -482,6 +539,13 @@ func (t *tables) lines(c *stepTally, rate func(int) Rate) []Line {
 		}
 		out = append(out, l)
 		switch name {
+		case LineLate:
+			out = append(out, Line{Name: LineCompleted, Finish: t.LengthValue, Rate: rate(c.atLength)},
+				Line{Name: LineCompleted, Finish: FinishNone, Rate: rate(c.unknownEnd)})
+		case loadgen.ErrEmptyStream:
+			for _, reason := range c.reasons {
+				out = append(out, Line{Name: name, Finish: reason, Rate: rate(c.empty[reason])})
+			}
 		case loadgen.ErrStatusOther:
 			for _, code := range c.codes {
 				out = append(out, Line{Name: name, Status: code, Doc: t.docs[code], Rate: rate(c.statuses[code])})
@@ -502,7 +566,7 @@ func (t *tables) pool() {
 		ps := PooledStep{Step: k + 1, RPS: lim.RPS, Admitted: lim.Admitted}
 		var cs []*stepTally
 		var n []int
-		codes, labels := map[int]bool{}, map[string]bool{}
+		codes, labels, reasons := map[int]bool{}, map[string]bool{}, map[string]bool{}
 		for i := range t.Cells {
 			s := &t.Cells[i].Steps[k]
 			if s.State != StepAttempted || s.Scheduled == 0 {
@@ -515,6 +579,9 @@ func (t *tables) pool() {
 			}
 			for _, label := range t.tallies[i][k].labels {
 				labels[label] = true
+			}
+			for _, reason := range t.tallies[i][k].reasons {
+				reasons[reason] = true
 			}
 		}
 		ps.Cells = len(cs)
@@ -529,6 +596,11 @@ func (t *tables) pool() {
 				sortedLabels = append(sortedLabels, label)
 			}
 			slices.Sort(sortedLabels)
+			var sortedReasons []string
+			for reason := range reasons {
+				sortedReasons = append(sortedReasons, reason)
+			}
+			slices.Sort(sortedReasons)
 			counts := func(f func(*stepTally) int) []int {
 				k := make([]int, len(cs))
 				for i, s := range cs {
@@ -543,6 +615,15 @@ func (t *tables) pool() {
 				}
 				ps.Lines = append(ps.Lines, l)
 				switch name {
+				case LineLate:
+					ps.Lines = append(ps.Lines,
+						PooledLine{Name: LineCompleted, Finish: t.LengthValue, Pooled: newPooled(counts(func(s *stepTally) int { return s.atLength }), n)},
+						PooledLine{Name: LineCompleted, Finish: FinishNone, Pooled: newPooled(counts(func(s *stepTally) int { return s.unknownEnd }), n)})
+				case loadgen.ErrEmptyStream:
+					for _, reason := range sortedReasons {
+						ps.Lines = append(ps.Lines, PooledLine{Name: name, Finish: reason,
+							Pooled: newPooled(counts(func(s *stepTally) int { return s.empty[reason] }), n)})
+					}
 				case loadgen.ErrStatusOther:
 					for _, code := range sorted {
 						ps.Lines = append(ps.Lines, PooledLine{Name: name, Status: code, Doc: t.docs[code],
@@ -588,8 +669,16 @@ func (t *StepTables) text(frame bool) string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	pct := func(f float64) string { return fmt.Sprintf("%.2f%%", 100*f) }
-	label := func(name string, status int, inBand string) string {
+	label := func(name string, status int, inBand, finish string) string {
 		switch {
+		case name == LineCompleted && finish == FinishNone:
+			return "completed, no finish reason (unknown termination)"
+		case finish == FinishNone:
+			return name + ", no finish reason"
+		case finish == t.LengthValue:
+			return fmt.Sprintf("%s, finish reason %s (stopped at the ceiling)", name, finish)
+		case finish != "":
+			return fmt.Sprintf("%s, finish reason %s", name, finish)
 		case inBand != "":
 			return name + " " + inBand
 		case status != 0 && name != loadgen.ErrStatus429:
@@ -653,7 +742,7 @@ func (t *StepTables) text(frame bool) string {
 			}
 			w("step %d, %g rps, %d scheduled:", s.Step, s.RPS, s.Scheduled)
 			for _, l := range s.Lines {
-				w("  %-22s %d/%d %s [%s, %s]%s", label(l.Name, l.Status, l.InBand), l.Count, l.Scheduled, pct(l.Value), pct(l.Lo), pct(l.Hi), note(l.Status, l.Doc, l.InBand, l.ErrorDoc))
+				w("  %-22s %d/%d %s [%s, %s]%s", label(l.Name, l.Status, l.InBand, l.Finish), l.Count, l.Scheduled, pct(l.Value), pct(l.Lo), pct(l.Hi), note(l.Status, l.Doc, l.InBand, l.ErrorDoc))
 				if l.Name == loadgen.ErrStatus429 {
 					retryAfterText(w, s.Signals, t.Limits[s.Step-1])
 				}
@@ -696,7 +785,7 @@ func (t *StepTables) text(frame bool) string {
 		}
 		w("step %d, %g rps, %d of %d cells, %d scheduled:", s.Step, s.RPS, s.Cells, t.FrameCells, s.Scheduled)
 		for _, l := range s.Lines {
-			w("  %-22s %s%s", label(l.Name, l.Status, l.InBand), pooled(l.Pooled), note(l.Status, l.Doc, l.InBand, l.ErrorDoc))
+			w("  %-22s %s%s", label(l.Name, l.Status, l.InBand, l.Finish), pooled(l.Pooled), note(l.Status, l.Doc, l.InBand, l.ErrorDoc))
 			if l.Name == loadgen.ErrStatus429 {
 				retryAfterText(w, s.Signals, t.Limits[s.Step-1])
 			}

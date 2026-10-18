@@ -166,7 +166,7 @@ func indexRows(provider, model, page string, st *StepTables) []IndexRow {
 			ps := st.Pooled[k]
 			row.Cells, row.Scheduled = ps.Cells, ps.Scheduled
 			for _, l := range ps.Lines {
-				if l.InBand == "" && (l.Status == 0 || l.Name == loadgen.ErrStatus429) {
+				if l.InBand == "" && l.Finish == "" && (l.Status == 0 || l.Name == loadgen.ErrStatus429) {
 					row.Counts = append(row.Counts, IndexCount{Line: l.Name, Count: l.Count})
 				}
 			}

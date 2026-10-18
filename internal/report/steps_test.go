@@ -192,16 +192,17 @@ func TestStepTablesCell(t *testing.T) {
 	}
 	var names []string
 	for _, l := range s.Lines {
-		names = append(names, fmt.Sprint(l.Name, l.Status, l.InBand))
+		names = append(names, fmt.Sprint(l.Name, l.Status, l.InBand, l.Finish))
 	}
-	want := []string{"completed_in_time0", "completed_late0", "status_429429", "status_other0", "status_other503", "status_other529",
-		"connect0", "reset0", "empty_stream0", "malformed_stream0", "malformed_stream0(none)", "censored0", "unsent0"}
+	want := []string{"completed_in_time0", "completed_late0", "completed0length", "completed0(none)", "status_429429", "status_other0",
+		"status_other503", "status_other529", "connect0", "reset0", "empty_stream0", "empty_stream0(none)", "malformed_stream0",
+		"malformed_stream0(none)", "censored0", "unsent0"}
 	if !slices.Equal(names, want) {
 		t.Errorf("lines %q, want %q", names, want)
 	}
 	sum := 0
 	for _, l := range s.Lines {
-		if l.Status == 0 && l.InBand == "" || l.Name == loadgen.ErrStatus429 {
+		if l.Status == 0 && l.InBand == "" && l.Finish == "" || l.Name == loadgen.ErrStatus429 {
 			sum += l.Count
 		}
 		lo, hi := wilson(float64(l.Count)/114, 114)
@@ -366,6 +367,166 @@ func TestStepTablesPooled(t *testing.T) {
 	b, _ := json.Marshal(again)
 	if string(a) != string(b) || st.Cells[0].Cell != "cell-00" {
 		t.Error("cell order changed the tables")
+	}
+}
+
+// finishCell is a cell whose step 1 holds, per finish reason, n[reason]
+// completions in time, late[reason] late completions and empty[reason]
+// empty streams, and whose step 2 is 240 completions in time with no
+// finish reason; its later steps are unsent.
+func finishCell(label string, n, late, empty map[string]int) CellRecords {
+	var outs []outcome
+	var reasons []string
+	for _, m := range []map[string]int{n, late, empty} {
+		for reason := range m {
+			reasons = append(reasons, reason)
+		}
+	}
+	slices.Sort(reasons)
+	reasons = slices.Compact(reasons)
+	for _, reason := range reasons {
+		outs = append(outs, outcome{1, LineInTime, 0, n[reason]}, outcome{1, LineLate, 0, late[reason]},
+			outcome{1, loadgen.ErrEmptyStream, 0, empty[reason]})
+	}
+	outs = append(outs, outcome{2, LineInTime, 0, 240}, outcome{3, LineUnsent, 0, 480}, outcome{4, LineUnsent, 0, 960},
+		outcome{5, LineUnsent, 0, 1920})
+	c := cellOf(label, outs...)
+	i := 1
+	for _, reason := range reasons {
+		for _, k := range []int{n[reason], late[reason], empty[reason]} {
+			for j := 0; j < k; j++ {
+				c.Records[i].FinishReason = reason
+				i++
+			}
+		}
+	}
+	return c
+}
+
+// HA3 point 8: the empty_stream line splits by finish reason, the
+// completions at the adapter's length value publish on their own line,
+// and a completion with no finish reason is noted as unknown
+// termination; per cell and pooled, and without changing the index's
+// lines.
+func TestStepTablesFinishReasons(t *testing.T) {
+	finishLines := func(lines []Line) map[string]int {
+		out := map[string]int{}
+		for _, l := range lines {
+			if l.Finish != "" {
+				out[l.Name+" "+l.Finish] = l.Count
+			}
+		}
+		return out
+	}
+	cfg, v := stepsConfig(t)
+	cell := finishCell("weekday-00",
+		map[string]int{"stop": 5, "length": 2, "": 1, "max_tokens": 1},
+		map[string]int{"length": 1, "": 1},
+		map[string]int{"length": 3, "stop": 1, "": 2})
+	st, err := NewStepTables(cfg, v, []CellRecords{cell})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := st.Cells[0].Steps[0]
+	if st.LengthValue != "length" || s.Scheduled != 17 {
+		t.Fatalf("length value %q, %d scheduled", st.LengthValue, s.Scheduled)
+	}
+	var order []string
+	for _, l := range s.Lines {
+		if l.Finish != "" {
+			order = append(order, l.Name+" "+l.Finish)
+			if l.Rate != newRate(l.Count, 17) {
+				t.Errorf("%s %s: %+v", l.Name, l.Finish, l.Rate)
+			}
+		}
+	}
+	if want := []string{"completed length", "completed (none)", "empty_stream (none)", "empty_stream length", "empty_stream stop"}; !slices.Equal(order, want) {
+		t.Errorf("finish lines %q, want %q", order, want)
+	}
+	if got, want := finishLines(s.Lines), map[string]int{"completed length": 3, "completed (none)": 2,
+		"empty_stream (none)": 2, "empty_stream length": 3, "empty_stream stop": 1}; !reflect.DeepEqual(got, want) {
+		t.Errorf("finish counts %v, want %v", got, want)
+	}
+	if l := lineAt(t, s.Lines, loadgen.ErrEmptyStream, 0); l.Count != 6 || l.Finish != "" {
+		t.Errorf("empty_stream %+v", l)
+	}
+	if got := finishLines(st.Cells[0].Steps[1].Lines); !reflect.DeepEqual(got, map[string]int{"completed length": 0, "completed (none)": 240}) {
+		t.Errorf("step 2 finish counts %v", got)
+	}
+	text := st.Text()
+	for _, frag := range []string{
+		"  completed, finish reason length (stopped at the ceiling) 3/17 17.65% [",
+		"  completed, no finish reason (unknown termination) 2/17 11.76% [",
+		"  empty_stream           6/17 35.29% [",
+		"  empty_stream, no finish reason 2/17 11.76% [",
+		"  empty_stream, finish reason length (stopped at the ceiling) 3/17 17.65% [",
+		"  empty_stream, finish reason stop 1/17 5.88% [",
+	} {
+		if !strings.Contains(text, frag) {
+			t.Errorf("text lacks %q:\n%s", frag, text)
+		}
+	}
+	if b, _ := json.Marshal(st); !strings.Contains(string(b), `"length_value":"length"`) ||
+		!strings.Contains(string(b), `{"name":"empty_stream","finish_reason":"stop","count":1,`) {
+		t.Errorf("JSON lacks the length value or a finish line: %s", b)
+	}
+
+	// A Messages route's length value is max_tokens.
+	cfg.Target.Adapter = config.AdapterMessages
+	st, err = NewStepTables(cfg, v, []CellRecords{cell})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := finishLines(st.Cells[0].Steps[0].Lines); st.LengthValue != "max_tokens" || got["completed max_tokens"] != 1 || got["completed length"] != 0 {
+		t.Errorf("messages: length value %q, finish counts %v", st.LengthValue, got)
+	}
+	if text := st.Text(); !strings.Contains(text, "  completed, finish reason max_tokens (stopped at the ceiling) 1/17 5.88% [") ||
+		!strings.Contains(text, "  empty_stream, finish reason length 3/17 17.65% [") {
+		t.Errorf("messages text:\n%s", text)
+	}
+
+	// Pooled: the union of the cells' finish reasons, each pooled over
+	// every cell that attempted the step.
+	cfg.Target.Adapter = config.AdapterChatCompletions
+	cells := []CellRecords{cell}
+	for i := 1; i < 12; i++ {
+		empty := map[string]int{"stop": 1}
+		if i == 1 {
+			empty = map[string]int{"content_filter": 2}
+		}
+		cells = append(cells, finishCell(fmt.Sprintf("weekday-%02d", i), map[string]int{"stop": 15}, nil, empty))
+	}
+	st, err = NewStepTables(cfg, v, cells)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := st.Pooled[0]
+	var pooled []string
+	for _, l := range p.Lines {
+		if l.Finish != "" {
+			pooled = append(pooled, fmt.Sprintf("%s %s %d/%d %d", l.Name, l.Finish, l.Count, l.Scheduled, l.CellsWithEvents))
+		}
+	}
+	if want := []string{"completed length 3/194 1", "completed (none) 2/194 1", "empty_stream (none) 2/194 1",
+		"empty_stream content_filter 2/194 1", "empty_stream length 3/194 1", "empty_stream stop 11/194 11"}; !slices.Equal(pooled, want) {
+		t.Errorf("pooled finish lines %q, want %q", pooled, want)
+	}
+	if text := st.Text(); !strings.Contains(text, "  empty_stream, finish reason content_filter 2/194 1.03%; cell rates 0.00% to 11.76%; 1 of 12 cells with events;") {
+		t.Errorf("pooled text:\n%s", text)
+	}
+	ix, err := NewIndex([]IndexRoute{{Config: cfg, Verdict: v, Cells: cells, Page: "routes/groq.html"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, c := range ix.Rows[0].Counts {
+		names = append(names, c.Line)
+		if c.Line == loadgen.ErrEmptyStream && c.Count != 18 {
+			t.Errorf("index empty_stream %d, want 18", c.Count)
+		}
+	}
+	if !slices.Equal(names, stepLines) {
+		t.Errorf("index lines %q, want %q", names, stepLines)
 	}
 }
 
