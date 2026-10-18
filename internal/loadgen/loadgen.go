@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,10 @@ type Request struct {
 	// ReportedModel is the first model id a chunk reported.
 	FinishReason  string `json:"finish_reason,omitempty"`
 	ReportedModel string `json:"reported_model,omitempty"`
+	// ModelMismatch lists, in arrival order, each distinct model id a
+	// chunk reported that differs from the requested one, up to
+	// modelMismatchLimit ids.
+	ModelMismatch []string `json:"model_mismatch,omitempty"`
 	// StreamError is the first in-band error object, compacted, with
 	// credentials masked and cut at errorBodyLimit bytes.
 	StreamError string `json:"stream_error,omitempty"`
@@ -136,6 +141,16 @@ type Result struct {
 	// TInjectNs is the planned fault offset in run time (warmup +
 	// fault.t_inject_offset_s).
 	TInjectNs int64 `json:"t_inject_ns"`
+
+	// RequestedModel is the model id every request sent. ReportedModels
+	// lists each distinct id recorded on the requests (reported_model and
+	// model_mismatch), in request order. ModelMismatches counts requests
+	// with a mismatch; SplitSeries marks a hosted run that had one, which
+	// splits the series at this run.
+	RequestedModel  string   `json:"requested_model,omitempty"`
+	ReportedModels  []string `json:"reported_models,omitempty"`
+	ModelMismatches int      `json:"model_mismatches,omitempty"`
+	SplitSeries     bool     `json:"split_series,omitempty"`
 }
 
 type gen struct {
@@ -264,6 +279,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	gcLoMs, gcHiMs := gcMon.stopAndP99Ms()
 	res.Requests = requests
 	res.Gates = evaluateGates(cfg, requests, cpuSamples, gcLoMs, gcHiMs, res.WarmupEndNs, res.FaultEndNs)
+	compareModels(cfg, g.model, res)
 	if aborted || ctx.Err() != nil {
 		return res, fmt.Errorf("loadgen: run aborted by context: %w", ctx.Err())
 	}
@@ -307,6 +323,23 @@ func checkProtocols(cfg *config.Config, requests []Request) error {
 		return fmt.Errorf("loadgen: hosted target: %d responses not over HTTP/1.1 (first: %s)", n, first)
 	}
 	return nil
+}
+
+// compareModels fills res's model fields from its requests.
+func compareModels(cfg *config.Config, requested string, res *Result) {
+	res.RequestedModel = requested
+	for i := range res.Requests {
+		r := &res.Requests[i]
+		for _, m := range append([]string{r.ReportedModel}, r.ModelMismatch...) {
+			if m != "" && !slices.Contains(res.ReportedModels, m) {
+				res.ReportedModels = append(res.ReportedModels, m)
+			}
+		}
+		if len(r.ModelMismatch) > 0 {
+			res.ModelMismatches++
+		}
+	}
+	res.SplitSeries = cfg.Target.Hosted && res.ModelMismatches > 0
 }
 
 func buildFiller(tokens int) string {

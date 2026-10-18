@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -133,8 +134,9 @@ func (g *gen) execute(r *Request) {
 	}
 }
 
-// recordChunk keeps a chunk's usage, finish reason, reported model,
-// in-band error and reasoning arrival on r.
+// recordChunk keeps a chunk's usage, finish reason, reported model and
+// any mismatch with the requested one, in-band error and reasoning
+// arrival on r.
 func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	if !c.known {
 		r.UnknownEvents++
@@ -150,6 +152,10 @@ func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	}
 	if c.model != "" && r.ReportedModel == "" {
 		r.ReportedModel = c.model
+	}
+	if c.model != "" && c.model != g.model &&
+		len(r.ModelMismatch) < modelMismatchLimit && !slices.Contains(r.ModelMismatch, c.model) {
+		r.ModelMismatch = append(r.ModelMismatch, c.model)
 	}
 	if c.err != nil && r.StreamError == "" {
 		var b bytes.Buffer
@@ -366,6 +372,9 @@ const eventLimit = 1 << 20
 
 // Bytes read after [DONE] before the body is closed unread.
 const drainLimit = 4096
+
+// Distinct mismatched model ids kept per request.
+const modelMismatchLimit = 4
 
 // Bytes of a non-200 body kept, and how long after the status the read
 // may run.
