@@ -203,7 +203,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	// is bounded by the pinned 30 s timeout, so 2x lambda x timeout can
 	// absorb every request blackholing simultaneously.
 	provision := int(cfg.Load.RateRPS*float64(config.PinnedClientTimeoutS)*2) + cfg.Load.Connections
-	transport := newTransport(provision)
+	transport := NewTransport(provision)
 	defer transport.CloseIdleConnections()
 	model := cfg.Target.ModelName
 	if model == "" {
@@ -304,10 +304,10 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	return res, nil
 }
 
-// newTransport pins HTTP/1.1 on plain and TLS connections, so each
+// NewTransport pins HTTP/1.1 on plain and TLS connections, so each
 // in-flight request holds its own connection. A non-nil empty
 // TLSNextProto stops the transport from offering h2 in the TLS handshake.
-func newTransport(provision int) *http.Transport {
+func NewTransport(provision int) *http.Transport {
 	return &http.Transport{
 		ForceAttemptHTTP2:   false,
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},

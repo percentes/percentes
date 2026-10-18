@@ -33,7 +33,7 @@ func h2Server(t *testing.T) *httptest.Server {
 // added, so they match the transport Run builds.
 func trustingTransport(t *testing.T, srv *httptest.Server) *http.Transport {
 	t.Helper()
-	tr := newTransport(1)
+	tr := NewTransport(1)
 	if _, err := tr.RoundTrip(&http.Request{}); err == nil {
 		t.Fatal("a request with no URL must fail")
 	}

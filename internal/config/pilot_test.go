@@ -236,11 +236,63 @@ func TestPilotFieldsRefusedOutsidePilot(t *testing.T) {
 		"params":        func(c *Config) { c.Target.Params = &Params{MaxTokens: 256} },
 		"name":          func(c *Config) { c.Target.Name = "mock" },
 		"not_applied":   func(c *Config) { c.Target.NotApplied = []string{"temperature"} },
+		"probe":         func(c *Config) { c.Target.Probe = &TargetProbe{AccountLimitStatuses: []int{402}} },
 	} {
 		c := loadRef(t, acRef)
 		mutate(c)
 		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "pilot") {
 			t.Errorf("%s under the ac profile must be refused, got: %v", name, err)
 		}
+	}
+}
+
+func TestPilotTargetProbe(t *testing.T) {
+	limits := "https://api.example.test/v1/model_apis/gpt-oss-120b"
+	for _, tc := range []struct {
+		name  string
+		probe TargetProbe
+		want  string // "" = valid
+	}{
+		{"empty", TargetProbe{}, ""},
+		{"limits read", TargetProbe{LimitsURL: limits, LimitsAuthScheme: "Api-Key"}, ""},
+		{"account-limit statuses", TargetProbe{AccountLimitStatuses: []int{402, 429, 529}}, ""},
+		{"scheme without url", TargetProbe{LimitsAuthScheme: "Bearer"}, "pilot.targets[1].probe.limits_auth_scheme: set without limits_url"},
+		{"url without scheme", TargetProbe{LimitsURL: limits}, "pilot.targets[1].probe.limits_auth_scheme: one or more"},
+		{"scheme with a space", TargetProbe{LimitsURL: limits, LimitsAuthScheme: "Api Key"}, "pilot.targets[1].probe.limits_auth_scheme: one or more"},
+		{"url with query", TargetProbe{LimitsURL: limits + "?key=x", LimitsAuthScheme: "Bearer"}, "pilot.targets[1].probe.limits_url: no userinfo, query"},
+		{"url with userinfo", TargetProbe{LimitsURL: "https://u:p@api.example.test/v1/model_apis/x", LimitsAuthScheme: "Bearer"}, "pilot.targets[1].probe.limits_url: no userinfo"},
+		{"url without path", TargetProbe{LimitsURL: "https://api.example.test", LimitsAuthScheme: "Bearer"}, "pilot.targets[1].probe.limits_url: the complete request path"},
+		{"status 399", TargetProbe{AccountLimitStatuses: []int{399}}, "pilot.targets[1].probe.account_limit_statuses[0]: 399 is not a 4xx or 5xx status"},
+		{"status 600", TargetProbe{AccountLimitStatuses: []int{402, 600}}, "pilot.targets[1].probe.account_limit_statuses[1]: 600 is not"},
+		{"setup-defect status", TargetProbe{AccountLimitStatuses: []int{401}}, "pilot.targets[1].probe.account_limit_statuses[0]: 401 already blocks the start"},
+		{"repeated status", TargetProbe{AccountLimitStatuses: []int{402, 402}}, "pilot.targets[1].probe.account_limit_statuses[1]: 402 listed twice"},
+	} {
+		c := loadRef(t, pilotRef)
+		p := tc.probe
+		c.Pilot.Targets[1].Probe = &p
+		err := c.Validate()
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: must load, got: %v", tc.name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: must fail naming %q, got: %v", tc.name, tc.want, err)
+		}
+	}
+
+	raw, err := os.ReadFile(pilotRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := "      not_applied: [reasoning_format]\n"
+	edited := strings.Replace(string(raw), line, line+"      probe:\n        limits_url: "+limits+"\n        limits_auth_scheme: Api-Key\n        account_limit_statuses: [402]\n", 1)
+	if edited == string(raw) {
+		t.Fatal("reference no longer carries the not_applied line this test edits")
+	}
+	c, err := Parse([]byte(edited))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := c.Pilot.Targets[1].Probe; p == nil || p.LimitsURL != limits || p.LimitsAuthScheme != "Api-Key" || len(p.AccountLimitStatuses) != 1 || p.AccountLimitStatuses[0] != 402 {
+		t.Errorf("parsed probe %+v", p)
 	}
 }

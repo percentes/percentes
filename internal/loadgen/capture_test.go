@@ -25,7 +25,7 @@ func captureGen(srv *httptest.Server, allow ...string) *gen {
 	cfg.Target.BaseURL = srv.URL
 	cfg.Target.Hosted = true
 	cfg.Target.ResponseHeaders = allow
-	return &gen{cfg: cfg, client: &http.Client{Transport: newTransport(1)}, epoch: time.Now(), filler: "xyz", model: "m", apiKey: testKey}
+	return &gen{cfg: cfg, client: &http.Client{Transport: NewTransport(1)}, epoch: time.Now(), filler: "xyz", model: "m", apiKey: testKey}
 }
 
 // Only allowlisted headers are kept: never a credential header, never a

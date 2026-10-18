@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -42,6 +43,24 @@ type Params struct {
 type StreamOptions struct {
 	IncludeUsage bool `yaml:"include_usage" json:"include_usage"`
 }
+
+// TargetProbe is a pilot target's pre-run probe configuration.
+type TargetProbe struct {
+	// LimitsURL is read with GET and the target's key during the probe,
+	// and the response recorded; empty skips the read.
+	LimitsURL string `yaml:"limits_url,omitempty" json:"limits_url,omitempty"`
+	// LimitsAuthScheme is the word sent before the key in the limits
+	// read's Authorization header.
+	LimitsAuthScheme string `yaml:"limits_auth_scheme,omitempty" json:"limits_auth_scheme,omitempty"`
+	// AccountLimitStatuses are the statuses the provider documents as an
+	// account-side limit the operator set. One on the probe request
+	// blocks the start, as 400, 401, 403 and 404 do (SPEC-HOSTED §5).
+	AccountLimitStatuses []int `yaml:"account_limit_statuses,omitempty" json:"account_limit_statuses,omitempty"`
+}
+
+// SetupDefectStatuses block a window's start when the probe request
+// returns one (SPEC-HOSTED §5).
+var SetupDefectStatuses = []int{400, 401, 403, 404}
 
 // reasoningFormats are the reasoning_format values the pilot accepts.
 var reasoningFormats = []string{"hidden", "raw", "parsed"}
@@ -216,6 +235,9 @@ func validatePilotTarget(v *validator, field string, t *Target) {
 	}
 	validateResponseHeaders(v, field, t)
 	validateResponseShape(v, field, t)
+	if t.Probe != nil {
+		validateTargetProbe(v, field+".probe", t.Probe)
+	}
 
 	p := t.Params
 	if p == nil {
@@ -241,6 +263,32 @@ func validatePilotTarget(v *validator, field string, t *Target) {
 	}
 	if p.StreamOptions != nil && !p.StreamOptions.IncludeUsage {
 		v.errf("%s.params.stream_options: include_usage must be true when set", field)
+	}
+}
+
+func validateTargetProbe(v *validator, field string, p *TargetProbe) {
+	switch {
+	case p.LimitsURL == "" && p.LimitsAuthScheme != "":
+		v.errf("%s.limits_auth_scheme: set without limits_url", field)
+	case p.LimitsURL != "":
+		if err := checkEndpointURL(p.LimitsURL); err != nil {
+			v.errf("%s.limits_url: %v", field, err)
+		}
+		if !fieldKey(p.LimitsAuthScheme) {
+			v.errf("%s.limits_auth_scheme: one or more of a-z, A-Z, 0-9, _ and -, required with limits_url, got %q", field, p.LimitsAuthScheme)
+		}
+	}
+	seen := map[int]bool{}
+	for i, s := range p.AccountLimitStatuses {
+		switch {
+		case s < 400 || s > 599:
+			v.errf("%s.account_limit_statuses[%d]: %d is not a 4xx or 5xx status", field, i, s)
+		case slices.Contains(SetupDefectStatuses, s):
+			v.errf("%s.account_limit_statuses[%d]: %d already blocks the start", field, i, s)
+		case seen[s]:
+			v.errf("%s.account_limit_statuses[%d]: %d listed twice", field, i, s)
+		}
+		seen[s] = true
 	}
 }
 

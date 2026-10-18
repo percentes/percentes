@@ -390,6 +390,8 @@ type Target struct {
 	// NotApplied lists settings the other endpoint sends that this one
 	// does not support.
 	NotApplied []string `yaml:"not_applied,omitempty" json:"not_applied,omitempty"`
+	// Probe configures the pre-run probe's limits read and start gate.
+	Probe *TargetProbe `yaml:"probe,omitempty" json:"probe,omitempty"`
 }
 
 // ResponseShape names where a target's stream chunks carry each field.
