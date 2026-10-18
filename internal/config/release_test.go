@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -40,6 +41,10 @@ func TestReleaseRefusals(t *testing.T) {
 	edoc := func(c *Config) *ErrorDoc {
 		c.Target.ErrorDocs = []ErrorDoc{{Type: "overloaded_error", Status: 529, Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
 		return &c.Target.ErrorDocs[0]
+	}
+	unpub := func(c *Config) *UnpublishedLimit {
+		c.Target.UnpublishedLimits = []UnpublishedLimit{{Dimension: "acceleration", Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64), Ruled: "2026-10-08", Ruling: "rulings.md"}}
+		return &c.Target.UnpublishedLimits[0]
 	}
 	bill := func(c *Config) *BillingRefusal {
 		c.Target.BillingRefusals = []BillingRefusal{{Status: 400, BodyContains: "blocked_api_access", Meaning: "spend limit reached", Source: "errors.png", Retrieved: "2026-10-07"}}
@@ -130,6 +135,22 @@ func TestReleaseRefusals(t *testing.T) {
 		{"limit no date", func(c *Config) { limit(c).Retrieved = "" }, "target.limits[0].retrieved"},
 		{"limit hash", func(c *Config) { limit(c).SHA256 = strings.Repeat("A", 64) }, "target.limits[0].sha256: 64 lowercase hex"},
 		{"limit short hash", func(c *Config) { limit(c).SHA256 = "abc" }, "target.limits[0].sha256"},
+		{"unpublished dimension unset", func(c *Config) { unpub(c).Dimension = "" }, "target.unpublished_limits[0].dimension: one or more of a-z, 0-9 and _, starting with a letter, required, got \"\""},
+		{"unpublished dimension spaced", func(c *Config) { unpub(c).Dimension = "acceleration limit" }, "target.unpublished_limits[0].dimension: one or more"},
+		{"unpublished dimension upper case", func(c *Config) { unpub(c).Dimension = "Acceleration" }, "target.unpublished_limits[0].dimension: one or more"},
+		{"unpublished dimension with a value", func(c *Config) { unpub(c).Dimension = LimitTPM }, "target.unpublished_limits[0].dimension: \"tokens_per_minute\" is recorded with a value or listed twice"},
+		{"unpublished dimension listed twice", func(c *Config) {
+			unpub(c)
+			c.Target.UnpublishedLimits = append(c.Target.UnpublishedLimits, c.Target.UnpublishedLimits[0])
+		}, "target.unpublished_limits[1].dimension: \"acceleration\" is recorded with a value or listed twice"},
+		{"unpublished source", func(c *Config) { unpub(c).Source = " " }, "target.unpublished_limits[0].source: required"},
+		{"unpublished source scheme", func(c *Config) { unpub(c).Source = "ftp://example.com/limits" }, "target.unpublished_limits[0].source: \"ftp://example.com/limits\" is not an http"},
+		{"unpublished retrieved", func(c *Config) { unpub(c).Retrieved = "7 October 2026" }, "target.unpublished_limits[0].retrieved: a date as YYYY-MM-DD"},
+		{"unpublished hash", func(c *Config) { unpub(c).SHA256 = "abc" }, "target.unpublished_limits[0].sha256: 64 lowercase hex"},
+		{"unpublished ruling undated", func(c *Config) { unpub(c).Ruled = "" }, "target.unpublished_limits[0].ruled: a date as YYYY-MM-DD required, got \"\""},
+		{"unpublished ruling date", func(c *Config) { unpub(c).Ruled = "8 October 2026" }, "target.unpublished_limits[0].ruled: a date as YYYY-MM-DD"},
+		{"unpublished ruling before retrieval", func(c *Config) { unpub(c).Ruled = "2026-10-06" }, "target.unpublished_limits[0].ruled: 2026-10-06 is before retrieved 2026-10-07"},
+		{"unpublished ruling unrecorded", func(c *Config) { unpub(c).Ruling = " " }, "target.unpublished_limits[0].ruling: required"},
 		{"no naming", func(c *Config) { c.Target.Naming = nil }, "target.naming: required"},
 		{"naming provider", func(c *Config) { c.Target.Naming.Provider = "" }, "target.naming.provider: required"},
 		{"naming lines", func(c *Config) { c.Target.Naming.Lines = nil }, "target.naming.lines: required"},
@@ -210,6 +231,49 @@ func TestReleaseLimitAndNamingForms(t *testing.T) {
 	}
 }
 
+// Unpublished limits load from YAML, with URL and file sources and a
+// ruling on the retrieval date or later, beside a recorded limit of
+// another dimension.
+func TestReleaseUnpublishedLimits(t *testing.T) {
+	raw, err := os.ReadFile(releaseRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const entries = `  unpublished_limits:
+    - dimension: acceleration
+      source: https://example.test/rate-limits
+      retrieved: 2026-10-07
+      sha256: "abababababababababababababababababababababababababababababababab"
+      ruled: 2026-10-07
+      ruling: rulings/2026-10-07-acceleration.md
+    - dimension: concurrent_requests
+      source: limits.png
+      retrieved: 2026-10-07
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      ruled: 2026-10-09
+      ruling: rulings/2026-10-09-concurrency.md
+  naming:
+`
+	with := strings.Replace(string(raw), "  naming:\n", entries, 1)
+	if with == string(raw) {
+		t.Fatal("no naming block in the reference")
+	}
+	c, err := Parse([]byte(with))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []UnpublishedLimit{
+		{Dimension: "acceleration", Source: "https://example.test/rate-limits", Retrieved: "2026-10-07", SHA256: strings.Repeat("ab", 32), Ruled: "2026-10-07", Ruling: "rulings/2026-10-07-acceleration.md"},
+		{Dimension: LimitConcurrency, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64), Ruled: "2026-10-09", Ruling: "rulings/2026-10-09-concurrency.md"},
+	}
+	if !slices.Equal(c.Target.UnpublishedLimits, want) {
+		t.Errorf("unpublished limits %+v", c.Target.UnpublishedLimits)
+	}
+	if _, err := Parse([]byte(strings.Replace(with, "      ruled: 2026-10-09\n", "      ruled: 2026-10-09\n      cap_rps: 1\n", 1))); err == nil || !strings.Contains(err.Error(), "cap_rps") {
+		t.Errorf("an unknown field in an entry: got %v", err)
+	}
+}
+
 func TestReleaseBody(t *testing.T) {
 	const chat = `{"model":"m","messages":[{"role":"user","content":"{{case}}"}],"stream":true,%s}`
 	const messages = `{"model":"m","system":"s","messages":[{"role":"user","content":"{{case}}"}],"stream":true,%s}`
@@ -265,6 +329,9 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 	for _, f := range []func(*Target){
 		func(t *Target) { t.Adapter = AdapterChatCompletions },
 		func(t *Target) { t.Limits = rel.Target.Limits },
+		func(t *Target) {
+			t.UnpublishedLimits = []UnpublishedLimit{{Dimension: "acceleration", Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64), Ruled: "2026-10-07", Ruling: "rulings.md"}}
+		},
 		func(t *Target) { t.Naming = rel.Target.Naming },
 		func(t *Target) {
 			t.StatusDocs = []StatusDoc{{Status: 529, Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
@@ -279,13 +346,13 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 		for _, ref := range []string{acRef, experimentRef} {
 			c := loadRef(t, ref)
 			f(&c.Target)
-			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, unpublished_limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
 				t.Errorf("%s: got %v", ref, err)
 			}
 		}
 		p := loadRef(t, pilotRef)
 		f(&p.Pilot.Targets[1])
-		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, unpublished_limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
 			t.Errorf("pilot: got %v", err)
 		}
 	}

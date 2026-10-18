@@ -54,22 +54,28 @@ func ExpectedPlan(cfg *config.Config) Plan {
 // Demand.
 const RouteCapDimension = "route_cap_usd"
 
+// UnpublishedPrefix opens the Dimension of a Demand against a
+// target.unpublished_limits entry, before the entry's dimension.
+const UnpublishedPrefix = "unpublished:"
+
 // Demand is a step's nominal demand against one limit. A half test admits
 // a demand of at most half the limit; a cover test, of at most the limit.
 type Demand struct {
 	Dimension string `json:"dimension"`
-	// Limit indexes target.limits; -1 is release.caps.route_usd.
-	Limit    int     `json:"limit"`
-	Value    float64 `json:"value"`
-	Demand   float64 `json:"demand"`
-	Fraction float64 `json:"fraction"`
-	Half     bool    `json:"half"`
-	Pass     bool    `json:"pass"`
+	// Limit indexes target.limits, or target.unpublished_limits where
+	// Unpublished is set; -1 is release.caps.route_usd.
+	Limit       int     `json:"limit"`
+	Unpublished bool    `json:"unpublished,omitempty"`
+	Value       float64 `json:"value"`
+	Demand      float64 `json:"demand"`
+	Fraction    float64 `json:"fraction"`
+	Half        bool    `json:"half"`
+	Pass        bool    `json:"pass"`
 }
 
 // Step is one ladder step's verdict. An excluded step names its binding
-// limit: its first failed test in target.limits order, then the route
-// cap.
+// limit: its first failed test in target.limits order, then
+// target.unpublished_limits order, then the route cap.
 type Step struct {
 	RPS      float64  `json:"rps"`
 	Admitted bool     `json:"admitted"`
@@ -112,9 +118,10 @@ func (v *Verdict) Admitted() []float64 {
 // cells up to the step, a spend window the step's rate over the window.
 // The monthly spend cap and the route's ledger cap must cover the
 // edition up to the step plus the probe requests, and the auto-reload
-// threshold the costliest cell. A step is admitted when it passes every
-// test; every demand rises with the step, so the admitted steps are the
-// ladder up to the top step. cfg must validate.
+// threshold the costliest cell. Each unpublished limit caps the step's
+// rate at config.PinnedReleaseUnpublishedCapRPS. A step is admitted when
+// it passes every test; every demand rises with the step, so the
+// admitted steps are the ladder up to the top step. cfg must validate.
 func CeilingRule(cfg *config.Config, p Price, plan Plan) (*Verdict, error) {
 	if cfg.Profile != config.ProfileRelease || cfg.Release == nil {
 		return nil, errors.New("admission: ceiling rule: not a release configuration")
@@ -157,6 +164,11 @@ func CeilingRule(cfg *config.Config, p Price, plan Plan) (*Verdict, error) {
 			l := &cfg.Target.Limits[i]
 			d, half := limitDemand(l, r, cell, plan.DayCells, in, ceiling, c, cfg.Client.HTTPTimeoutS, cellUSD, editionUSD)
 			s.Demands = append(s.Demands, demand(l.Dimension, i, rat(l.Value), d, half))
+		}
+		for i, u := range cfg.Target.UnpublishedLimits {
+			d := demand(UnpublishedPrefix+u.Dimension, i, rat(config.PinnedReleaseUnpublishedCapRPS), r, false)
+			d.Unpublished = true
+			s.Demands = append(s.Demands, d)
 		}
 		s.Demands = append(s.Demands, demand(RouteCapDimension, -1, routeCap, editionUSD, false))
 		for i := range s.Demands {

@@ -123,6 +123,24 @@ const (
 
 var countings = []string{CountingInputOutput, CountingInput, CountingOutputBurndown}
 
+// UnpublishedLimit is the operator's dated ruling on a dimension the
+// provider documents but neither publishes a value for nor shows in the
+// console: the route runs at most PinnedReleaseUnpublishedCapRPS.
+type UnpublishedLimit struct {
+	// Dimension names the documented dimension: one or more of a-z, 0-9
+	// and _, starting with a letter, and no dimension of target.limits.
+	Dimension string `yaml:"dimension" json:"dimension"`
+	// Source, Retrieved and SHA256 record the page that documents the
+	// dimension, as a Limit's.
+	Source    string `yaml:"source" json:"source"`
+	Retrieved string `yaml:"retrieved" json:"retrieved"`
+	SHA256    string `yaml:"sha256" json:"sha256"`
+	// Ruled is the ruling's date, YYYY-MM-DD in UTC, on or after
+	// Retrieved; Ruling names where the ruling is kept.
+	Ruled  string `yaml:"ruled" json:"ruled"`
+	Ruling string `yaml:"ruling" json:"ruling"`
+}
+
 // Naming is the route's provider-naming record.
 type Naming struct {
 	// Provider is the word mark printed for the route, as plain text.
@@ -355,6 +373,13 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	for i := range t.Limits {
 		validateLimit(v, fmt.Sprintf("%s.limits[%d]", field, i), &t.Limits[i])
 	}
+	dims := map[string]bool{}
+	for _, l := range t.Limits {
+		dims[l.Dimension] = true
+	}
+	for i := range t.UnpublishedLimits {
+		validateUnpublishedLimit(v, fmt.Sprintf("%s.unpublished_limits[%d]", field, i), &t.UnpublishedLimits[i], dims)
+	}
 	if t.Naming == nil {
 		v.errf("%s.naming: required under the release profile", field)
 	} else {
@@ -454,6 +479,44 @@ func validateLimit(v *validator, field string, l *Limit) {
 	}
 }
 
+var unpublishedDimensionRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+// validateUnpublishedLimit requires a dimension name that no recorded
+// limit and no earlier entry carries, the documenting page's source,
+// retrieval date and hash, a ruling date no earlier than the retrieval,
+// and where the ruling is kept. seen holds target.limits' dimensions.
+func validateUnpublishedLimit(v *validator, field string, u *UnpublishedLimit, seen map[string]bool) {
+	switch {
+	case !unpublishedDimensionRe.MatchString(u.Dimension):
+		v.errf("%s.dimension: one or more of a-z, 0-9 and _, starting with a letter, required, got %q", field, u.Dimension)
+	case seen[u.Dimension]:
+		v.errf("%s.dimension: %q is recorded with a value or listed twice", field, u.Dimension)
+	}
+	seen[u.Dimension] = true
+	switch src := strings.TrimSpace(u.Source); {
+	case src == "":
+		v.errf("%s.source: required (the page's URL or the retained screenshot's file name)", field)
+	case strings.Contains(src, "://") && !parsesAsURL(src):
+		v.errf("%s.source: %q is not an http or https URL with a host", field, u.Source)
+	}
+	retrieved, rerr := time.Parse(time.DateOnly, u.Retrieved)
+	if rerr != nil {
+		v.errf("%s.retrieved: a date as YYYY-MM-DD required, got %q", field, u.Retrieved)
+	}
+	if !sha256Hex(u.SHA256) {
+		v.errf("%s.sha256: 64 lowercase hex characters required, got %q", field, u.SHA256)
+	}
+	switch ruled, err := time.Parse(time.DateOnly, u.Ruled); {
+	case err != nil:
+		v.errf("%s.ruled: a date as YYYY-MM-DD required, got %q", field, u.Ruled)
+	case rerr == nil && ruled.Before(retrieved):
+		v.errf("%s.ruled: %s is before retrieved %s", field, u.Ruled, u.Retrieved)
+	}
+	if strings.TrimSpace(u.Ruling) == "" {
+		v.errf("%s.ruling: required (where the dated ruling is kept)", field)
+	}
+}
+
 // validateStatusDoc requires a status other than 200 that no earlier
 // entry documents, a meaning, a source and a retrieval date.
 func validateStatusDoc(v *validator, field string, d *StatusDoc, seen map[int]bool) {
@@ -542,8 +605,8 @@ func validateNaming(v *validator, field string, n *Naming) {
 // refuseReleaseFields refuses the release-only target fields on a target
 // outside the release profile.
 func refuseReleaseFields(v *validator, field string, t *Target) {
-	if t.Adapter != "" || len(t.Limits) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 || len(t.BillingRefusals) > 0 {
-		v.errf("%s: adapter, limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only", field)
+	if t.Adapter != "" || len(t.Limits) > 0 || len(t.UnpublishedLimits) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 || len(t.BillingRefusals) > 0 {
+		v.errf("%s: adapter, limits, unpublished_limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only", field)
 	}
 }
 

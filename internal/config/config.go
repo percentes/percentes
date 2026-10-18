@@ -176,6 +176,10 @@ const (
 	PinnedReleaseDeadlineS        = 30
 	PinnedReleaseHardTimeoutS     = 90
 	PinnedReleaseConnections      = 32
+
+	// SPEC-HOSTED HA3 point 6: the rate a route runs at most under a
+	// ruling on a documented dimension with no published value.
+	PinnedReleaseUnpublishedCapRPS = 0.5
 )
 
 // Pre-registered sweep grids (§4 SLO sweep, §5 detector sensitivity).
@@ -443,6 +447,10 @@ type Target struct {
 	// Limits records every limit the ceiling rule reads for the route
 	// (SPEC-HOSTED HA3 point 6).
 	Limits []Limit `yaml:"limits,omitempty" json:"limits,omitempty"`
+	// UnpublishedLimits records the operator's rulings on dimensions the
+	// provider documents with no published value; each caps the route at
+	// PinnedReleaseUnpublishedCapRPS (SPEC-HOSTED HA3 point 6).
+	UnpublishedLimits []UnpublishedLimit `yaml:"unpublished_limits,omitempty" json:"unpublished_limits,omitempty"`
 	// Naming records how the route's provider may be named.
 	Naming *Naming `yaml:"naming,omitempty" json:"naming,omitempty"`
 	// StatusDocs records the provider's documented meaning of HTTP

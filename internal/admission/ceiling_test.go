@@ -1,6 +1,7 @@
 package admission
 
 import (
+	"encoding/json"
 	"math"
 	"slices"
 	"strconv"
@@ -286,6 +287,78 @@ func TestCeilingRuleDimensions(t *testing.T) {
 		if d := demandOf(t, stepAt(t, v, 1), c.l.Dimension); d.Demand != c.want {
 			t.Errorf("%s counting %q: 1 rps demand %g, want %g", c.l.Dimension, c.l.Counting, d.Demand, c.want)
 		}
+	}
+}
+
+func unpublished(dims ...string) []config.UnpublishedLimit {
+	var out []config.UnpublishedLimit
+	for _, d := range dims {
+		out = append(out, config.UnpublishedLimit{Dimension: d, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64), Ruled: "2026-10-08", Ruling: "rulings.md"})
+	}
+	return out
+}
+
+// An unpublished limit caps the route at 0.5 rps as a cover test, after
+// every recorded limit and before the route cap.
+func TestCeilingRuleUnpublished(t *testing.T) {
+	groq := price("0.15", "0.60")
+	limits := []config.Limit{lim(config.LimitRPM, 1000), lim(config.LimitTPM, 250000)}
+	cfg := releaseConfig(t, "groq", 512, "10", limits...)
+	if v := rule(t, cfg, groq); v.TopRPS != 1 {
+		t.Fatalf("without a ruling: top step %g, want 1", v.TopRPS)
+	}
+	cfg.Target.UnpublishedLimits = unpublished("acceleration", "concurrent_requests")
+	v := rule(t, cfg, groq)
+	if v.TopRPS != 0.5 || !slices.Equal(v.Admitted(), []float64{0.25, 0.5}) {
+		t.Fatalf("top step %g, admitted %v", v.TopRPS, v.Admitted())
+	}
+	for _, s := range v.Steps {
+		var dims []string
+		for _, d := range s.Demands {
+			dims = append(dims, d.Dimension)
+		}
+		if want := []string{config.LimitRPM, config.LimitTPM, "unpublished:acceleration", "unpublished:concurrent_requests", RouteCapDimension}; !slices.Equal(dims, want) {
+			t.Errorf("step %g demands %q, want %q", s.RPS, dims, want)
+		}
+		for k, dim := range []string{"unpublished:acceleration", "unpublished:concurrent_requests"} {
+			d := demandOf(t, &s, dim)
+			want := Demand{Dimension: dim, Limit: k, Unpublished: true, Value: 0.5, Demand: s.RPS, Fraction: s.RPS / 0.5, Pass: s.RPS <= 0.5}
+			if d != want {
+				t.Errorf("step %g: %+v, want %+v", s.RPS, d, want)
+			}
+		}
+		if d := demandOf(t, &s, config.LimitRPM); d.Unpublished || d.Limit != 0 {
+			t.Errorf("step %g recorded limit: %+v", s.RPS, d)
+		}
+	}
+	if b := stepAt(t, v, 1).Binding; b == nil || b.Dimension != "unpublished:acceleration" || !b.Unpublished || b.Limit != 0 {
+		t.Errorf("1 rps binding %+v", b)
+	}
+	b, err := json.Marshal(demandOf(t, stepAt(t, v, 1), "unpublished:acceleration"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"dimension":"unpublished:acceleration","limit":0,"unpublished":true,"value":0.5,"demand":1,"fraction":2,"half":false,"pass":false}`; string(b) != want {
+		t.Errorf("JSON %s, want %s", b, want)
+	}
+	if b, _ := json.Marshal(demandOf(t, stepAt(t, v, 1), config.LimitRPM)); strings.Contains(string(b), "unpublished") {
+		t.Errorf("recorded limit JSON %s", b)
+	}
+
+	// A recorded limit failing at the same step binds first; the ruling
+	// binds before the route cap.
+	cfg = releaseConfig(t, "route", 512, "10", lim(config.LimitRPM, 15))
+	cfg.Target.UnpublishedLimits = unpublished("acceleration")
+	if v := rule(t, cfg, groq); v.TopRPS != 0 || v.Steps[0].Binding.Dimension != config.LimitRPM {
+		t.Errorf("recorded limit first: top %g, binding %+v", v.TopRPS, v.Steps[0].Binding)
+	}
+	cfg = releaseConfig(t, "route", 512, "5", lim(config.LimitRPM, 1000))
+	if v := rule(t, cfg, groq); v.Steps[2].Binding.Dimension != RouteCapDimension {
+		t.Fatalf("route cap binds 1 rps without a ruling: %+v", v.Steps[2].Binding)
+	}
+	cfg.Target.UnpublishedLimits = unpublished("acceleration")
+	if v := rule(t, cfg, groq); v.TopRPS != 0.5 || v.Steps[2].Binding.Dimension != "unpublished:acceleration" {
+		t.Errorf("ruling before the route cap: top %g, binding %+v", v.TopRPS, v.Steps[2].Binding)
 	}
 }
 
