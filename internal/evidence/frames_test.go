@@ -9,12 +9,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
 )
 
@@ -178,6 +180,62 @@ func TestFramesAreTheBodyBytes(t *testing.T) {
 		}
 		if string(got) != strings.Join(parts, "") || !b64 || rec.DroppedBytes != 0 {
 			t.Errorf("request %d: %q (base64 frame %v, dropped %d)", i, got, b64, rec.DroppedBytes)
+		}
+	}
+}
+
+// A retained header's values are in the frame store and not in the
+// attempts file, which carries the stand-in for each value; a published
+// header keeps its values in the attempts file.
+func TestRetainedHeadersInTheFrameStoreOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h := w.Header()
+		h.Set("X-Ratelimit-Limit-Tokens", "limit-tokens-250000")
+		h.Set("X-Ratelimit-Remaining-Tokens", "remaining-249000")
+		h.Set("Content-Type", "text/event-stream")
+		w.Write([]byte(`data: {"choices":[{"delta":{"content":"a"}}]}` + "\n\ndata: [DONE]\n\n")) //nolint:errcheck
+	}))
+	defer srv.Close()
+	cfg := hostedCfg(srv.URL)
+	cfg.Target.ResponseHeaders = []string{"x-ratelimit-*"}
+	cfg.Target.RetainedHeaders = []string{"x-ratelimit-limit-*"}
+
+	res, err := loadgen.Run(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	attemptsPath, err := WriteRun(dir, cfg, res, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	framesPath, err := WriteRunFrames(t.TempDir(), res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(attempts, []byte("limit-tokens")) {
+		t.Errorf("attempts file carries a retained value:\n%s", attempts)
+	}
+	recs, err := ReadRecords(bytes.NewReader(attempts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := readFrames(t, framesPath)
+	if len(recs) == 0 || len(frames) != len(recs) {
+		t.Fatalf("%d attempts, %d frame records", len(recs), len(frames))
+	}
+	for i := range recs {
+		published := map[string][]string{
+			"X-Ratelimit-Limit-Tokens":     {config.RetainedHeaderValue},
+			"X-Ratelimit-Remaining-Tokens": {"remaining-249000"},
+		}
+		kept := map[string][]string{"X-Ratelimit-Limit-Tokens": {"limit-tokens-250000"}}
+		if !reflect.DeepEqual(recs[i].Headers, published) || !reflect.DeepEqual(frames[i].Headers, kept) {
+			t.Errorf("request %d: attempts headers %v, frame store headers %v", i, recs[i].Headers, frames[i].Headers)
 		}
 	}
 }

@@ -151,6 +151,21 @@ func TestReleaseRefusals(t *testing.T) {
 		{"unpublished ruling date", func(c *Config) { unpub(c).Ruled = "8 October 2026" }, "target.unpublished_limits[0].ruled: a date as YYYY-MM-DD"},
 		{"unpublished ruling before retrieval", func(c *Config) { unpub(c).Ruled = "2026-10-06" }, "target.unpublished_limits[0].ruled: 2026-10-06 is before retrieved 2026-10-07"},
 		{"unpublished ruling unrecorded", func(c *Config) { unpub(c).Ruling = " " }, "target.unpublished_limits[0].ruling: required"},
+		{"retained header name", func(c *Config) { c.Target.RetainedHeaders = []string{"X Ratelimit"} }, `target.retained_headers[0]: "X Ratelimit" is not a header name, optionally ending in *`},
+		{"retained header listed twice", func(c *Config) {
+			c.Target.RetainedHeaders = []string{"x-ratelimit-limit-requests", "X-Ratelimit-Limit-Requests"}
+		}, `target.retained_headers[1]: "X-Ratelimit-Limit-Requests" listed twice`},
+		{"retained header not recorded", func(c *Config) { c.Target.RetainedHeaders = []string{"x-request-id"} }, `target.retained_headers[0]: "x-request-id" matches names target.response_headers does not record`},
+		{"retained pattern wider than recorded", func(c *Config) { c.Target.RetainedHeaders = []string{"x-rate*"} }, `target.retained_headers[0]: "x-rate*" matches names target.response_headers does not record`},
+		{"retained pattern over a literal", func(c *Config) {
+			c.Target.ResponseHeaders = []string{"Retry-After", "x-ratelimit-limit-requests"}
+			c.Target.RetainedHeaders = []string{"x-ratelimit-limit-*"}
+		}, `target.retained_headers[0]: "x-ratelimit-limit-*" matches names target.response_headers does not record`},
+		{"retained Retry-After", func(c *Config) { c.Target.RetainedHeaders = []string{"retry-after"} }, `target.retained_headers[0]: "retry-after" matches Retry-After, whose values the per-step tables print`},
+		{"retained pattern over Retry-After", func(c *Config) {
+			c.Target.ResponseHeaders = []string{"Retry-*", "x-ratelimit-*"}
+			c.Target.RetainedHeaders = []string{"x-ratelimit-*", "retry-*"}
+		}, `target.retained_headers[1]: "retry-*" matches Retry-After, whose values the per-step tables print`},
 		{"no naming", func(c *Config) { c.Target.Naming = nil }, "target.naming: required"},
 		{"naming provider", func(c *Config) { c.Target.Naming.Provider = "" }, "target.naming.provider: required"},
 		{"naming lines", func(c *Config) { c.Target.Naming.Lines = nil }, "target.naming.lines: required"},
@@ -274,6 +289,38 @@ func TestReleaseUnpublishedLimits(t *testing.T) {
 	}
 }
 
+// Retained headers load from YAML as literal names and prefixes inside
+// the recorded allowlist, and match without regard to case.
+func TestReleaseRetainedHeaders(t *testing.T) {
+	raw, err := os.ReadFile(releaseRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with := strings.Replace(string(raw), "  naming:\n", "  retained_headers: [x-ratelimit-limit-*, X-Ratelimit-Remaining-Tokens]\n  naming:\n", 1)
+	if with == string(raw) {
+		t.Fatal("no naming block in the reference")
+	}
+	c, err := Parse([]byte(with))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"x-ratelimit-limit-*", "X-Ratelimit-Remaining-Tokens"}; !slices.Equal(c.Target.RetainedHeaders, want) {
+		t.Errorf("retained headers %q, want %q", c.Target.RetainedHeaders, want)
+	}
+	for name, want := range map[string]bool{
+		"X-Ratelimit-Limit-Requests":     true,
+		"x-ratelimit-limit-tokens":       true,
+		"X-Ratelimit-Remaining-Tokens":   true,
+		"X-Ratelimit-Remaining-Requests": false,
+		"X-Ratelimit-Limit":              false,
+		"Retry-After":                    false,
+	} {
+		if got := c.Target.HeaderRetained(name); got != want {
+			t.Errorf("HeaderRetained(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestReleaseBody(t *testing.T) {
 	const chat = `{"model":"m","messages":[{"role":"user","content":"{{case}}"}],"stream":true,%s}`
 	const messages = `{"model":"m","system":"s","messages":[{"role":"user","content":"{{case}}"}],"stream":true,%s}`
@@ -332,6 +379,10 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 		func(t *Target) {
 			t.UnpublishedLimits = []UnpublishedLimit{{Dimension: "acceleration", Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64), Ruled: "2026-10-07", Ruling: "rulings.md"}}
 		},
+		func(t *Target) {
+			t.ResponseHeaders = []string{"x-ratelimit-*"}
+			t.RetainedHeaders = []string{"x-ratelimit-*"}
+		},
 		func(t *Target) { t.Naming = rel.Target.Naming },
 		func(t *Target) {
 			t.StatusDocs = []StatusDoc{{Status: 529, Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
@@ -346,13 +397,13 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 		for _, ref := range []string{acRef, experimentRef} {
 			c := loadRef(t, ref)
 			f(&c.Target)
-			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, unpublished_limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
 				t.Errorf("%s: got %v", ref, err)
 			}
 		}
 		p := loadRef(t, pilotRef)
 		f(&p.Pilot.Targets[1])
-		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, unpublished_limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
 			t.Errorf("pilot: got %v", err)
 		}
 	}

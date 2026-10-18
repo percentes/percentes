@@ -121,9 +121,13 @@ type Request struct {
 	// Proto is the response's protocol version ("" = no response).
 	Proto string `json:"proto,omitempty"`
 	// Status is the HTTP status code (0 = no response). Headers holds the
-	// response headers target.response_headers allows, by canonical name.
-	Status  int                 `json:"status,omitempty"`
-	Headers map[string][]string `json:"headers,omitempty"`
+	// response headers target.response_headers allows, by canonical name,
+	// with config.RetainedHeaderValue in place of each value of a header
+	// target.retained_headers names; RetainedHeaders holds those values
+	// for the raw-frame store, never in JSON.
+	Status          int                 `json:"status,omitempty"`
+	Headers         map[string][]string `json:"headers,omitempty"`
+	RetainedHeaders map[string][]string `json:"-"`
 	// PeerAddr is the remote address of the connection the request used
 	// ("" = none obtained); ConnReused says it came from the idle pool.
 	PeerAddr   string `json:"peer_addr,omitempty"`

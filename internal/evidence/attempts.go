@@ -51,7 +51,9 @@ type Record struct {
 	Protocol string `json:"protocol,omitempty"`
 	Status   int    `json:"status,omitempty"`
 	// RetryAfter is the first Retry-After value among Headers, the
-	// response headers target.response_headers allows.
+	// response headers target.response_headers allows, each value of a
+	// header target.retained_headers names replaced by
+	// config.RetainedHeaderValue.
 	RetryAfter string              `json:"retry_after,omitempty"`
 	Headers    map[string][]string `json:"headers,omitempty"`
 	ErrText    string              `json:"err_text,omitempty"`

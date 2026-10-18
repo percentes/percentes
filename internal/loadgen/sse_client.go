@@ -65,6 +65,7 @@ func (g *gen) execute(r *Request) {
 	r.Status = resp.StatusCode
 	secrets := g.secrets()
 	r.Headers = allowedHeaders(resp.Header, g.cfg.Target.ResponseHeaders, secrets)
+	r.RetainedHeaders = retainHeaders(r.Headers, &g.cfg.Target)
 	// Only the mock's replica header is recorded (§1); any other endpoint controls the value.
 	r.Replica = replicaFrom(resp.Header, g.cfg.Mock != nil && !g.cfg.Target.Hosted, g.cfg.Target.BaseURL, g.apiKey)
 
@@ -759,6 +760,27 @@ func allowedHeaders(h http.Header, allow []string, secrets []string) map[string]
 		}
 	}
 	return out
+}
+
+// retainHeaders moves the values of the headers in h that t retains to
+// the map it returns, leaving config.RetainedHeaderValue in their place.
+func retainHeaders(h map[string][]string, t *config.Target) map[string][]string {
+	var kept map[string][]string
+	for name, vs := range h {
+		if !t.HeaderRetained(name) {
+			continue
+		}
+		if kept == nil {
+			kept = map[string][]string{}
+		}
+		kept[name] = vs
+		marks := make([]string, len(vs))
+		for i := range marks {
+			marks[i] = config.RetainedHeaderValue
+		}
+		h[name] = marks
+	}
+	return kept
 }
 
 func containsAny(s string, subs []string) bool {

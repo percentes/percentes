@@ -25,11 +25,14 @@ const repoModule = "github.com/percentes/percentes"
 
 // FrameRecord is one scheduled request's retained response bytes: the
 // timed reads of a 200 body, or the kept start of a non-200 body, with
-// credentials masked.
+// credentials masked, and the header values the attempts file withholds.
 type FrameRecord struct {
-	Index  int64   `json:"index"`
-	Status int     `json:"status,omitempty"`
-	Frames []Frame `json:"frames,omitempty"`
+	Index  int64 `json:"index"`
+	Status int   `json:"status,omitempty"`
+	// Headers are the values of the response headers
+	// target.retained_headers keeps out of the attempts file.
+	Headers map[string][]string `json:"headers,omitempty"`
+	Frames  []Frame             `json:"frames,omitempty"`
 	// DroppedBytes counts 200 body bytes read and not kept.
 	DroppedBytes int64  `json:"dropped_bytes,omitempty"`
 	ErrorBody    *Bytes `json:"error_body,omitempty"`
@@ -69,7 +72,7 @@ func FrameRecords(res *loadgen.Result) []FrameRecord {
 	out := make([]FrameRecord, len(res.Requests))
 	for i := range res.Requests {
 		r := &res.Requests[i]
-		rec := FrameRecord{Index: r.Index, Status: r.Status, DroppedBytes: r.FrameBytesDropped}
+		rec := FrameRecord{Index: r.Index, Status: r.Status, Headers: r.RetainedHeaders, DroppedBytes: r.FrameBytesDropped}
 		for _, f := range r.Frames {
 			rec.Frames = append(rec.Frames, Frame{Ns: f.Ns, Bytes: bytesOf(f.Data)})
 		}

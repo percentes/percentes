@@ -360,6 +360,7 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 		}
 	}
 	validateResponseHeaders(v, field, t)
+	validateRetainedHeaders(v, field, t)
 	validateResponseShape(v, field, t)
 	if t.Adapter == AdapterMessages && t.ResponseShape != nil {
 		v.errf("%s.response_shape: must be absent for the %q adapter, which reads the Messages event fields", field, AdapterMessages)
@@ -602,11 +603,36 @@ func validateNaming(v *validator, field string, n *Naming) {
 	}
 }
 
+// validateRetainedHeaders refuses a retained_headers entry that is not a
+// header name (with an optional trailing "*"), repeats another, could
+// match a name target.response_headers does not record, or could match
+// Retry-After, whose values the per-step tables print.
+func validateRetainedHeaders(v *validator, field string, t *Target) {
+	seen := map[string]bool{}
+	for i, e := range t.RetainedHeaders {
+		if !headerToken(strings.TrimSuffix(e, "*")) {
+			v.errf("%s.retained_headers[%d]: %q is not a header name, optionally ending in *", field, i, e)
+			continue
+		}
+		key := strings.ToLower(e)
+		if seen[key] {
+			v.errf("%s.retained_headers[%d]: %q listed twice", field, i, e)
+		}
+		seen[key] = true
+		if !slices.ContainsFunc(t.ResponseHeaders, func(a string) bool { return headerCovers(a, e) }) {
+			v.errf("%s.retained_headers[%d]: %q matches names target.response_headers does not record", field, i, e)
+		}
+		if headerMatch(e, "Retry-After") {
+			v.errf("%s.retained_headers[%d]: %q matches Retry-After, whose values the per-step tables print", field, i, e)
+		}
+	}
+}
+
 // refuseReleaseFields refuses the release-only target fields on a target
 // outside the release profile.
 func refuseReleaseFields(v *validator, field string, t *Target) {
-	if t.Adapter != "" || len(t.Limits) > 0 || len(t.UnpublishedLimits) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 || len(t.BillingRefusals) > 0 {
-		v.errf("%s: adapter, limits, unpublished_limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only", field)
+	if t.Adapter != "" || len(t.Limits) > 0 || len(t.UnpublishedLimits) > 0 || len(t.RetainedHeaders) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 || len(t.BillingRefusals) > 0 {
+		v.errf("%s: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only", field)
 	}
 }
 

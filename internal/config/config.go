@@ -451,6 +451,12 @@ type Target struct {
 	// provider documents with no published value; each caps the route at
 	// PinnedReleaseUnpublishedCapRPS (SPEC-HOSTED HA3 point 6).
 	UnpublishedLimits []UnpublishedLimit `yaml:"unpublished_limits,omitempty" json:"unpublished_limits,omitempty"`
+	// RetainedHeaders lists the recorded response headers whose values the
+	// provider's terms keep unpublished, in the form of ResponseHeaders:
+	// the attempts file carries RetainedHeaderValue in place of each
+	// value, and the frame store keeps the values (SPEC-HOSTED HA3 point
+	// 15).
+	RetainedHeaders []string `yaml:"retained_headers,omitempty" json:"retained_headers,omitempty"`
 	// Naming records how the route's provider may be named.
 	Naming *Naming `yaml:"naming,omitempty" json:"naming,omitempty"`
 	// StatusDocs records the provider's documented meaning of HTTP
@@ -534,6 +540,31 @@ func HeaderAllowed(allow []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// RetainedHeaderValue stands in the attempts file for each value of a
+// header target.retained_headers names.
+const RetainedHeaderValue = "[retained]"
+
+// HeaderRetained reports whether a response header name matches an entry
+// of target.retained_headers.
+func (t *Target) HeaderRetained(name string) bool {
+	for _, e := range t.RetainedHeaders {
+		if headerMatch(e, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// headerCovers reports whether every name entry matches also matches
+// allowlist entry a.
+func headerCovers(a, entry string) bool {
+	if p, ok := strings.CutSuffix(a, "*"); ok {
+		name := strings.TrimSuffix(entry, "*")
+		return len(name) >= len(p) && strings.EqualFold(name[:len(p)], p)
+	}
+	return !strings.HasSuffix(entry, "*") && strings.EqualFold(a, entry)
 }
 
 func headerMatch(entry, name string) bool {
