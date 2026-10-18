@@ -174,6 +174,7 @@ func (c *Config) validatePilot(v *validator) {
 		{"pins", c.Pins},
 		{"mock", c.Mock},
 		{"calibration", c.Calibration},
+		{"release", c.Release},
 	} {
 		if !reflect.ValueOf(b.val).IsZero() {
 			v.errf("%s: must be absent under the pilot profile", b.field)
@@ -233,6 +234,7 @@ func validatePilotTarget(v *validator, field string, t *Target) {
 	if len(t.MetricsURLs) > 0 || t.QueueGauge != "" || len(t.MetricsFamilies) > 0 || t.TTFTHistogram != "" {
 		v.errf("%s: metrics_urls, queue_gauge, metrics_families and ttft_histogram are not read for a hosted target (§6)", field)
 	}
+	refuseReleaseFields(v, field, t)
 	validateTargetRequest(v, field, ProfilePilot, t)
 	validateResponseHeaders(v, field, t)
 	validateResponseShape(v, field, t)

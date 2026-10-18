@@ -57,11 +57,17 @@ func (c *Config) Validate() error {
 	case ProfilePilot:
 		c.validatePilot(v)
 		return v.result()
+	case ProfileRelease:
+		c.validateRelease(v)
+		return v.result()
 	default:
-		v.errf("profile: must be %q, %q or %q, got %q", ProfileExperiment, ProfileAC, ProfilePilot, c.Profile)
+		v.errf("profile: must be %q, %q, %q or %q, got %q", ProfileExperiment, ProfileAC, ProfilePilot, ProfileRelease, c.Profile)
 	}
 	if c.Pilot != nil {
 		v.errf("pilot: must be absent unless profile is %q", ProfilePilot)
+	}
+	if c.Release != nil {
+		v.errf("release: must be absent unless profile is %q", ProfileRelease)
 	}
 
 	c.validateRun(v)
@@ -254,8 +260,9 @@ func (c *Config) validateTarget(v *validator) {
 		}
 	}
 	if t := c.Target; t.Name != "" || t.EndpointURL != "" || t.Params != nil || len(t.NotApplied) > 0 || t.Probe != nil {
-		v.errf("target: name, endpoint_url, params, not_applied and probe are set on pilot.targets entries only")
+		v.errf("target: name, endpoint_url, params, not_applied and probe are set on pilot.targets entries and the release profile's target only")
 	}
+	refuseReleaseFields(v, "target", &c.Target)
 	validateTargetRequest(v, "target", c.Profile, &c.Target)
 	validateResponseHeaders(v, "target", &c.Target)
 	validateResponseShape(v, "target", &c.Target)

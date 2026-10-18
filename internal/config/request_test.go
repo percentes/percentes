@@ -49,7 +49,7 @@ func TestAuthHeaderValidation(t *testing.T) {
 	}
 }
 
-// No profile in this tree sends a target's literal body.
+// Every profile but release refuses a target's literal body.
 func TestTargetBodyRefused(t *testing.T) {
 	const body = `{"stream":true,"messages":[{"role":"user","content":"{{case}}"}]}`
 	for _, ref := range []string{acRef, experimentRef} {

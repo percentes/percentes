@@ -29,12 +29,17 @@ import (
 //   - "pilot": the SPEC-HOSTED HA2 descriptive pilot: two hosted
 //     endpoints sent one literal request body at deterministic arrivals,
 //     with no replicas, SLO, fault or §6 infrastructure pins.
+//   - "release": one route of a SPEC-HOSTED HA3 public descriptive
+//     release: one hosted target sent its literal request body (Shape S)
+//     up the HA1 ladder as HA3 modifies it, with no replicas, SLO, fault
+//     or §6 infrastructure pins.
 type Profile string
 
 const (
 	ProfileExperiment Profile = "experiment"
 	ProfileAC         Profile = "ac"
 	ProfilePilot      Profile = "pilot"
+	ProfileRelease    Profile = "release"
 )
 
 // Fault variants (§1). VariantMock is the Phase 0 injector family; the
@@ -157,6 +162,20 @@ const (
 	// time-synchronization source at run start exceeds this does not
 	// count.
 	PinnedClockOffsetMaxS = 60
+
+	// SPEC-HOSTED HA3 points 5 and 7: a 60 s warm-up at the first step,
+	// 480 s measured per step, a 90 s drain after every step; Shape S
+	// with a 1,200-token input bound, a 30 s deadline and a 90 s hard
+	// timeout; load.connections 32 added to the provision from the top
+	// step.
+	PinnedReleaseWarmupS          = 60
+	PinnedReleaseStepS            = 480
+	PinnedReleaseDrainS           = 90
+	PinnedReleaseShape            = "S"
+	PinnedReleaseInputBoundTokens = 1200
+	PinnedReleaseDeadlineS        = 30
+	PinnedReleaseHardTimeoutS     = 90
+	PinnedReleaseConnections      = 32
 )
 
 // Pre-registered sweep grids (§4 SLO sweep, §5 detector sensitivity).
@@ -167,6 +186,11 @@ var (
 	PinnedSensitivityEntryPct = []int{85, 90, 95}
 	PinnedSensitivityWindowS  = []int{5, 10, 20}
 	PinnedSensitivityHoldS    = []int{15, 30, 60}
+
+	// SPEC-HOSTED HA3 points 5 and 7: the ladder's steps in ascending
+	// order, and the output ceiling with its one fallback.
+	PinnedReleaseStepsRPS = []float64{0.25, 0.5, 1, 2, 4}
+	PinnedReleaseCeilings = []int{512, 1024}
 )
 
 // Config is the root of the run configuration.
@@ -197,6 +221,10 @@ type Config struct {
 	// Pilot carries the pilot profile's request body and endpoints.
 	// Required under that profile and absent otherwise.
 	Pilot *Pilot `yaml:"pilot,omitempty" json:"pilot,omitempty"`
+
+	// Release carries the release profile's ladder and shape. Required
+	// under that profile and absent otherwise.
+	Release *Release `yaml:"release,omitempty" json:"release,omitempty"`
 
 	// Raw holds the configuration file bytes as parsed, so the report's
 	// config hash covers the published file.
@@ -389,20 +417,33 @@ type Target struct {
 	// reads the OpenAI chat-completion chunk with no reasoning field.
 	ResponseShape *ResponseShape `yaml:"response_shape,omitempty" json:"response_shape,omitempty"`
 
-	// The fields below are set on pilot.targets entries only.
+	// The fields below are set on pilot.targets entries and on the
+	// release profile's target only.
 
 	// Name labels the endpoint.
 	Name string `yaml:"name,omitempty" json:"name,omitempty"`
 	// EndpointURL is the complete request URL, in place of BaseURL plus
 	// /v1/chat/completions; nothing is appended to it.
 	EndpointURL string `yaml:"endpoint_url,omitempty" json:"endpoint_url,omitempty"`
-	// Params are the generation settings added to pilot.body.
+	// Params are the generation settings added to pilot.body; pilot
+	// targets only.
 	Params *Params `yaml:"params,omitempty" json:"params,omitempty"`
 	// NotApplied lists settings the other endpoint sends that this one
-	// does not support.
+	// does not support; pilot targets only.
 	NotApplied []string `yaml:"not_applied,omitempty" json:"not_applied,omitempty"`
 	// Probe configures the pre-run probe's limits read and start gate.
 	Probe *TargetProbe `yaml:"probe,omitempty" json:"probe,omitempty"`
+
+	// The fields below are set on the release profile's target only.
+
+	// Adapter is the streaming request shape: AdapterChatCompletions or
+	// AdapterMessages (SPEC-HOSTED HA3 point 2).
+	Adapter string `yaml:"adapter,omitempty" json:"adapter,omitempty"`
+	// Limits records every limit the ceiling rule reads for the route
+	// (SPEC-HOSTED HA3 point 6).
+	Limits []Limit `yaml:"limits,omitempty" json:"limits,omitempty"`
+	// Naming records how the route's provider may be named.
+	Naming *Naming `yaml:"naming,omitempty" json:"naming,omitempty"`
 }
 
 // ResponseShape names where a target's stream chunks carry each field.

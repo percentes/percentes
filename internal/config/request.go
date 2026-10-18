@@ -29,8 +29,8 @@ func (t *Target) KeyHeader(key string) (name, value string) {
 	return "Authorization", "Bearer " + key
 }
 
-// validateTargetRequest checks auth_header and refuses body: none of
-// these profiles sends a literal body.
+// validateTargetRequest checks auth_header and body: the release profile
+// requires a literal body and every other profile refuses one.
 func validateTargetRequest(v *validator, field string, profile Profile, t *Target) {
 	switch {
 	case t.AuthHeader == "":
@@ -39,8 +39,16 @@ func validateTargetRequest(v *validator, field string, profile Profile, t *Targe
 	case t.APIKeyEnv == "":
 		v.errf("%s.auth_header: set without api_key_env", field)
 	}
-	if t.Body != "" {
+	switch {
+	case profile != ProfileRelease && t.Body != "":
 		v.errf("%s.body: a literal request body is not accepted under the %q profile", field, profile)
+	case profile != ProfileRelease:
+	case t.Body == "":
+		v.errf("%s.body: required under the %q profile", field, profile)
+	default:
+		if err := CheckLiteralBody(t.Body); err != nil {
+			v.errf("%s.body: %v", field, err)
+		}
 	}
 }
 
