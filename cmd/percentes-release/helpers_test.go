@@ -67,19 +67,23 @@ func fakeSNTP(t *testing.T, offset string) string {
 	return "sntp time.example.test"
 }
 
-// fakeBalance puts a balance command on PATH that prints its own read
-// count, kept in a file beside it, and returns the command.
+// fakeBalance puts a balance command on PATH that prints a balance of
+// US$30.00 and, on stderr, its own read count, kept in a file beside it,
+// and returns the command.
 func fakeBalance(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	count := filepath.Join(dir, "count")
-	script := "#!/bin/sh\nn=$(($(cat '" + count + "' 2>/dev/null || echo 0) + 1))\necho $n > '" + count + "'\necho \"balance USD 30.00, read $n\"\n"
+	script := "#!/bin/sh\nn=$(($(cat '" + count + "' 2>/dev/null || echo 0) + 1))\necho $n > '" + count + "'\necho \"read $n\" >&2\necho '" + fakeBalanceOut + "'\n"
 	if err := os.WriteFile(filepath.Join(dir, "balance"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return "balance --account test"
 }
+
+// fakeBalanceOut is fakeBalance's standard output, less its newline.
+const fakeBalanceOut = `{"amount_usd": "30.00"}`
 
 // releaseConfig is the release reference at endpoint, with the test key
 // set in its variable.

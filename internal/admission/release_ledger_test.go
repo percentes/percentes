@@ -229,6 +229,26 @@ func TestAdmitAtShapeBound(t *testing.T) {
 	liability("0.0486496")
 }
 
+// A reservation is its requests at the highest price recorded at their
+// bounds, and has no value where the route has no price there.
+func TestReservationUSD(t *testing.T) {
+	l, _ := releaseLedger(t, routeConfig(t, "groq", "10", "1300"))
+	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 512)))
+	must(t, l.RecordPrice("groq", shapePrice(price("0.20", "0.80"), 512)))
+	must(t, l.RecordPrice("groq", shapePrice(price("0.10", "0.40"), 512)))
+	if got, err := state(t, l).ReservationUSD("groq", 3721, at512); err != nil || got != "2.4171616" {
+		t.Fatalf("3,721 requests at 512: %q %v, want US$2.4171616 (US$0.0006496 each)", got, err)
+	}
+	for _, tc := range []struct {
+		route string
+		tok   Tokens
+	}{{"groq", at1024}, {"google", at512}} {
+		if got, err := state(t, l).ReservationUSD(tc.route, 1, tc.tok); err == nil || got != "" || !strings.Contains(err.Error(), "no price recorded for "+tc.route) {
+			t.Errorf("%s at %v: %q %v", tc.route, tc.tok, got, err)
+		}
+	}
+}
+
 // The ledger covers a ceiling rule verdict only with prices at both the
 // cells' and the ceiling check's token bounds, each at least the
 // verdict's.

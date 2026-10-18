@@ -42,6 +42,9 @@ type StatusRecord struct {
 	// DroppedBytes counts output past statusOutputLimit, not kept.
 	DroppedBytes int64  `json:"dropped_bytes,omitempty"`
 	Error        string `json:"error,omitempty"`
+	// Check is a release cell's start balance read against the cell's
+	// reservation, and absent from every other record.
+	Check *BalanceCheck `json:"check,omitempty"`
 }
 
 // ParseStatusCommand splits s on white space into the endpoint-status
@@ -81,7 +84,9 @@ func ReadStatus(ctx context.Context, args []string) *StatusRecord {
 }
 
 // ReadBalance runs the balance command args as ReadStatus runs the
-// endpoint-status command; the route's key is not in its environment.
+// endpoint-status command; the route's key is not in its environment,
+// so a command that reads the balance with a credential reads it from a
+// file its arguments name.
 func ReadBalance(ctx context.Context, args []string) *StatusRecord {
 	return ReadStatus(ctx, args)
 }

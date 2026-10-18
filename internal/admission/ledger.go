@@ -347,6 +347,17 @@ func (s *State) price(route string, tok Tokens) *big.Rat {
 	return nil
 }
 
+// ReservationUSD is n requests to route at tok, each at the highest
+// per-request price recorded for the route at tok: the liability their
+// admission adds, as a decimal number of US dollars.
+func (s *State) ReservationUSD(route string, n int, tok Tokens) (string, error) {
+	p := s.price(route, tok)
+	if p == nil {
+		return "", fmt.Errorf("admission: no price recorded for %s at %d input and %d output tokens", route, tok.Input, tok.Output)
+	}
+	return decimalString(new(big.Rat).Mul(p, big.NewRat(int64(n), 1))), nil
+}
+
 func (s *State) usage(route string) *Usage {
 	u, ok := s.Routes[route]
 	if !ok {

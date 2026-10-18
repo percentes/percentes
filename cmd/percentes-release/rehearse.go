@@ -129,6 +129,12 @@ func (f *mockForm) routeConfig(ref []byte, endpoint, keyEnv string) (*config.Con
 	return config.Parse(b)
 }
 
+// mockBalanceCmd prints a balance of cfg's route cap, which covers every
+// cell the ledger admits.
+func mockBalanceCmd(cfg *config.Config) string {
+	return `echo {"amount_usd":"` + cfg.Release.Caps.RouteUSD + `"}`
+}
+
 // passedCeiling is a ceiling check record of cfg's request at its
 // configured ceiling, with texts cut at byteCap, that passed the ceiling
 // check and the input bound.
@@ -460,7 +466,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		}
 		r, err := newRoute(routeInput{
 			cfg: cfg, configName: name + ".yaml", schedulePath: schedulePath, out: in.out, ledgerPath: ledgerPath,
-			framesRoot: in.frames, clockSync: in.clockSync, statusCmd: "true", balanceCmd: "true", opPath: opPath,
+			framesRoot: in.frames, clockSync: in.clockSync, statusCmd: "true", balanceCmd: mockBalanceCmd(cfg), opPath: opPath,
 			probeFiles: []string{probePath}, byteCap: in.byteCap, accountCreated: today, build: in.build,
 		})
 		if err != nil {

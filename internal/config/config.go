@@ -471,6 +471,10 @@ type Target struct {
 	// spend-limit or exhausted-balance refusal; one stops the route's
 	// process (SPEC-HOSTED HA3 point 16).
 	BillingRefusals []BillingRefusal `yaml:"billing_refusals,omitempty" json:"billing_refusals,omitempty"`
+	// BalanceUnavailable records the operator's ruling under which a cell
+	// starts without a balance amount; without it, a balance command
+	// that prints unavailable blocks the cell's start.
+	BalanceUnavailable *BalanceUnavailable `yaml:"balance_unavailable,omitempty" json:"balance_unavailable,omitempty"`
 }
 
 // ResponseShape names where a target's stream chunks carry each field.

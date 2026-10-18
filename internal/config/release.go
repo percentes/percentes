@@ -152,6 +152,18 @@ type UnpublishedLimit struct {
 	Ruling string `yaml:"ruling" json:"ruling"`
 }
 
+// BalanceUnavailable is the operator's dated ruling that the route's
+// balance cannot be read at each cell.
+type BalanceUnavailable struct {
+	// Reason says why: a postpaid account, or a balance shown only in the
+	// provider's console.
+	Reason string `yaml:"reason" json:"reason"`
+	// Ruled is the ruling's date, YYYY-MM-DD in UTC; Ruling names where
+	// the ruling is kept.
+	Ruled  string `yaml:"ruled" json:"ruled"`
+	Ruling string `yaml:"ruling" json:"ruling"`
+}
+
 // Naming is the route's provider-naming record.
 type Naming struct {
 	// Provider is the word mark printed for the route, as plain text.
@@ -415,6 +427,9 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	for i := range t.UnpublishedLimits {
 		validateUnpublishedLimit(v, fmt.Sprintf("%s.unpublished_limits[%d]", field, i), &t.UnpublishedLimits[i], dims)
 	}
+	if b := t.BalanceUnavailable; b != nil {
+		validateBalanceUnavailable(v, field+".balance_unavailable", b)
+	}
 	if t.Naming == nil {
 		v.errf("%s.naming: required under the release profile", field)
 	} else {
@@ -576,6 +591,20 @@ func validateUnpublishedLimit(v *validator, field string, u *UnpublishedLimit, s
 	}
 }
 
+// validateBalanceUnavailable requires a reason, a ruling date and where
+// the ruling is kept.
+func validateBalanceUnavailable(v *validator, field string, b *BalanceUnavailable) {
+	if strings.TrimSpace(b.Reason) == "" {
+		v.errf("%s.reason: required (why the balance cannot be read at each cell)", field)
+	}
+	if _, err := time.Parse(time.DateOnly, b.Ruled); err != nil {
+		v.errf("%s.ruled: a date as YYYY-MM-DD required, got %q", field, b.Ruled)
+	}
+	if strings.TrimSpace(b.Ruling) == "" {
+		v.errf("%s.ruling: required (where the dated ruling is kept)", field)
+	}
+}
+
 // validateStatusDoc requires a status other than 200 that no earlier
 // entry documents, a meaning, a source and a retrieval date.
 func validateStatusDoc(v *validator, field string, d *StatusDoc, seen map[int]bool) {
@@ -689,8 +718,9 @@ func validateRetainedHeaders(v *validator, field string, t *Target) {
 // refuseReleaseFields refuses the release-only target fields on a target
 // outside the release profile.
 func refuseReleaseFields(v *validator, field string, t *Target) {
-	if t.Adapter != "" || len(t.Limits) > 0 || len(t.UnpublishedLimits) > 0 || len(t.RetainedHeaders) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 || len(t.BillingRefusals) > 0 {
-		v.errf("%s: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only", field)
+	if t.Adapter != "" || len(t.Limits) > 0 || len(t.UnpublishedLimits) > 0 || len(t.RetainedHeaders) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 ||
+		len(t.BillingRefusals) > 0 || t.BalanceUnavailable != nil {
+		v.errf("%s: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals and balance_unavailable are set on the release profile's target only", field)
 	}
 }
 

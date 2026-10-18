@@ -23,6 +23,9 @@ func TestReleaseReferenceLoads(t *testing.T) {
 	if got := c.Target.Limits[0].Retrieved; got != "2026-10-07" {
 		t.Errorf("retrieved %q", got)
 	}
+	if b := c.Target.BalanceUnavailable; b == nil || b.Reason == "" || b.Ruled != "2026-10-07" || b.Ruling == "" {
+		t.Errorf("balance ruling %+v", b)
+	}
 	if got := c.ReleaseConnectionProvision(); got != 752 {
 		t.Errorf("connection provision %d, want 2 x 4 rps x 90 s + 32 = 752", got)
 	}
@@ -221,6 +224,9 @@ func TestReleaseRefusals(t *testing.T) {
 		{"billing meaning", func(c *Config) { bill(c).Meaning = "" }, "target.billing_refusals[0].meaning: required"},
 		{"billing source", func(c *Config) { bill(c).Source = "" }, "target.billing_refusals[0].source: required"},
 		{"billing date", func(c *Config) { bill(c).Retrieved = "2026-10" }, "target.billing_refusals[0].retrieved: a date as YYYY-MM-DD"},
+		{"balance reason", func(c *Config) { c.Target.BalanceUnavailable.Reason = " " }, "target.balance_unavailable.reason: required"},
+		{"balance ruled", func(c *Config) { c.Target.BalanceUnavailable.Ruled = "7 October 2026" }, "target.balance_unavailable.ruled: a date as YYYY-MM-DD required, got \"7 October 2026\""},
+		{"balance ruling", func(c *Config) { c.Target.BalanceUnavailable.Ruling = "" }, "target.balance_unavailable.ruling: required"},
 	} {
 		c := loadRef(t, releaseRef)
 		tc.mutate(c)
@@ -444,17 +450,18 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 		func(t *Target) {
 			t.BillingRefusals = []BillingRefusal{{Status: 402, Meaning: "balance exhausted", Source: "errors.png", Retrieved: "2026-10-07"}}
 		},
+		func(t *Target) { t.BalanceUnavailable = rel.Target.BalanceUnavailable },
 	} {
 		for _, ref := range []string{acRef, experimentRef} {
 			c := loadRef(t, ref)
 			f(&c.Target)
-			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals and balance_unavailable are set on the release profile's target only") {
 				t.Errorf("%s: got %v", ref, err)
 			}
 		}
 		p := loadRef(t, pilotRef)
 		f(&p.Pilot.Targets[1])
-		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals and balance_unavailable are set on the release profile's target only") {
 			t.Errorf("pilot: got %v", err)
 		}
 	}
@@ -466,7 +473,7 @@ func TestReleaseUnknownFieldRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, from := range []string{"    drain_s: 90", "    deadline_s: 30", "    route_usd: \"10\"", "      retrieved: 2026-10-07"} {
+	for _, from := range []string{"    drain_s: 90", "    deadline_s: 30", "    route_usd: \"10\"", "      retrieved: 2026-10-07", "    ruled: 2026-10-07"} {
 		bad := strings.Replace(string(raw), from, from+"\n"+strings.Repeat(" ", len(from)-len(strings.TrimLeft(from, " ")))+"drain_ss: 90", 1)
 		if bad == string(raw) {
 			t.Fatalf("%q not in the reference", from)

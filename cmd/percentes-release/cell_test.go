@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -526,11 +527,109 @@ func TestCellStopsAndBlocks(t *testing.T) {
 	}
 }
 
+// A failed balance check, a balance below the cell's reservation, and a
+// balance unavailable where the route records no balance_unavailable
+// ruling each block the cell before admission: the ledger gains no line
+// and the endpoint no request, and the cell keeps its evidence, its start
+// balance record carrying the check. A balance at the reservation, and
+// one unavailable under the ruling, let the cell start: it is admitted
+// and its probe sent, which the endpoint answers with a 401.
+func TestCellBalanceGate(t *testing.T) {
+	below := func(need string) string {
+		r, _ := new(big.Rat).SetString(need)
+		return r.Sub(r, big.NewRat(1, 10_000_000)).FloatString(7)
+	}
+	amount := func(usd string) []string { return []string{"/bin/echo", `{"amount_usd": "` + usd + `"}`} }
+	unavailable := []string{"/bin/echo", `{"unavailable": "shown in the console only"}`}
+	for _, tc := range []struct {
+		name    string
+		balance func(need string) []string
+		ruling  bool
+		status  string
+		reason  string
+	}{
+		{"command fails", func(string) []string { return []string{"/bin/sh", "-c", `echo '{"amount_usd": "30.00"}'; exit 3`} }, true,
+			evidence.BalanceCheckFailed, "balance check failed: the command failed: exit status 3"},
+		{"output not JSON", func(string) []string { return []string{"/bin/echo", "balance USD 30.00"} }, true,
+			evidence.BalanceCheckFailed, "balance check failed: the output is not one JSON object with amount_usd or unavailable"},
+		{"below the reservation", func(need string) []string { return amount(below(need)) }, true,
+			evidence.BalanceInsufficient, "is below the cell's reservation of US$"},
+		{"unavailable without a ruling", func(string) []string { return unavailable }, false,
+			evidence.BalanceUnavailable, "balance unavailable (shown in the console only), and the route records no balance_unavailable ruling"},
+		{"at the reservation", amount, false, evidence.BalanceSufficient, ""},
+		{"unavailable under a ruling", func(string) []string { return unavailable }, true, evidence.BalanceUnavailable, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+			cfg := releaseConfig(t, e.url())
+			if !tc.ruling {
+				cfg.Target.BalanceUnavailable = nil
+			}
+			r, f := newTestRoute(t, cfg, "+0.005")
+			run := r.runs[0]
+			need, err := ledgerState(t, f.ledger).ReservationUSD("groq", 1+len(loadgen.BuildSchedule(cellConfig(r.cfg, run.Seed, r.steps))), admission.ReleaseTokens(r.cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.balance = tc.balance(need)
+			before, err := ledgerEntries(f.ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, err := r.runCell(context.Background(), run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			starts := tc.reason == ""
+			reason, probes := tc.reason, 0
+			if starts {
+				reason, probes = "probe request returned 401", 1
+			}
+			if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], reason) {
+				t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, reason)
+			}
+			if n := e.hits.Load(); n != int64(probes) || rec.Sent != (admission.Counts{Probe: probes}) {
+				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
+			}
+			after, err := ledgerEntries(f.ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if added := after[len(before):]; (len(added) == 0) == starts {
+				t.Fatalf("ledger lines added %+v", added)
+			}
+			if u := ledgerState(t, f.ledger).Routes["groq"]; u.Reserved != 0 || u.Probe != probes || u.Charged() != probes {
+				t.Fatalf("ledger usage %+v", u)
+			}
+			raw, err := os.ReadFile(filepath.Join(r.cellDir(run), evidence.BalanceStartFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got evidence.StatusRecord
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if c := got.Check; c == nil || c.Status != tc.status || c.RequiredUSD != need || (c.Ruling != nil) != (tc.status == evidence.BalanceUnavailable && tc.ruling) {
+				t.Fatalf("start balance check %+v, want %s against US$%s", c, tc.status, need)
+			}
+			m, text := checkRetained(t, r, run)
+			if c := m.Release; m.Counted() || c.Outcome != outcomeBlocked || c.LadderStarted || !slices.Equal(c.Reasons, rec.Reasons) || (m.Artifact(probe.File) != nil) != starts {
+				t.Fatalf("manifest: counted %t, cell %+v, artifacts %+v", m.Counted(), c, m.Artifacts)
+			}
+			if !strings.Contains(text, "Outcome: blocked; a labelled record, outside the route's frame of 12 cells\n  "+rec.Reasons[0]+"\n") {
+				t.Fatalf("report text:\n%s", text)
+			}
+		})
+	}
+}
+
 // Each cell reads the account balance at its start and at its end, also
 // a cell stopped before its ladder, and its manifest names both records.
+// The start record carries the check against the cell's probe and
+// scheduled requests at the ledger's price.
 func TestCellBalanceRecords(t *testing.T) {
 	e := newEndpoint(t, always200)
-	r, _ := newTestRoute(t, releaseConfig(t, e.url()), "+75.5")
+	r, f := newTestRoute(t, releaseConfig(t, e.url()), "+75.5")
 	for i, run := range r.runs[:2] {
 		rec, err := r.runCell(context.Background(), run)
 		if err != nil {
@@ -555,9 +654,22 @@ func TestCellBalanceRecords(t *testing.T) {
 			if err := json.Unmarshal(raw, &got); err != nil {
 				t.Fatal(err)
 			}
-			want := fmt.Sprintf("balance USD 30.00, read %d\n", 2*i+j+1)
-			if got.Stdout.Text != want || !slices.Equal(got.Command, []string{"balance", "--account", "test"}) || got.Error != "" {
-				t.Errorf("cell %d %s: command %q, stdout %q, error %q; want stdout %q", i, b.name, got.Command, got.Stdout.Text, got.Error, want)
+			want := fmt.Sprintf("read %d\n", 2*i+j+1)
+			if got.Stdout.Text != fakeBalanceOut+"\n" || got.Stderr.Text != want || !slices.Equal(got.Command, []string{"balance", "--account", "test"}) || got.Error != "" {
+				t.Errorf("cell %d %s: command %q, stdout %q, stderr %q, error %q; want stderr %q", i, b.name, got.Command, got.Stdout.Text, got.Stderr.Text, got.Error, want)
+			}
+			if b.name == evidence.BalanceEndFile {
+				if got.Check != nil {
+					t.Errorf("cell %d: end balance checked: %+v", i, got.Check)
+				}
+				continue
+			}
+			need, err := ledgerState(t, f.ledger).ReservationUSD("groq", 1+len(loadgen.BuildSchedule(cellConfig(r.cfg, run.Seed, r.steps))), admission.ReleaseTokens(r.cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c := got.Check; c == nil || *c != (evidence.BalanceCheck{Status: evidence.BalanceSufficient, AmountUSD: "30.00", RequiredUSD: need}) {
+				t.Errorf("cell %d: start balance check %+v, want sufficient against US$%s", i, c, need)
 			}
 		}
 	}
@@ -641,8 +753,8 @@ func TestLabelMissedAndInterrupted(t *testing.T) {
 		if err := json.Unmarshal(raw, &got); err != nil {
 			t.Fatal(err)
 		}
-		if want := fmt.Sprintf("balance USD 30.00, read %d\n", read); got.Stdout.Text != want {
-			t.Errorf("%s %s: stdout %q, want %q", run.Label, ref.Name, got.Stdout.Text, want)
+		if want := fmt.Sprintf("read %d\n", read); got.Stderr.Text != want || got.Stdout.Text != fakeBalanceOut+"\n" {
+			t.Errorf("%s %s: stdout %q, stderr %q, want stderr %q", run.Label, ref.Name, got.Stdout.Text, got.Stderr.Text, want)
 		}
 	}
 	for _, tc := range []struct {

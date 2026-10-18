@@ -126,7 +126,7 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	framesRoot := fs.String("frames", "", "raw-frame store directory outside the source tree (required)")
 	clockSync := fs.String("clock-sync", "", "host clock-sync command run before each cell, split on spaces with no shell (required)")
 	statusCmd := fs.String("status-cmd", "", "endpoint-status command run at each cell's start and end, split on spaces with no shell (required)")
-	balanceCmd := fs.String("balance-cmd", "", "account balance or quota command run at each cell's start and end, split on spaces with no shell (required)")
+	balanceCmd := fs.String("balance-cmd", "", "account balance or quota command run at each cell's start and end, split on spaces with no shell, printing {\"amount_usd\": \"<decimal>\"} or {\"unavailable\": \"<reason>\"} (required)")
 	opPath := fs.String("operator", "", "the route's operator file (required)")
 	var probeFiles listFlag
 	fs.Var(&probeFiles, "ceiling-probe", "a ceiling check record of a host of the route's model: every host's at 512, and at 1024 when one failed at 512 (repeatable, required)")

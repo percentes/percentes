@@ -1,8 +1,9 @@
 // percentes-release runs one release route's cells unattended over the
 // committed window (SPEC-HOSTED HA3). At each scheduled start, at the
 // route's offset inside the slot, it records the clock offset, the
-// endpoint status and the account balance or quota, admits the cell in
-// the ledger, sends a one-request probe and runs the ladder up to the
+// endpoint status and the account balance or quota, blocks the cell
+// where the balance check does not let it start, admits the cell in the
+// ledger, sends a one-request probe and runs the ladder up to the
 // route's top admitted step with the loopback canary, then writes the
 // cell's evidence with a labelled manifest and report pair, also for a
 // cell stopped or blocked before its ladder. A missed cell, and one whose

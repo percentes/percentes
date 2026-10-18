@@ -35,11 +35,13 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 // runCell runs one cell attempt (SPEC-HOSTED HA3 point 16) and returns its
 // record, also written to the cell's directory. A clock offset above the
 // pinned bound or a ledger refusal stops the route before any request; a
-// probe status that blocks the start ends the cell before the ladder,
-// unless it is a 401 or 403 the route's previous probed cell also saw,
-// which stops the route; a documented billing refusal on the probe or
-// inside the ladder stops the route; an EMFILE error ends the ladder and
-// the cell is client-invalid.
+// failed balance check, a balance below the cell's reservation, or a
+// balance unavailable where the route records no balance_unavailable
+// ruling blocks the start before admission; a probe status that blocks
+// the start ends the cell before the ladder, unless it is a 401 or 403
+// the route's previous probed cell also saw, which stops the route; a
+// documented billing refusal on the probe or inside the ladder stops the
+// route; an EMFILE error ends the ladder and the cell is client-invalid.
 // Every finished cell keeps its evidence with a labelled manifest and a
 // report pair (retain). An error is an execution error.
 func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord, err error) {
@@ -79,20 +81,35 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if ev.statusStart, err = evidence.WriteStatus(dir, evidence.StatusStartFile, evidence.ReadStatus(ctx, r.status)); err != nil {
 		return rec, err
 	}
-	if ev.balanceStart, err = evidence.WriteStatus(dir, evidence.BalanceStartFile, evidence.ReadBalance(ctx, r.balance)); err != nil {
+	offsets := loadgen.BuildSchedule(cfg)
+	tok := admission.ReleaseTokens(cfg)
+	st, err := r.ledger.State()
+	if err != nil {
+		return rec, err
+	}
+	need, err := st.ReservationUSD(t.Name, 1+len(offsets), tok)
+	if err != nil {
+		return rec, err
+	}
+	balance := evidence.ReadBalance(ctx, r.balance)
+	balance.Check = evidence.CheckBalance(balance, need, t.BalanceUnavailable)
+	if ev.balanceStart, err = evidence.WriteStatus(dir, evidence.BalanceStartFile, balance); err != nil {
 		return rec, err
 	}
 	if c := ev.clock; c.AbsOffsetS != nil && *c.AbsOffsetS > config.PinnedClockOffsetMaxS {
 		finish(outcomeStopped, (&routeStop{c.Flag}).Error())
 		return rec, r.retain(ctx, ev, rec, nil)
 	}
+	if reason := balance.Check.Blocks(); reason != "" {
+		finish(outcomeBlocked, reason)
+		return rec, r.retain(ctx, ev, rec, nil)
+	}
 
-	offsets := loadgen.BuildSchedule(cfg)
 	cases := make([]string, len(offsets))
 	for i := range cases {
 		cases[i] = r.shape.UserText(run.Seed, i)
 	}
-	a, err := r.ledger.Admit(t.Name, admission.PurposeCell, 1+len(offsets), admission.ReleaseTokens(cfg))
+	a, err := r.ledger.Admit(t.Name, admission.PurposeCell, 1+len(offsets), tok)
 	var refused *admission.Refusal
 	if errors.As(err, &refused) {
 		finish(outcomeStopped, (&routeStop{refused.Error()}).Error())
