@@ -407,6 +407,12 @@ type gen struct {
 	// onDispatch and onDone are Hooks.OnDispatch and Hooks.OnDone.
 	onDispatch func(r *Request)
 	onDone     func(r *Request)
+	// A request takes its dispatch time under stopMu's read lock, and only
+	// while stop (Run's ctx.Done(); nil = never) is open; stopNs is taken
+	// under the write lock, so no request sent has a dispatch time after it.
+	stopMu sync.RWMutex
+	stop   <-chan struct{}
+	stopNs int64
 }
 
 type gateFunc func(cfg *config.Config, requests []Request, samples []cpuSample, gcLoMs, gcHiMs float64, measStartNs, measEndNs int64) GateReport
@@ -504,6 +510,7 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 		gates:      gates,
 		onDispatch: onDispatch,
 		onDone:     onDone,
+		stop:       ctx.Done(),
 	}
 	if ladder != nil {
 		g.trip = newLadderTripwire(cfg, ladder)
@@ -535,10 +542,11 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 	if hooks != nil && hooks.OnEpoch != nil {
 		hooks.OnEpoch(g.epoch)
 	}
-	var stopNs int64
 	stopped := make(chan struct{})
 	unwatch := context.AfterFunc(ctx, func() {
-		stopNs = g.now()
+		g.stopMu.Lock()
+		g.stopNs = g.now()
+		g.stopMu.Unlock()
 		close(stopped)
 	})
 	defer unwatch()
@@ -558,7 +566,7 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 	var aborted bool
 	pace := func(r *Request, step *sync.WaitGroup) bool {
 		delta := r.IntendedNs - spawnLeadNs - g.now()
-		if delta > 0 && !g.sleep(ctx, time.Duration(delta)) {
+		if (delta > 0 && !g.sleep(ctx, time.Duration(delta))) || ctx.Err() != nil {
 			return false // remaining requests stay undispatched -> gate fails
 		}
 		wg.Add(1)
@@ -571,14 +579,12 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 			// timer wakeup latency under read-burst load. Cost: ~1.5 ms of
 			// one core per request at 20 rps ≈ 3% of one core.
 			const spinNs = int64(1_500_000)
-			if wait := r.IntendedNs - spinNs - g.now(); wait > 0 {
-				waitTimer := time.NewTimer(time.Duration(wait))
-				<-waitTimer.C
+			if wait := r.IntendedNs - spinNs - g.now(); wait > 0 && !g.sleep(ctx, time.Duration(wait)) {
+				return
 			}
 			for g.now() < r.IntendedNs {
 			}
-			g.execute(r)
-			if g.onDone != nil {
+			if g.execute(r) && g.onDone != nil {
 				g.onDone(r)
 			}
 		}()
@@ -608,7 +614,7 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 	res.Tripwires = g.trip.report()
 	if aborted || ctx.Err() != nil {
 		<-stopped
-		res.Interrupted = interruption(context.Cause(ctx), stopNs, requests)
+		res.Interrupted = interruption(context.Cause(ctx), g.stopNs, requests)
 		return res, fmt.Errorf("loadgen: run aborted by context: %w", ctx.Err())
 	}
 	if err := checkProtocols(cfg, requests); err != nil {

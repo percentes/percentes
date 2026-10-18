@@ -22,12 +22,21 @@ import (
 	"github.com/percentes/percentes/internal/sse"
 )
 
-// execute runs one scheduled request to its terminal state. The client
+// execute runs one scheduled request to its terminal state, and reports
+// false, leaving it unsent, once the run has stopped. The client
 // timeout (clientTimeout) runs from actual dispatch (a real client
 // timeout); latency re-basing to intended time happens at read-out, and
 // the send-skew gate bounds the difference.
-func (g *gen) execute(r *Request) {
-	r.DispatchNs = g.now()
+func (g *gen) execute(r *Request) bool {
+	g.stopMu.RLock()
+	select {
+	case <-g.stop:
+		g.stopMu.RUnlock()
+		return false
+	default:
+		r.DispatchNs = g.now()
+	}
+	g.stopMu.RUnlock()
 	g.trip.start(r.DispatchNs, r.Step)
 	defer g.trip.end()
 	if g.onDispatch != nil {
@@ -52,13 +61,13 @@ func (g *gen) execute(r *Request) {
 	if err != nil {
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrConnect, g.now()
 		r.ErrText = redact.ErrorText(err, timeout)
-		return
+		return true
 	}
 
 	resp, err := g.roundTrip(req)
 	if err != nil {
 		g.classifyTransportErr(r, err)
-		return
+		return true
 	}
 	defer resp.Body.Close()
 	r.Proto = resp.Proto
@@ -79,7 +88,7 @@ func (g *gen) execute(r *Request) {
 		stop := time.AfterFunc(errorBodyWait, cancel)
 		defer stop.Stop()
 		r.ErrorBody = readErrorBody(resp.Body, secrets)
-		return
+		return true
 	}
 
 	shape := g.cfg.Target.Shape()
@@ -171,6 +180,7 @@ func (g *gen) execute(r *Request) {
 	if frames != nil {
 		r.Frames, r.FrameBytesDropped = frames.result(secrets)
 	}
+	return true
 }
 
 // frameRecorder keeps each read of a body with its return time, up to
