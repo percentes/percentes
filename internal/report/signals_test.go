@@ -1,6 +1,7 @@
 package report
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -345,5 +346,139 @@ func TestStepTablesTimeRefusals(t *testing.T) {
 				t.Errorf("got %v, want %q", err, c.want)
 			}
 		})
+	}
+}
+
+// A prompt count is a chat-completions prompt_tokens, or a Messages
+// input_tokens with its cache counts; a missing or null count is absent
+// and an explicit 0 is a count.
+func TestPromptTokens(t *testing.T) {
+	for _, c := range []struct {
+		usage string
+		n     int
+		ok    bool
+	}{
+		{`{"prompt_tokens":12,"completion_tokens":7}`, 12, true},
+		{`{"prompt_tokens":0}`, 0, true},
+		{`{"prompt_tokens":null,"completion_tokens":7}`, 0, false},
+		{`{"completion_tokens":7}`, 0, false},
+		{`{}`, 0, false},
+		{`{"prompt_tokens":"12"}`, 0, false},
+		{`{"input_tokens":40,"cache_creation_input_tokens":30,"cache_read_input_tokens":20,"output_tokens":5}`, 90, true},
+		{`{"input_tokens":50,"cache_read_input_tokens":null}`, 50, true},
+		{`{"input_tokens":0}`, 0, true},
+		{`{"input_tokens":null,"cache_read_input_tokens":9}`, 0, false},
+		{`null`, 0, false},
+		{``, 0, false},
+	} {
+		if n, ok := promptTokens(json.RawMessage(c.usage)); n != c.n || ok != c.ok {
+			t.Errorf("%s: %d %v, want %d %v", c.usage, n, ok, c.n, c.ok)
+		}
+	}
+}
+
+// Per step and pooled: the content events of errored and of censored
+// requests, each over its own requests, and the provider-reported prompt
+// tokens over the requests sent, an explicit 0 counted and a null left
+// out.
+func TestStepTablesOutcomeCounts(t *testing.T) {
+	cfg, v := stepsConfig(t)
+	usage := []string{
+		`{"prompt_tokens":120,"completion_tokens":7}`, `{"prompt_tokens":0}`, `{"prompt_tokens":null,"completion_tokens":5}`,
+		`{"completion_tokens":5}`, `{"input_tokens":40,"cache_creation_input_tokens":30,"cache_read_input_tokens":20}`,
+		`{"input_tokens":50,"cache_read_input_tokens":null}`,
+	}
+	cell := func(label string) CellRecords {
+		c := signalsCell(label)
+		var completed, errored int
+		for i := range c.Records {
+			r := &c.Records[i]
+			if r.Step != 1 || r.Warmup {
+				continue
+			}
+			switch r.Outcome {
+			case loadgen.OutcomeCompleted:
+				r.Usage = json.RawMessage(usage[completed])
+				completed++
+			case loadgen.OutcomeErrored:
+				if r.ErrClass == loadgen.ErrMalformedStream {
+					errored++
+					r.ContentEvents = errored
+				}
+				if errored == 6 {
+					r.Usage = json.RawMessage(`{"input_tokens":200}`)
+				}
+			case loadgen.OutcomeCensored:
+				r.ContentEvents, r.Usage = 9, json.RawMessage(`{"prompt_tokens":110}`)
+			}
+		}
+		return c
+	}
+	st, err := NewStepTables(cfg, v, []CellRecords{cell("weekday-00")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := st.Cells[0].Steps[0].Signals
+	if c := sig.ContentEventsErrored; c != (Counts{Of: 10, N: 10, Min: 0, P50: 1, P90: 5, Max: 6}) {
+		t.Errorf("errored content events %+v", c)
+	}
+	if c := sig.ContentEventsCensored; c != (Counts{Of: 1, N: 1, Min: 9, P50: 9, P90: 9, Max: 9}) {
+		t.Errorf("censored content events %+v", c)
+	}
+	if c := sig.PromptTokens; c != (Counts{Of: 17, N: 6, Min: 0, P50: 90, P90: 200, Max: 200}) {
+		t.Errorf("prompt tokens %+v", c)
+	}
+	if c := sig.ContentEvents; c != (Counts{Of: 6, N: 6}) {
+		t.Errorf("completion content events %+v", c)
+	}
+	sig2 := st.Cells[0].Steps[1].Signals
+	if c := sig2.ContentEventsErrored; c != (Counts{Of: 1, N: 1}) {
+		t.Errorf("step 2 errored content events %+v", c)
+	}
+	if c := sig2.ContentEventsCensored; c != (Counts{}) {
+		t.Errorf("step 2 censored content events %+v", c)
+	}
+	if c := sig2.PromptTokens; c != (Counts{Of: 41}) {
+		t.Errorf("step 2 prompt tokens %+v", c)
+	}
+	text := st.Text()
+	for _, frag := range []string{
+		"    provider-reported reasoning tokens    on 0 of 6: not verifiable\n" +
+			"  content events, errored requests:  n 10, min 0, median 1, 90th percentile 5, max 6\n" +
+			"  content events, censored requests: n 1, min 9, median 9, 90th percentile 9, max 9\n" +
+			"  prompt length over the 17 requests sent:\n" +
+			"    provider-reported prompt tokens       on 6 of 17: min 0, median 90, 90th percentile 200, max 200\n" +
+			"  inter-chunk gaps ",
+		"  content events, errored requests:  n 1, min 0, median 0, 90th percentile 0, max 0\n" +
+			"  content events, censored requests: n 0\n" +
+			"  prompt length over the 41 requests sent:\n" +
+			"    provider-reported prompt tokens       on 0 of 41: not verifiable\n",
+	} {
+		if !strings.Contains(text, frag) {
+			t.Errorf("text lacks %q:\n%s", frag, text)
+		}
+	}
+
+	var cells []CellRecords
+	for i := 0; i < 12; i++ {
+		cells = append(cells, cell(fmt.Sprintf("cell-%02d", i)))
+	}
+	if st, err = NewStepTables(cfg, v, cells); err != nil {
+		t.Fatal(err)
+	}
+	p := st.Pooled[0].Signals
+	if c := p.ContentEventsErrored; c != (Counts{Of: 120, N: 120, Min: 0, P50: 1, P90: 5, Max: 6}) {
+		t.Errorf("pooled errored content events %+v", c)
+	}
+	if c := p.ContentEventsCensored; c != (Counts{Of: 12, N: 12, Min: 9, P50: 9, P90: 9, Max: 9}) {
+		t.Errorf("pooled censored content events %+v", c)
+	}
+	if c := p.PromptTokens; c != (Counts{Of: 204, N: 72, Min: 0, P50: 90, P90: 200, Max: 200}) {
+		t.Errorf("pooled prompt tokens %+v", c)
+	}
+	text = st.Text()
+	if pooledPart := text[strings.Index(text, "-- Pooled per step"):]; !strings.Contains(pooledPart,
+		"\n  prompt length over the 204 requests sent:\n    provider-reported prompt tokens       on 72 of 204: min 0, median 90, 90th percentile 200, max 200\n") {
+		t.Errorf("pooled text lacks the prompt tokens:\n%s", pooledPart)
 	}
 }

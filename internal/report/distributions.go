@@ -88,7 +88,7 @@ func distribution(xs []int64) Distribution {
 	return Distribution{Quantiles: quantiles(s), P95: tail(95), P99: tail(99)}
 }
 
-// Counts is a per-request count over a step's Of completions, of which N
+// Counts is a per-request count over Of requests of a step, of which N
 // carry it: the minimum, the median and 90th percentile by nearest rank,
 // and the maximum, zero where N is 0.
 type Counts struct {
@@ -198,9 +198,9 @@ func distributionText(d Distribution) string {
 	return text
 }
 
-// countsText renders a count over completions; where every completion
-// carries it the share is left out, and where none does it publishes as
-// not verifiable.
+// countsText renders a count over requests; where every request carries
+// it the share is left out, and where none does it publishes as not
+// verifiable.
 func countsText(c Counts) string {
 	switch {
 	case c.N == 0:

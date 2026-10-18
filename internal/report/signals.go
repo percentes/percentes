@@ -53,16 +53,22 @@ const (
 // whole answer. retry counts the status_429 responses per Retry-After
 // value. events holds each completion's content events, and tokens and
 // reasoning its provider-reported completion and reasoning tokens where
-// its record carries them; obs holds every request's terminal state for
-// the incidence estimator, and gaps the inter-chunk gaps per bin of
-// evidence.GapEdgesUs.
+// its record carries them; erroredEvents and censoredEvents hold the
+// content events of each errored and censored request. sent counts the
+// requests with an outcome, and prompt holds the provider-reported
+// prompt tokens of those whose usage carries them. obs holds every
+// request's terminal state for the incidence estimator, and gaps the
+// inter-chunk gaps per bin of evidence.GapEdgesUs.
 type timing struct {
-	failure                   map[string][]int64
-	ttft, done                [2][]int64
-	retry                     map[string]int
-	events, tokens, reasoning []int
-	obs                       []collect.Obs
-	gaps                      []int64
+	failure                       map[string][]int64
+	ttft, done                    [2][]int64
+	retry                         map[string]int
+	events, tokens, reasoning     []int
+	erroredEvents, censoredEvents []int
+	sent                          int
+	prompt                        []int
+	obs                           []collect.Obs
+	gaps                          []int64
 }
 
 func newStepTally() stepTally {
@@ -80,6 +86,7 @@ func (t *timing) add(line string, r *evidence.Record, horizonUs int64) error {
 		t.obs = append(t.obs, collect.Obs{TimeUs: horizonUs, Kind: collect.ObsCensored})
 	case LineCensored:
 		t.obs = append(t.obs, collect.Obs{TimeUs: max(0, r.DoneNs-r.IntendedNs) / 1000, Kind: collect.ObsCensored})
+		t.censoredEvents = append(t.censoredEvents, r.ContentEvents)
 	case LineInTime, LineLate:
 		if r.FirstTokNs == 0 || r.FirstTokNs < r.IntendedNs || r.DoneNs < r.FirstTokNs {
 			return fmt.Errorf("completed with intended_ns %d, first_token_ns %d and done_ns %d", r.IntendedNs, r.FirstTokNs, r.DoneNs)
@@ -107,8 +114,46 @@ func (t *timing) add(line string, r *evidence.Record, horizonUs int64) error {
 		if line == loadgen.ErrStatus429 && r.RetryAfter != "" {
 			t.retry[r.RetryAfter]++
 		}
+		t.erroredEvents = append(t.erroredEvents, r.ContentEvents)
+	}
+	if line != LineUnsent {
+		t.sent++
+		if n, ok := promptTokens(r.Usage); ok {
+			t.prompt = append(t.prompt, n)
+		}
 	}
 	return nil
+}
+
+// promptTokens is the provider-reported prompt token count in a record's
+// usage: a chat-completions prompt_tokens, or a Messages input_tokens
+// plus its two cache counts, which input_tokens excludes. A missing or
+// null count is absent; an explicit 0 is a count.
+func promptTokens(usage json.RawMessage) (int, bool) {
+	var u map[string]json.RawMessage
+	if json.Unmarshal(usage, &u) != nil {
+		return 0, false
+	}
+	count := func(key string) (int, bool) {
+		var n *int
+		if v, ok := u[key]; !ok || json.Unmarshal(v, &n) != nil || n == nil {
+			return 0, false
+		}
+		return *n, true
+	}
+	if n, ok := count("prompt_tokens"); ok {
+		return n, true
+	}
+	n, ok := count("input_tokens")
+	if !ok {
+		return 0, false
+	}
+	for _, k := range []string{"cache_creation_input_tokens", "cache_read_input_tokens"} {
+		if c, ok := count(k); ok {
+			n += c
+		}
+	}
+	return n, true
 }
 
 // Quantiles are the median and 90th percentile of N durations by
@@ -166,21 +211,26 @@ type RetryAfterValue struct {
 // Signals is a step's failure timing per error class with events; its
 // completion latency over every completion and by connection; its
 // completion length as content events, provider-reported completion
-// tokens and reasoning tokens; its inter-chunk gaps; and its Retry-After
-// record, nil where the step had no status_429. ConditionalCaveat marks
-// errors and censored requests above 5 percent of scheduled, where the
-// latency is read beside the incidence curve.
+// tokens and reasoning tokens; the content events of its errored and of
+// its censored requests; its provider-reported prompt tokens over the
+// requests sent; its inter-chunk gaps; and its Retry-After record, nil
+// where the step had no status_429. ConditionalCaveat marks errors and
+// censored requests above 5 percent of scheduled, where the latency is
+// read beside the incidence curve.
 type Signals struct {
-	Failures          []FailureTiming `json:"failure_timing,omitempty"`
-	TTFT              Distribution    `json:"ttft"`
-	WholeAnswer       Distribution    `json:"whole_answer"`
-	Latency           []ConnLatency   `json:"latency_by_connection"`
-	ConditionalCaveat bool            `json:"conditional_caveat,omitempty"`
-	ContentEvents     Counts          `json:"content_events"`
-	CompletionTokens  Counts          `json:"completion_tokens"`
-	ReasoningTokens   Counts          `json:"reasoning_tokens"`
-	Gaps              Gaps            `json:"inter_chunk_gaps"`
-	RetryAfter        *RetryAfter     `json:"retry_after,omitempty"`
+	Failures              []FailureTiming `json:"failure_timing,omitempty"`
+	TTFT                  Distribution    `json:"ttft"`
+	WholeAnswer           Distribution    `json:"whole_answer"`
+	Latency               []ConnLatency   `json:"latency_by_connection"`
+	ConditionalCaveat     bool            `json:"conditional_caveat,omitempty"`
+	ContentEvents         Counts          `json:"content_events"`
+	CompletionTokens      Counts          `json:"completion_tokens"`
+	ReasoningTokens       Counts          `json:"reasoning_tokens"`
+	ContentEventsErrored  Counts          `json:"content_events_errored"`
+	ContentEventsCensored Counts          `json:"content_events_censored"`
+	PromptTokens          Counts          `json:"prompt_tokens"`
+	Gaps                  Gaps            `json:"inter_chunk_gaps"`
+	RetryAfter            *RetryAfter     `json:"retry_after,omitempty"`
 }
 
 // conditionalLimit is the error and censored fraction above which
@@ -223,6 +273,15 @@ func signals(ts []*stepTally, scheduled int, retryRecorded bool) *Signals {
 	s.ContentEvents = counts(catInts(func(t *stepTally) []int { return t.events }), of)
 	s.CompletionTokens = counts(catInts(func(t *stepTally) []int { return t.tokens }), of)
 	s.ReasoningTokens = counts(catInts(func(t *stepTally) []int { return t.reasoning }), of)
+	errored := catInts(func(t *stepTally) []int { return t.erroredEvents })
+	s.ContentEventsErrored = counts(errored, len(errored))
+	censored := catInts(func(t *stepTally) []int { return t.censoredEvents })
+	s.ContentEventsCensored = counts(censored, len(censored))
+	sent := 0
+	for _, t := range ts {
+		sent += t.sent
+	}
+	s.PromptTokens = counts(catInts(func(t *stepTally) []int { return t.prompt }), sent)
 	s.Gaps = gapsOf(ts)
 	for c, conn := range []string{ConnDialled, ConnReused} {
 		s.Latency = append(s.Latency, ConnLatency{
@@ -282,7 +341,8 @@ func maxHalfFraction(s admission.Step) (f float64, ok bool) {
 }
 
 // signalsText renders a step's failure timing, completion latency,
-// completion length and inter-chunk gaps.
+// completion length, the content events of requests that did not
+// complete, prompt length and inter-chunk gaps.
 func signalsText(w func(string, ...any), s *Signals) {
 	q := func(x Quantiles) string {
 		if x.N == 0 {
@@ -310,6 +370,22 @@ func signalsText(w func(string, ...any), s *Signals) {
 		w("    %-37s %s", "content events", countsText(s.ContentEvents))
 		w("    %-37s %s", "provider-reported completion tokens", countsText(s.CompletionTokens))
 		w("    %-37s %s", "provider-reported reasoning tokens", countsText(s.ReasoningTokens))
+	}
+	for _, o := range []struct {
+		name string
+		c    Counts
+	}{{"errored", s.ContentEventsErrored}, {"censored", s.ContentEventsCensored}} {
+		text := fmt.Sprintf("n %d", o.c.N)
+		if o.c.N > 0 {
+			text += ", " + countsText(o.c)
+		}
+		w("  content events, %-18s %s", o.name+" requests:", text)
+	}
+	if s.PromptTokens.Of == 0 {
+		w("  prompt length: no requests sent")
+	} else {
+		w("  prompt length over the %d requests sent:", s.PromptTokens.Of)
+		w("    %-37s %s", "provider-reported prompt tokens", countsText(s.PromptTokens))
 	}
 	gapsText(w, s.Gaps)
 }

@@ -66,8 +66,9 @@ func distCell(label string) CellRecords {
 // timeout or their refusals; per step, the TTFT and whole-answer
 // distributions with the order-statistic intervals where their ranks
 // fall inside the completions, the completion length as content events,
-// provider-reported completion tokens and reasoning tokens, and the
-// inter-chunk gap histogram.
+// provider-reported completion tokens and reasoning tokens, the content
+// events of errored and censored requests, the provider-reported prompt
+// tokens over the requests sent, and the inter-chunk gap histogram.
 func TestStepTablesDistributions(t *testing.T) {
 	cfg, v := stepsConfig(t)
 	st, err := NewStepTables(cfg, v, []CellRecords{distCell("weekday-00")})
@@ -133,6 +134,10 @@ func TestStepTablesDistributions(t *testing.T) {
 			"    content events                        min 1, median 3, 90th percentile 5, max 5\n" +
 			"    provider-reported completion tokens   on 50 of 100: min 2, median 50, 90th percentile 90, max 100\n" +
 			"    provider-reported reasoning tokens    on 0 of 100: not verifiable\n" +
+			"  content events, errored requests:  n 0\n" +
+			"  content events, censored requests: n 0\n" +
+			"  prompt length over the 100 requests sent:\n" +
+			"    provider-reported prompt tokens       on 0 of 100: not verifiable\n" +
 			"  inter-chunk gaps between successive content events, over completions: n 200\n" +
 			"    20 ms to under 50 ms   150 (75.00%)\n" +
 			"    500 ms to under 1 s    50 (25.00%)\n" +
