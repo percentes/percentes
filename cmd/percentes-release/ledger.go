@@ -7,11 +7,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"math/big"
 	"os"
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
+	"github.com/percentes/percentes/internal/config"
 )
 
 // ledgerEntries reads and checks the ledger at path and returns its lines.
@@ -36,24 +36,14 @@ func ledgerEntries(path string) ([]admission.Entry, error) {
 	return out, sc.Err()
 }
 
-// routePrice is the price the ledger admits route at: the recorded price
-// line with the highest per-request price, the first of equals.
+// routePrice is route's newest recorded price: the price line with the
+// latest retrieval date, the last of equals.
 func routePrice(entries []admission.Entry, route string) (admission.Price, error) {
-	var (
-		best *admission.Entry
-		high *big.Rat
-	)
+	var best *admission.Entry
 	for i := range entries {
 		e := &entries[i]
-		if e.Kind != admission.KindPrice || e.Route != route {
-			continue
-		}
-		r, ok := new(big.Rat).SetString(e.PerRequestUSD)
-		if !ok {
-			return admission.Price{}, fmt.Errorf("ledger line %d: per-request price %q", e.Seq, e.PerRequestUSD)
-		}
-		if high == nil || r.Cmp(high) > 0 {
-			best, high = e, r
+		if e.Kind == admission.KindPrice && e.Route == route && (best == nil || e.Retrieved >= best.Retrieved) {
+			best = e
 		}
 	}
 	if best == nil {
@@ -61,6 +51,22 @@ func routePrice(entries []admission.Entry, route string) (admission.Price, error
 	}
 	return admission.Price{InputUSDPerMTok: best.InputUSDPerMTok, OutputUSDPerMTok: best.OutputUSDPerMTok,
 		InputTokens: best.InputTokens, OutputTokens: best.OutputTokens, Source: best.Source, Retrieved: best.Retrieved}, nil
+}
+
+// recordPrice records cfg's route's list prices at each token bound its
+// requests are admitted at, cells' first, and returns the bounds.
+func recordPrice(l *admission.Ledger, cfg *config.Config, in, out, source, retrieved string) ([]admission.Tokens, error) {
+	bounds := []admission.Tokens{admission.ReleaseTokens(cfg)}
+	if p := admission.ReleaseProbeTokens(cfg); p != bounds[0] {
+		bounds = append(bounds, p)
+	}
+	for _, tok := range bounds {
+		if err := l.RecordPrice(cfg.Target.Name, admission.Price{InputUSDPerMTok: in, OutputUSDPerMTok: out,
+			InputTokens: tok.Input, OutputTokens: tok.Output, Source: source, Retrieved: retrieved}); err != nil {
+			return nil, err
+		}
+	}
+	return bounds, nil
 }
 
 // sentBefore counts the requests the ledger settled for route at times
@@ -77,7 +83,8 @@ func sentBefore(entries []admission.Entry, route string, t time.Time) int {
 
 // ledgerCmd creates the release ledger with the caps of every route's
 // configuration (admission.ReleaseCaps), or records a route's prices at
-// its shape's input bound and ceiling.
+// the token bounds its requests are admitted at: its shape's input bound
+// and ceiling, and the input bound and the ceiling check's ceiling.
 func ledgerCmd(args []string) (int, error) {
 	if len(args) == 0 {
 		return exitError, errors.New("ledger: create or price")
@@ -129,15 +136,16 @@ func ledgerCmd(args []string) (int, error) {
 	if err := st.CheckRelease(cfg); err != nil {
 		return exitError, err
 	}
-	sh := cfg.Release.Shape
-	if err := l.RecordPrice(cfg.Target.Name, admission.Price{InputUSDPerMTok: *in, OutputUSDPerMTok: *out,
-		InputTokens: sh.InputBoundTokens, OutputTokens: sh.CeilingTokens, Source: *source, Retrieved: *retrieved}); err != nil {
+	bounds, err := recordPrice(l, cfg, *in, *out, *source, *retrieved)
+	if err != nil {
 		return exitError, err
 	}
 	if st, err = l.State(); err != nil {
 		return exitError, err
 	}
-	fmt.Printf("%s: price recorded at %d input and %d output tokens; the ledger admits at US$%s a request\n",
-		cfg.Target.Name, sh.InputBoundTokens, sh.CeilingTokens, st.Routes[cfg.Target.Name].MaxPerRequestUSD.FloatString(6))
+	for _, tok := range bounds {
+		fmt.Printf("%s: price recorded at %d input and %d output tokens; the ledger admits these at US$%s a request\n",
+			cfg.Target.Name, tok.Input, tok.Output, st.Routes[cfg.Target.Name].Prices[tok].FloatString(7))
+	}
 	return exitOK, nil
 }

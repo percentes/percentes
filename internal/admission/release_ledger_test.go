@@ -41,6 +41,13 @@ func shapePrice(p Price, ceiling int) Price {
 	return p
 }
 
+// at512 and at1024 are a release request's token bounds at each pinned
+// ceiling.
+var (
+	at512  = Tokens{config.PinnedReleaseInputBoundTokens, 512}
+	at1024 = Tokens{config.PinnedReleaseInputBoundTokens, 1024}
+)
+
 // A release ledger's caps come from the routes' configurations: each
 // route's cap under its name, the one global cap, no request caps.
 func TestReleaseCaps(t *testing.T) {
@@ -103,23 +110,23 @@ func TestCheckRelease(t *testing.T) {
 // admits nothing.
 func TestReleaseLedgerCaps(t *testing.T) {
 	l, _ := releaseLedger(t, routeConfig(t, "groq", "10", "85"), routeConfig(t, "google", "80", "85"))
-	refused(t, l, "groq", PurposeCell, 1, "no price recorded for groq")
+	refusedAt(t, l, "groq", PurposeCell, 1, at512, "no price recorded for groq")
 	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 512)))
 	must(t, l.RecordPrice("google", shapePrice(price("0.75", "3.75"), 512)))
 	must(t, l.RecordPrice("azure", shapePrice(price("2", "10"), 512)))
 
 	// US$0.0004872 a request: 20,525 requests are US$9.99978.
-	admit(t, l, "groq", PurposeCell, 20525)
-	refused(t, l, "groq", PurposeProbe, 1, "projected liability for the route US$10.0002672 exceeds US$10")
+	admitAt(t, l, "groq", PurposeCell, 20525, at512)
+	refusedAt(t, l, "groq", PurposeProbe, 1, at512, "projected liability for the route US$10.0002672 exceeds US$10")
 	// US$0.00282 a request.
-	admit(t, l, "google", PurposeCell, 26000)
-	refused(t, l, "google", PurposeCell, 1000, "projected liability US$86.13978 exceeds US$85")
-	refused(t, l, "azure", PurposeProbe, 1, "no liability cap for route azure")
+	admitAt(t, l, "google", PurposeCell, 26000, at512)
+	refusedAt(t, l, "google", PurposeCell, 1000, at512, "projected liability US$86.13978 exceeds US$85")
+	refusedAt(t, l, "azure", PurposeProbe, 1, at512, "no liability cap for route azure")
 
-	if _, err := l.Admit("groq", PurposeWindow, WindowRequests); err == nil || errors.As(err, new(*Refusal)) || !strings.Contains(err.Error(), "admits no window") {
+	if _, err := l.Admit("groq", PurposeWindow, WindowRequests, at512); err == nil || errors.As(err, new(*Refusal)) || !strings.Contains(err.Error(), "admits no window") {
 		t.Errorf("window on a release ledger: %v", err)
 	}
-	if _, err := l.Admit("groq", PurposeCell, 0); err == nil {
+	if _, err := l.Admit("groq", PurposeCell, 0, at512); err == nil {
 		t.Error("empty cell admitted")
 	}
 	st := state(t, l)
@@ -133,7 +140,7 @@ func TestReleaseLedgerCaps(t *testing.T) {
 func TestReleaseCellSettles(t *testing.T) {
 	l, _ := releaseLedger(t, routeConfig(t, "groq", "10", "1300"))
 	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 512)))
-	a := admit(t, l, "groq", PurposeCell, 3735+2)
+	a := admitAt(t, l, "groq", PurposeCell, 3735+2, at512)
 	if err := l.Settle(a, Counts{Development: 1}); err == nil {
 		t.Fatal("development settled on a cell")
 	}
@@ -145,7 +152,8 @@ func TestReleaseCellSettles(t *testing.T) {
 }
 
 // A price is taken at the token bounds it names, written on its line;
-// a release ledger has no default bounds.
+// a release ledger has no default bounds. Each bound keeps its own
+// highest price.
 func TestPricePerShape(t *testing.T) {
 	l, path := releaseLedger(t, routeConfig(t, "groq", "10", "1300"))
 	if err := l.RecordPrice("groq", groqPrice); err == nil || !strings.Contains(err.Error(), "token bounds 0 and 0") {
@@ -153,8 +161,8 @@ func TestPricePerShape(t *testing.T) {
 	}
 	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 1024)))
 	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 512)))
-	if got := state(t, l).Routes["groq"].MaxPerRequestUSD; decimalString(got) != "0.0007944" {
-		t.Fatalf("max price %s, want the 1,024-token price", decimalString(got))
+	if p := state(t, l).Routes["groq"].Prices; len(p) != 2 || decimalString(p[at1024]) != "0.0007944" || decimalString(p[at512]) != "0.0004872" {
+		t.Fatalf("prices %v, want US$0.0007944 at 1,024 and US$0.0004872 at 512", p)
 	}
 	b, _ := os.ReadFile(path)
 	if !strings.Contains(string(b), `"input_tokens":1200,"output_tokens":512,"per_request_usd":"0.0004872"`) {
@@ -171,4 +179,82 @@ func TestPricePerShape(t *testing.T) {
 	if b, _ := os.ReadFile(ppath); !strings.Contains(string(b), `"input_tokens":2000,"output_tokens":4096,"per_request_usd":"0.0027576"`) {
 		t.Fatalf("pilot price line %s", b)
 	}
+}
+
+// An admission names its requests' token bounds: it is refused where the
+// route has no price at them, its line carries the price it counts at,
+// and each request counts at the highest price recorded at its bounds.
+func TestAdmitAtShapeBound(t *testing.T) {
+	l, path := releaseLedger(t, routeConfig(t, "groq", "10", "1300"))
+	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 512)))
+	refusedAt(t, l, "groq", PurposeProbe, 10, at1024, "no price recorded for groq at 1200 input and 1024 output tokens")
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), `"kind":"refused","route":"groq","input_tokens":1200,"output_tokens":1024,"purpose":"probe","reserve":10`) {
+		t.Fatalf("refused line %s", b)
+	}
+
+	a := admitAt(t, l, "groq", PurposeCell, 100, at512)
+	if a.Tokens != at512 {
+		t.Fatalf("admission %+v", a)
+	}
+	b, _ = os.ReadFile(path)
+	if !strings.Contains(string(b), `"kind":"admit","route":"groq","input_tokens":1200,"output_tokens":512,"per_request_usd":"0.0004872","purpose":"cell","reserve":100`) {
+		t.Fatalf("admit line %s", b)
+	}
+	altered := filepath.Join(t.TempDir(), "ledger.jsonl")
+	must(t, os.WriteFile(altered, []byte(strings.Replace(string(b), `"per_request_usd":"0.0004872","purpose"`, `"per_request_usd":"0.0001","purpose"`, 1)), 0o600))
+	if _, err := Open(altered); err == nil || !strings.Contains(err.Error(), "not the route's highest price") {
+		t.Fatalf("altered admit price: %v", err)
+	}
+
+	// 100 at US$0.0004872 and 10 at US$0.0007944.
+	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 1024)))
+	p := admitAt(t, l, "groq", PurposeProbe, 10, at1024)
+	liability := func(want string) {
+		t.Helper()
+		if liab, err := state(t, l).Liability(); err != nil || decimalString(liab) != want {
+			t.Fatalf("liability %v %v, want US$%s", liab, err, want)
+		}
+	}
+	liability("0.056664")
+	must(t, l.Settle(p, Counts{Probe: 4}))
+	liability("0.0518976")
+	// A higher price at 512 counts every request there at it, sent or
+	// reserved; a lower one later changes nothing.
+	must(t, l.RecordPrice("groq", shapePrice(price("0.20", "0.80"), 512)))
+	liability("0.0681376")
+	must(t, l.RecordPrice("groq", shapePrice(price("0.10", "0.40"), 512)))
+	liability("0.0681376")
+	must(t, l.Settle(a, Counts{Probe: 1, Warmup: 9, Measured: 60}))
+	liability("0.0486496")
+}
+
+// The ledger covers a ceiling rule verdict only with prices at both the
+// cells' and the ceiling check's token bounds, each at least the
+// verdict's.
+func TestCovers(t *testing.T) {
+	cfg := routeConfig(t, "groq", "10", "1300")
+	l, _ := releaseLedger(t, cfg)
+	verdict := func(p Price) *Verdict {
+		t.Helper()
+		v, err := CeilingRule(cfg, p, ExpectedPlan(cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 512)))
+	if err := state(t, l).Covers(cfg, verdict(groqPrice)); err == nil || !strings.Contains(err.Error(), "no price recorded for groq at 1200 input and 1024 output tokens") {
+		t.Fatalf("priced at 512 only: %v", err)
+	}
+	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 1024)))
+	must(t, state(t, l).Covers(cfg, verdict(groqPrice)))
+	newer := price("0.20", "0.80")
+	must(t, l.RecordPrice("groq", shapePrice(newer, 512)))
+	if err := state(t, l).Covers(cfg, verdict(newer)); err == nil || !strings.Contains(err.Error(), "US$0.0007944 a request at 1200 input and 1024 output tokens, under the ceiling rule's US$0.0010592") {
+		t.Fatalf("1,024 price older than the 512 one: %v", err)
+	}
+	must(t, l.RecordPrice("groq", shapePrice(newer, 1024)))
+	must(t, state(t, l).Covers(cfg, verdict(newer)))
+	must(t, state(t, l).Covers(cfg, verdict(groqPrice)))
 }

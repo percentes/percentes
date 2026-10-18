@@ -17,9 +17,10 @@
 //
 // Before the window, schedule writes the committed schedule of the routes
 // whose configurations it is given, ledger create starts the release
-// ledger with their caps, ledger price records a route's prices at its
-// shape, and ceiling-check sends a route's ceiling check, admitted in the
-// ledger, and writes the record run reads with --ceiling-probe. After
+// ledger with their caps, ledger price records a route's prices at the
+// token bounds of its cells and of its ceiling check, and ceiling-check
+// sends a route's ceiling check, admitted in the ledger, and writes the
+// record run reads with --ceiling-probe. After
 // the window, pages writes the index page and each route's page from the
 // cells' records.
 //
@@ -86,7 +87,7 @@ const usage = `usage: percentes-release <command> [flags]
 commands:
   schedule        write the committed schedule of the routes
   ledger create   start the release ledger with the routes' caps
-  ledger price    record a route's prices at its shape
+  ledger price    record a route's prices for its cells and ceiling check
   ceiling-check   send a route's ceiling check and write its record
   run             run one route's cells over the committed window
   dispatch        sum every cell's dispatch series under --out

@@ -74,7 +74,7 @@ func probeTarget(ctx context.Context, ledger *admission.Ledger, p *config.Pilot,
 	if wrongModel != "" {
 		n = 2
 	}
-	a, err := ledger.Admit(t.EndpointURL, admission.PurposeProbe, n)
+	a, err := ledger.Admit(t.EndpointURL, admission.PurposeProbe, n, admission.PilotTokens)
 	if err != nil {
 		return nil, err
 	}

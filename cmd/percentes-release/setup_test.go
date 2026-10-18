@@ -48,6 +48,39 @@ func TestNewRouteRefusals(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "ledger: no price recorded for route groq"},
+		{"priced at the ceiling only", func(t *testing.T, f *fixture) {
+			f.in.ledgerPath = filepath.Join(t.TempDir(), "ledger.jsonl")
+			l, err := admission.Create(f.in.ledgerPath, mustCaps(t, f.in.cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.RecordPrice("groq", admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.60", InputTokens: 1200, OutputTokens: 512,
+				Source: "https://example.test/pricing", Retrieved: "2026-10-06"}); err != nil {
+				t.Fatal(err)
+			}
+		}, "no price recorded for groq at 1200 input and 1024 output tokens"},
+		{"fallback priced at 512 only", func(t *testing.T, f *fixture) {
+			fallback(t, f.in.cfg)
+			f.in.ledgerPath = filepath.Join(t.TempDir(), "ledger.jsonl")
+			l, err := admission.Create(f.in.ledgerPath, mustCaps(t, f.in.cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.RecordPrice("groq", admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.60", InputTokens: 1200, OutputTokens: 512,
+				Source: "https://example.test/pricing", Retrieved: "2026-10-06"}); err != nil {
+				t.Fatal(err)
+			}
+		}, "no price recorded for groq at 1200 input and 1024 output tokens"},
+		{"probe price older", func(t *testing.T, f *fixture) {
+			l, err := admission.Open(f.in.ledgerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.RecordPrice("groq", admission.Price{InputUSDPerMTok: "0.20", OutputUSDPerMTok: "0.80", InputTokens: 1200, OutputTokens: 512,
+				Source: "https://example.test/pricing", Retrieved: "2026-10-08"}); err != nil {
+				t.Fatal(err)
+			}
+		}, "under the ceiling rule's US$0.0010592"},
 		{"model excluded", func(t *testing.T, f *fixture) {
 			ceiling(t, f, pass("groq", 512, false), pass("groq", 1024, false))
 		}, "the ceiling rule excludes the model"},
@@ -72,6 +105,17 @@ func TestNewRouteRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fallback sets cfg's ceiling to 1,024 tokens.
+func fallback(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	const from, to = `"max_completion_tokens": 512,`, `"max_completion_tokens": 1024,`
+	if strings.Count(cfg.Target.Body, from) != 1 {
+		t.Fatalf("body %q", cfg.Target.Body)
+	}
+	cfg.Target.Body = strings.Replace(cfg.Target.Body, from, to, 1)
+	cfg.Release.Shape.CeilingTokens = 1024
 }
 
 func mustCaps(t *testing.T, cfg *config.Config) admission.Caps {
@@ -209,8 +253,9 @@ func TestStopSignals(t *testing.T) {
 	}
 }
 
-// The ledger gives the route's highest recorded price and the requests
-// it settled before the window.
+// The ledger gives the route's newest recorded price, whatever its token
+// bounds and per-request price, and the requests it settled before the
+// window.
 func TestLedgerReads(t *testing.T) {
 	cfg := releaseConfig(t, "https://api.example.test/openai/v1/chat/completions")
 	f := newFixture(t, cfg, "+0.005")
@@ -218,13 +263,18 @@ func TestLedgerReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := l.RecordPrice("groq", admission.Price{InputUSDPerMTok: "0.20", OutputUSDPerMTok: "0.80", InputTokens: 1200, OutputTokens: 512, Source: "https://example.test/pricing", Retrieved: "2026-10-07"}); err != nil {
-		t.Fatal(err)
+	record := func(in, out string, ceiling int, retrieved string) {
+		t.Helper()
+		if err := l.RecordPrice("groq", admission.Price{InputUSDPerMTok: in, OutputUSDPerMTok: out, InputTokens: 1200, OutputTokens: ceiling, Source: "https://example.test/pricing", Retrieved: retrieved}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := l.RecordPrice("groq", admission.Price{InputUSDPerMTok: "0.10", OutputUSDPerMTok: "0.40", InputTokens: 1200, OutputTokens: 512, Source: "https://example.test/pricing", Retrieved: "2026-10-08"}); err != nil {
-		t.Fatal(err)
-	}
-	a, err := l.Admit("groq", admission.PurposeProbe, 10)
+	// US$0.0007944 a request at 1,024, read before US$0.0006496 at 512.
+	record("0.15", "0.60", 1024, "2026-10-07")
+	record("0.20", "0.80", 512, "2026-10-08")
+	// Recorded last, read earliest.
+	record("0.30", "1.20", 512, "2026-10-05")
+	a, err := l.Admit("groq", admission.PurposeProbe, 10, admission.ReleaseTokens(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +286,7 @@ func TestLedgerReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err := routePrice(entries, "groq")
-	if err != nil || p.InputUSDPerMTok != "0.20" || p.Retrieved != "2026-10-07" {
+	if err != nil || p.InputUSDPerMTok != "0.20" || p.OutputUSDPerMTok != "0.80" || p.Retrieved != "2026-10-08" {
 		t.Fatalf("price %+v, %v", p, err)
 	}
 	if _, err := routePrice(entries, "other"); err == nil {

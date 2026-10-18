@@ -247,6 +247,12 @@ func newRoute(in routeInput) (*route, error) {
 	if r.verdict, err = admission.CeilingRule(cfg, price, plan); err != nil {
 		return nil, err
 	}
+	if st, err = r.ledger.State(); err != nil {
+		return nil, err
+	}
+	if err := st.Covers(cfg, r.verdict); err != nil {
+		return nil, fmt.Errorf("run: %w", err)
+	}
 	if r.steps = len(r.verdict.Admitted()); r.steps == 0 {
 		return nil, fmt.Errorf("run: the ceiling rule admits no step of route %s; binding limit %s", name, r.verdict.Steps[0].Binding.Dimension)
 	}

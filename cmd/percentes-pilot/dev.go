@@ -242,7 +242,7 @@ func devRun(ctx context.Context, ledger *admission.Ledger, cfg *config.Config, t
 	for i, c := range cases {
 		texts[i], labels[i] = c.Text, c.Label
 	}
-	a, err := ledger.Admit(t.EndpointURL, admission.PurposeDevelopment, len(cases))
+	a, err := ledger.Admit(t.EndpointURL, admission.PurposeDevelopment, len(cases), admission.PilotTokens)
 	if err != nil {
 		return e, err
 	}

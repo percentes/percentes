@@ -179,6 +179,10 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	if u := ledgerState(t, f.ledger).Routes["groq"]; u == nil || u.Reserved != 0 || u.Probe+u.Warmup+u.Measured != sent+1 {
 		t.Fatalf("ledger usage %+v", u)
 	}
+	// The cell is admitted at its configured ceiling.
+	if b, _ := os.ReadFile(f.ledger); !strings.Contains(string(b), `"kind":"admit","route":"groq","input_tokens":1200,"output_tokens":512,"per_request_usd":"0.0004872","purpose":"cell"`) {
+		t.Fatalf("ledger %s", b)
+	}
 	e.mu.Lock()
 	for i, body := range e.bodies {
 		if prefix := fmt.Sprintf("cs-%d-", run.Seed); !bytes.Contains(body, []byte(prefix)) {

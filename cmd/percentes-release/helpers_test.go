@@ -146,8 +146,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := l.RecordPrice(cfg.Target.Name, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.60", InputTokens: 1200, OutputTokens: 512,
-		Source: "https://example.test/pricing", Retrieved: "2026-10-06"}); err != nil {
+	if _, err := recordPrice(l, cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, dir, "r.txt", []byte("record"))

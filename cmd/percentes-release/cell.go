@@ -92,7 +92,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	for i := range cases {
 		cases[i] = r.shape.UserText(run.Seed, i)
 	}
-	a, err := r.ledger.Admit(t.Name, admission.PurposeCell, 1+len(offsets))
+	a, err := r.ledger.Admit(t.Name, admission.PurposeCell, 1+len(offsets), admission.ReleaseTokens(cfg))
 	var refused *admission.Refusal
 	if errors.As(err, &refused) {
 		finish(outcomeStopped, (&routeStop{refused.Error()}).Error())

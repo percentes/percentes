@@ -134,8 +134,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	var offsets []int
 	for i, cfg := range cfgs {
 		name := cfg.Target.Name
-		if err := l.RecordPrice(name, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.60", InputTokens: 1200, OutputTokens: 512,
-			Source: "https://example.test/pricing", Retrieved: "2026-10-06"}); err != nil {
+		if _, err := recordPrice(l, cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
 			t.Fatal(err)
 		}
 		length := probe.LengthChatCompletions

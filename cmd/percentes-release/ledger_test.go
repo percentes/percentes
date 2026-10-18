@@ -12,7 +12,7 @@ import (
 
 // ledger create starts a ledger with every route's release caps; ledger
 // price records a route's prices at its shape's input bound and ceiling,
-// the price run admits the route at.
+// and at the input bound and the ceiling check's ceiling.
 func TestLedgerCmd(t *testing.T) {
 	groq := routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "10")
 	baseten := routeConfigFile(t, "baseten", "https://api.example.test/v1/chat/completions", "25")
@@ -57,19 +57,26 @@ func TestLedgerCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := routePrice(entries, "groq")
-	if err != nil {
-		t.Fatal(err)
+	var bounds []int
+	for _, e := range entries {
+		if e.Kind == admission.KindPrice {
+			if e.InputTokens != 1200 || e.InputUSDPerMTok != "0.15" || e.Source != "https://example.test/pricing" {
+				t.Fatalf("price line %+v", e)
+			}
+			bounds = append(bounds, e.OutputTokens)
+		}
 	}
-	if p.InputTokens != 1200 || p.OutputTokens != config.PinnedReleaseCeilings[0] || p.InputUSDPerMTok != "0.15" || p.Source != "https://example.test/pricing" {
-		t.Fatalf("price %+v", p)
+	if !reflect.DeepEqual(bounds, config.PinnedReleaseCeilings) {
+		t.Fatalf("prices at %v output tokens, want %v", bounds, config.PinnedReleaseCeilings)
 	}
 	if st, err = l.State(); err != nil {
 		t.Fatal(err)
 	}
-	// 1,200 tokens at US$0.15 and 512 at US$0.60 a million.
-	if got, want := st.Routes["groq"].MaxPerRequestUSD, big.NewRat(4872, 10_000_000); got.Cmp(want) != 0 {
-		t.Fatalf("per-request price %s, want %s", got.FloatString(7), want.FloatString(7))
+	// 1,200 tokens at US$0.15 and 512 or 1,024 at US$0.60 a million.
+	for tok, want := range map[admission.Tokens]*big.Rat{{Input: 1200, Output: 512}: big.NewRat(4872, 10_000_000), {Input: 1200, Output: 1024}: big.NewRat(7944, 10_000_000)} {
+		if got := st.Routes["groq"].Prices[tok]; got == nil || got.Cmp(want) != 0 {
+			t.Fatalf("per-request price at %v: %v, want %s", tok, got, want.FloatString(7))
+		}
 	}
 }
 

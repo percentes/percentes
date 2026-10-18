@@ -66,7 +66,7 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 		return exitError, err
 	}
 
-	a, err := ledger.Admit(name, admission.PurposeProbe, probe.CeilingRequests)
+	a, err := ledger.Admit(name, admission.PurposeProbe, probe.CeilingRequests, admission.ReleaseProbeTokens(cfg))
 	if err != nil {
 		return exitError, err
 	}

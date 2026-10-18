@@ -89,7 +89,7 @@ func (d *windowDeps) run(ctx context.Context, w window) (rec *windowRecord, err 
 	if err := os.MkdirAll(w.dir, 0o755); err != nil {
 		return rec, err
 	}
-	a, err := d.ledger.Admit(t.EndpointURL, w.purpose, admission.WindowRequests)
+	a, err := d.ledger.Admit(t.EndpointURL, w.purpose, admission.WindowRequests, admission.PilotTokens)
 	var refused *admission.Refusal
 	if errors.As(err, &refused) {
 		rec.Blocked = refused.Error()

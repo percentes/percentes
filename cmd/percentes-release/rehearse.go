@@ -427,8 +427,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	label := sched.Cells[0].Label
 	for i, cfg := range cfgs {
 		name := cfg.Target.Name
-		if err := l.RecordPrice(name, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.60", InputTokens: config.PinnedReleaseInputBoundTokens,
-			OutputTokens: cfg.Release.Shape.CeilingTokens, Source: rehearsalURL, Retrieved: today}); err != nil {
+		if _, err := recordPrice(l, cfg, "0.15", "0.60", rehearsalURL, today); err != nil {
 			return exitError, err
 		}
 		length := probe.LengthChatCompletions

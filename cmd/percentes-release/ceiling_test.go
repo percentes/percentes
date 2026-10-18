@@ -79,6 +79,43 @@ func (f *ceilingFixture) probeCharge(t *testing.T) (int, int) {
 	return 0, 0
 }
 
+// priced512 is a new ledger for the route at cfgPath holding its price at
+// the 512-token ceiling only.
+func priced512(t *testing.T, cfgPath string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	if code, err := ledgerCmd([]string{"create", "--ledger", path, "--config", cfgPath}); err != nil || code != exitOK {
+		t.Fatalf("ledger create: %d, %v", code, err)
+	}
+	l, err := admission.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.RecordPrice("groq", admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.60", InputTokens: 1200, OutputTokens: 512,
+		Source: "https://example.test/pricing", Retrieved: "2026-10-06"}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// fallbackFile is the configuration at cfgPath at the 1,024-token
+// ceiling.
+func fallbackFile(t *testing.T, cfgPath string) string {
+	t.Helper()
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, r := range [][2]string{{"ceiling_tokens: 512 ", "ceiling_tokens: 1024 "}, {`"max_completion_tokens": 512,`, `"max_completion_tokens": 1024,`}} {
+		if strings.Count(s, r[0]) != 1 {
+			t.Fatalf("configuration: %q not found once", r[0])
+		}
+		s = strings.Replace(s, r[0], r[1], 1)
+	}
+	return writeFile(t, t.TempDir(), "groq-1024.yaml", []byte(s))
+}
+
 func startMock(t *testing.T, sh mock.Shape) string {
 	t.Helper()
 	fixed := config.LatencyDist{Distribution: "fixed"}
@@ -110,6 +147,10 @@ func TestCeilingCheckCmd(t *testing.T) {
 	}
 	if sent, reserved := f.probeCharge(t); sent != probe.CeilingRequests || reserved != 0 {
 		t.Fatalf("ledger: %d probe requests, %d reserved", sent, reserved)
+	}
+	// The check is admitted at the highest pinned ceiling.
+	if b, _ := os.ReadFile(f.ledger); !strings.Contains(string(b), `"kind":"admit","route":"groq","input_tokens":1200,"output_tokens":1024,"per_request_usd":"0.0007944","purpose":"probe","reserve":10`) {
+		t.Fatalf("ledger %s", b)
 	}
 	cfgs, err := loadReleases([]string{f.cfg})
 	if err != nil {
@@ -159,6 +200,15 @@ func TestCeilingCheckCmdRefusals(t *testing.T) {
 			}
 			return f.args()
 		}, "no price"},
+		{"priced at the ceiling only", func(t *testing.T, f *ceilingFixture) []string {
+			f.ledger = priced512(t, f.cfg)
+			return f.args()
+		}, "no price recorded for groq at 1200 input and 1024 output tokens"},
+		{"fallback priced at 512 only", func(t *testing.T, f *ceilingFixture) []string {
+			f.cfg = fallbackFile(t, f.cfg)
+			f.ledger = priced512(t, f.cfg)
+			return f.args()
+		}, "no price recorded for groq at 1200 input and 1024 output tokens"},
 		{"caps differ", func(t *testing.T, f *ceilingFixture) []string {
 			f.cfg = routeConfigFile(t, "groq", endpoint, "9")
 			return f.args()

@@ -78,8 +78,8 @@ func showLedger(path string) (int, error) {
 	for _, e := range names {
 		u := st.Routes[e]
 		price := "none"
-		if u.MaxPerRequestUSD != nil {
-			price = u.MaxPerRequestUSD.FloatString(6)
+		if p := u.Prices[admission.PilotTokens]; p != nil {
+			price = p.FloatString(6)
 		}
 		fmt.Printf("%s: %d of %d (probe %d, development %d, warm-up %d, measured %d, replacement %d, reserved %d); per-request price US$%s\n",
 			e, u.Charged(), st.Caps.RouteRequests, u.Probe, u.Development, u.Warmup, u.Measured, u.Replacement, u.Reserved, price)

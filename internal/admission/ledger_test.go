@@ -53,9 +53,16 @@ func must(t *testing.T, err error) {
 	}
 }
 
+// admit and refused admit at the pilot's token bounds, admitAt and
+// refusedAt at tok.
 func admit(t *testing.T, l *Ledger, route, purpose string, n int) Admission {
 	t.Helper()
-	a, err := l.Admit(route, purpose, n)
+	return admitAt(t, l, route, purpose, n, PilotTokens)
+}
+
+func admitAt(t *testing.T, l *Ledger, route, purpose string, n int, tok Tokens) Admission {
+	t.Helper()
+	a, err := l.Admit(route, purpose, n, tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,11 +71,16 @@ func admit(t *testing.T, l *Ledger, route, purpose string, n int) Admission {
 
 func refused(t *testing.T, l *Ledger, route, purpose string, n int, reason string) {
 	t.Helper()
+	refusedAt(t, l, route, purpose, n, PilotTokens, reason)
+}
+
+func refusedAt(t *testing.T, l *Ledger, route, purpose string, n int, tok Tokens, reason string) {
+	t.Helper()
 	before := state(t, l)
-	_, err := l.Admit(route, purpose, n)
+	_, err := l.Admit(route, purpose, n, tok)
 	var r *Refusal
 	if !errors.As(err, &r) || !strings.Contains(r.Reason, reason) {
-		t.Fatalf("Admit(%s, %s, %d) = %v, want a refusal containing %q", route, purpose, n, err, reason)
+		t.Fatalf("Admit(%s, %s, %d, %v) = %v, want a refusal containing %q", route, purpose, n, tok, err, reason)
 	}
 	after := state(t, l)
 	if after.Lines != before.Lines+1 || after.Total() != before.Total() {
@@ -98,7 +110,7 @@ func TestCreateAndOpen(t *testing.T) {
 		t.Error("Open of a missing ledger succeeded")
 	}
 	missing := &Ledger{path: filepath.Join(t.TempDir(), "none.jsonl"), now: time.Now}
-	if _, err := missing.Admit(groq, PurposeProbe, 1); err == nil {
+	if _, err := missing.Admit(groq, PurposeProbe, 1, PilotTokens); err == nil {
 		t.Error("Admit on a missing ledger succeeded")
 	}
 	l, err := Open(path)
@@ -176,16 +188,16 @@ func TestReservationHoldsUntilSettled(t *testing.T) {
 	}
 }
 
-// Projected liability (requests at the highest recorded per-request price
-// plus hosting) may reach US$40 and no further.
+// Projected liability (requests at the highest per-request price recorded
+// at their token bounds, plus hosting) may reach US$40 and no further.
 func TestLiabilityCap(t *testing.T) {
 	l, _ := newLedger(t)
 	refused(t, l, groq, PurposeProbe, 1, "no price recorded for "+groq)
 	must(t, l.RecordPrice(groq, groqPrice))
 	must(t, l.RecordPrice(groq, fortyPerRequest))
 	must(t, l.RecordPrice(groq, groqPrice))
-	if st := state(t, l); st.Routes[groq].MaxPerRequestUSD.Cmp(big.NewRat(40, 1)) != 0 {
-		t.Fatalf("max price %v, want the highest recorded", st.Routes[groq].MaxPerRequestUSD)
+	if st := state(t, l); st.Routes[groq].Prices[PilotTokens].Cmp(big.NewRat(40, 1)) != 0 {
+		t.Fatalf("max price %v, want the highest recorded", st.Routes[groq].Prices[PilotTokens])
 	}
 	a := admit(t, l, groq, PurposeProbe, 1)
 	refused(t, l, groq, PurposeProbe, 1, "projected liability US$80 exceeds US$40")
@@ -244,9 +256,8 @@ func TestSettle(t *testing.T) {
 		t.Fatalf("overrun: %v", err)
 	}
 	u := state(t, l).Routes[groq]
-	want := Usage{Probe: 5, Development: 24, Warmup: 6, Measured: 120, Replacement: 126, MaxPerRequestUSD: u.MaxPerRequestUSD}
-	if *u != want || u.Charged() != 281 {
-		t.Fatalf("usage %+v, want %+v", *u, want)
+	if u.Probe != 5 || u.Development != 24 || u.Warmup != 6 || u.Measured != 120 || u.Replacement != 126 || u.Reserved != 0 || u.Charged() != 281 {
+		t.Fatalf("usage %+v", *u)
 	}
 }
 
@@ -261,8 +272,13 @@ func TestAdmitArguments(t *testing.T) {
 		{groq, PurposeWindow, 126}, {groq, PurposeWindow, 128}, {groq, PurposeReplacement, 1},
 		{groq, PurposeProbe, 0}, {groq, PurposeDevelopment, -1}, {groq, "measured", 1}, {"", PurposeProbe, 1},
 	} {
-		if _, err := l.Admit(c.route, c.purpose, c.n); err == nil {
+		if _, err := l.Admit(c.route, c.purpose, c.n, PilotTokens); err == nil {
 			t.Errorf("Admit(%q, %q, %d) accepted", c.route, c.purpose, c.n)
+		}
+	}
+	for _, tok := range []Tokens{{}, {PilotMaxInputTokens, 0}, {0, PilotMaxOutputTokens}, {-1, PilotMaxOutputTokens}} {
+		if _, err := l.Admit(groq, PurposeProbe, 1, tok); err == nil || errors.As(err, new(*Refusal)) {
+			t.Errorf("Admit at %v: %v", tok, err)
 		}
 	}
 	if st := state(t, l); st.Lines != 2 {
@@ -301,9 +317,9 @@ func TestAppendOnly(t *testing.T) {
 	}
 	step("price", l.RecordPrice(groq, groqPrice))
 	step("hosting", l.RecordHosting("3", "client host"))
-	a, err := l.Admit(groq, PurposeWindow, WindowRequests)
+	a, err := l.Admit(groq, PurposeWindow, WindowRequests, PilotTokens)
 	step("admit", err)
-	_, err = l.Admit(baseten, PurposeWindow, WindowRequests)
+	_, err = l.Admit(baseten, PurposeWindow, WindowRequests, PilotTokens)
 	step("refused", err)
 	step("settle", l.Settle(a, Counts{Probe: 1, Warmup: 6, Measured: 120}))
 }
@@ -340,7 +356,7 @@ func TestLedgerRefusesAnAlteredFile(t *testing.T) {
 				t.Fatal("Open accepted the file")
 			}
 			bad := &Ledger{path: p, now: time.Now}
-			if _, err := bad.Admit(groq, PurposeProbe, 1); err == nil {
+			if _, err := bad.Admit(groq, PurposeProbe, 1, PilotTokens); err == nil {
 				t.Fatal("Admit accepted the file")
 			}
 			if got, _ := os.ReadFile(p); string(got) != b {
@@ -366,7 +382,7 @@ func TestConcurrentAdmissions(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			_, err = h.Admit(groq, PurposeWindow, WindowRequests)
+			_, err = h.Admit(groq, PurposeWindow, WindowRequests, PilotTokens)
 			var r *Refusal
 			mu.Lock()
 			defer mu.Unlock()
@@ -426,7 +442,7 @@ func TestCapsHoldUnderRandomTraffic(t *testing.T) {
 			if purpose == PurposeProbe || purpose == PurposeDevelopment {
 				n = 1 + rng.Intn(48)
 			}
-			a, err := l.Admit(routes[rng.Intn(len(routes))], purpose, n)
+			a, err := l.Admit(routes[rng.Intn(len(routes))], purpose, n, PilotTokens)
 			var r *Refusal
 			switch {
 			case err == nil:

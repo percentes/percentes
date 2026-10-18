@@ -110,6 +110,43 @@ func (v *Verdict) Admitted() []float64 {
 	return out
 }
 
+// ReleaseTokens are the token bounds of a release route's cell requests:
+// the shape's input bound and ceiling.
+func ReleaseTokens(cfg *config.Config) Tokens {
+	return Tokens{Input: cfg.Release.Shape.InputBoundTokens, Output: cfg.Release.Shape.CeilingTokens}
+}
+
+// ReleaseProbeTokens are the token bounds a release route's ceiling check
+// is admitted at: the shape's input bound and the highest pinned ceiling.
+func ReleaseProbeTokens(cfg *config.Config) Tokens {
+	return Tokens{Input: cfg.Release.Shape.InputBoundTokens, Output: slices.Max(config.PinnedReleaseCeilings)}
+}
+
+// Covers reports whether the ledger prices cfg's route's requests at
+// least as high as v does: its highest per-request price at ReleaseTokens
+// at least v's PerRequestUSD, and at ReleaseProbeTokens at least v's
+// ProbeUSD.
+func (s *State) Covers(cfg *config.Config, v *Verdict) error {
+	for _, c := range []struct {
+		tok  Tokens
+		want string
+	}{{ReleaseTokens(cfg), v.PerRequestUSD}, {ReleaseProbeTokens(cfg), v.ProbeUSD}} {
+		want, err := decimal(c.want)
+		if err != nil {
+			return fmt.Errorf("admission: ceiling rule price: %w", err)
+		}
+		have := s.price(cfg.Target.Name, c.tok)
+		if have == nil {
+			return fmt.Errorf("admission: no price recorded for %s at %d input and %d output tokens", cfg.Target.Name, c.tok.Input, c.tok.Output)
+		}
+		if have.Cmp(want) < 0 {
+			return fmt.Errorf("admission: the ledger admits %s at US$%s a request at %d input and %d output tokens, under the ceiling rule's US$%s",
+				cfg.Target.Name, decimalString(have), c.tok.Input, c.tok.Output, c.want)
+		}
+	}
+	return nil
+}
+
 // CeilingRule applies SPEC-HOSTED HA3 point 6 to a release route at its
 // configured ceiling. A request is taken at the shape's input bound and
 // ceiling and priced at p; a probe request at the highest pinned
@@ -143,7 +180,7 @@ func CeilingRule(cfg *config.Config, p Price, plan Plan) (*Verdict, error) {
 	if err != nil {
 		return nil, fmt.Errorf("admission: ceiling rule: price: %w", err)
 	}
-	p.OutputTokens = slices.Max(config.PinnedReleaseCeilings)
+	p.OutputTokens = ReleaseProbeTokens(cfg).Output
 	cProbe, _ := checkPrice(cfg.Target.Name, p)
 	routeCap, err := decimal(rel.Caps.RouteUSD)
 	if err != nil {
