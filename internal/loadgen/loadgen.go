@@ -116,12 +116,24 @@ type Request struct {
 	// ErrorBody is the first errorBodyLimit bytes of a non-200 body with
 	// credentials masked, held for the raw-frame store; never in JSON.
 	ErrorBody []byte `json:"-"`
+	// Frames are the timed reads of a 200 body, credentials masked, kept
+	// for hosted targets only; never in JSON. FrameBytesDropped counts the
+	// body bytes read after the first frameLimit and not kept.
+	Frames            []Frame `json:"-"`
+	FrameBytesDropped int64   `json:"-"`
 
 	// ITLsUs are inter-token latency (ITL) gaps (us) for pooled per-window ITL
 	// histograms (§3: per-request p99 is forbidden; pooling happens in
 	// the collector). Excluded from JSON records for size; the pooled
 	// summaries appear in the report.
 	ITLsUs []int64 `json:"-"`
+}
+
+// Frame is one read of a response body: the bytes it returned and its
+// return time as a nanosecond offset from the run epoch.
+type Frame struct {
+	Ns   int64
+	Data []byte
 }
 
 // TTFTNs and E2ENs are re-based to intended dispatch time. Valid only for

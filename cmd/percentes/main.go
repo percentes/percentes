@@ -1,8 +1,10 @@
 // percentes runs one full experiment from one config file and writes the
 // JavaScript Object Notation (JSON) and human-readable report pair, and
 // the per-attempt JSON Lines file of every run that dispatched, failed
-// runs included. Exit codes: 0 = run valid, 2 = run completed but a
-// run-failing gate marked it invalid, 1 = execution error.
+// runs included. A hosted run also writes its raw-frame store under
+// --frames, a directory outside the instrument's source tree. Exit codes:
+// 0 = run valid, 2 = run completed but a run-failing gate marked it
+// invalid, 1 = execution error.
 package main
 
 import (
@@ -35,6 +37,7 @@ func main() {
 	victim := flag.String("victim", "", "victim replica identity (pod name) for in-flight attribution")
 	probeDirect := flag.String("probe-direct", "", "victim-direct inference URL for the replica-ready probe")
 	probeService := flag.String("probe-service", "", "service inference URL for the traffic-restored probe")
+	framesRoot := flag.String("frames", "", "raw-frame store directory outside the source tree (hosted targets, required); each run writes <UTC epoch>/"+evidence.FramesFile)
 	flag.Parse()
 	for name, u := range map[string]string{"--probe-direct": *probeDirect, "--probe-service": *probeService} {
 		if u == "" {
@@ -51,6 +54,13 @@ func main() {
 	cfg, err := config.LoadFile(*configPath)
 	if err != nil {
 		log.Fatalf("percentes: %v", err)
+	}
+	if cfg.Target.Hosted {
+		if err := evidence.CheckFramesRoot(*framesRoot); err != nil {
+			log.Fatalf("percentes: %v", err)
+		}
+	} else if *framesRoot != "" {
+		log.Fatal("percentes: --frames applies to hosted targets only")
 	}
 
 	// Wire an interrupt-aware context so Ctrl-C / SIGTERM cancels the in-flight
@@ -90,6 +100,16 @@ func main() {
 	var streams []loadgen.CanaryStream
 	if canary != nil {
 		streams = canary.Stop()
+	}
+	if art != nil && cfg.Target.Hosted {
+		if path, ferr := evidence.WriteRunFrames(*framesRoot, art.Loadgen); ferr != nil {
+			if err == nil {
+				log.Fatalf("percentes: %v", ferr)
+			}
+			log.Printf("percentes: %v", ferr)
+		} else if path != "" {
+			log.Printf("percentes: frames written: %s", path)
+		}
 	}
 	if err != nil {
 		if sampler != nil {

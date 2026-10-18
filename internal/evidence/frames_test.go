@@ -1,0 +1,236 @@
+package evidence
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/percentes/percentes/internal/loadgen"
+)
+
+const (
+	frameKey      = "tok-FRAMES-0123456789abcdef"
+	frameUser     = "frames-user-0001"
+	framePassword = "frames-pass-0002"
+)
+
+var caseIndex = regexp.MustCompile(`cs-\d+-(\d+) `)
+
+// readFrames returns the frame store's records.
+func readFrames(t *testing.T, path string) []FrameRecord {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []FrameRecord
+	for _, m := range lines(t, b) {
+		raw, _ := json.Marshal(m)
+		var rec FrameRecord
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// The frame store of a hosted run holds no bearer token and no base-URL
+// credential, raw or decoded, whole or split across reads, in streamed
+// frames or in a non-200 body.
+func TestFrameStoreHoldsNoCredentials(t *testing.T) {
+	var sawAuth atomic.Bool
+	secrets := []string{frameKey, frameUser, framePassword}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		auth := req.Header.Get("Authorization")
+		sawAuth.Store(auth == "Bearer "+frameKey)
+		b, _ := io.ReadAll(req.Body)
+		m := caseIndex.FindSubmatch(b)
+		if m == nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		echo := auth + " " + frameUser + ":" + framePassword
+		if string(m[1]) == "1" {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"bad key ` + echo + `"}`)) //nolint:errcheck
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		half := len(frameKey) / 2
+		for _, part := range []string{
+			`data: {"choices":[{"delta":{"content":"` + echo + `"}}]}` + "\n\n",
+			`data: {"choices":[{"delta":{"content":"` + frameKey[:half],
+			frameKey[half:] + `"}}]}` + "\n\n: " + frameUser[:5],
+			frameUser[5:] + "\n\ndata: [DONE]\n\n",
+		} {
+			w.Write([]byte(part)) //nolint:errcheck
+			w.(http.Flusher).Flush()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("PERCENTES_FRAMES_TEST_KEY", frameKey)
+	cfg := hostedCfg(strings.Replace(srv.URL, "http://", "http://"+frameUser+":"+framePassword+"@", 1))
+	cfg.Target.APIKeyEnv = "PERCENTES_FRAMES_TEST_KEY"
+
+	res, err := loadgen.Run(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawAuth.Load() {
+		t.Fatal("server did not receive the bearer token; the test proves nothing")
+	}
+	path, err := WriteRunFrames(t.TempDir(), res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	half := len(frameKey) / 2
+	for _, s := range append(secrets, frameKey[:half], frameKey[half:], frameUser[5:]) {
+		if bytes.Contains(file, []byte(s)) {
+			t.Errorf("frame store carries %q", s)
+		}
+	}
+
+	recs := readFrames(t, path)
+	if len(recs) != len(res.Requests) || len(recs) != 3 {
+		t.Fatalf("%d records for %d requests, want 3", len(recs), len(res.Requests))
+	}
+	for i, rec := range recs {
+		var decoded []byte
+		prev := res.Requests[i].DispatchNs
+		for _, f := range rec.Frames {
+			if f.Ns < prev {
+				t.Errorf("request %d: frame at %d before %d", i, f.Ns, prev)
+			}
+			prev = f.Ns
+			decoded = append(decoded, f.Raw()...)
+		}
+		if rec.ErrorBody != nil {
+			decoded = append(decoded, rec.ErrorBody.Raw()...)
+		}
+		for _, s := range secrets {
+			if bytes.Contains(decoded, []byte(s)) {
+				t.Errorf("request %d: decoded bytes carry %q", i, s)
+			}
+		}
+		masked := strings.Repeat("*", len(frameKey))
+		switch i {
+		case 1:
+			if rec.Status != http.StatusUnauthorized || rec.Frames != nil || !strings.Contains(string(decoded), "bad key Bearer "+masked) {
+				t.Errorf("request 1: status %d, %d frames, body %q", rec.Status, len(rec.Frames), decoded)
+			}
+		default:
+			if rec.Status != http.StatusOK || len(rec.Frames) < 2 || rec.ErrorBody != nil ||
+				strings.Count(string(decoded), masked) != 2 || !strings.HasSuffix(string(decoded), "data: [DONE]\n\n") {
+				t.Errorf("request %d: status %d, %d frames, bytes %q", i, rec.Status, len(rec.Frames), decoded)
+			}
+		}
+	}
+}
+
+// With no credential to mask, the frames are the body's bytes in order,
+// bytes that are not UTF-8 included.
+func TestFramesAreTheBodyBytes(t *testing.T) {
+	parts := []string{
+		`data: {"choices":[{"delta":{"content":"a"}}]}` + "\n\n",
+		": \xff\xfe\n\n",
+		`data: {"choices":[{"delta":{"content":"b"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n",
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, p := range parts {
+			w.Write([]byte(p)) //nolint:errcheck
+			w.(http.Flusher).Flush()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	res, err := loadgen.Run(context.Background(), hostedCfg(srv.URL), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := WriteRunFrames(t.TempDir(), res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, rec := range readFrames(t, path) {
+		var got []byte
+		b64 := false
+		for _, f := range rec.Frames {
+			got = append(got, f.Raw()...)
+			b64 = b64 || f.Base64 != nil
+		}
+		if string(got) != strings.Join(parts, "") || !b64 || rec.DroppedBytes != 0 {
+			t.Errorf("request %d: %q (base64 frame %v, dropped %d)", i, got, b64, rec.DroppedBytes)
+		}
+	}
+}
+
+// The store is never written inside the instrument's source tree, and
+// never over an existing file; the file is readable by its owner only.
+func TestFrameStorePlacement(t *testing.T) {
+	res := &loadgen.Result{EpochWall: time.Date(2026, 10, 6, 20, 0, 0, 0, time.UTC), Requests: []loadgen.Request{{Index: 0}}}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inRepo := filepath.Join(wd, "frames-must-not-exist")
+	t.Cleanup(func() { os.RemoveAll(inRepo) })
+	if _, err := WriteRunFrames(inRepo, res); err == nil {
+		t.Errorf("frame store written inside the repository at %s", inRepo)
+	}
+
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "go.mod"), []byte("// clone\nmodule github.com/percentes/percentes\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteRunFrames(filepath.Join(tree, "a", "b"), res); err == nil {
+		t.Error("frame store written inside a source tree")
+	}
+	if _, err := os.Stat(filepath.Join(tree, "a")); !os.IsNotExist(err) {
+		t.Errorf("refused store left %s/a behind: %v", tree, err)
+	}
+	if err := CheckFramesRoot(""); err == nil {
+		t.Error("empty frame store directory accepted")
+	}
+
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "go.mod"), []byte("module example.com/estate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path, err := WriteRunFrames(filepath.Join(other, "frames"), res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(other, "frames", "20261006T200000.000000000Z", FramesFile); path != want {
+		t.Errorf("path %s, want %s", path, want)
+	}
+	if fi, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o600 {
+		t.Errorf("file mode %v, want 0600", fi.Mode().Perm())
+	}
+	if b, _ := os.ReadFile(path); string(b) != `{"index":0}`+"\n" {
+		t.Errorf("file %q", b)
+	}
+	if _, err := WriteRunFrames(filepath.Join(other, "frames"), res); err == nil {
+		t.Error("existing frame store overwritten")
+	}
+}

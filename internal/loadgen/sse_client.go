@@ -72,10 +72,16 @@ func (g *gen) execute(r *Request) {
 
 	shape := g.cfg.Target.Shape()
 	keepText := g.cfg.Target.Hosted
+	var body io.Reader = resp.Body
+	var frames *frameRecorder
+	if keepText {
+		frames = &frameRecorder{r: resp.Body, now: g.now, limit: frameLimit}
+		body = frames
+	}
 	var content, reasoning strings.Builder
 	var malformed, sawDone bool
 	var prevTokNs int64
-	_, dropped, err := sse.Events(resp.Body, eventLimit, func(payload []byte) bool {
+	_, dropped, err := sse.Events(body, eventLimit, func(payload []byte) bool {
 		// [DONE] may carry trailing whitespace.
 		if string(bytes.TrimSpace(payload)) == "[DONE]" {
 			sawDone = true
@@ -130,8 +136,78 @@ func (g *gen) execute(r *Request) {
 	// The transport reuses the connection only once the body reads to
 	// its end, which [DONE] precedes.
 	if sawDone && err == nil {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, drainLimit)) //nolint:errcheck
+		io.Copy(io.Discard, io.LimitReader(body, drainLimit)) //nolint:errcheck
 	}
+	if frames != nil {
+		r.Frames, r.FrameBytesDropped = frames.result(secrets)
+	}
+}
+
+// frameRecorder keeps each read of a body with its return time, up to
+// limit bytes; once a read would pass limit, it and every later read are
+// counted and not kept.
+type frameRecorder struct {
+	r       io.Reader
+	now     func() int64
+	limit   int
+	buf     []byte
+	ends    []int
+	ns      []int64
+	full    bool
+	dropped int64
+}
+
+func (f *frameRecorder) Read(p []byte) (int, error) {
+	n, err := f.r.Read(p)
+	if n > 0 {
+		t := f.now()
+		if f.full || len(f.buf)+n > f.limit {
+			f.full = true
+			f.dropped += int64(n)
+		} else {
+			f.buf = append(f.buf, p[:n]...)
+			f.ends = append(f.ends, len(f.buf))
+			f.ns = append(f.ns, t)
+		}
+	}
+	return n, err
+}
+
+// result masks each secret across frame boundaries with asterisks of the
+// same length, and, when bytes were dropped, any kept tail that begins a
+// secret. secrets must be ordered longest first.
+func (f *frameRecorder) result(secrets []string) ([]Frame, int64) {
+	b := f.buf
+	for _, s := range secrets {
+		if s != "" {
+			b = bytes.ReplaceAll(b, []byte(s), bytes.Repeat([]byte("*"), len(s)))
+		}
+	}
+	if f.dropped > 0 {
+		maskSecretPrefixTail(b, secrets)
+	}
+	out := make([]Frame, len(f.ends))
+	start := 0
+	for i, end := range f.ends {
+		out[i] = Frame{Ns: f.ns[i], Data: b[start:end]}
+		start = end
+	}
+	return out, f.dropped
+}
+
+// maskSecretPrefixTail masks the longest tail of b that is a proper
+// prefix of a secret.
+func maskSecretPrefixTail(b []byte, secrets []string) {
+	longest := 0
+	for _, s := range secrets {
+		for k := len(s) - 1; k > longest; k-- {
+			if bytes.HasSuffix(b, []byte(s[:k])) {
+				longest = k
+				break
+			}
+		}
+	}
+	copy(b[len(b)-longest:], bytes.Repeat([]byte("*"), longest))
 }
 
 // recordChunk keeps a chunk's usage, finish reason, reported model and
@@ -377,6 +453,9 @@ const eventLimit = 1 << 20
 
 // Bytes read after [DONE] before the body is closed unread.
 const drainLimit = 4096
+
+// Bytes of a 200 body kept as frames per request.
+const frameLimit = 8 << 20
 
 // Distinct mismatched model ids kept per request.
 const modelMismatchLimit = 4

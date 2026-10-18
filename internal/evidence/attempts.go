@@ -1,7 +1,7 @@
-// Package evidence writes a run's per-attempt records (SPEC-HOSTED §9):
-// one JSON Lines file, one JSON object per scheduled request, in index
-// order, for every run that reached load generation, including a run
-// that failed a run-level check.
+// Package evidence writes a run's per-attempt records and its raw-frame
+// store (SPEC-HOSTED §9): JSON Lines files, one JSON object per scheduled
+// request, in index order, for every run that reached load generation,
+// including a run that failed a run-level check.
 package evidence
 
 import (
