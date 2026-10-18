@@ -1,4 +1,5 @@
-// Package score applies the task's output contract to a visible answer.
+// Package score applies the task's output contract to a visible answer
+// and classifies each attempt's task outcome against a scoring cutoff.
 // The contract is exactly one JSON object whose one key is "route" and whose
 // value is a string in the configured label set, with JSON whitespace
 // (space, tab, line feed, carriage return) allowed around it. Anything else
