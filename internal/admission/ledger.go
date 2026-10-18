@@ -1,10 +1,12 @@
-// Package admission is the pilot's request and liability ledger: one
+// Package admission is the request and liability ledger of the pilot and
+// the release, and the release's ceiling rule. The ledger is one
 // append-only JSON Lines file holding every inference request sent to a
-// pilot endpoint (probe, development, warm-up, measured and replacement
-// traffic), the per-request prices and the hosting costs the operator
-// entered. A window starts only when the ledger plus WindowRequests stays
-// within EndpointRequestCap for its endpoint and TotalRequestCap in all,
-// and the projected liability stays within LiabilityCapUSD.
+// route (probe, development, warm-up, measured and replacement traffic),
+// the per-request prices and the hosting costs the operator entered. Its
+// first line fixes the caps it enforces: the pilot's (PilotCaps) or a
+// release's, read from each route's configuration (ReleaseCaps). An
+// admission is refused when it would take a route's or the total request
+// count, or a route's or the global projected liability, past its cap.
 //
 // An admission reserves its requests before any is sent and counts at the
 // reservation until settled with the requests actually sent, so a run cut
@@ -31,17 +33,18 @@ import (
 	"github.com/percentes/percentes/internal/config"
 )
 
-// Pilot caps and the per-request token bounds the price is taken at.
+// The pilot's caps and the per-request token bounds its prices are taken
+// at.
 const (
-	EndpointRequestCap = 1024
-	TotalRequestCap    = 2048
-	LiabilityCapUSD    = "40"
-	MaxInputTokens     = 2000
-	MaxOutputTokens    = config.PinnedPilotCompletionCeiling
+	PilotRouteRequestCap = 1024
+	PilotTotalRequestCap = 2048
+	PilotLiabilityCapUSD = "40"
+	PilotMaxInputTokens  = 2000
+	PilotMaxOutputTokens = config.PinnedPilotCompletionCeiling
 )
 
-// WindowRequests is one window's reservation: the session schedule's
-// requests plus the window's pre-run probe request.
+// WindowRequests is one pilot window's reservation: the session
+// schedule's requests plus the window's pre-run probe request.
 const WindowRequests = int(config.PinnedPilotRateRPS*(config.PinnedPilotWarmupS+config.PinnedPilotMeasuredS)) + 1
 
 // SchemaVersion is the ledger format's version.
@@ -57,13 +60,15 @@ const (
 	KindSettle  = "settle"
 )
 
-// Admission purposes. A window or replacement reserves WindowRequests; a
-// probe or development admission reserves the count it names.
+// Admission purposes. A window or replacement reserves the ledger's
+// window_requests; a probe, development or cell admission reserves the
+// count it names.
 const (
 	PurposeProbe       = "probe"
 	PurposeDevelopment = "development"
 	PurposeWindow      = "window"
 	PurposeReplacement = "replacement"
+	PurposeCell        = "cell"
 )
 
 // Entry is one ledger line. Seq counts lines from 1; Prev is the hex
@@ -79,13 +84,14 @@ type Entry struct {
 	Caps          *Caps `json:"caps,omitempty"`
 
 	// price, admit, refused, settle
-	Endpoint string `json:"endpoint,omitempty"`
+	Route string `json:"route,omitempty"`
 
 	// price: list prices in US$ per million tokens, and where they were
-	// read. PerRequestUSD is the price at MaxInputTokens and
-	// MaxOutputTokens.
+	// read. PerRequestUSD is the price at InputTokens and OutputTokens.
 	InputUSDPerMTok  string `json:"input_usd_per_mtok,omitempty"`
 	OutputUSDPerMTok string `json:"output_usd_per_mtok,omitempty"`
+	InputTokens      int    `json:"input_tokens,omitempty"`
+	OutputTokens     int    `json:"output_tokens,omitempty"`
 	PerRequestUSD    string `json:"per_request_usd,omitempty"`
 	Source           string `json:"source,omitempty"`
 	Retrieved        string `json:"retrieved,omitempty"`
@@ -107,26 +113,103 @@ type Entry struct {
 	Overrun bool    `json:"overrun,omitempty"`
 }
 
-// Caps are the limits in force when the ledger was created.
+// Caps are the limits the ledger enforces, fixed when it is created.
+// LiabilityUSD is the global cap and RouteLiabilityUSD each route's;
+// where RouteLiabilityUSD is set, a route it does not list admits
+// nothing. A zero request cap sets none. WindowRequests is the size of
+// every window and replacement admission (zero admits none).
+// MaxInputTokens and MaxOutputTokens are the token bounds of a price
+// that names none (zero: every price names its own).
 type Caps struct {
-	EndpointRequests int    `json:"endpoint_requests"`
-	TotalRequests    int    `json:"total_requests"`
-	LiabilityUSD     string `json:"liability_usd"`
-	WindowRequests   int    `json:"window_requests"`
-	MaxInputTokens   int    `json:"max_input_tokens"`
-	MaxOutputTokens  int    `json:"max_output_tokens"`
+	RouteRequests     int               `json:"route_requests"`
+	TotalRequests     int               `json:"total_requests"`
+	LiabilityUSD      string            `json:"liability_usd"`
+	RouteLiabilityUSD map[string]string `json:"route_liability_usd,omitempty"`
+	WindowRequests    int               `json:"window_requests"`
+	MaxInputTokens    int               `json:"max_input_tokens"`
+	MaxOutputTokens   int               `json:"max_output_tokens"`
 }
 
-func currentCaps() *Caps {
-	return &Caps{EndpointRequestCap, TotalRequestCap, LiabilityCapUSD, WindowRequests, MaxInputTokens, MaxOutputTokens}
+// PilotCaps are the pilot's caps.
+func PilotCaps() Caps {
+	return Caps{RouteRequests: PilotRouteRequestCap, TotalRequests: PilotTotalRequestCap, LiabilityUSD: PilotLiabilityCapUSD,
+		WindowRequests: WindowRequests, MaxInputTokens: PilotMaxInputTokens, MaxOutputTokens: PilotMaxOutputTokens}
 }
 
-// Position is the ledger's charge for the endpoint, in all, and the
-// projected liability.
+// ReleaseCaps are the caps of a ledger shared by the release routes
+// whose configurations are given: each route's release.caps.route_usd
+// under its target name, and the release.caps.global_usd they all
+// carry. A release ledger caps liability only; every price names the
+// route's shape.
+func ReleaseCaps(cfgs ...*config.Config) (Caps, error) {
+	if len(cfgs) == 0 {
+		return Caps{}, errors.New("admission: release caps: no route configurations")
+	}
+	c := Caps{RouteLiabilityUSD: map[string]string{}}
+	var global *big.Rat
+	for _, cfg := range cfgs {
+		if cfg.Profile != config.ProfileRelease || cfg.Release == nil {
+			return Caps{}, fmt.Errorf("admission: release caps: %q is not a release configuration", cfg.Target.Name)
+		}
+		name, rc := cfg.Target.Name, cfg.Release.Caps
+		if _, dup := c.RouteLiabilityUSD[name]; dup || name == "" {
+			return Caps{}, fmt.Errorf("admission: release caps: route name %q empty or listed twice", name)
+		}
+		g, err := decimal(rc.GlobalUSD)
+		if err != nil {
+			return Caps{}, fmt.Errorf("admission: release caps: %s global_usd: %w", name, err)
+		}
+		if global == nil {
+			global, c.LiabilityUSD = g, rc.GlobalUSD
+		} else if g.Cmp(global) != 0 {
+			return Caps{}, fmt.Errorf("admission: release caps: %s global_usd %s, another route's %s", name, rc.GlobalUSD, c.LiabilityUSD)
+		}
+		c.RouteLiabilityUSD[name] = rc.RouteUSD
+	}
+	if _, _, err := checkCaps(&c); err != nil {
+		return Caps{}, fmt.Errorf("admission: release caps: %w", err)
+	}
+	return c, nil
+}
+
+// checkCaps returns the global and per-route liability caps.
+func checkCaps(c *Caps) (*big.Rat, map[string]*big.Rat, error) {
+	switch {
+	case c.RouteRequests < 0 || c.TotalRequests < 0 || c.WindowRequests < 0:
+		return nil, nil, fmt.Errorf("negative request cap in %+v", *c)
+	case c.MaxInputTokens < 0 || c.MaxOutputTokens < 0 || (c.MaxInputTokens == 0) != (c.MaxOutputTokens == 0):
+		return nil, nil, fmt.Errorf("token bounds %d and %d: both positive or both zero", c.MaxInputTokens, c.MaxOutputTokens)
+	}
+	global, err := decimal(c.LiabilityUSD)
+	if err != nil || global.Sign() == 0 {
+		return nil, nil, fmt.Errorf("liability_usd %q is not a positive decimal number", c.LiabilityUSD)
+	}
+	routes := map[string]*big.Rat{}
+	for name, usd := range c.RouteLiabilityUSD {
+		r, err := decimal(usd)
+		switch {
+		case name == "":
+			return nil, nil, errors.New("route_liability_usd: empty route name")
+		case err != nil || r.Sign() == 0:
+			return nil, nil, fmt.Errorf("route_liability_usd for %s: %q is not a positive decimal number", name, usd)
+		case r.Cmp(global) > 0:
+			return nil, nil, fmt.Errorf("route_liability_usd for %s: US$%s exceeds the global US$%s", name, usd, c.LiabilityUSD)
+		}
+		routes[name] = r
+	}
+	return global, routes, nil
+}
+
+// Position is the ledger's charge for the route, in all, and the
+// projected liability in all and, where the ledger caps it, for the
+// route.
 type Position struct {
-	EndpointRequests int    `json:"endpoint_requests"`
-	TotalRequests    int    `json:"total_requests"`
-	LiabilityUSD     string `json:"liability_usd"`
+	RouteRequests     int    `json:"route_requests"`
+	TotalRequests     int    `json:"total_requests"`
+	LiabilityUSD      string `json:"liability_usd"`
+	RouteLiabilityUSD string `json:"route_liability_usd,omitempty"`
+
+	liab, routeLiab *big.Rat
 }
 
 // Counts are requests sent, by traffic class.
@@ -139,7 +222,7 @@ type Counts struct {
 
 func (c Counts) total() int { return c.Probe + c.Development + c.Warmup + c.Measured }
 
-// Usage is one endpoint's charge. A replacement window's warm-up and
+// Usage is one route's charge. A replacement window's warm-up and
 // measured requests count as Replacement; its probe request as Probe.
 // Reserved is the reservation of admissions not yet settled.
 type Usage struct {
@@ -150,7 +233,7 @@ type Usage struct {
 	Replacement int
 	Reserved    int
 	// MaxPerRequestUSD is the highest per-request price recorded for the
-	// endpoint (nil = none).
+	// route (nil = none).
 	MaxPerRequestUSD *big.Rat
 }
 
@@ -161,77 +244,115 @@ func (u *Usage) Charged() int {
 
 // State is the ledger read and checked.
 type State struct {
-	Lines      int
-	Endpoints  map[string]*Usage
+	Lines int
+	// Caps are the caps the ledger was created with.
+	Caps       Caps
+	Routes     map[string]*Usage
 	HostingUSD *big.Rat
 	// Open maps each unsettled admit line to its admission.
 	Open map[int]Admission
-	// order lists endpoints in first-seen order.
+	// order lists routes in first-seen order.
 	order []string
+	// liabilityCap and routeCaps are Caps' liability caps.
+	liabilityCap *big.Rat
+	routeCaps    map[string]*big.Rat
 }
 
 // Admission is one admitted reservation.
 type Admission struct {
-	Seq      int
-	Endpoint string
-	Purpose  string
-	Reserve  int
+	Seq     int
+	Route   string
+	Purpose string
+	Reserve int
 }
 
-// Total is the charge across endpoints.
+// Total is the charge across routes.
 func (s *State) Total() int {
 	n := 0
-	for _, u := range s.Endpoints {
+	for _, u := range s.Routes {
 		n += u.Charged()
 	}
 	return n
 }
 
-// Liability is every endpoint's charge at its highest recorded
-// per-request price plus the hosting costs. An endpoint with a charge
-// and no price is an error.
+// Liability is every route's charge at its highest recorded per-request
+// price plus the hosting costs. A route with a charge and no price is an
+// error.
 func (s *State) Liability() (*big.Rat, error) {
 	return s.liability("", 0)
 }
 
-func (s *State) liability(endpoint string, extra int) (*big.Rat, error) {
+func (s *State) liability(route string, extra int) (*big.Rat, error) {
 	sum := new(big.Rat).Set(s.HostingUSD)
-	for _, e := range s.order {
-		u := s.Endpoints[e]
-		n := u.Charged()
-		if e == endpoint {
-			n += extra
+	for _, r := range s.order {
+		c, err := s.routeLiability(r, route, extra)
+		if err != nil {
+			return nil, err
 		}
-		if n == 0 {
-			continue
-		}
-		if u.MaxPerRequestUSD == nil {
-			return nil, fmt.Errorf("no price recorded for %s", e)
-		}
-		sum.Add(sum, new(big.Rat).Mul(u.MaxPerRequestUSD, new(big.Rat).SetInt64(int64(n))))
+		sum.Add(sum, c)
 	}
 	return sum, nil
 }
 
-func (s *State) usage(endpoint string) *Usage {
-	u, ok := s.Endpoints[endpoint]
+// routeLiability is route r's charge, with extra more requests when r is
+// route, at its highest recorded per-request price.
+func (s *State) routeLiability(r, route string, extra int) (*big.Rat, error) {
+	n := extra
+	if r != route {
+		n = 0
+	}
+	u := s.Routes[r]
+	if u != nil {
+		n += u.Charged()
+	}
+	if n == 0 {
+		return new(big.Rat), nil
+	}
+	if u == nil || u.MaxPerRequestUSD == nil {
+		return nil, fmt.Errorf("no price recorded for %s", r)
+	}
+	return new(big.Rat).Mul(u.MaxPerRequestUSD, new(big.Rat).SetInt64(int64(n))), nil
+}
+
+func (s *State) usage(route string) *Usage {
+	u, ok := s.Routes[route]
 	if !ok {
 		u = &Usage{}
-		s.Endpoints[endpoint] = u
-		s.order = append(s.order, endpoint)
+		s.Routes[route] = u
+		s.order = append(s.order, route)
 	}
 	return u
 }
 
+// CheckRelease reports whether the ledger caps cfg's route at cfg's
+// release.caps: the same global cap, and the route's cap under its
+// target name.
+func (s *State) CheckRelease(cfg *config.Config) error {
+	if cfg.Release == nil {
+		return errors.New("admission: not a release configuration")
+	}
+	name, rc := cfg.Target.Name, cfg.Release.Caps
+	g, err := decimal(rc.GlobalUSD)
+	if err != nil || g.Cmp(s.liabilityCap) != 0 {
+		return fmt.Errorf("admission: ledger global cap US$%s, %s's configuration %q", s.Caps.LiabilityUSD, name, rc.GlobalUSD)
+	}
+	have, ok := s.routeCaps[name]
+	r, err := decimal(rc.RouteUSD)
+	if !ok || err != nil || r.Cmp(have) != 0 {
+		return fmt.Errorf("admission: ledger cap for route %s %q, its configuration %q", name, s.Caps.RouteLiabilityUSD[name], rc.RouteUSD)
+	}
+	return nil
+}
+
 // Refusal is an admission the caps refused; the ledger records it.
 type Refusal struct {
-	Endpoint string
-	Purpose  string
-	Reason   string
+	Route   string
+	Purpose string
+	Reason  string
 }
 
 func (r *Refusal) Error() string {
-	return fmt.Sprintf("admission: %s for %s refused: %s", r.Purpose, r.Endpoint, r.Reason)
+	return fmt.Sprintf("admission: %s for %s refused: %s", r.Purpose, r.Route, r.Reason)
 }
 
 // Ledger is the ledger file at a path. Every operation reads and checks
@@ -241,14 +362,18 @@ type Ledger struct {
 	now  func() time.Time
 }
 
-// Create starts a new ledger at path; the file must not exist.
-func Create(path string) (*Ledger, error) {
+// Create starts a new ledger at path under caps; the file must not
+// exist.
+func Create(path string, caps Caps) (*Ledger, error) {
+	if _, _, err := checkCaps(&caps); err != nil {
+		return nil, fmt.Errorf("admission: create ledger: %w", err)
+	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("admission: create ledger: %w", err)
 	}
 	l := &Ledger{path: path, now: time.Now}
-	err = l.append(f, nil, &Entry{Kind: KindOpen, SchemaVersion: SchemaVersion, Caps: currentCaps()})
+	err = l.append(f, nil, &Entry{Kind: KindOpen, SchemaVersion: SchemaVersion, Caps: &caps})
 	if cerr := f.Close(); err == nil && cerr != nil {
 		err = fmt.Errorf("admission: create ledger: %w", cerr)
 	}
@@ -361,26 +486,35 @@ func decimalString(r *big.Rat) string {
 	return r.RatString()
 }
 
-// perRequest is the price of one request at the token bounds.
-func perRequest(in, out *big.Rat) *big.Rat {
-	r := new(big.Rat).Mul(in, big.NewRat(MaxInputTokens, 1))
-	r.Add(r, new(big.Rat).Mul(out, big.NewRat(MaxOutputTokens, 1)))
+// perRequest is the price of one request at inTok input and outTok
+// output tokens.
+func perRequest(in, out *big.Rat, inTok, outTok int) *big.Rat {
+	r := new(big.Rat).Mul(in, big.NewRat(int64(inTok), 1))
+	r.Add(r, new(big.Rat).Mul(out, big.NewRat(int64(outTok), 1)))
 	return r.Quo(r, big.NewRat(1_000_000, 1))
 }
 
-// Price is a provider's list price for an endpoint, as read.
+// Price is a provider's list price for a route, as read.
 type Price struct {
 	InputUSDPerMTok  string
 	OutputUSDPerMTok string
+	// InputTokens and OutputTokens are the per-request token bounds the
+	// price is taken at: a release route's input bound and ceiling. Zero
+	// takes the ledger's max_input_tokens and max_output_tokens.
+	InputTokens  int
+	OutputTokens int
 	// Source is the URL the prices were read from; Retrieved its date
 	// (2006-01-02).
 	Source    string
 	Retrieved string
 }
 
-func checkPrice(endpoint string, p Price) (*big.Rat, error) {
-	if endpoint == "" {
-		return nil, errors.New("empty endpoint")
+func checkPrice(route string, p Price) (*big.Rat, error) {
+	if route == "" {
+		return nil, errors.New("empty route")
+	}
+	if p.InputTokens < 1 || p.OutputTokens < 1 {
+		return nil, fmt.Errorf("token bounds %d and %d: both must be positive", p.InputTokens, p.OutputTokens)
 	}
 	in, err := decimal(p.InputUSDPerMTok)
 	if err != nil {
@@ -396,19 +530,22 @@ func checkPrice(endpoint string, p Price) (*big.Rat, error) {
 	if _, err := time.Parse("2006-01-02", p.Retrieved); err != nil || !dateRe.MatchString(p.Retrieved) {
 		return nil, fmt.Errorf("retrieved %q is not a 2006-01-02 date", p.Retrieved)
 	}
-	return perRequest(in, out), nil
+	return perRequest(in, out, p.InputTokens, p.OutputTokens), nil
 }
 
-// RecordPrice appends an endpoint's prices. Admission uses the highest
-// per-request price ever recorded for the endpoint.
-func (l *Ledger) RecordPrice(endpoint string, p Price) error {
-	_, err := l.update(func(*State) (*Entry, error) {
-		r, err := checkPrice(endpoint, p)
+// RecordPrice appends a route's prices. Admission uses the highest
+// per-request price ever recorded for the route.
+func (l *Ledger) RecordPrice(route string, p Price) error {
+	_, err := l.update(func(st *State) (*Entry, error) {
+		if p.InputTokens == 0 && p.OutputTokens == 0 {
+			p.InputTokens, p.OutputTokens = st.Caps.MaxInputTokens, st.Caps.MaxOutputTokens
+		}
+		r, err := checkPrice(route, p)
 		if err != nil {
 			return nil, fmt.Errorf("admission: price: %w", err)
 		}
-		return &Entry{Kind: KindPrice, Endpoint: endpoint, InputUSDPerMTok: p.InputUSDPerMTok, OutputUSDPerMTok: p.OutputUSDPerMTok,
-			PerRequestUSD: decimalString(r), Source: p.Source, Retrieved: p.Retrieved}, nil
+		return &Entry{Kind: KindPrice, Route: route, InputUSDPerMTok: p.InputUSDPerMTok, OutputUSDPerMTok: p.OutputUSDPerMTok,
+			InputTokens: p.InputTokens, OutputTokens: p.OutputTokens, PerRequestUSD: decimalString(r), Source: p.Source, Retrieved: p.Retrieved}, nil
 	})
 	return err
 }
@@ -429,53 +566,60 @@ func (l *Ledger) RecordHosting(usd, note string) error {
 	return err
 }
 
-// Admit reserves n requests to endpoint for purpose. A window or
-// replacement must reserve exactly WindowRequests. The admission is
-// refused, and the refusal recorded, when the endpoint's charge plus n
-// exceeds EndpointRequestCap, the total plus n exceeds TotalRequestCap, or
-// the projected liability exceeds LiabilityCapUSD.
-func (l *Ledger) Admit(endpoint, purpose string, n int) (Admission, error) {
+// Admit reserves n requests to route for purpose. A window or
+// replacement must reserve exactly the ledger's window_requests. The
+// admission is refused, and the refusal recorded, when the route's
+// charge plus n exceeds the route request cap, the total plus n exceeds
+// the total request cap, or the projected liability exceeds the route's
+// or the global liability cap.
+func (l *Ledger) Admit(route, purpose string, n int) (Admission, error) {
 	var a Admission
 	_, err := l.update(func(st *State) (*Entry, error) {
-		if endpoint == "" {
-			return nil, errors.New("admission: empty endpoint")
+		if route == "" {
+			return nil, errors.New("admission: empty route")
 		}
-		switch purpose {
+		switch w := st.Caps.WindowRequests; purpose {
 		case PurposeWindow, PurposeReplacement:
-			if n != WindowRequests {
-				return nil, fmt.Errorf("admission: a %s reserves %d requests, not %d", purpose, WindowRequests, n)
+			if w == 0 {
+				return nil, fmt.Errorf("admission: this ledger admits no %s", purpose)
 			}
-		case PurposeProbe, PurposeDevelopment:
+			if n != w {
+				return nil, fmt.Errorf("admission: a %s reserves %d requests, not %d", purpose, w, n)
+			}
+		case PurposeProbe, PurposeDevelopment, PurposeCell:
 			if n < 1 {
 				return nil, fmt.Errorf("admission: a %s reserves at least one request, not %d", purpose, n)
 			}
 		default:
 			return nil, fmt.Errorf("admission: unknown purpose %q", purpose)
 		}
-		before, err := st.position(endpoint, 0)
+		before, err := st.position(route, 0)
 		var after *Position
 		if err == nil {
-			after, err = st.position(endpoint, n)
+			after, err = st.position(route, n)
 		}
 		if err != nil {
-			return &Entry{Kind: KindRefused, Endpoint: endpoint, Purpose: purpose, Reserve: n, Reason: err.Error()},
-				&Refusal{endpoint, purpose, err.Error()}
+			return &Entry{Kind: KindRefused, Route: route, Purpose: purpose, Reserve: n, Reason: err.Error()},
+				&Refusal{route, purpose, err.Error()}
 		}
+		c := st.Caps
 		reason := ""
-		switch liab, _ := decimal(after.LiabilityUSD); {
-		case after.EndpointRequests > EndpointRequestCap:
-			reason = fmt.Sprintf("%d requests for the endpoint exceed the cap of %d", after.EndpointRequests, EndpointRequestCap)
-		case after.TotalRequests > TotalRequestCap:
-			reason = fmt.Sprintf("%d requests in total exceed the cap of %d", after.TotalRequests, TotalRequestCap)
-		case liab.Cmp(liabilityCap) > 0:
-			reason = fmt.Sprintf("projected liability US$%s exceeds US$%s", after.LiabilityUSD, LiabilityCapUSD)
+		switch {
+		case c.RouteRequests > 0 && after.RouteRequests > c.RouteRequests:
+			reason = fmt.Sprintf("%d requests for the route exceed the cap of %d", after.RouteRequests, c.RouteRequests)
+		case c.TotalRequests > 0 && after.TotalRequests > c.TotalRequests:
+			reason = fmt.Sprintf("%d requests in total exceed the cap of %d", after.TotalRequests, c.TotalRequests)
+		case st.routeCaps[route] != nil && after.routeLiab.Cmp(st.routeCaps[route]) > 0:
+			reason = fmt.Sprintf("projected liability for the route US$%s exceeds US$%s", after.RouteLiabilityUSD, c.RouteLiabilityUSD[route])
+		case after.liab.Cmp(st.liabilityCap) > 0:
+			reason = fmt.Sprintf("projected liability US$%s exceeds US$%s", after.LiabilityUSD, c.LiabilityUSD)
 		}
 		if reason != "" {
-			return &Entry{Kind: KindRefused, Endpoint: endpoint, Purpose: purpose, Reserve: n, Before: before, After: after, Reason: reason},
-				&Refusal{endpoint, purpose, reason}
+			return &Entry{Kind: KindRefused, Route: route, Purpose: purpose, Reserve: n, Before: before, After: after, Reason: reason},
+				&Refusal{route, purpose, reason}
 		}
-		a = Admission{Seq: st.Lines + 1, Endpoint: endpoint, Purpose: purpose, Reserve: n}
-		return &Entry{Kind: KindAdmit, Endpoint: endpoint, Purpose: purpose, Reserve: n, Before: before, After: after}, nil
+		a = Admission{Seq: st.Lines + 1, Route: route, Purpose: purpose, Reserve: n}
+		return &Entry{Kind: KindAdmit, Route: route, Purpose: purpose, Reserve: n, Before: before, After: after}, nil
 	})
 	if err != nil {
 		return Admission{}, err
@@ -483,32 +627,42 @@ func (l *Ledger) Admit(endpoint, purpose string, n int) (Admission, error) {
 	return a, nil
 }
 
-var liabilityCap, _ = new(big.Rat).SetString(LiabilityCapUSD)
-
-// position is the charge with extra more requests to endpoint. It fails
-// when the liability cannot be projected.
-func (st *State) position(endpoint string, extra int) (*Position, error) {
+// position is the charge with extra more requests to route. It fails
+// when the liability cannot be projected, or when the ledger caps routes
+// and not this one.
+func (st *State) position(route string, extra int) (*Position, error) {
+	if len(st.routeCaps) > 0 && st.routeCaps[route] == nil {
+		return nil, fmt.Errorf("no liability cap for route %s", route)
+	}
 	if extra > 0 {
-		if u, ok := st.Endpoints[endpoint]; !ok || u.MaxPerRequestUSD == nil {
-			return nil, fmt.Errorf("no price recorded for %s", endpoint)
+		if u, ok := st.Routes[route]; !ok || u.MaxPerRequestUSD == nil {
+			return nil, fmt.Errorf("no price recorded for %s", route)
 		}
 	}
-	liab, err := st.liability(endpoint, extra)
+	liab, err := st.liability(route, extra)
 	if err != nil {
 		return nil, err
 	}
 	n := extra
-	if u, ok := st.Endpoints[endpoint]; ok {
+	if u, ok := st.Routes[route]; ok {
 		n += u.Charged()
 	}
-	return &Position{EndpointRequests: n, TotalRequests: st.Total() + extra, LiabilityUSD: decimalString(liab)}, nil
+	p := &Position{RouteRequests: n, TotalRequests: st.Total() + extra, LiabilityUSD: decimalString(liab), liab: liab}
+	if len(st.routeCaps) > 0 {
+		if p.routeLiab, err = st.routeLiability(route, route, extra); err != nil {
+			return nil, err
+		}
+		p.RouteLiabilityUSD = decimalString(p.routeLiab)
+	}
+	return p, nil
 }
 
 // Settle records the requests a's traffic sent, replacing its
 // reservation. A probe admission sends probe requests only, a development
-// admission development requests only, a window or replacement probe,
-// warm-up and measured requests. Sent counts above the reservation are
-// recorded as an overrun and returned as an error after the write.
+// admission development requests only, a window, replacement or cell
+// probe, warm-up and measured requests. Sent counts above the
+// reservation are recorded as an overrun and returned as an error after
+// the write.
 func (l *Ledger) Settle(a Admission, sent Counts) error {
 	e, err := l.update(func(st *State) (*Entry, error) {
 		open, ok := st.Open[a.Seq]
@@ -522,7 +676,7 @@ func (l *Ledger) Settle(a Admission, sent Counts) error {
 			return nil, fmt.Errorf("admission: settle: %w", err)
 		}
 		s := sent
-		return &Entry{Kind: KindSettle, Endpoint: a.Endpoint, Admit: a.Seq, Sent: &s, Overrun: sent.total() > a.Reserve}, nil
+		return &Entry{Kind: KindSettle, Route: a.Route, Admit: a.Seq, Sent: &s, Overrun: sent.total() > a.Reserve}, nil
 	})
 	if err != nil {
 		return err
@@ -543,7 +697,7 @@ func checkCounts(purpose string, c Counts) error {
 		stray = c.Development+c.Warmup+c.Measured > 0
 	case PurposeDevelopment:
 		stray = c.Probe+c.Warmup+c.Measured > 0
-	case PurposeWindow, PurposeReplacement:
+	case PurposeWindow, PurposeReplacement, PurposeCell:
 		stray = c.Development > 0
 	default:
 		return fmt.Errorf("unknown purpose %q", purpose)
@@ -556,7 +710,7 @@ func checkCounts(purpose string, c Counts) error {
 
 // Parse checks a ledger's bytes and returns its state.
 func Parse(b []byte) (*State, error) {
-	st := &State{Endpoints: map[string]*Usage{}, HostingUSD: new(big.Rat), Open: map[int]Admission{}}
+	st := &State{Routes: map[string]*Usage{}, HostingUSD: new(big.Rat), Open: map[int]Admission{}}
 	if len(b) == 0 {
 		return nil, errors.New("admission: ledger is empty")
 	}
@@ -604,15 +758,21 @@ func (st *State) apply(e *Entry) error {
 		if e.SchemaVersion != SchemaVersion || e.Caps == nil {
 			return fmt.Errorf("schema_version %d, caps %v", e.SchemaVersion, e.Caps)
 		}
+		global, routes, err := checkCaps(e.Caps)
+		if err != nil {
+			return err
+		}
+		st.Caps, st.liabilityCap, st.routeCaps = *e.Caps, global, routes
 	case KindPrice:
-		r, err := checkPrice(e.Endpoint, Price{e.InputUSDPerMTok, e.OutputUSDPerMTok, e.Source, e.Retrieved})
+		r, err := checkPrice(e.Route, Price{InputUSDPerMTok: e.InputUSDPerMTok, OutputUSDPerMTok: e.OutputUSDPerMTok,
+			InputTokens: e.InputTokens, OutputTokens: e.OutputTokens, Source: e.Source, Retrieved: e.Retrieved})
 		if err != nil {
 			return err
 		}
 		if e.PerRequestUSD != decimalString(r) {
 			return fmt.Errorf("per_request_usd %q, prices give %s", e.PerRequestUSD, decimalString(r))
 		}
-		u := st.usage(e.Endpoint)
+		u := st.usage(e.Route)
 		if u.MaxPerRequestUSD == nil || r.Cmp(u.MaxPerRequestUSD) > 0 {
 			u.MaxPerRequestUSD = r
 		}
@@ -624,20 +784,20 @@ func (st *State) apply(e *Entry) error {
 		st.HostingUSD.Add(st.HostingUSD, r)
 	case KindAdmit:
 		switch {
-		case e.Endpoint == "" || e.Reserve < 1:
-			return fmt.Errorf("admit %q reserve %d", e.Endpoint, e.Reserve)
-		case (e.Purpose == PurposeWindow || e.Purpose == PurposeReplacement) && e.Reserve != WindowRequests:
+		case e.Route == "" || e.Reserve < 1:
+			return fmt.Errorf("admit %q reserve %d", e.Route, e.Reserve)
+		case (e.Purpose == PurposeWindow || e.Purpose == PurposeReplacement) && e.Reserve != st.Caps.WindowRequests:
 			return fmt.Errorf("%s reserve %d", e.Purpose, e.Reserve)
 		}
 		if err := checkCounts(e.Purpose, Counts{}); err != nil {
 			return err
 		}
-		st.usage(e.Endpoint).Reserved += e.Reserve
-		st.Open[e.Seq] = Admission{Seq: e.Seq, Endpoint: e.Endpoint, Purpose: e.Purpose, Reserve: e.Reserve}
+		st.usage(e.Route).Reserved += e.Reserve
+		st.Open[e.Seq] = Admission{Seq: e.Seq, Route: e.Route, Purpose: e.Purpose, Reserve: e.Reserve}
 	case KindRefused:
 	case KindSettle:
 		a, ok := st.Open[e.Admit]
-		if !ok || e.Sent == nil || a.Endpoint != e.Endpoint {
+		if !ok || e.Sent == nil || a.Route != e.Route {
 			return fmt.Errorf("settle of line %d does not match an unsettled admission", e.Admit)
 		}
 		if err := checkCounts(a.Purpose, *e.Sent); err != nil {
@@ -647,7 +807,7 @@ func (st *State) apply(e *Entry) error {
 			return fmt.Errorf("overrun %t for %d sent against %d", e.Overrun, e.Sent.total(), a.Reserve)
 		}
 		delete(st.Open, e.Admit)
-		u := st.usage(a.Endpoint)
+		u := st.usage(a.Route)
 		u.Reserved -= a.Reserve
 		c := e.Sent
 		u.Probe += c.Probe

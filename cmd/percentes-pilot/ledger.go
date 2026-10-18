@@ -32,7 +32,7 @@ func ledgerCmd(args []string) (int, error) {
 	}
 	switch args[0] {
 	case "create":
-		if _, err := admission.Create(*path); err != nil {
+		if _, err := admission.Create(*path, admission.PilotCaps()); err != nil {
 			return exitError, err
 		}
 		fmt.Printf("ledger created: %s\n", *path)
@@ -70,19 +70,19 @@ func showLedger(path string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	names := make([]string, 0, len(st.Endpoints))
-	for e := range st.Endpoints {
+	names := make([]string, 0, len(st.Routes))
+	for e := range st.Routes {
 		names = append(names, e)
 	}
 	sort.Strings(names)
 	for _, e := range names {
-		u := st.Endpoints[e]
+		u := st.Routes[e]
 		price := "none"
 		if u.MaxPerRequestUSD != nil {
 			price = u.MaxPerRequestUSD.FloatString(6)
 		}
 		fmt.Printf("%s: %d of %d (probe %d, development %d, warm-up %d, measured %d, replacement %d, reserved %d); per-request price US$%s\n",
-			e, u.Charged(), admission.EndpointRequestCap, u.Probe, u.Development, u.Warmup, u.Measured, u.Replacement, u.Reserved, price)
+			e, u.Charged(), st.Caps.RouteRequests, u.Probe, u.Development, u.Warmup, u.Measured, u.Replacement, u.Reserved, price)
 	}
 	liab := ""
 	if r, err := st.Liability(); err != nil {
@@ -90,6 +90,6 @@ func showLedger(path string) (int, error) {
 	} else {
 		liab = "US$" + r.FloatString(6)
 	}
-	fmt.Printf("total: %d of %d; liability %s of US$%s; %d lines\n", st.Total(), admission.TotalRequestCap, liab, admission.LiabilityCapUSD, st.Lines)
+	fmt.Printf("total: %d of %d; liability %s of US$%s; %d lines\n", st.Total(), st.Caps.TotalRequests, liab, st.Caps.LiabilityUSD, st.Lines)
 	return exitOK, nil
 }

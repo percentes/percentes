@@ -1,8 +1,8 @@
 # Percentes release reference configuration (SPEC-HOSTED amendment HA3).
 # One file is one route: the Groq route of openai/gpt-oss-120b, sent its
-# literal request body (Shape S) up the five-step ladder. The system text
-# and the limits block are placeholders showing the form; each route's
-# frozen configuration records its own. The file holds no keys:
+# literal request body (Shape S) up the five-step ladder. The system text,
+# the limits block and the caps are placeholders showing the form; each
+# route's frozen configuration records its own. The file holds no keys:
 # api_key_env names the environment variable that holds the key.
 schema_version: 1
 profile: release
@@ -44,6 +44,9 @@ release:
     input_bound_tokens: 1200
     ceiling_tokens: 512     # 512, or the fallback 1024
     deadline_s: 30
+  caps:                     # admission ledger caps, US$
+    route_usd: "10"
+    global_usd: "1300"      # the same in every route's file
 
 target:
   name: groq
@@ -73,6 +76,7 @@ target:
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
     - dimension: tokens_per_minute
       value: 250000
+      counting: input_and_output
       source: groq-console-limits.png
       retrieved: 2026-10-07
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"

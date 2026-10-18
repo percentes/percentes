@@ -74,7 +74,7 @@ func testConfig(t *testing.T, urls [2]string, rate, warmupS, measuredS float64) 
 func testLedger(t *testing.T, cfg *config.Config) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ledger.jsonl")
-	l, err := admission.Create(path)
+	l, err := admission.Create(path, admission.PilotCaps())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func ledgerUsage(t *testing.T, ledger, endpoint string) admission.Usage {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := st.Endpoints[endpoint]
+	u := st.Routes[endpoint]
 	if u == nil {
 		return admission.Usage{}
 	}

@@ -114,7 +114,7 @@ func TestSettlementIsEveryRequestSent(t *testing.T) {
 		t.Fatalf("sent %+v, want %+v", sent, want)
 	}
 	must(t, l.Settle(a, sent))
-	u := state(t, l).Endpoints[endpoint]
+	u := state(t, l).Routes[endpoint]
 	if got := int64(u.Charged()); got != served.Load() || got != int64(1+len(res.Requests)) {
 		t.Fatalf("ledger %d, server read %d, scheduled %d plus the probe", got, served.Load(), len(res.Requests))
 	}

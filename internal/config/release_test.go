@@ -32,6 +32,7 @@ func TestReleaseReferenceLoads(t *testing.T) {
 // Each mutation breaks one release pin; the error names the field.
 func TestReleaseRefusals(t *testing.T) {
 	limit := func(c *Config) *Limit { return &c.Target.Limits[0] }
+	tpm := func(c *Config) *Limit { return &c.Target.Limits[1] }
 	for _, tc := range []struct {
 		name   string
 		mutate func(*Config)
@@ -49,6 +50,12 @@ func TestReleaseRefusals(t *testing.T) {
 		{"ceiling 256", func(c *Config) { c.Release.Shape.CeilingTokens = 256 }, "release.shape.ceiling_tokens: must be one of [512 1024]"},
 		{"ceiling 2048", func(c *Config) { c.Release.Shape.CeilingTokens = 2048 }, "release.shape.ceiling_tokens"},
 		{"deadline", func(c *Config) { c.Release.Shape.DeadlineS = 60 }, "release.shape.deadline_s: pinned 30"},
+		{"no caps", func(c *Config) { c.Release.Caps = LedgerCaps{} }, "release.caps.route_usd: a positive decimal number of US dollars required"},
+		{"no global cap", func(c *Config) { c.Release.Caps.GlobalUSD = "" }, "release.caps.global_usd: a positive decimal number"},
+		{"zero route cap", func(c *Config) { c.Release.Caps.RouteUSD = "0" }, "release.caps.route_usd"},
+		{"cap in exponent form", func(c *Config) { c.Release.Caps.RouteUSD = "1e1" }, "release.caps.route_usd"},
+		{"cap with a currency sign", func(c *Config) { c.Release.Caps.GlobalUSD = "$1300" }, "release.caps.global_usd"},
+		{"route cap over global", func(c *Config) { c.Release.Caps.RouteUSD = "1300.01" }, "release.caps.route_usd: 1300.01 exceeds global_usd 1300"},
 		{"hard timeout 30", func(c *Config) { c.Client.HTTPTimeoutS = 30 }, "client.http_timeout_s: the hard timeout, pinned 90"},
 		{"retries", func(c *Config) { c.Client.Retries = 1 }, "client.retries"},
 		{"deterministic", func(c *Config) { c.Load.ArrivalProcess = "deterministic" }, "load.arrival_process: pinned \"poisson\""},
@@ -94,6 +101,12 @@ func TestReleaseRefusals(t *testing.T) {
 		{"limit value", func(c *Config) { limit(c).Value = 0 }, "target.limits[0].value: must be > 0"},
 		{"limit window off a window dimension", func(c *Config) { limit(c).WindowS = 600 }, "target.limits[0].window_s: set for \"spend_per_window_usd\" only"},
 		{"spend window without window", func(c *Config) { limit(c).Dimension = LimitSpendWindow }, "target.limits[0].window_s: must be > 0"},
+		{"token limit without counting", func(c *Config) { tpm(c).Counting = "" }, "target.limits[1].counting: must be one of"},
+		{"unknown counting", func(c *Config) { tpm(c).Counting = "actual" }, "target.limits[1].counting: must be one of"},
+		{"counting on a request limit", func(c *Config) { limit(c).Counting = CountingInput }, "target.limits[0].counting: set for \"tokens_per_minute\" and \"tokens_per_day\" only"},
+		{"burndown without a factor", func(c *Config) { tpm(c).Counting = CountingOutputBurndown }, "target.limits[1].output_burndown: must be >= 1"},
+		{"burndown below one", func(c *Config) { tpm(c).Counting, tpm(c).OutputBurndown = CountingOutputBurndown, 0.5 }, "target.limits[1].output_burndown: must be >= 1"},
+		{"factor without burndown", func(c *Config) { tpm(c).OutputBurndown = 15 }, "target.limits[1].output_burndown: set for counting \"output_burndown\" only"},
 		{"limit source", func(c *Config) { limit(c).Source = " " }, "target.limits[0].source: required"},
 		{"limit source scheme", func(c *Config) { limit(c).Source = "ftp://example.com/limits" }, "target.limits[0].source: \"ftp://example.com/limits\" is not an http"},
 		{"limit date", func(c *Config) { limit(c).Retrieved = "7 October 2026" }, "target.limits[0].retrieved: a date as YYYY-MM-DD"},
@@ -115,13 +128,15 @@ func TestReleaseRefusals(t *testing.T) {
 	}
 }
 
-// Operator-set limits, rolling spend windows, URL sources and recorded
-// permission load.
+// Operator-set limits, rolling spend windows, token countings, URL
+// sources and recorded permission load.
 func TestReleaseLimitAndNamingForms(t *testing.T) {
 	c := loadRef(t, releaseRef)
 	c.Target.Limits = append(c.Target.Limits,
 		Limit{Dimension: LimitSpendWindow, Value: 10, WindowS: 600, Source: "https://ai.google.dev/gemini-api/docs/rate-limits", Retrieved: "2026-10-07", SHA256: strings.Repeat("ab", 32)},
 		Limit{Dimension: LimitSpendMonth, Value: 10, OperatorSet: true, Source: "spend-limit.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
+		Limit{Dimension: LimitTPD, Value: 7e8, Counting: CountingOutputBurndown, OutputBurndown: 15, Source: "quotas.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
+		Limit{Dimension: LimitTPM, Value: 1e6, Counting: CountingInput, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
 	)
 	c.Target.Naming.PermissionRequired, c.Target.Naming.PermissionRecord = true, "manifest: written permission"
 	if err := c.Validate(); err != nil {
@@ -207,7 +222,7 @@ func TestReleaseUnknownFieldRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, from := range []string{"    drain_s: 90", "    deadline_s: 30", "      retrieved: 2026-10-07"} {
+	for _, from := range []string{"    drain_s: 90", "    deadline_s: 30", "    route_usd: \"10\"", "      retrieved: 2026-10-07"} {
 		bad := strings.Replace(string(raw), from, from+"\n"+strings.Repeat(" ", len(from)-len(strings.TrimLeft(from, " ")))+"drain_ss: 90", 1)
 		if bad == string(raw) {
 			t.Fatalf("%q not in the reference", from)

@@ -4,18 +4,29 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
 )
 
-// Release is the release profile's ladder and request shape (SPEC-HOSTED
-// HA3 points 5 and 7). One configuration file holds one route: its
-// target is the top-level target.
+// Release is the release profile's ladder, request shape (SPEC-HOSTED
+// HA3 points 5 and 7) and ledger caps. One configuration file holds one
+// route: its target is the top-level target.
 type Release struct {
-	Ladder Ladder `yaml:"ladder" json:"ladder"`
-	Shape  Shape  `yaml:"shape" json:"shape"`
+	Ladder Ladder     `yaml:"ladder" json:"ladder"`
+	Shape  Shape      `yaml:"shape" json:"shape"`
+	Caps   LedgerCaps `yaml:"caps" json:"caps"`
+}
+
+// LedgerCaps are the release ledger's liability caps in US dollars, as
+// decimal numbers: this route's, and the global cap over every route
+// that shares the ledger, which each route's file repeats.
+type LedgerCaps struct {
+	RouteUSD  string `yaml:"route_usd" json:"route_usd"`
+	GlobalUSD string `yaml:"global_usd" json:"global_usd"`
 }
 
 // Ladder is the offered-load ladder: open-loop Poisson arrivals at each
@@ -59,6 +70,12 @@ type Limit struct {
 	// every other dimension.
 	WindowS     float64 `yaml:"window_s,omitempty" json:"window_s,omitempty"`
 	OperatorSet bool    `yaml:"operator_set,omitempty" json:"operator_set,omitempty"`
+	// Counting is how the provider counts a request against a
+	// tokens_per_minute or tokens_per_day limit, one of the Counting*
+	// values, and absent for every other dimension. OutputBurndown is
+	// the factor output tokens count at under CountingOutputBurndown.
+	Counting       string  `yaml:"counting,omitempty" json:"counting,omitempty"`
+	OutputBurndown float64 `yaml:"output_burndown,omitempty" json:"output_burndown,omitempty"`
 	// Source is the page's URL or the retained screenshot's file name.
 	Source string `yaml:"source" json:"source"`
 	// Retrieved is the retrieval date, YYYY-MM-DD in UTC.
@@ -86,6 +103,21 @@ var limitDimensions = []string{
 	LimitRPM, LimitRPS, LimitTPM, LimitInputTPM, LimitOutputTPM, LimitConcurrency,
 	LimitRPD, LimitTPD, LimitSpendWindow, LimitSpendMonth, LimitReloadThreshold,
 }
+
+// Values of a limit's counting. The ceiling rule takes a request at the
+// shape's input bound and output ceiling (SPEC-HOSTED HA3 point 6).
+const (
+	// CountingInputOutput counts input plus output tokens, or input plus
+	// max_tokens where the provider estimates at admission.
+	CountingInputOutput = "input_and_output"
+	// CountingInput counts input tokens only.
+	CountingInput = "input"
+	// CountingOutputBurndown counts input plus output tokens times
+	// output_burndown.
+	CountingOutputBurndown = "output_burndown"
+)
+
+var countings = []string{CountingInputOutput, CountingInput, CountingOutputBurndown}
 
 // Naming is the route's provider-naming record.
 type Naming struct {
@@ -195,8 +227,36 @@ func (c *Config) validateRelease(v *validator) {
 		v.errf("release.shape.ceiling_tokens: must be one of %v (SPEC-HOSTED HA3 point 7), got %d", PinnedReleaseCeilings, r.Shape.CeilingTokens)
 	}
 	pin("release.shape.deadline_s", float64(r.Shape.DeadlineS), PinnedReleaseDeadlineS)
+	validateLedgerCaps(v, "release.caps", r.Caps)
 
 	c.validateReleaseTarget(v, &c.Target)
+}
+
+// validateLedgerCaps requires both caps as positive decimal numbers, the
+// route's within the global cap.
+func validateLedgerCaps(v *validator, field string, c LedgerCaps) {
+	route, rok := usdDecimal(c.RouteUSD)
+	global, gok := usdDecimal(c.GlobalUSD)
+	if !rok {
+		v.errf("%s.route_usd: a positive decimal number of US dollars required, got %q", field, c.RouteUSD)
+	}
+	if !gok {
+		v.errf("%s.global_usd: a positive decimal number of US dollars required, got %q", field, c.GlobalUSD)
+	}
+	if rok && gok && route.Cmp(global) > 0 {
+		v.errf("%s.route_usd: %s exceeds global_usd %s", field, c.RouteUSD, c.GlobalUSD)
+	}
+}
+
+var usdDecimalRe = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]+)?$`)
+
+// usdDecimal parses a positive decimal number such as "400" or "0.5".
+func usdDecimal(s string) (*big.Rat, bool) {
+	if !usdDecimalRe.MatchString(s) {
+		return nil, false
+	}
+	r, ok := new(big.Rat).SetString(s)
+	return r, ok && r.Sign() > 0
 }
 
 func (c *Config) validateReleaseTarget(v *validator, t *Target) {
@@ -307,6 +367,19 @@ func validateLimit(v *validator, field string, l *Limit) {
 		v.errf("%s.window_s: must be > 0 for %q, got %g", field, LimitSpendWindow, l.WindowS)
 	case l.Dimension != LimitSpendWindow && l.WindowS != 0:
 		v.errf("%s.window_s: set for %q only", field, LimitSpendWindow)
+	}
+	tokens := l.Dimension == LimitTPM || l.Dimension == LimitTPD
+	switch {
+	case tokens && !slices.Contains(countings, l.Counting):
+		v.errf("%s.counting: must be one of %q for %q, got %q", field, countings, l.Dimension, l.Counting)
+	case !tokens && l.Counting != "":
+		v.errf("%s.counting: set for %q and %q only", field, LimitTPM, LimitTPD)
+	}
+	switch {
+	case l.Counting == CountingOutputBurndown && l.OutputBurndown < 1:
+		v.errf("%s.output_burndown: must be >= 1 for counting %q, got %g", field, CountingOutputBurndown, l.OutputBurndown)
+	case l.Counting != CountingOutputBurndown && l.OutputBurndown != 0:
+		v.errf("%s.output_burndown: set for counting %q only", field, CountingOutputBurndown)
 	}
 	switch src := strings.TrimSpace(l.Source); {
 	case src == "":

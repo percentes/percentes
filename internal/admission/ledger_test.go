@@ -30,7 +30,7 @@ var fortyPerRequest = Price{InputUSDPerMTok: "0", OutputUSDPerMTok: "9765.625", 
 func newLedger(t *testing.T) (*Ledger, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ledger.jsonl")
-	l, err := Create(path)
+	l, err := Create(path, PilotCaps())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,22 +53,22 @@ func must(t *testing.T, err error) {
 	}
 }
 
-func admit(t *testing.T, l *Ledger, endpoint, purpose string, n int) Admission {
+func admit(t *testing.T, l *Ledger, route, purpose string, n int) Admission {
 	t.Helper()
-	a, err := l.Admit(endpoint, purpose, n)
+	a, err := l.Admit(route, purpose, n)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return a
 }
 
-func refused(t *testing.T, l *Ledger, endpoint, purpose string, n int, reason string) {
+func refused(t *testing.T, l *Ledger, route, purpose string, n int, reason string) {
 	t.Helper()
 	before := state(t, l)
-	_, err := l.Admit(endpoint, purpose, n)
+	_, err := l.Admit(route, purpose, n)
 	var r *Refusal
 	if !errors.As(err, &r) || !strings.Contains(r.Reason, reason) {
-		t.Fatalf("Admit(%s, %s, %d) = %v, want a refusal containing %q", endpoint, purpose, n, err, reason)
+		t.Fatalf("Admit(%s, %s, %d) = %v, want a refusal containing %q", route, purpose, n, err, reason)
 	}
 	after := state(t, l)
 	if after.Lines != before.Lines+1 || after.Total() != before.Total() {
@@ -91,7 +91,7 @@ func TestWindowRequestsIsTheScheduleAndProbe(t *testing.T) {
 // the caps in force.
 func TestCreateAndOpen(t *testing.T) {
 	_, path := newLedger(t)
-	if _, err := Create(path); err == nil {
+	if _, err := Create(path, PilotCaps()); err == nil {
 		t.Error("Create over an existing ledger succeeded")
 	}
 	if _, err := Open(filepath.Join(t.TempDir(), "none.jsonl")); err == nil {
@@ -106,7 +106,7 @@ func TestCreateAndOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)
-	if !bytes.Contains(b, []byte(`"caps":{"endpoint_requests":1024,"total_requests":2048,"liability_usd":"40","window_requests":127,"max_input_tokens":2000,"max_output_tokens":4096}`)) {
+	if !bytes.Contains(b, []byte(`"caps":{"route_requests":1024,"total_requests":2048,"liability_usd":"40","window_requests":127,"max_input_tokens":2000,"max_output_tokens":4096}`)) {
 		t.Errorf("open line %s", b)
 	}
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
@@ -117,28 +117,28 @@ func TestCreateAndOpen(t *testing.T) {
 	}
 }
 
-// The ledger plus the reservation may reach 1,024 for an endpoint and no
+// The ledger plus the reservation may reach 1,024 for a route and no
 // further.
-func TestEndpointCap(t *testing.T) {
+func TestRouteRequestCap(t *testing.T) {
 	l, _ := newLedger(t)
 	must(t, l.RecordPrice(groq, groqPrice))
 	must(t, l.RecordPrice(baseten, groqPrice))
-	admit(t, l, groq, PurposeDevelopment, EndpointRequestCap-WindowRequests)
+	admit(t, l, groq, PurposeDevelopment, PilotRouteRequestCap-WindowRequests)
 	admit(t, l, groq, PurposeWindow, WindowRequests)
-	refused(t, l, groq, PurposeProbe, 1, "1025 requests for the endpoint exceed the cap of 1024")
-	refused(t, l, groq, PurposeReplacement, WindowRequests, "1151 requests for the endpoint exceed the cap of 1024")
+	refused(t, l, groq, PurposeProbe, 1, "1025 requests for the route exceed the cap of 1024")
+	refused(t, l, groq, PurposeReplacement, WindowRequests, "1151 requests for the route exceed the cap of 1024")
 
-	admit(t, l, baseten, PurposeDevelopment, EndpointRequestCap-WindowRequests+1)
-	refused(t, l, baseten, PurposeWindow, WindowRequests, "1025 requests for the endpoint exceed the cap of 1024")
-	refused(t, l, baseten, PurposeReplacement, WindowRequests, "1025 requests for the endpoint exceed the cap of 1024")
+	admit(t, l, baseten, PurposeDevelopment, PilotRouteRequestCap-WindowRequests+1)
+	refused(t, l, baseten, PurposeWindow, WindowRequests, "1025 requests for the route exceed the cap of 1024")
+	refused(t, l, baseten, PurposeReplacement, WindowRequests, "1025 requests for the route exceed the cap of 1024")
 	admit(t, l, baseten, PurposeProbe, WindowRequests-1)
 	st := state(t, l)
-	if st.Endpoints[groq].Charged() != EndpointRequestCap || st.Endpoints[baseten].Charged() != EndpointRequestCap {
-		t.Errorf("charged %d and %d", st.Endpoints[groq].Charged(), st.Endpoints[baseten].Charged())
+	if st.Routes[groq].Charged() != PilotRouteRequestCap || st.Routes[baseten].Charged() != PilotRouteRequestCap {
+		t.Errorf("charged %d and %d", st.Routes[groq].Charged(), st.Routes[baseten].Charged())
 	}
 }
 
-// The total across endpoints may reach 2,048 and no further.
+// The total across routes may reach 2,048 and no further.
 func TestTotalCap(t *testing.T) {
 	l, _ := newLedger(t)
 	for _, e := range []string{groq, baseten, third} {
@@ -149,7 +149,7 @@ func TestTotalCap(t *testing.T) {
 	refused(t, l, third, PurposeWindow, WindowRequests, "2151 requests in total exceed the cap of 2048")
 	admit(t, l, third, PurposeProbe, 24)
 	refused(t, l, third, PurposeProbe, 1, "2049 requests in total exceed the cap of 2048")
-	if st := state(t, l); st.Total() != TotalRequestCap {
+	if st := state(t, l); st.Total() != PilotTotalRequestCap {
 		t.Errorf("total %d", st.Total())
 	}
 }
@@ -165,12 +165,12 @@ func TestReservationHoldsUntilSettled(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := state(t, l2)
-	if u := st.Endpoints[groq]; u.Reserved != WindowRequests || u.Charged() != WindowRequests || len(st.Open) != 1 {
+	if u := st.Routes[groq]; u.Reserved != WindowRequests || u.Charged() != WindowRequests || len(st.Open) != 1 {
 		t.Fatalf("after admit: %+v open %v", u, st.Open)
 	}
 	must(t, l2.Settle(a, Counts{Probe: 1, Warmup: 6, Measured: 50}))
 	st = state(t, l)
-	u := st.Endpoints[groq]
+	u := st.Routes[groq]
 	if u.Reserved != 0 || u.Probe != 1 || u.Warmup != 6 || u.Measured != 50 || u.Charged() != 57 || len(st.Open) != 0 {
 		t.Fatalf("after settle: %+v open %v", u, st.Open)
 	}
@@ -184,8 +184,8 @@ func TestLiabilityCap(t *testing.T) {
 	must(t, l.RecordPrice(groq, groqPrice))
 	must(t, l.RecordPrice(groq, fortyPerRequest))
 	must(t, l.RecordPrice(groq, groqPrice))
-	if st := state(t, l); st.Endpoints[groq].MaxPerRequestUSD.Cmp(big.NewRat(40, 1)) != 0 {
-		t.Fatalf("max price %v, want the highest recorded", st.Endpoints[groq].MaxPerRequestUSD)
+	if st := state(t, l); st.Routes[groq].MaxPerRequestUSD.Cmp(big.NewRat(40, 1)) != 0 {
+		t.Fatalf("max price %v, want the highest recorded", st.Routes[groq].MaxPerRequestUSD)
 	}
 	a := admit(t, l, groq, PurposeProbe, 1)
 	refused(t, l, groq, PurposeProbe, 1, "projected liability US$80 exceeds US$40")
@@ -223,8 +223,8 @@ func TestSettle(t *testing.T) {
 		"warm-up on a probe":      l.Settle(p, Counts{Warmup: 1}),
 		"probe on development":    l.Settle(d, Counts{Probe: 1}),
 		"negative":                l.Settle(w, Counts{Measured: -1}),
-		"not an admit line":       l.Settle(Admission{Seq: 2, Endpoint: groq, Purpose: PurposeProbe, Reserve: 1}, Counts{}),
-		"altered admission":       l.Settle(Admission{Seq: w.Seq, Endpoint: groq, Purpose: PurposeWindow, Reserve: 200}, Counts{}),
+		"not an admit line":       l.Settle(Admission{Seq: 2, Route: groq, Purpose: PurposeProbe, Reserve: 1}, Counts{}),
+		"altered admission":       l.Settle(Admission{Seq: w.Seq, Route: groq, Purpose: PurposeWindow, Reserve: 200}, Counts{}),
 	} {
 		if err == nil {
 			t.Errorf("%s: settled", name)
@@ -243,7 +243,7 @@ func TestSettle(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "128 requests sent against a reservation of 127") {
 		t.Fatalf("overrun: %v", err)
 	}
-	u := state(t, l).Endpoints[groq]
+	u := state(t, l).Routes[groq]
 	want := Usage{Probe: 5, Development: 24, Warmup: 6, Measured: 120, Replacement: 126, MaxPerRequestUSD: u.MaxPerRequestUSD}
 	if *u != want || u.Charged() != 281 {
 		t.Fatalf("usage %+v, want %+v", *u, want)
@@ -255,23 +255,23 @@ func TestAdmitArguments(t *testing.T) {
 	l, _ := newLedger(t)
 	must(t, l.RecordPrice(groq, groqPrice))
 	for _, c := range []struct {
-		endpoint, purpose string
-		n                 int
+		route, purpose string
+		n              int
 	}{
 		{groq, PurposeWindow, 126}, {groq, PurposeWindow, 128}, {groq, PurposeReplacement, 1},
 		{groq, PurposeProbe, 0}, {groq, PurposeDevelopment, -1}, {groq, "measured", 1}, {"", PurposeProbe, 1},
 	} {
-		if _, err := l.Admit(c.endpoint, c.purpose, c.n); err == nil {
-			t.Errorf("Admit(%q, %q, %d) accepted", c.endpoint, c.purpose, c.n)
+		if _, err := l.Admit(c.route, c.purpose, c.n); err == nil {
+			t.Errorf("Admit(%q, %q, %d) accepted", c.route, c.purpose, c.n)
 		}
 	}
 	if st := state(t, l); st.Lines != 2 {
 		t.Errorf("%d lines", st.Lines)
 	}
 	for _, p := range []Price{
-		{"0.15", "", groqPrice.Source, groqPrice.Retrieved}, {"-1", "0.6", groqPrice.Source, groqPrice.Retrieved},
-		{"1e3", "0.6", groqPrice.Source, groqPrice.Retrieved}, {"0.15", "0.6", "console.groq.com", groqPrice.Retrieved},
-		{"0.15", "0.6", groqPrice.Source, "6 Oct 2026"},
+		{"0.15", "", 0, 0, groqPrice.Source, groqPrice.Retrieved}, {"-1", "0.6", 0, 0, groqPrice.Source, groqPrice.Retrieved},
+		{"1e3", "0.6", 0, 0, groqPrice.Source, groqPrice.Retrieved}, {"0.15", "0.6", 0, 0, "console.groq.com", groqPrice.Retrieved},
+		{"0.15", "0.6", 0, 0, groqPrice.Source, "6 Oct 2026"}, {"0.15", "0.6", 1200, 0, groqPrice.Source, groqPrice.Retrieved},
 	} {
 		if err := l.RecordPrice(groq, p); err == nil {
 			t.Errorf("price %+v accepted", p)
@@ -382,7 +382,7 @@ func TestConcurrentAdmissions(t *testing.T) {
 	}
 	wg.Wait()
 	st := state(t, l)
-	if admitted != EndpointRequestCap/WindowRequests || refusals != 20-admitted || st.Total() != admitted*WindowRequests || st.Lines != 2+20 {
+	if admitted != PilotRouteRequestCap/WindowRequests || refusals != 20-admitted || st.Total() != admitted*WindowRequests || st.Lines != 2+20 {
 		t.Fatalf("admitted %d, refused %d, total %d, lines %d", admitted, refusals, st.Total(), st.Lines)
 	}
 }
@@ -392,10 +392,10 @@ func TestConcurrentAdmissions(t *testing.T) {
 func TestCapsHoldUnderRandomTraffic(t *testing.T) {
 	l, _ := newLedger(t)
 	rng := rand.New(rand.NewSource(20261006))
-	endpoints := []string{groq, baseten, third}
+	routes := []string{groq, baseten, third}
 	// At US$0.0199608 a request the liability cap binds at 2,003
 	// requests, under the total cap.
-	for _, e := range endpoints {
+	for _, e := range routes {
 		must(t, l.RecordPrice(e, Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "4.8", Source: groqPrice.Source, Retrieved: groqPrice.Retrieved}))
 	}
 	purposes := []string{PurposeProbe, PurposeDevelopment, PurposeWindow, PurposeReplacement}
@@ -426,14 +426,14 @@ func TestCapsHoldUnderRandomTraffic(t *testing.T) {
 			if purpose == PurposeProbe || purpose == PurposeDevelopment {
 				n = 1 + rng.Intn(48)
 			}
-			a, err := l.Admit(endpoints[rng.Intn(len(endpoints))], purpose, n)
+			a, err := l.Admit(routes[rng.Intn(len(routes))], purpose, n)
 			var r *Refusal
 			switch {
 			case err == nil:
 				open = append(open, a)
 				admits++
 			case errors.As(err, &r):
-				for _, k := range []string{"for the endpoint", "in total", "liability"} {
+				for _, k := range []string{"for the route", "in total", "liability"} {
 					if strings.Contains(r.Reason, k) {
 						refusals[k]++
 					}
@@ -443,13 +443,13 @@ func TestCapsHoldUnderRandomTraffic(t *testing.T) {
 			}
 		}
 		st := state(t, l)
-		for e, u := range st.Endpoints {
-			if u.Charged() > EndpointRequestCap {
+		for e, u := range st.Routes {
+			if u.Charged() > PilotRouteRequestCap {
 				t.Fatalf("step %d: %s charged %d", i, e, u.Charged())
 			}
 		}
 		liab, err := st.Liability()
-		if err != nil || st.Total() > TotalRequestCap || liab.Cmp(cap40) > 0 {
+		if err != nil || st.Total() > PilotTotalRequestCap || liab.Cmp(cap40) > 0 {
 			t.Fatalf("step %d: total %d liability %v %v", i, st.Total(), liab, err)
 		}
 	}
