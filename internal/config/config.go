@@ -448,6 +448,9 @@ type Target struct {
 	// StatusDocs records the provider's documented meaning of HTTP
 	// statuses, printed beside each status line of the per-step tables.
 	StatusDocs []StatusDoc `yaml:"status_docs,omitempty" json:"status_docs,omitempty"`
+	// ErrorDocs records the provider's documented meaning of in-band
+	// error types, printed beside each in-band error line.
+	ErrorDocs []ErrorDoc `yaml:"error_docs,omitempty" json:"error_docs,omitempty"`
 }
 
 // ResponseShape names where a target's stream chunks carry each field.

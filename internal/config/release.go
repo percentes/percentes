@@ -145,6 +145,19 @@ type StatusDoc struct {
 	Retrieved string `yaml:"retrieved" json:"retrieved"`
 }
 
+// ErrorDoc is the provider's documented meaning of one in-band error
+// type: the string at the error object's "type" key. Status is the HTTP
+// status the provider documents for the same condition, 0 where it
+// documents none.
+type ErrorDoc struct {
+	Type    string `yaml:"type" json:"type"`
+	Status  int    `yaml:"status,omitempty" json:"status,omitempty"`
+	Meaning string `yaml:"meaning" json:"meaning"`
+	// Source and Retrieved are as a StatusDoc's.
+	Source    string `yaml:"source" json:"source"`
+	Retrieved string `yaml:"retrieved" json:"retrieved"`
+}
+
 // releaseUnsentKeys may not appear at the top level of a release body:
 // sampling controls stay at each provider's default, and no output-length
 // forcing is sent (SPEC-HOSTED HA3 points 3 and 7).
@@ -334,6 +347,10 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	for i := range t.StatusDocs {
 		validateStatusDoc(v, fmt.Sprintf("%s.status_docs[%d]", field, i), &t.StatusDocs[i], seen)
 	}
+	types := map[string]bool{}
+	for i := range t.ErrorDocs {
+		validateErrorDoc(v, fmt.Sprintf("%s.error_docs[%d]", field, i), &t.ErrorDocs[i], types)
+	}
 }
 
 // checkReleaseBody reports why a literal body breaks the release shape:
@@ -426,17 +443,38 @@ func validateStatusDoc(v *validator, field string, d *StatusDoc, seen map[int]bo
 		v.errf("%s.status: %d documented twice", field, d.Status)
 	}
 	seen[d.Status] = true
-	if strings.TrimSpace(d.Meaning) == "" {
+	validateDoc(v, field, d.Meaning, d.Source, d.Retrieved)
+}
+
+// validateErrorDoc requires a type that no earlier entry documents, a
+// status that is 0 or as a StatusDoc's, a meaning, a source and a
+// retrieval date.
+func validateErrorDoc(v *validator, field string, d *ErrorDoc, seen map[string]bool) {
+	switch {
+	case d.Type == "" || strings.TrimSpace(d.Type) != d.Type:
+		v.errf("%s.type: an error type with no surrounding space required, got %q", field, d.Type)
+	case seen[d.Type]:
+		v.errf("%s.type: %q documented twice", field, d.Type)
+	}
+	seen[d.Type] = true
+	if d.Status != 0 && (d.Status < 100 || d.Status > 599 || d.Status == 200) {
+		v.errf("%s.status: 0 or an HTTP status from 100 to 599 other than 200 required, got %d", field, d.Status)
+	}
+	validateDoc(v, field, d.Meaning, d.Source, d.Retrieved)
+}
+
+func validateDoc(v *validator, field, meaning, source, retrieved string) {
+	if strings.TrimSpace(meaning) == "" {
 		v.errf("%s.meaning: required", field)
 	}
-	switch src := strings.TrimSpace(d.Source); {
+	switch src := strings.TrimSpace(source); {
 	case src == "":
 		v.errf("%s.source: required (the page's URL or the retained screenshot's file name)", field)
 	case strings.Contains(src, "://") && !parsesAsURL(src):
-		v.errf("%s.source: %q is not an http or https URL with a host", field, d.Source)
+		v.errf("%s.source: %q is not an http or https URL with a host", field, source)
 	}
-	if _, err := time.Parse(time.DateOnly, d.Retrieved); err != nil {
-		v.errf("%s.retrieved: a date as YYYY-MM-DD required, got %q", field, d.Retrieved)
+	if _, err := time.Parse(time.DateOnly, retrieved); err != nil {
+		v.errf("%s.retrieved: a date as YYYY-MM-DD required, got %q", field, retrieved)
 	}
 }
 
@@ -465,8 +503,8 @@ func validateNaming(v *validator, field string, n *Naming) {
 // refuseReleaseFields refuses the release-only target fields on a target
 // outside the release profile.
 func refuseReleaseFields(v *validator, field string, t *Target) {
-	if t.Adapter != "" || len(t.Limits) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 {
-		v.errf("%s: adapter, limits, naming and status_docs are set on the release profile's target only", field)
+	if t.Adapter != "" || len(t.Limits) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 {
+		v.errf("%s: adapter, limits, naming, status_docs and error_docs are set on the release profile's target only", field)
 	}
 }
 

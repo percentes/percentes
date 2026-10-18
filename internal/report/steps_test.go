@@ -113,7 +113,8 @@ type outcome struct {
 
 // cellOf builds a cell's records: a warm-up record that fits no line,
 // the outcomes in order, and every step listed in unsent as unsent
-// requests (count n).
+// requests (count n). A completion or error ends 1 ns after intended
+// dispatch.
 func cellOf(label string, outs ...outcome) CellRecords {
 	c := CellRecords{Cell: label}
 	add := func(r evidence.Record) {
@@ -126,15 +127,15 @@ func cellOf(label string, outs ...outcome) CellRecords {
 			r := evidence.Record{Step: o.step, DispatchNs: 1}
 			switch o.line {
 			case LineInTime:
-				r.Outcome, r.InTime = loadgen.OutcomeCompleted, true
+				r.Outcome, r.InTime, r.FirstTokNs, r.DoneNs = loadgen.OutcomeCompleted, true, 1, 1
 			case LineLate:
-				r.Outcome, r.Late = loadgen.OutcomeCompleted, true
+				r.Outcome, r.Late, r.FirstTokNs, r.DoneNs = loadgen.OutcomeCompleted, true, 1, 1
 			case LineCensored:
 				r.Outcome = loadgen.OutcomeCensored
 			case LineUnsent:
 				r.DispatchNs = 0
 			default:
-				r.Outcome, r.ErrClass, r.Status = loadgen.OutcomeErrored, o.line, o.status
+				r.Outcome, r.ErrClass, r.Status, r.DoneNs = loadgen.OutcomeErrored, o.line, o.status, 1
 				if o.line == loadgen.ErrStatus429 {
 					r.Status = 429
 				}
@@ -191,16 +192,16 @@ func TestStepTablesCell(t *testing.T) {
 	}
 	var names []string
 	for _, l := range s.Lines {
-		names = append(names, fmt.Sprint(l.Name, l.Status))
+		names = append(names, fmt.Sprint(l.Name, l.Status, l.InBand))
 	}
 	want := []string{"completed_in_time0", "completed_late0", "status_429429", "status_other0", "status_other503", "status_other529",
-		"connect0", "reset0", "empty_stream0", "malformed_stream0", "censored0", "unsent0"}
+		"connect0", "reset0", "empty_stream0", "malformed_stream0", "malformed_stream0(none)", "censored0", "unsent0"}
 	if !slices.Equal(names, want) {
 		t.Errorf("lines %q, want %q", names, want)
 	}
 	sum := 0
 	for _, l := range s.Lines {
-		if l.Status == 0 || l.Name == loadgen.ErrStatus429 {
+		if l.Status == 0 && l.InBand == "" || l.Name == loadgen.ErrStatus429 {
 			sum += l.Count
 		}
 		lo, hi := wilson(float64(l.Count)/114, 114)

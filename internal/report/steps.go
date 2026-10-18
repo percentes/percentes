@@ -100,11 +100,16 @@ func newRate(k, n int) Rate {
 
 // Line is one outcome line of a cell's step. Status is a status line's
 // HTTP status and Doc the provider's documented meaning of it, nil where
-// target.status_docs records none.
+// target.status_docs records none. InBand is a malformed_stream
+// sub-line's in-band error label (inBandLabel) and ErrorDoc the
+// provider's documented meaning of it, nil where target.error_docs
+// records none.
 type Line struct {
-	Name   string            `json:"name"`
-	Status int               `json:"status,omitempty"`
-	Doc    *config.StatusDoc `json:"documented,omitempty"`
+	Name     string            `json:"name"`
+	Status   int               `json:"status,omitempty"`
+	Doc      *config.StatusDoc `json:"documented,omitempty"`
+	InBand   string            `json:"in_band_error,omitempty"`
+	ErrorDoc *config.ErrorDoc  `json:"documented_error,omitempty"`
 	Rate
 }
 
@@ -120,14 +125,15 @@ type G6 struct {
 }
 
 // CellStep is one step of a cell. An attempted step with scheduled
-// requests carries its lines and hosted-G6.
+// requests carries its lines, hosted-G6 and signals.
 type CellStep struct {
-	Step      int     `json:"step"`
-	RPS       float64 `json:"rps"`
-	State     string  `json:"state"`
-	Scheduled int     `json:"scheduled"`
-	Lines     []Line  `json:"lines,omitempty"`
-	G6        *G6     `json:"hosted_g6,omitempty"`
+	Step      int      `json:"step"`
+	RPS       float64  `json:"rps"`
+	State     string   `json:"state"`
+	Scheduled int      `json:"scheduled"`
+	Lines     []Line   `json:"lines,omitempty"`
+	G6        *G6      `json:"hosted_g6,omitempty"`
+	Signals   *Signals `json:"signals,omitempty"`
 }
 
 // CellTable is one cell's per-step table.
@@ -181,9 +187,11 @@ func newPooled(k, n []int) Pooled {
 
 // PooledLine is one outcome line pooled over a step's cells.
 type PooledLine struct {
-	Name   string            `json:"name"`
-	Status int               `json:"status,omitempty"`
-	Doc    *config.StatusDoc `json:"documented,omitempty"`
+	Name     string            `json:"name"`
+	Status   int               `json:"status,omitempty"`
+	Doc      *config.StatusDoc `json:"documented,omitempty"`
+	InBand   string            `json:"in_band_error,omitempty"`
+	ErrorDoc *config.ErrorDoc  `json:"documented_error,omitempty"`
 	Pooled
 }
 
@@ -205,6 +213,7 @@ type PooledStep struct {
 	Scheduled int          `json:"scheduled"`
 	Lines     []PooledLine `json:"lines,omitempty"`
 	G6        *PooledG6    `json:"hosted_g6,omitempty"`
+	Signals   *Signals     `json:"signals,omitempty"`
 }
 
 // StepTables is one route's per-step tables (SPEC-HOSTED HA3 point 13):
@@ -228,22 +237,30 @@ type CellRecords struct {
 	Records []evidence.Record
 }
 
-// stepTally counts one step's requests per line and the status_other
-// requests per status. Codes lists those statuses in ascending order;
+// stepTally counts one step's requests per line, the status_other
+// requests per status and the malformed_stream requests per in-band
+// error label. Codes and labels list those in ascending order;
 // reachable counts the requests that were not connect or reset errors.
+// It also keeps the durations and Retry-After values signals reads.
 type stepTally struct {
 	lines     map[string]int
 	statuses  map[int]int
 	codes     []int
+	inBand    map[string]int
+	labels    []string
 	reachable int
+	timing
 }
 
-// tables carries the status documentation and each cell's tallies, in
-// the order of the cell tables, while the tables are built.
+// tables carries the status and error documentation, whether
+// Retry-After could be recorded, and each cell's tallies, in the order
+// of the cell tables, while the tables are built.
 type tables struct {
 	*StepTables
-	docs    map[int]*config.StatusDoc
-	tallies [][]stepTally
+	docs          map[int]*config.StatusDoc
+	errorDocs     map[string]*config.ErrorDoc
+	retryRecorded bool
+	tallies       [][]stepTally
 }
 
 // lineOf is the line a release record falls on.
@@ -308,11 +325,17 @@ func NewStepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords
 			Route: cfg.Target.Name, CeilingTokens: rel.Shape.CeilingTokens, DeadlineS: rel.Shape.DeadlineS,
 			Limits: v.Steps, FrameCells: admission.ReleaseCells,
 		},
-		docs: map[int]*config.StatusDoc{},
+		docs:          map[int]*config.StatusDoc{},
+		errorDocs:     map[string]*config.ErrorDoc{},
+		retryRecorded: config.HeaderAllowed(cfg.Target.ResponseHeaders, "Retry-After"),
 	}
 	for i := range cfg.Target.StatusDocs {
 		d := cfg.Target.StatusDocs[i]
 		t.docs[d.Status] = &d
+	}
+	for i := range cfg.Target.ErrorDocs {
+		d := cfg.Target.ErrorDocs[i]
+		t.errorDocs[d.Type] = &d
 	}
 	sorted := slices.Clone(cells)
 	slices.SortFunc(sorted, func(a, b CellRecords) int { return strings.Compare(a.Cell, b.Cell) })
@@ -344,7 +367,7 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 	dispatched := make([]bool, len(steps))
 	for k := range steps {
 		ct.Steps[k] = CellStep{Step: k + 1, RPS: steps[k]}
-		tally[k] = stepTally{lines: map[string]int{}, statuses: map[int]int{}}
+		tally[k] = newStepTally()
 	}
 	for i := range c.Records {
 		r := &c.Records[i]
@@ -367,6 +390,12 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 		tl.lines[line]++
 		if line == loadgen.ErrStatusOther {
 			tl.statuses[r.Status]++
+		}
+		if line == loadgen.ErrMalformedStream {
+			tl.inBand[inBandLabel(r.StreamError)]++
+		}
+		if err := tl.add(line, r); err != nil {
+			return ct, nil, fmt.Errorf("record %d: %w", r.Index, err)
 		}
 		if r.DispatchNs != 0 {
 			dispatched[r.Step-1] = true
@@ -393,8 +422,13 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 			tl.codes = append(tl.codes, code)
 		}
 		slices.Sort(tl.codes)
+		for label := range tl.inBand {
+			tl.labels = append(tl.labels, label)
+		}
+		slices.Sort(tl.labels)
 		tl.reachable = s.Scheduled - tl.lines[loadgen.ErrConnect] - tl.lines[loadgen.ErrReset]
 		s.Lines = t.lines(tl, func(k int) Rate { return newRate(k, s.Scheduled) })
+		s.Signals = signals([]*stepTally{tl}, s.Scheduled, t.retryRecorded)
 		in := newRate(tl.lines[LineInTime], s.Scheduled)
 		s.G6 = &G6{InTime: in, Pass: in.Value >= config.PinnedBaselineGoodputMin}
 		if tl.reachable > 0 {
@@ -406,7 +440,8 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 }
 
 // lines builds a step's outcome lines in print order, a status line per
-// code after status_other.
+// code after status_other and an in-band error line per label after
+// malformed_stream.
 func (t *tables) lines(c *stepTally, rate func(int) Rate) []Line {
 	var out []Line
 	for _, name := range stepLines {
@@ -415,9 +450,14 @@ func (t *tables) lines(c *stepTally, rate func(int) Rate) []Line {
 			l.Status, l.Doc = 429, t.docs[429]
 		}
 		out = append(out, l)
-		if name == loadgen.ErrStatusOther {
+		switch name {
+		case loadgen.ErrStatusOther:
 			for _, code := range c.codes {
 				out = append(out, Line{Name: name, Status: code, Doc: t.docs[code], Rate: rate(c.statuses[code])})
+			}
+		case loadgen.ErrMalformedStream:
+			for _, label := range c.labels {
+				out = append(out, Line{Name: name, InBand: label, ErrorDoc: t.errorDocs[label], Rate: rate(c.inBand[label])})
 			}
 		}
 	}
@@ -431,7 +471,7 @@ func (t *tables) pool() {
 		ps := PooledStep{Step: k + 1, RPS: lim.RPS, Admitted: lim.Admitted}
 		var cs []*stepTally
 		var n []int
-		codes := map[int]bool{}
+		codes, labels := map[int]bool{}, map[string]bool{}
 		for i := range t.Cells {
 			s := &t.Cells[i].Steps[k]
 			if s.State != StepAttempted || s.Scheduled == 0 {
@@ -442,6 +482,9 @@ func (t *tables) pool() {
 			for _, code := range t.tallies[i][k].codes {
 				codes[code] = true
 			}
+			for _, label := range t.tallies[i][k].labels {
+				labels[label] = true
+			}
 		}
 		ps.Cells = len(cs)
 		if len(cs) > 0 {
@@ -450,6 +493,11 @@ func (t *tables) pool() {
 				sorted = append(sorted, code)
 			}
 			slices.Sort(sorted)
+			var sortedLabels []string
+			for label := range labels {
+				sortedLabels = append(sortedLabels, label)
+			}
+			slices.Sort(sortedLabels)
 			counts := func(f func(*stepTally) int) []int {
 				k := make([]int, len(cs))
 				for i, s := range cs {
@@ -463,10 +511,16 @@ func (t *tables) pool() {
 					l.Status, l.Doc = 429, t.docs[429]
 				}
 				ps.Lines = append(ps.Lines, l)
-				if name == loadgen.ErrStatusOther {
+				switch name {
+				case loadgen.ErrStatusOther:
 					for _, code := range sorted {
 						ps.Lines = append(ps.Lines, PooledLine{Name: name, Status: code, Doc: t.docs[code],
 							Pooled: newPooled(counts(func(s *stepTally) int { return s.statuses[code] }), n)})
+					}
+				case loadgen.ErrMalformedStream:
+					for _, label := range sortedLabels {
+						ps.Lines = append(ps.Lines, PooledLine{Name: name, InBand: label, ErrorDoc: t.errorDocs[label],
+							Pooled: newPooled(counts(func(s *stepTally) int { return s.inBand[label] }), n)})
 					}
 				}
 			}
@@ -482,6 +536,7 @@ func (t *tables) pool() {
 				p := newPooled(rk, rn)
 				ps.G6.ExcludingConnectReset = &p
 			}
+			ps.Signals = signals(cs, ps.Scheduled, t.retryRecorded)
 		}
 		t.Pooled = append(t.Pooled, ps)
 	}
@@ -492,14 +547,27 @@ func (t *StepTables) Text() string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	pct := func(f float64) string { return fmt.Sprintf("%.2f%%", 100*f) }
-	label := func(name string, status int) string {
-		if status != 0 && name != loadgen.ErrStatus429 {
+	label := func(name string, status int, inBand string) string {
+		switch {
+		case inBand != "":
+			return name + " " + inBand
+		case status != 0 && name != loadgen.ErrStatus429:
 			return fmt.Sprintf("%s %d", name, status)
 		}
 		return name
 	}
-	note := func(status int, doc *config.StatusDoc) string {
+	note := func(status int, doc *config.StatusDoc, inBand string, edoc *config.ErrorDoc) string {
 		switch {
+		case inBand == InBandNone || inBand == InBandUntyped || inBand == InBandUndecodable:
+			return ""
+		case inBand != "" && edoc == nil:
+			return fmt.Sprintf("; %s: no documented meaning recorded", inBand)
+		case inBand != "":
+			corr := ""
+			if edoc.Status != 0 {
+				corr = fmt.Sprintf(", corresponding to status %d", edoc.Status)
+			}
+			return fmt.Sprintf("; %s documented as %q%s (%s, retrieved %s)", inBand, edoc.Meaning, corr, edoc.Source, edoc.Retrieved)
 		case status == 0:
 			return ""
 		case doc == nil:
@@ -544,13 +612,17 @@ func (t *StepTables) Text() string {
 			}
 			w("step %d, %g rps, %d scheduled:", s.Step, s.RPS, s.Scheduled)
 			for _, l := range s.Lines {
-				w("  %-22s %d/%d %s [%s, %s]%s", label(l.Name, l.Status), l.Count, l.Scheduled, pct(l.Value), pct(l.Lo), pct(l.Hi), note(l.Status, l.Doc))
+				w("  %-22s %d/%d %s [%s, %s]%s", label(l.Name, l.Status, l.InBand), l.Count, l.Scheduled, pct(l.Value), pct(l.Lo), pct(l.Hi), note(l.Status, l.Doc, l.InBand, l.ErrorDoc))
+				if l.Name == loadgen.ErrStatus429 {
+					retryAfterText(w, s.Signals, t.Limits[s.Step-1])
+				}
 			}
 			w("  hosted-G6 (completion within %d s over scheduled): %s [%s, %s] against %.2f: %s (reported, not run-invalidating)",
 				t.DeadlineS, pct(s.G6.InTime.Value), pct(s.G6.InTime.Lo), pct(s.G6.InTime.Hi), config.PinnedBaselineGoodputMin, passText(s.G6.Pass))
 			if r := s.G6.ExcludingConnectReset; r != nil {
 				w("  hosted-G6 excluding connect and reset: %d/%d %s [%s, %s]", r.Count, r.Scheduled, pct(r.Value), pct(r.Lo), pct(r.Hi))
 			}
+			signalsText(w, s.Signals)
 		}
 		w("")
 	}
@@ -578,13 +650,17 @@ func (t *StepTables) Text() string {
 		}
 		w("step %d, %g rps, %d of %d cells, %d scheduled:", s.Step, s.RPS, s.Cells, t.FrameCells, s.Scheduled)
 		for _, l := range s.Lines {
-			w("  %-22s %s%s", label(l.Name, l.Status), pooled(l.Pooled), note(l.Status, l.Doc))
+			w("  %-22s %s%s", label(l.Name, l.Status, l.InBand), pooled(l.Pooled), note(l.Status, l.Doc, l.InBand, l.ErrorDoc))
+			if l.Name == loadgen.ErrStatus429 {
+				retryAfterText(w, s.Signals, t.Limits[s.Step-1])
+			}
 		}
 		w("  hosted-G6 (completion within %d s over scheduled): %s against %.2f: %s (reported, not run-invalidating)",
 			t.DeadlineS, pooled(s.G6.InTime), config.PinnedBaselineGoodputMin, passText(s.G6.Pass))
 		if p := s.G6.ExcludingConnectReset; p != nil {
 			w("  hosted-G6 excluding connect and reset: %s", pooled(*p))
 		}
+		signalsText(w, s.Signals)
 	}
 	return b.String()
 }

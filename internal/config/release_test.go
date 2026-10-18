@@ -37,6 +37,10 @@ func TestReleaseRefusals(t *testing.T) {
 		return &c.Target.StatusDocs[0]
 	}
 	tpm := func(c *Config) *Limit { return &c.Target.Limits[1] }
+	edoc := func(c *Config) *ErrorDoc {
+		c.Target.ErrorDocs = []ErrorDoc{{Type: "overloaded_error", Status: 529, Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
+		return &c.Target.ErrorDocs[0]
+	}
 	for _, tc := range []struct {
 		name   string
 		mutate func(*Config)
@@ -139,6 +143,18 @@ func TestReleaseRefusals(t *testing.T) {
 		{"status source", func(c *Config) { doc(c).Source = "" }, "target.status_docs[0].source: required"},
 		{"status source scheme", func(c *Config) { doc(c).Source = "ftp://example.com/errors" }, "target.status_docs[0].source: \"ftp://example.com/errors\" is not an http"},
 		{"status date", func(c *Config) { doc(c).Retrieved = "7 October 2026" }, "target.status_docs[0].retrieved: a date as YYYY-MM-DD"},
+		{"error type unset", func(c *Config) { edoc(c).Type = "" }, "target.error_docs[0].type: an error type with no surrounding space required, got \"\""},
+		{"error type spaced", func(c *Config) { edoc(c).Type = " overloaded_error" }, "target.error_docs[0].type: an error type"},
+		{"error type documented twice", func(c *Config) {
+			edoc(c)
+			c.Target.ErrorDocs = append(c.Target.ErrorDocs, c.Target.ErrorDocs[0])
+		}, "target.error_docs[1].type: \"overloaded_error\" documented twice"},
+		{"error status 200", func(c *Config) { edoc(c).Status = 200 }, "target.error_docs[0].status: 0 or an HTTP status from 100 to 599 other than 200 required, got 200"},
+		{"error status 99", func(c *Config) { edoc(c).Status = 99 }, "target.error_docs[0].status: 0 or an HTTP status"},
+		{"error meaning", func(c *Config) { edoc(c).Meaning = "" }, "target.error_docs[0].meaning: required"},
+		{"error source", func(c *Config) { edoc(c).Source = " " }, "target.error_docs[0].source: required"},
+		{"error source scheme", func(c *Config) { edoc(c).Source = "ftp://example.com/errors" }, "target.error_docs[0].source: \"ftp://example.com/errors\" is not an http"},
+		{"error date", func(c *Config) { edoc(c).Retrieved = "2026-13-01" }, "target.error_docs[0].retrieved: a date as YYYY-MM-DD"},
 	} {
 		c := loadRef(t, releaseRef)
 		tc.mutate(c)
@@ -149,7 +165,8 @@ func TestReleaseRefusals(t *testing.T) {
 }
 
 // Operator-set limits, rolling spend windows, token countings, URL
-// sources, recorded permission and documented statuses load.
+// sources, recorded permission, documented statuses and documented
+// in-band error types, with and without a status, load.
 func TestReleaseLimitAndNamingForms(t *testing.T) {
 	c := loadRef(t, releaseRef)
 	c.Target.Limits = append(c.Target.Limits,
@@ -162,6 +179,10 @@ func TestReleaseLimitAndNamingForms(t *testing.T) {
 	c.Target.StatusDocs = []StatusDoc{
 		{Status: 529, Meaning: "overloaded", Source: "https://example.test/errors", Retrieved: "2026-10-07"},
 		{Status: 503, Meaning: "service unavailable", Source: "errors.png", Retrieved: "2026-10-07"},
+	}
+	c.Target.ErrorDocs = []ErrorDoc{
+		{Type: "overloaded_error", Status: 529, Meaning: "overloaded", Source: "https://example.test/errors", Retrieved: "2026-10-07"},
+		{Type: "server_error", Meaning: "server error", Source: "errors.png", Retrieved: "2026-10-07"},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
@@ -227,17 +248,20 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 		func(t *Target) {
 			t.StatusDocs = []StatusDoc{{Status: 529, Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
 		},
+		func(t *Target) {
+			t.ErrorDocs = []ErrorDoc{{Type: "overloaded_error", Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
+		},
 	} {
 		for _, ref := range []string{acRef, experimentRef} {
 			c := loadRef(t, ref)
 			f(&c.Target)
-			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, naming and status_docs are set on the release profile's target only") {
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, naming, status_docs and error_docs are set on the release profile's target only") {
 				t.Errorf("%s: got %v", ref, err)
 			}
 		}
 		p := loadRef(t, pilotRef)
 		f(&p.Pilot.Targets[1])
-		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, naming and status_docs are set on the release profile's target only") {
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, naming, status_docs and error_docs are set on the release profile's target only") {
 			t.Errorf("pilot: got %v", err)
 		}
 	}
