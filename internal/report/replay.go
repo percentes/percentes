@@ -32,7 +32,8 @@ const (
 // requests, reported models and mismatches, protocols, run validity, the
 // invalid reasons on the manifest and on every record, and the G2 and G6
 // gates. A release cell's pair is its CellReport, checked for protocols,
-// the invalid reasons on every record and the hosted-G6 results.
+// the invalid reasons on every record, the hosted-G6 results and the
+// steps its G2 results cover.
 func FromRun(dir string, cfgRaw []byte) ([]byte, string, error) {
 	m, err := evidence.ReadManifest(filepath.Join(dir, evidence.ManifestFile))
 	if err != nil {

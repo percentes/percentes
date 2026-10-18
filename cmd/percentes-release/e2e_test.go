@@ -303,7 +303,8 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 					inTime = line.Count
 				}
 			}
-			if s.State != report.StepAttempted || s.Scheduled == 0 || inTime != s.Scheduled || s.G6 == nil || !s.G6.Pass {
+			lg := rec.Ladder.Steps[k].Gates
+			if s.State != report.StepAttempted || s.Scheduled == 0 || inTime != s.Scheduled || s.G2 == nil || lg == nil || s.G2.Pass != lg.Pass || s.G6 == nil || !s.G6.Pass {
 				t.Errorf("%s: step %d table %+v", name, k+1, s)
 			}
 		}

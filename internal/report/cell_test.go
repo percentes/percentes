@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -84,7 +85,9 @@ func TestCellReport(t *testing.T) {
 
 	m, cfg = cellManifest(t, evidence.CellCounted, nil, true)
 	recs := cellOf("x", outcome{1, LineInTime, 0, 3}, outcome{2, loadgen.ErrStatus429, 0, 1}).Records
-	m.Gates = []validity.Gate{validity.G2(0, &loadgen.GateReport{Pass: true}), validity.ReleaseG6(1, 3, 3, 30), validity.ReleaseG6(2, 0, 1, 30)}
+	pass := &loadgen.GateReport{Pass: true}
+	g2 := []validity.Gate{validity.G2(0, pass), validity.G2(1, pass), validity.G2(2, pass)}
+	m.Gates = append(slices.Clone(g2), validity.ReleaseG6(1, 3, 3, 30), validity.ReleaseG6(2, 0, 1, 30))
 	raw, text, err = cellReport(m, cfg, recs)
 	if err != nil {
 		t.Fatal(err)
@@ -102,16 +105,17 @@ func TestCellReport(t *testing.T) {
 
 	// The manifest's hosted-G6 results are the records'.
 	gates := m.Gates
+	g6 := gates[len(g2):]
 	for name, edit := range map[string][]validity.Gate{
-		"a step left out":      gates[:2],
-		"another count":        {gates[0], gates[1], validity.ReleaseG6(2, 1, 1, 30)},
-		"another step":         {gates[0], gates[1], validity.ReleaseG6(3, 0, 1, 30)},
-		"none":                 gates[:1],
-		"a verdict reversed":   {gates[0], gates[1], func() validity.Gate { g := gates[2]; g.Pass = true; return g }()},
-		"another deadline":     {gates[0], gates[1], validity.ReleaseG6(2, 0, 1, 90)},
-		"a step not attempted": append(append([]validity.Gate{}, gates...), validity.ReleaseG6(3, 0, 1, 30)),
+		"a step left out":      g6[:1],
+		"another count":        {g6[0], validity.ReleaseG6(2, 1, 1, 30)},
+		"another step":         {g6[0], validity.ReleaseG6(3, 0, 1, 30)},
+		"none":                 nil,
+		"a verdict reversed":   {g6[0], func() validity.Gate { g := g6[1]; g.Pass = true; return g }()},
+		"another deadline":     {g6[0], validity.ReleaseG6(2, 0, 1, 90)},
+		"a step not attempted": append(slices.Clone(g6), validity.ReleaseG6(3, 0, 1, 30)),
 	} {
-		m.Gates = edit
+		m.Gates = append(slices.Clone(g2), edit...)
 		if _, _, err := cellReport(m, cfg, recs); err == nil || !strings.Contains(err.Error(), "hosted-G6 from the records differs from the manifest's") {
 			t.Errorf("%s: %v", name, err)
 		}
@@ -125,6 +129,78 @@ func TestCellReport(t *testing.T) {
 	m.Release = nil
 	if _, _, err := cellReport(m, cfg, nil); err == nil || !strings.Contains(err.Error(), "no cell record") {
 		t.Errorf("no cell record: %v", err)
+	}
+}
+
+// A cell report prints each step's G2 result from the manifest beside
+// hosted-G6, and on a step the ladder ran with nothing dispatched; the
+// results must cover the attempted steps and no excluded one, once each
+// and with no gap.
+func TestCellReportG2(t *testing.T) {
+	reasons := []string{"G2 failed at step 2"}
+	m, cfg := cellManifest(t, evidence.CellInvalid, reasons, true)
+	recs := cellOf("x", outcome{1, LineInTime, 0, 3}, outcome{2, LineInTime, 0, 2}, outcome{3, LineUnsent, 0, 4}).Records
+	for i := range recs {
+		recs[i].RunFailures = reasons
+	}
+	pass := &loadgen.GateReport{Pass: true, CPUMeasured: true}
+	fail := &loadgen.GateReport{SendSkewP99Us: 7000, SendSkewMaxUs: 9000, CPUMeasured: true, CPUWorstWindowPct: 81.5}
+	g2 := []validity.Gate{validity.G2(1, pass), validity.G2(2, fail), validity.G2(3, nil)}
+	g6 := []validity.Gate{validity.ReleaseG6(1, 3, 3, 30), validity.ReleaseG6(2, 2, 2, 30)}
+	m.Gates = append(slices.Clone(g2), g6...)
+	raw, text, err := cellReport(m, cfg, recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep CellReport
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatal(err)
+	}
+	steps := rep.Tables.Cells[0].Steps
+	for k, want := range []*G2{
+		{Observed: true, Pass: true, Detail: g2[0].Detail},
+		{Observed: true, Pass: false, Detail: g2[1].Detail},
+		{Observed: false, Pass: false, Detail: "no verdict: the run stopped before the step's drain ended"},
+		nil, nil,
+	} {
+		if got := steps[k].G2; !reflect.DeepEqual(got, want) {
+			t.Errorf("step %d: G2 %+v, want %+v", k+1, got, want)
+		}
+	}
+	if steps[2].State != StepNotAttempted {
+		t.Fatalf("step 3 is %s", steps[2].State)
+	}
+	const line = "  G2 (client validity at the step's drain end): "
+	for _, want := range []string{
+		line + "pass; " + g2[0].Detail + " (run-failing)\n  hosted-G6 (completion within 30 s over scheduled): 100.00%",
+		line + "FAIL; " + g2[1].Detail + " (run-failing)\n  hosted-G6 (completion within 30 s over scheduled): 100.00%",
+		"step 3, 1 rps: not attempted (the cell's ladder ended before this step)\n" +
+			line + "not observed, so not passed; no verdict: the run stopped before the step's drain ended (run-failing)\n",
+		"step 4, 2 rps: excluded by the ceiling rule\nstep 5,",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text lacks %q:\n%s", want, text)
+		}
+	}
+
+	for name, c := range map[string]struct {
+		gates []validity.Gate
+		want  string
+	}{
+		"an attempted step left out": {g2[:1], "step 2 is attempted and the manifest records no G2 result for it"},
+		"an excluded step":           {append(slices.Clone(g2), validity.G2(4, pass)), "G2 at step 4, which the ceiling rule excluded"},
+		"beyond the ladder":          {append(slices.Clone(g2), validity.G2(6, pass)), "G2 at step 6 of a 5-step ladder"},
+		"a step twice":               {append(slices.Clone(g2), validity.G2(2, pass)), "G2 at step 2 given twice"},
+		"the first step left out":    {[]validity.Gate{g2[1], g2[2]}, "step 1 is attempted and the manifest records no G2 result for it"},
+	} {
+		m.Gates = append(slices.Clone(c.gates), g6...)
+		if _, _, err := cellReport(m, cfg, recs); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	m.Gates = []validity.Gate{g2[0], g2[2], g6[0]}
+	if _, _, err := cellReport(m, cfg, recs[:4]); err == nil || !strings.Contains(err.Error(), "G2 at step 3 and none at step 2") {
+		t.Errorf("a gap after an attempted step: %v", err)
 	}
 }
 

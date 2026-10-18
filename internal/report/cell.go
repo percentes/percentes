@@ -32,7 +32,8 @@ type CellReport struct {
 }
 
 // cellReport renders a release cell's report pair from its manifest m,
-// cfg and the records of its attempts file.
+// cfg and the records of its attempts file, with each step's G2 result
+// from m's gates.
 func cellReport(m *evidence.Manifest, cfg *config.Config, recs []evidence.Record) ([]byte, string, error) {
 	c := m.Release
 	if c == nil {
@@ -49,6 +50,9 @@ func cellReport(m *evidence.Manifest, cfg *config.Config, recs []evidence.Record
 		return nil, "", err
 	}
 	if err := checkG6(m.Gates, recs, cfg.Release.Shape.DeadlineS); err != nil {
+		return nil, "", err
+	}
+	if err := stepG2(st.Cells[0].Steps, m.Gates); err != nil {
 		return nil, "", err
 	}
 	rep := &CellReport{
@@ -81,6 +85,35 @@ func checkG6(gates []validity.Gate, recs []evidence.Record, deadlineS int) error
 	}
 	if !reflect.DeepEqual(got, evidence.ReleaseG6(recs, deadlineS)) {
 		return errors.New("report: hosted-G6 from the records differs from the manifest's")
+	}
+	return nil
+}
+
+// stepG2 sets each step's G2 from the per-step G2 results in gates. The
+// results must cover steps 1 to n for some n, include every attempted
+// step and no step the ceiling rule excluded, and name each step once.
+func stepG2(steps []CellStep, gates []validity.Gate) error {
+	for _, g := range gates {
+		if g.ID != "G2" || g.Step == 0 {
+			continue
+		}
+		switch {
+		case g.Step < 0 || g.Step > len(steps):
+			return fmt.Errorf("report: G2 at step %d of a %d-step ladder", g.Step, len(steps))
+		case steps[g.Step-1].State == StepExcluded:
+			return fmt.Errorf("report: G2 at step %d, which the ceiling rule excluded", g.Step)
+		case steps[g.Step-1].G2 != nil:
+			return fmt.Errorf("report: G2 at step %d given twice", g.Step)
+		}
+		steps[g.Step-1].G2 = &G2{Observed: g.Observed, Pass: g.Pass, Detail: g.Detail}
+	}
+	for k, s := range steps {
+		switch {
+		case s.State == StepAttempted && s.G2 == nil:
+			return fmt.Errorf("report: step %d is attempted and the manifest records no G2 result for it", s.Step)
+		case k > 0 && s.G2 != nil && steps[k-1].G2 == nil:
+			return fmt.Errorf("report: G2 at step %d and none at step %d", s.Step, k)
+		}
 	}
 	return nil
 }

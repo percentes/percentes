@@ -156,15 +156,27 @@ type G6 struct {
 	ExcludingConnectReset *Rate `json:"excluding_connect_reset,omitempty"`
 }
 
+// G2 is the client-validity gate at one step of one cell as its manifest
+// records it, judged at the step's drain end (SPEC-HOSTED HA3 point 5).
+// It is run-failing; Observed is false where the run stopped before the
+// drain ended, and such a step does not pass.
+type G2 struct {
+	Observed bool   `json:"observed"`
+	Pass     bool   `json:"pass"`
+	Detail   string `json:"detail"`
+}
+
 // CellStep is one step of a cell. An attempted step with scheduled
 // requests carries its lines, hosted-G6, throughput, completion-incidence
-// curve with its quantiles, and signals.
+// curve with its quantiles, and signals. In a cell report, each step the
+// ladder ran carries G2.
 type CellStep struct {
 	Step       int                 `json:"step"`
 	RPS        float64             `json:"rps"`
 	State      string              `json:"state"`
 	Scheduled  int                 `json:"scheduled"`
 	Lines      []Line              `json:"lines,omitempty"`
+	G2         *G2                 `json:"g2,omitempty"`
 	G6         *G6                 `json:"hosted_g6,omitempty"`
 	Throughput *Throughput         `json:"throughput,omitempty"`
 	Curve      []CurvePoint        `json:"completion_incidence,omitempty"`
@@ -771,9 +783,11 @@ func (t *StepTables) text(frame bool) string {
 				continue
 			case s.State == StepNotAttempted:
 				w("step %d, %g rps: not attempted (the cell's ladder ended before this step)", s.Step, s.RPS)
+				g2Text(w, s.G2)
 				continue
 			case s.Scheduled == 0:
 				w("step %d, %g rps: no requests scheduled", s.Step, s.RPS)
+				g2Text(w, s.G2)
 				continue
 			}
 			w("step %d, %g rps, %d scheduled:", s.Step, s.RPS, s.Scheduled)
@@ -783,6 +797,7 @@ func (t *StepTables) text(frame bool) string {
 					retryAfterText(w, s.Signals, t.Limits[s.Step-1])
 				}
 			}
+			g2Text(w, s.G2)
 			w("  hosted-G6 (completion within %d s over scheduled): %s [%s, %s] against %.2f: %s (reported, not run-invalidating)",
 				t.DeadlineS, pct(s.G6.InTime.Value), pct(s.G6.InTime.Lo), pct(s.G6.InTime.Hi), config.PinnedBaselineGoodputMin, passText(s.G6.Pass))
 			if r := s.G6.ExcludingConnectReset; r != nil {
@@ -860,6 +875,18 @@ func (t *StepTables) text(frame bool) string {
 		steps(p.Pooled, len(p.Cells))
 	}
 	return b.String()
+}
+
+// g2Text writes a step's G2 line, or nothing for a step with none.
+func g2Text(w func(string, ...any), g *G2) {
+	switch {
+	case g == nil:
+		return
+	case !g.Observed:
+		w("  G2 (client validity at the step's drain end): not observed, so not passed; %s (run-failing)", g.Detail)
+		return
+	}
+	w("  G2 (client validity at the step's drain end): %s; %s (run-failing)", passText(g.Pass), g.Detail)
 }
 
 func passText(pass bool) string {
