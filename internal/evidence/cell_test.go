@@ -3,6 +3,7 @@ package evidence
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -686,23 +687,21 @@ func TestCheckReleaseCellAndAnswer(t *testing.T) {
 }
 
 // The provider notices, the AWS replication pack's send and the emails
-// and forms that described the work load as operator records.
+// and forms that described the work are the publication record's, never
+// a cell's operator records.
 func TestOperatorPublicationRecords(t *testing.T) {
-	body := strings.Replace(operatorJSON, `{"kind": "source_diff"`,
-		`{"kind": "notice", "path": "operator-notes.txt", "retrieved": "2026-10-27"},
-    {"kind": "replication_pack", "path": "operator-notes.txt", "retrieved": "2026-10-27"},
-    {"kind": "disclosure", "path": "operator-notes.txt", "retrieved": "2026-09-15", "note": "email"},
+	for _, c := range []struct{ kind, record string }{
+		{"notice", `{"kind": "notice", "path": "operator-notes.txt", "retrieved": "2026-10-27"}`},
+		{"replication_pack", `{"kind": "replication_pack", "path": "operator-notes.txt", "retrieved": "2026-10-27"}`},
+		{"disclosure", `{"kind": "disclosure", "path": "operator-notes.txt", "retrieved": "2026-09-15", "note": "email"}`},
+	} {
+		body := strings.Replace(operatorJSON, `{"kind": "source_diff"`, c.record+`,
     {"kind": "source_diff"`, 1)
-	if body == operatorJSON {
-		t.Fatal("fixture edit did not apply")
-	}
-	op, err := LoadOperator(writeOperator(t, body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, kind := range []string{RecordNotice, RecordReplicationPack, RecordDisclosure} {
-		if op.find(kind) == nil {
-			t.Errorf("no %s record", kind)
+		if body == operatorJSON {
+			t.Fatal("fixture edit did not apply")
+		}
+		if _, err := LoadOperator(writeOperator(t, body)); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("kind: unknown kind %q", c.kind)) {
+			t.Errorf("%s: %v", c.kind, err)
 		}
 	}
 }

@@ -644,3 +644,25 @@ func TestStepTablesRefusals(t *testing.T) {
 		t.Errorf("unmutated: %v", err)
 	}
 }
+
+// A route's page prints its naming lines verbatim under the heading; a
+// cell's report carries none.
+func TestStepTablesNaming(t *testing.T) {
+	cfg, v := stepsConfig(t)
+	cell := cellOf("weekday-00", outcome{1, LineInTime, 0, 10})
+	st, err := NewStepTables(cfg, v, []CellRecords{cell})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "no figure pools across steps or routes.\nPercentes is not affiliated with or endorsed by Groq LLC.\nGroq is a trademark of Groq LLC and/or its affiliates.\n\n"
+	if text := st.Text(); !slices.Equal(st.Naming, cfg.Target.Naming.Lines) || !strings.Contains(text, want) {
+		t.Errorf("naming %q; page lacks %q:\n%s", st.Naming, want, text)
+	}
+	inCell, err := stepTables(cfg, v, []CellRecords{cell})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inCell.Naming != nil || strings.Contains(inCell.text(false), "Groq LLC") {
+		t.Errorf("a cell's tables carry the naming lines %q", inCell.Naming)
+	}
+}

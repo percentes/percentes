@@ -25,7 +25,8 @@
 // sends a route's ceiling check, admitted in the ledger, and writes the
 // record run reads with --ceiling-probe. After
 // the window, pages writes the index page and each route's page from the
-// cells' records.
+// cells' records, and publish-check checks the release publication
+// record against the cells, the pages and the files it names.
 //
 // Before the freeze, rehearse runs the acceptance run: one cell of each
 // of six mock routes, served on loopback by this process in the
@@ -48,6 +49,8 @@
 //	percentes-release dispatch --out DIR
 //	percentes-release pages --out DIR --frames DIR --config FILE ...
 //	    --pages DIR
+//	percentes-release publish-check --out DIR --frames DIR
+//	    --config FILE ... --pages DIR --record FILE
 //	percentes-release rehearse --out DIR --frames DIR --clock-sync CMD
 //	    --byte-cap N [--scale N] [--master-seed SEED] [--source-diff FILE]
 //	percentes-release check-cpu
@@ -59,7 +62,8 @@
 // a clock offset above the pinned bound, a probe 401 or 403 the route's
 // previous probed cell also saw, or an operator abort); 1 = execution
 // error or refusal to start. rehearse exits 0 when the rehearsal is
-// green and 2 when it is not.
+// green and 2 when it is not; publish-check exits 0 when the publication
+// record is complete and 2 when it is not.
 package main
 
 import (
@@ -95,6 +99,7 @@ commands:
   run             run one route's cells over the committed window
   dispatch        sum every cell's dispatch series under --out
   pages           write the index page and each route's page
+  publish-check   check the release publication record
   rehearse        run six mock routes' cells up the ladder at their offsets
   check-cpu       whether this build measures host CPU
 
@@ -129,6 +134,8 @@ func dispatch(args []string) int {
 		code, err = dispatchCmd(args[1:])
 	case "pages":
 		code, err = pagesCmd(args[1:])
+	case "publish-check":
+		code, err = publishCheckCmd(args[1:])
 	case "rehearse":
 		code, err = rehearseCmd(ctx, args[1:])
 	case "check-cpu":

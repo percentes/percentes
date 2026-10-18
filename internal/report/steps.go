@@ -280,8 +280,11 @@ type PooledStep struct {
 // quantiles inside the hard timeout. LengthValue is the finish reason
 // the route's adapter reports when the output ceiling stopped the
 // answer. StepS is the configured step window throughput is over.
+// Naming is the route's naming lines (config Naming.Lines), which the
+// route's page prints and a cell's report does not carry.
 type StepTables struct {
 	Route         string           `json:"route"`
+	Naming        []string         `json:"naming,omitempty"`
 	CeilingTokens int              `json:"ceiling_tokens"`
 	LengthValue   string           `json:"length_value"`
 	DeadlineS     int              `json:"deadline_s"`
@@ -380,7 +383,11 @@ func NewStepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords
 			return nil, fmt.Errorf("report: step tables: cell %q is %q: a labelled cell never enters a route's frame", c.Cell, c.Outcome)
 		}
 	}
-	return stepTables(cfg, v, cells)
+	st, err := stepTables(cfg, v, cells)
+	if err == nil && cfg.Target.Naming != nil {
+		st.Naming = cfg.Target.Naming.Lines
+	}
+	return st, err
 }
 
 // stepTables builds the tables of cells whatever their outcomes.
@@ -756,6 +763,9 @@ func (t *StepTables) text(frame bool) string {
 
 	w("== Per-step tables: route %s, ceiling %d tokens, deadline %d s ==", t.Route, t.CeilingTokens, t.DeadlineS)
 	w("Each rate is a count over the step's scheduled requests; no figure pools across steps or routes.")
+	for _, l := range t.Naming {
+		w("%s", l)
+	}
 	w("")
 	w("-- Ceiling rule: nominal demand as a fraction of each recorded limit --")
 	for k, s := range t.Limits {

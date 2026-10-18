@@ -168,7 +168,7 @@ type BalanceUnavailable struct {
 type Naming struct {
 	// Provider is the word mark printed for the route, as plain text.
 	Provider string `yaml:"provider" json:"provider"`
-	// Lines are printed verbatim beside the route.
+	// Lines are printed verbatim on the route's page.
 	Lines []string `yaml:"lines" json:"lines"`
 	// PermissionRequired marks a provider that may be named only with its
 	// written permission; PermissionRecord then names where it is kept.

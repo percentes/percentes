@@ -63,54 +63,73 @@ func pagesCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	given := map[string]bool{}
-	routes := make([]report.IndexRoute, len(cfgs))
-	recs := make([]*routeRecords, len(cfgs))
-	for i, cfg := range cfgs {
-		given[cfg.Target.Name] = true
-		if recs[i], err = readRouteCells(*out, *framesRoot, cfg); err != nil {
-			return exitError, err
-		}
-		routes[i] = report.IndexRoute{Config: cfg, Verdict: recs[i].verdict, Cells: recs[i].cells, Page: path.Join(routesDir, cfg.Target.Name+".txt")}
-	}
-	cells, err := filepath.Glob(filepath.Join(*out, "*", "*", cellFile))
+	rp, err := buildPages(*out, *framesRoot, cfgs)
 	if err != nil {
 		return exitError, err
 	}
-	for _, p := range cells {
-		if name := filepath.Base(filepath.Dir(filepath.Dir(p))); !given[name] {
-			return exitError, fmt.Errorf("pages: route %s has cells under %s and no --config", name, *out)
-		}
-	}
-	ix, err := report.NewIndex(routes)
-	if err != nil {
-		return exitError, err
-	}
-	files := map[string][]byte{indexPage: []byte(ix.Markdown())}
-	if files[indexJSON], err = marshalPage(ix); err != nil {
-		return exitError, err
-	}
-	for _, r := range routes {
-		st, err := report.NewStepTables(r.Config, r.Verdict, r.Cells)
-		if err != nil {
-			return exitError, err
-		}
-		files[r.Page] = []byte(st.Text())
-		if files[path.Join(routesDir, r.Config.Target.Name+".json")], err = marshalPage(st); err != nil {
-			return exitError, err
-		}
-	}
-	for name, b := range files {
+	for name, b := range rp.files {
 		if err := replaceFile(filepath.Join(*pages, filepath.FromSlash(name)), b); err != nil {
 			return exitError, err
 		}
 	}
-	fmt.Printf("index written: %s; %d rows\n", filepath.Join(*pages, indexPage), len(ix.Rows))
-	for i, r := range routes {
+	fmt.Printf("index written: %s; %d rows\n", filepath.Join(*pages, indexPage), len(rp.index.Rows))
+	for i, r := range rp.routes {
 		fmt.Printf("%s: %d of %d cells counted, %d labelled, %d with a run record only; page %s\n", r.Config.Target.Name,
-			len(r.Cells), admission.ReleaseCells, recs[i].labelled, recs[i].unrecorded, filepath.Join(*pages, filepath.FromSlash(r.Page)))
+			len(r.Cells), admission.ReleaseCells, rp.recs[i].labelled, rp.recs[i].unrecorded, filepath.Join(*pages, filepath.FromSlash(r.Page)))
 	}
 	return exitOK, nil
+}
+
+// releasePages are the pages of a release, by slash path under --pages,
+// with the index and each route's cells they were built from.
+type releasePages struct {
+	files  map[string][]byte
+	index  *report.Index
+	routes []report.IndexRoute
+	recs   []*routeRecords
+}
+
+// buildPages builds the index page and each route's page from the cells
+// of cfgs' routes under out. Every route with a cell under out must be
+// among cfgs.
+func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, error) {
+	given := map[string]bool{}
+	rp := &releasePages{routes: make([]report.IndexRoute, len(cfgs)), recs: make([]*routeRecords, len(cfgs))}
+	for i, cfg := range cfgs {
+		given[cfg.Target.Name] = true
+		var err error
+		if rp.recs[i], err = readRouteCells(out, framesRoot, cfg); err != nil {
+			return nil, err
+		}
+		rp.routes[i] = report.IndexRoute{Config: cfg, Verdict: rp.recs[i].verdict, Cells: rp.recs[i].cells, Page: path.Join(routesDir, cfg.Target.Name+".txt")}
+	}
+	cells, err := filepath.Glob(filepath.Join(out, "*", "*", cellFile))
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range cells {
+		if name := filepath.Base(filepath.Dir(filepath.Dir(p))); !given[name] {
+			return nil, fmt.Errorf("pages: route %s has cells under %s and no --config", name, out)
+		}
+	}
+	if rp.index, err = report.NewIndex(rp.routes); err != nil {
+		return nil, err
+	}
+	rp.files = map[string][]byte{indexPage: []byte(rp.index.Markdown())}
+	if rp.files[indexJSON], err = marshalPage(rp.index); err != nil {
+		return nil, err
+	}
+	for _, r := range rp.routes {
+		st, err := report.NewStepTables(r.Config, r.Verdict, r.Cells)
+		if err != nil {
+			return nil, err
+		}
+		rp.files[r.Page] = []byte(st.Text())
+		if rp.files[path.Join(routesDir, r.Config.Target.Name+".json")], err = marshalPage(st); err != nil {
+			return nil, err
+		}
+	}
+	return rp, nil
 }
 
 func marshalPage(v any) ([]byte, error) {
