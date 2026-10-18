@@ -41,6 +41,10 @@ func TestReleaseRefusals(t *testing.T) {
 		c.Target.ErrorDocs = []ErrorDoc{{Type: "overloaded_error", Status: 529, Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
 		return &c.Target.ErrorDocs[0]
 	}
+	bill := func(c *Config) *BillingRefusal {
+		c.Target.BillingRefusals = []BillingRefusal{{Status: 400, BodyContains: "blocked_api_access", Meaning: "spend limit reached", Source: "errors.png", Retrieved: "2026-10-07"}}
+		return &c.Target.BillingRefusals[0]
+	}
 	for _, tc := range []struct {
 		name   string
 		mutate func(*Config)
@@ -155,6 +159,17 @@ func TestReleaseRefusals(t *testing.T) {
 		{"error source", func(c *Config) { edoc(c).Source = " " }, "target.error_docs[0].source: required"},
 		{"error source scheme", func(c *Config) { edoc(c).Source = "ftp://example.com/errors" }, "target.error_docs[0].source: \"ftp://example.com/errors\" is not an http"},
 		{"error date", func(c *Config) { edoc(c).Retrieved = "2026-13-01" }, "target.error_docs[0].retrieved: a date as YYYY-MM-DD"},
+		{"billing status 200", func(c *Config) { bill(c).Status = 200 }, "target.billing_refusals[0].status: a 4xx or 5xx status required, got 200"},
+		{"billing status 600", func(c *Config) { bill(c).Status = 600 }, "target.billing_refusals[0].status: a 4xx or 5xx status required"},
+		{"billing body spaced", func(c *Config) { bill(c).BodyContains = "blocked_api_access " }, "target.billing_refusals[0].body_contains: surrounding space"},
+		{"billing recorded twice", func(c *Config) {
+			b := bill(c)
+			c.Target.BillingRefusals = append(c.Target.BillingRefusals, *b)
+			c.Target.BillingRefusals[1].Meaning = "other words"
+		}, "target.billing_refusals[1]: status 400 with body \"blocked_api_access\" recorded twice"},
+		{"billing meaning", func(c *Config) { bill(c).Meaning = "" }, "target.billing_refusals[0].meaning: required"},
+		{"billing source", func(c *Config) { bill(c).Source = "" }, "target.billing_refusals[0].source: required"},
+		{"billing date", func(c *Config) { bill(c).Retrieved = "2026-10" }, "target.billing_refusals[0].retrieved: a date as YYYY-MM-DD"},
 	} {
 		c := loadRef(t, releaseRef)
 		tc.mutate(c)
@@ -165,8 +180,9 @@ func TestReleaseRefusals(t *testing.T) {
 }
 
 // Operator-set limits, rolling spend windows, token countings, URL
-// sources, recorded permission, documented statuses and documented
-// in-band error types, with and without a status, load.
+// sources, recorded permission, documented statuses, documented in-band
+// error types, with and without a status, and billing refusals, with and
+// without a body string, load.
 func TestReleaseLimitAndNamingForms(t *testing.T) {
 	c := loadRef(t, releaseRef)
 	c.Target.Limits = append(c.Target.Limits,
@@ -183,6 +199,11 @@ func TestReleaseLimitAndNamingForms(t *testing.T) {
 	c.Target.ErrorDocs = []ErrorDoc{
 		{Type: "overloaded_error", Status: 529, Meaning: "overloaded", Source: "https://example.test/errors", Retrieved: "2026-10-07"},
 		{Type: "server_error", Meaning: "server error", Source: "errors.png", Retrieved: "2026-10-07"},
+	}
+	c.Target.BillingRefusals = []BillingRefusal{
+		{Status: 400, BodyContains: "blocked_api_access", Meaning: "spend limit reached", Source: "https://example.test/errors", Retrieved: "2026-10-07"},
+		{Status: 400, BodyContains: "usage limits", Meaning: "spend limit reached", Source: "errors.png", Retrieved: "2026-10-07"},
+		{Status: 402, Meaning: "balance exhausted", Source: "errors.png", Retrieved: "2026-10-07"},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
@@ -251,17 +272,20 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 		func(t *Target) {
 			t.ErrorDocs = []ErrorDoc{{Type: "overloaded_error", Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
 		},
+		func(t *Target) {
+			t.BillingRefusals = []BillingRefusal{{Status: 402, Meaning: "balance exhausted", Source: "errors.png", Retrieved: "2026-10-07"}}
+		},
 	} {
 		for _, ref := range []string{acRef, experimentRef} {
 			c := loadRef(t, ref)
 			f(&c.Target)
-			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, naming, status_docs and error_docs are set on the release profile's target only") {
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
 				t.Errorf("%s: got %v", ref, err)
 			}
 		}
 		p := loadRef(t, pilotRef)
 		f(&p.Pilot.Targets[1])
-		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, naming, status_docs and error_docs are set on the release profile's target only") {
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only") {
 			t.Errorf("pilot: got %v", err)
 		}
 	}
@@ -280,6 +304,27 @@ func TestReleaseUnknownFieldRejected(t *testing.T) {
 		}
 		if _, err := Parse([]byte(bad)); err == nil || !strings.Contains(err.Error(), "drain_ss") {
 			t.Errorf("unknown field after %q: got %v", from, err)
+		}
+	}
+}
+
+// A billing refusal matches its status and, where it names one, a body
+// carrying its string.
+func TestBillingRefusalMatches(t *testing.T) {
+	body := []byte(`{"error":{"message":"You have reached your specified API usage limits."}}`)
+	for _, tc := range []struct {
+		b      BillingRefusal
+		status int
+		want   bool
+	}{
+		{BillingRefusal{Status: 400, BodyContains: "specified API usage limits"}, 400, true},
+		{BillingRefusal{Status: 400, BodyContains: "specified API usage limits"}, 429, false},
+		{BillingRefusal{Status: 400, BodyContains: "blocked_api_access"}, 400, false},
+		{BillingRefusal{Status: 402}, 402, true},
+		{BillingRefusal{Status: 402}, 400, false},
+	} {
+		if got := tc.b.Matches(tc.status, body); got != tc.want {
+			t.Errorf("%+v on %d: %v, want %v", tc.b, tc.status, got, tc.want)
 		}
 	}
 }

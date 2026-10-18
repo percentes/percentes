@@ -11,7 +11,7 @@ KIND    ?= $(shell command -v kind 2>/dev/null || echo $(HOME)/go/bin/kind)
 CLUSTER ?= percentes
 IMAGE   ?= percentes/mockserver:dev
 
-.PHONY: all build bins percentes-pilot test test-unit test-ac docker-build kind-up kind-down kind-smoke reproduce campaign-e2e process-kill-e2e clean hooks
+.PHONY: all build bins percentes-pilot percentes-release percentes-release-linux test test-unit test-ac docker-build kind-up kind-down kind-smoke reproduce campaign-e2e process-kill-e2e clean hooks
 
 all: build
 
@@ -42,6 +42,18 @@ PILOT_CGO := $(if $(filter Darwin,$(shell uname -s)),1,0)
 
 percentes-pilot:
 	CGO_ENABLED=$(PILOT_CGO) $(GO) build -ldflags=-w -o $(PILOT_BIN) ./cmd/percentes-pilot
+
+# The release runner builds as the pilot command does for this host, and
+# statically for the Linux client host, where /proc gives host CPU.
+RELEASE_BIN        ?= bin/percentes-release
+RELEASE_LINUX_ARCH ?= amd64
+RELEASE_LINUX_BIN  ?= bin/percentes-release-linux-$(RELEASE_LINUX_ARCH)
+
+percentes-release:
+	CGO_ENABLED=$(PILOT_CGO) $(GO) build -ldflags=-w -o $(RELEASE_BIN) ./cmd/percentes-release
+
+percentes-release-linux:
+	GOOS=linux GOARCH=$(RELEASE_LINUX_ARCH) CGO_ENABLED=0 $(GO) build -o $(RELEASE_LINUX_BIN) ./cmd/percentes-release
 
 test-unit:
 	$(GO) test -race -short ./... -count=1

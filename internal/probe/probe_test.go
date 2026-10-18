@@ -531,3 +531,46 @@ func TestProbeKeyHeader(t *testing.T) {
 		t.Errorf("limits read Authorization %q, X-Api-Key %q", v, get.Values("X-Api-Key"))
 	}
 }
+
+// A release route's probe sends its literal body with the case text in
+// place, in the route's key header, and runs to the timeout it is given.
+func TestProbeReleaseTarget(t *testing.T) {
+	var mu sync.Mutex
+	var got []byte
+	var hdr http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		got, hdr = b, r.Header.Clone()
+		mu.Unlock()
+		time.Sleep(300 * time.Millisecond)
+		sseHandler(answerFrame, stopFrame, doneFrame)(w, r)
+	}))
+	defer srv.Close()
+	defer func(d time.Duration) { requestTimeout = d }(requestTimeout)
+	requestTimeout = 100 * time.Millisecond
+	c := releaseConfig(t, srv.URL+"/openai/v1/chat/completions")
+	tg := &c.Target
+	tg.AuthHeader = config.AuthAPIKey
+	rec := probe(t, Input{Target: tg, CaseText: caseText, Timeout: 5 * time.Second})
+	if rec.Start.Blocked || rec.Request.Status != http.StatusOK || rec.Request.Error != "" {
+		t.Fatalf("start %+v, status %d, error %q", rec.Start, rec.Request.Status, rec.Request.Error)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := config.LiteralBody(tg.Body, caseText); !bytes.Equal(got, want) {
+		t.Errorf("body %s, want %s", got, want)
+	}
+	if v := hdr.Values("Api-Key"); len(v) != 1 || v[0] != testKey || len(hdr.Values("Authorization")) != 0 {
+		t.Errorf("Api-Key %q, Authorization %q", v, hdr.Values("Authorization"))
+	}
+	if sum := sha256.Sum256(got); rec.BodySHA256 != hex.EncodeToString(sum[:]) || rec.BodyBytes != len(got) {
+		t.Errorf("body record %s, %d bytes", rec.BodySHA256, rec.BodyBytes)
+	}
+
+	for _, in := range []Input{{Target: &config.Target{Name: "x", APIKeyEnv: keyEnv}, CaseText: caseText}, {Target: tg, CaseText: caseText, WrongModel: "other"}} {
+		if _, err := Run(context.Background(), in); err == nil {
+			t.Errorf("%+v: probe ran", in)
+		}
+	}
+}

@@ -158,6 +158,23 @@ type ErrorDoc struct {
 	Retrieved string `yaml:"retrieved" json:"retrieved"`
 }
 
+// BillingRefusal is a response the provider documents as its spend-limit
+// or exhausted-balance refusal: a status and, where the status alone does
+// not mark it, a string its body carries.
+type BillingRefusal struct {
+	Status       int    `yaml:"status" json:"status"`
+	BodyContains string `yaml:"body_contains,omitempty" json:"body_contains,omitempty"`
+	Meaning      string `yaml:"meaning" json:"meaning"`
+	// Source and Retrieved are as a StatusDoc's.
+	Source    string `yaml:"source" json:"source"`
+	Retrieved string `yaml:"retrieved" json:"retrieved"`
+}
+
+// Matches reports whether a response with status and body is b.
+func (b *BillingRefusal) Matches(status int, body []byte) bool {
+	return status == b.Status && strings.Contains(string(body), b.BodyContains)
+}
+
 // releaseUnsentKeys may not appear at the top level of a release body:
 // sampling controls stay at each provider's default, and no output-length
 // forcing is sent (SPEC-HOSTED HA3 points 3 and 7).
@@ -351,6 +368,10 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	for i := range t.ErrorDocs {
 		validateErrorDoc(v, fmt.Sprintf("%s.error_docs[%d]", field, i), &t.ErrorDocs[i], types)
 	}
+	refusals := map[BillingRefusal]bool{}
+	for i := range t.BillingRefusals {
+		validateBillingRefusal(v, fmt.Sprintf("%s.billing_refusals[%d]", field, i), &t.BillingRefusals[i], refusals)
+	}
 }
 
 // checkReleaseBody reports why a literal body breaks the release shape:
@@ -463,6 +484,24 @@ func validateErrorDoc(v *validator, field string, d *ErrorDoc, seen map[string]b
 	validateDoc(v, field, d.Meaning, d.Source, d.Retrieved)
 }
 
+// validateBillingRefusal requires a 4xx or 5xx status, a body string with
+// no surrounding space, a status and string that no earlier entry
+// records, a meaning, a source and a retrieval date.
+func validateBillingRefusal(v *validator, field string, b *BillingRefusal, seen map[BillingRefusal]bool) {
+	if b.Status < 400 || b.Status > 599 {
+		v.errf("%s.status: a 4xx or 5xx status required, got %d", field, b.Status)
+	}
+	if strings.TrimSpace(b.BodyContains) != b.BodyContains {
+		v.errf("%s.body_contains: surrounding space in %q", field, b.BodyContains)
+	}
+	key := BillingRefusal{Status: b.Status, BodyContains: b.BodyContains}
+	if seen[key] {
+		v.errf("%s: status %d with body %q recorded twice", field, b.Status, b.BodyContains)
+	}
+	seen[key] = true
+	validateDoc(v, field, b.Meaning, b.Source, b.Retrieved)
+}
+
 func validateDoc(v *validator, field, meaning, source, retrieved string) {
 	if strings.TrimSpace(meaning) == "" {
 		v.errf("%s.meaning: required", field)
@@ -503,8 +542,8 @@ func validateNaming(v *validator, field string, n *Naming) {
 // refuseReleaseFields refuses the release-only target fields on a target
 // outside the release profile.
 func refuseReleaseFields(v *validator, field string, t *Target) {
-	if t.Adapter != "" || len(t.Limits) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 {
-		v.errf("%s: adapter, limits, naming, status_docs and error_docs are set on the release profile's target only", field)
+	if t.Adapter != "" || len(t.Limits) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 || len(t.BillingRefusals) > 0 {
+		v.errf("%s: adapter, limits, naming, status_docs, error_docs and billing_refusals are set on the release profile's target only", field)
 	}
 }
 

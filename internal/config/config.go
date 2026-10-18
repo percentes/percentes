@@ -451,6 +451,10 @@ type Target struct {
 	// ErrorDocs records the provider's documented meaning of in-band
 	// error types, printed beside each in-band error line.
 	ErrorDocs []ErrorDoc `yaml:"error_docs,omitempty" json:"error_docs,omitempty"`
+	// BillingRefusals records the responses the provider documents as its
+	// spend-limit or exhausted-balance refusal; one stops the route's
+	// process (SPEC-HOSTED HA3 point 16).
+	BillingRefusals []BillingRefusal `yaml:"billing_refusals,omitempty" json:"billing_refusals,omitempty"`
 }
 
 // ResponseShape names where a target's stream chunks carry each field.

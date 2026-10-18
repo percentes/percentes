@@ -61,15 +61,19 @@ const eventLimit = 1 << 20
 // distinctLimit bounds every list and map of distinct values in Shape.
 const distinctLimit = 32
 
-// Input is one probe of one pilot target.
+// Input is one probe of one pilot target, or of a release route's target
+// when Pilot is nil.
 type Input struct {
 	Pilot  *config.Pilot
 	Target *config.Target
 	// CaseText is the user text of the probe request.
 	CaseText string
 	// WrongModel, when set, is sent as the model of a second request, the
-	// session's interval after the first.
+	// session's interval after the first; pilot targets only.
 	WrongModel string
+	// Timeout bounds each exchange from its dispatch; zero is the pilot's
+	// requestTimeout.
+	Timeout time.Duration
 }
 
 // Record is one probe. Fields ending in Ns are nanoseconds on the
@@ -190,16 +194,30 @@ func Gate(t *config.Target, status int) Start {
 }
 
 // Run probes in.Target: the request, then the limits read when
-// configured, then the wrong-model request when in.WrongModel is set. It
-// returns an error, before any request, when the key's variable is empty.
+// configured, then the wrong-model request when in.WrongModel is set. A
+// release target's request is its literal body with the case text in
+// place. It returns an error, before any request, when the key's variable
+// is empty.
 func Run(ctx context.Context, in Input) (*Record, error) {
 	t := in.Target
+	if in.Pilot == nil && (t.Body == "" || in.WrongModel != "") {
+		return nil, fmt.Errorf("probe: %s: without a pilot body, a target body is required and no wrong-model request is sent", t.Name)
+	}
 	key := os.Getenv(t.APIKeyEnv)
 	if key == "" {
 		return nil, fmt.Errorf("probe: %s: environment variable %s is empty", t.Name, t.APIKeyEnv)
 	}
 	m := newMasker(key)
-	body := in.Pilot.RequestBody(t, in.CaseText)
+	var body []byte
+	if in.Pilot != nil {
+		body = in.Pilot.RequestBody(t, in.CaseText)
+	} else {
+		body = config.LiteralBody(t.Body, in.CaseText)
+	}
+	timeout := requestTimeout
+	if in.Timeout > 0 {
+		timeout = in.Timeout
+	}
 	sum := sha256.Sum256(body)
 	rec := &Record{
 		SchemaVersion:  1,
@@ -212,7 +230,7 @@ func Run(ctx context.Context, in Input) (*Record, error) {
 	}
 	transport := newTransport(1)
 	defer transport.CloseIdleConnections()
-	p := &prober{rt: transport, target: t, mask: m, timeout: requestTimeout}
+	p := &prober{rt: transport, target: t, mask: m, timeout: timeout}
 
 	dispatched := time.Now()
 	req := p.post(ctx, t.EndpointURL, t.ModelName, body, key)

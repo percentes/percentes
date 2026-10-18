@@ -394,6 +394,8 @@ type gen struct {
 	// gates evaluates the client-validity gate; a ladder step's verdict
 	// uses it too.
 	gates gateFunc
+	// onDone is Hooks.OnDone.
+	onDone func(r *Request)
 }
 
 type gateFunc func(cfg *config.Config, requests []Request, samples []cpuSample, gcLoMs, gcHiMs float64, measStartNs, measEndNs int64) GateReport
@@ -410,6 +412,10 @@ type Hooks struct {
 	// body or whose config carries a pilot body, one per scheduled
 	// request, by index.
 	Cases []string
+	// OnDone is called with each dispatched request once it is terminal,
+	// on that request's goroutine, concurrently with other calls. It must
+	// not block.
+	OnDone func(r *Request)
 }
 
 // Run executes the full scheduled load against cfg.Target.EndpointURL,
@@ -432,9 +438,12 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 	if len(schedule) == 0 {
 		return nil, fmt.Errorf("loadgen: empty schedule")
 	}
-	var cases []string
+	var (
+		cases  []string
+		onDone func(*Request)
+	)
 	if hooks != nil {
-		cases = hooks.Cases
+		cases, onDone = hooks.Cases, hooks.OnDone
 	}
 	if cfg.Target.Body != "" {
 		if cfg.Pilot != nil {
@@ -478,6 +487,7 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 		trip:   newTripwire(cfg, len(schedule)),
 		cases:  cases,
 		gates:  gates,
+		onDone: onDone,
 	}
 	if ladder != nil {
 		g.trip = newLadderTripwire(cfg, ladder)
@@ -552,6 +562,9 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 			for g.now() < r.IntendedNs {
 			}
 			g.execute(r)
+			if g.onDone != nil {
+				g.onDone(r)
+			}
 		}()
 		return true
 	}
