@@ -67,11 +67,13 @@ kubectl, python3 and curl. The Makefile and the git hooks select Go
 `GOTOOLCHAIN` yourself to override.
 
 ```
-make hooks            # once per clone: continuous-integration (CI) gates on commit and push
-make test-unit        # fast path: unit and integration tests only
-make reproduce        # AC7: one-command full harness run against the local cluster
-make test             # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
-make percentes-pilot  # bin/percentes-pilot, the hosted pilot command
+make hooks                    # once per clone: continuous-integration (CI) gates on commit and push
+make test-unit                # fast path: unit and integration tests only
+make reproduce                # AC7: one-command full harness run against the local cluster
+make test                     # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
+make percentes-pilot          # bin/percentes-pilot, the hosted pilot command
+make percentes-release        # bin/percentes-release, the release runner for this host
+make percentes-release-linux  # a static linux/amd64 build of it for the client host
 ```
 
 In that order: `make hooks` before your first commit, `make test-unit` to see
@@ -108,10 +110,11 @@ cmd/percentes            single-run harness command-line interface (CLI); hosted
 cmd/percentes-campaign   N-run campaign runner (SPEC §5 repetition, §10 gates)
 cmd/percentes-calibrate  SPEC §10 capacity ramp and §5 single-replica reference
 cmd/percentes-pilot      the SPEC-HOSTED HA2 pilot: ledger, probe, dev, session, check-cpu
+cmd/percentes-release    one route of a SPEC-HOSTED HA3 release: run, dispatch, check-cpu
 cmd/mockserver           fault-injectable mock inference server
 cmd/naivesweep           standalone reconnaissance probe, outside the instrument
 internal/                loadgen, collect, detect, orchestrator, validity, ...
-                         hosted: probe, admission, evidence, pilot, score
+                         hosted: probe, admission, evidence, pilot, score, schedule
 configs/                 pinned configurations; a *.reference.yaml per profile
 deploy/                  kind, mock and Phase 1 manifests; reproduce and capture scripts
 docs/                    ARCHITECTURE.md and the draw.io diagrams under docs/diagrams/
@@ -145,10 +148,47 @@ command's package documentation lists its subcommands and exit codes:
 go doc ./cmd/percentes-pilot
 ```
 
+`percentes-release` runs one route of a public descriptive release under
+SPEC-HOSTED amendment HA3 (hosted amendment 3). A route is one provider,
+one model, one endpoint and one account tier; its configuration carries
+the complete request uniform resource locator (URL), the whole request
+body as literal JavaScript Object Notation (JSON) frozen by hash, the
+header the key travels in, and every limit recorded for the account with
+its source. Twelve cells per route run over a committed window, one per
+Coordinated Universal Time (UTC) slot on a weekday and on a weekend day,
+each cell a ladder of five offered-load steps (Poisson arrivals, random
+and independent, at 0.25, 0.5, 1, 2 and 4 requests per second, 480 s
+each, with a 90 s drain after every step). A step is admitted only where
+its nominal demand is at most half of every recorded rate, token,
+concurrency, daily and spend-window limit, and only where the account's
+monthly cap and the route's liability cap cover its twelve cells,
+re-runs and probes. Every finished cell writes a labelled manifest and
+report pair; a cell that does not count is kept as a record outside the
+route's frame. The routes of a release run as separate processes on one
+client host, each at its own offset inside the slot.
+
+**One request, end to end.** The committed schedule gives the route a
+cell (a date and a UTC slot) and its offset inside the slot, and the
+cell's seed fixes the request's step and intended time. Its user text is
+the prefix `cs-<seed>-<index>` (six-digit index), a space and a synthetic
+support ticket; the frozen body carries it in its one slot. The client
+sends at the intended time, and the 90 s hard timeout runs from the send.
+The stream's first content event stamps the time to first token;
+`data: [DONE]` ends a chat-completions stream and `message_stop` a
+Messages stream; a whole answer arriving more than 30 s after the
+intended time is late. The request is one line of `attempts.jsonl` with
+its step, `in_time` or `late`, status, finish reason and usage, and one
+count on its step's `completed_in_time` or `completed_late` line in the
+cell's `report.json`, over the step's scheduled requests with a 95
+percent binomial (Wilson score) interval. A route's cells pool that line
+per step, and the index table, alphabetical with counts only, shows each
+step's pooled count and its denominator.
+
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#hosted-runs-and-the-evidence-files)
 describes the probe, the ledger, each evidence file and the mock's shaped
-form, and follows one request from its schedule to its line in the record
-file.
+form, and [its release section](docs/ARCHITECTURE.md#the-release-runner)
+the profile's pins, the schedule, the ceiling rule and check, a cell's
+outcomes and files, the per-step tables and the index.
 
 ## Pointing the probe at an endpoint
 
