@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
@@ -314,8 +315,9 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // model, whose hosts are the target and release.other_hosts, and requires
 // their choice to run the model at the configured ceiling. Every host's
 // record carries the host's model and byteCap; this route's also carry
-// its adapter and endpoint, and the one at the configured ceiling its
-// body's hash.
+// its adapter and endpoint and none of the values the route withholds
+// (probe.Exposed), and the one at the configured ceiling its body's
+// hash.
 func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.CeilingChoice, map[string][]byte, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
@@ -354,6 +356,10 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.C
 			fault = fmt.Sprintf("endpoint %s, want %s", rec.EndpointURL, redact.URL(t.EndpointURL))
 		case rec.Ceiling.Ceiling == cfg.Release.Shape.CeilingTokens && rec.BodySHA256 != body:
 			fault = fmt.Sprintf("body sha256 %s, want target.body's %s", rec.BodySHA256, body)
+		default:
+			if exposed := probe.Exposed(t, &rec); len(exposed) > 0 {
+				fault = "carries values the route withholds: " + strings.Join(exposed, ", ")
+			}
 		}
 		if fault != "" {
 			return none, nil, fmt.Errorf("ceiling probe %s: route %s at %d: %s", f, rec.Route, rec.Ceiling.Ceiling, fault)

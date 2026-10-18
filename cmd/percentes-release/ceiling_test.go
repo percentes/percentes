@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,6 +167,101 @@ func TestCeilingCheckCmd(t *testing.T) {
 	}
 	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 1800); err == nil || !strings.Contains(err.Error(), "byte cap 2000, want --byte-cap 1800") {
 		t.Fatalf("another byte cap: %v", err)
+	}
+}
+
+// withHeaders serves endpoint's route through a proxy that sets h on
+// every response, and returns the proxy's URL for it and its request
+// count.
+func withHeaders(t *testing.T, endpoint string, h map[string]string) (string, *atomic.Int32) {
+	t.Helper()
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: u.Scheme, Host: u.Host})
+	rp.FlushInterval = -1
+	rp.ModifyResponse = func(r *http.Response) error {
+		for k, v := range h {
+			r.Header.Set(k, v)
+		}
+		return nil
+	}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		rp.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + u.Path, &hits
+}
+
+// Under target.retained_headers, ceiling-check refuses to start without
+// --frames; with it, the record carries the stand-in for each retained
+// value, here on the 401 that blocks the check, and the frame store holds
+// the values. Run passes the record on to the ceiling rule, and refuses
+// this route's record carrying a retained value.
+func TestCeilingCheckWithholds(t *testing.T) {
+	endpoint, hits := withHeaders(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}),
+		map[string]string{"X-Ratelimit-Limit-Requests": "1000", "X-Ratelimit-Remaining-Requests": "qz7919"})
+	f := newCeilingFixture(t, endpoint, "wrong-"+testKey)
+	b, err := os.ReadFile(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := "  response_headers: [Retry-After, x-ratelimit-*]\n"
+	if strings.Count(string(b), line) != 1 {
+		t.Fatalf("configuration: %q not found once", line)
+	}
+	f.cfg = writeFile(t, t.TempDir(), "groq.yaml", []byte(strings.Replace(string(b), line, line+"  retained_headers: [x-ratelimit-remaining-*]\n", 1)))
+
+	if code, err := ceilingCheckCmd(context.Background(), f.args()); err == nil || code != exitError || !strings.Contains(err.Error(), "--frames is required") {
+		t.Fatalf("without --frames: %d, %v", code, err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("%d requests sent without --frames", n)
+	}
+	frames := t.TempDir()
+	if code, err := ceilingCheckCmd(context.Background(), append(f.args(), "--frames", frames)); err != nil || code != exitAdverse {
+		t.Fatalf("ceiling-check: %d, %v", code, err)
+	}
+	path, rec := f.record(t)
+	const published = "map[X-Ratelimit-Limit-Requests:[1000] X-Ratelimit-Remaining-Requests:[[retained]]]"
+	if len(rec.Requests) != 1 || rec.Requests[0].Exchange.Status != http.StatusUnauthorized || fmt.Sprint(rec.Requests[0].Exchange.Headers) != published {
+		t.Fatalf("requests %+v", rec.Requests)
+	}
+	if fmt.Sprint(rec.RateLimitHeaders) != published || rec.LimitsFrom != probe.LimitsFromHeaders {
+		t.Fatalf("rate-limit headers %v, limits from %q", rec.RateLimitHeaders, rec.LimitsFrom)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(raw, []byte("qz7919")) {
+		t.Fatalf("%s carries a retained value (%v)", path, err)
+	}
+	rel, err := filepath.Rel(f.out, filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.ReadFile(filepath.Join(frames, rel, probe.RetainedFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := bytes.Count(held, []byte(`"qz7919"`)); n != 1 {
+		t.Fatalf("retained file holds the value %d times:\n%s", n, held)
+	}
+
+	cfgs, err := loadReleases([]string{f.cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true))
+	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000); err == nil || !strings.Contains(err.Error(), "probe: route groq: the probe was blocked") {
+		t.Fatalf("run reads the record: %v", err)
+	}
+	rec.Requests[0].Exchange.Headers["X-Ratelimit-Remaining-Requests"] = []string{"qz7919"}
+	leaked := writeCeiling(t, *rec)
+	if _, _, err := readCeilingProbes(cfgs[0], []string{leaked, baseten}, 2000); err == nil ||
+		!strings.Contains(err.Error(), "route groq at 512: carries values the route withholds: X-Ratelimit-Remaining-Requests") {
+		t.Fatalf("a record carrying a retained value: %v", err)
 	}
 }
 

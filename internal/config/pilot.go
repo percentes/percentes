@@ -56,6 +56,10 @@ type TargetProbe struct {
 	// account-side limit the operator set. One on the probe request
 	// blocks the start, as 400, 401, 403 and 404 do (SPEC-HOSTED §5).
 	AccountLimitStatuses []int `yaml:"account_limit_statuses,omitempty" json:"account_limit_statuses,omitempty"`
+	// LimitsRetained keeps the limits body out of the probe record, which
+	// carries its hash, for a provider whose terms keep the account's
+	// limits unpublished (SPEC-HOSTED HA3 point 15); release targets only.
+	LimitsRetained bool `yaml:"limits_retained,omitempty" json:"limits_retained,omitempty"`
 }
 
 // SetupDefectStatuses block a window's start when the probe request
@@ -240,6 +244,9 @@ func validatePilotTarget(v *validator, field string, t *Target) {
 	validateResponseShape(v, field, t)
 	if t.Probe != nil {
 		validateTargetProbe(v, field+".probe", t.Probe)
+		if t.Probe.LimitsRetained {
+			v.errf("%s.probe.limits_retained: set on the release profile's target only", field)
+		}
 	}
 
 	p := t.Params
@@ -280,6 +287,9 @@ func validateTargetProbe(v *validator, field string, p *TargetProbe) {
 		if !fieldKey(p.LimitsAuthScheme) {
 			v.errf("%s.limits_auth_scheme: one or more of a-z, A-Z, 0-9, _ and -, required with limits_url, got %q", field, p.LimitsAuthScheme)
 		}
+	}
+	if p.LimitsRetained && p.LimitsURL == "" {
+		v.errf("%s.limits_retained: set without limits_url", field)
 	}
 	seen := map[int]bool{}
 	for i, s := range p.AccountLimitStatuses {

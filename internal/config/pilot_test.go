@@ -266,6 +266,8 @@ func TestPilotTargetProbe(t *testing.T) {
 		{"status 600", TargetProbe{AccountLimitStatuses: []int{402, 600}}, "pilot.targets[1].probe.account_limit_statuses[1]: 600 is not"},
 		{"setup-defect status", TargetProbe{AccountLimitStatuses: []int{401}}, "pilot.targets[1].probe.account_limit_statuses[0]: 401 already blocks the start"},
 		{"repeated status", TargetProbe{AccountLimitStatuses: []int{402, 402}}, "pilot.targets[1].probe.account_limit_statuses[1]: 402 listed twice"},
+		{"limits retained", TargetProbe{LimitsURL: limits, LimitsAuthScheme: "Bearer", LimitsRetained: true}, "pilot.targets[1].probe.limits_retained: set on the release profile's target only"},
+		{"limits retained without url", TargetProbe{LimitsRetained: true}, "pilot.targets[1].probe.limits_retained: set without limits_url"},
 	} {
 		c := loadRef(t, pilotRef)
 		p := tc.probe

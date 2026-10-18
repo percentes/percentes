@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
+	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/pilot"
 	"github.com/percentes/percentes/internal/probe"
 )
@@ -17,7 +18,8 @@ import (
 // 7) at its configured ceiling: probe.CeilingRequests requests of Shape S
 // text, admitted in the release ledger before the first is sent and
 // settled with the requests sent. It writes the record run reads with
-// --ceiling-probe, also when the check fails or is blocked.
+// --ceiling-probe, also when the check fails or is blocked, and what the
+// record withholds under --frames.
 func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	fs := flag.NewFlagSet("ceiling-check", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "the route's release configuration at the ceiling checked (required)")
@@ -26,6 +28,8 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	out := fs.String("out", "", "output directory; the check writes ceiling-<UTC time>/<route>-<ceiling>/"+probe.File+" under it (required)")
 	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
 	snapshots := fs.String("snapshots", "", "directory of the retained limit copies the configuration names by file name")
+	framesRoot := fs.String("frames", "", "raw-frame store directory outside the source tree; the check writes ceiling-<UTC time>/<route>-<ceiling>/"+probe.RetainedFile+
+		" under it (required when the configuration sets target.retained_headers or target.probe.limits_retained)")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
@@ -41,6 +45,14 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	}
 	cfg := cfgs[0]
 	name, ceiling := cfg.Target.Name, cfg.Release.Shape.CeilingTokens
+	if *framesRoot == "" && probe.Retains(&cfg.Target) {
+		return exitError, errors.New("ceiling-check: --frames is required: the configuration withholds probe values")
+	}
+	if *framesRoot != "" {
+		if err := evidence.CheckFramesRoot(*framesRoot); err != nil {
+			return exitError, err
+		}
+	}
 	shape, err := pilot.GenerateShapeS(pilot.ShapeSSeed, *byteCap)
 	if err != nil {
 		return exitError, err
@@ -81,10 +93,19 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	dir := filepath.Join(*out, "ceiling-"+time.Now().UTC().Format("20060102T150405Z"), fmt.Sprintf("%s-%d", name, ceiling))
-	path, err := probe.Write(dir, rec)
+	rel := filepath.Join("ceiling-"+time.Now().UTC().Format("20060102T150405Z"), fmt.Sprintf("%s-%d", name, ceiling))
+	path, err := probe.Write(filepath.Join(*out, rel), rec)
 	if err != nil {
 		return exitError, err
+	}
+	if *framesRoot != "" {
+		held, err := probe.WriteRetained(filepath.Join(*framesRoot, rel), rec)
+		if err != nil {
+			return exitError, err
+		}
+		if held != "" {
+			fmt.Printf("%s: withheld values written %s\n", name, held)
+		}
 	}
 
 	c, ib := rec.Ceiling, rec.InputBound

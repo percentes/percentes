@@ -517,6 +517,107 @@ func TestReleaseProbeLimits(t *testing.T) {
 	}
 }
 
+// The values a route withholds stay out of the record: each value of a
+// header target.retained_headers names is replaced by the stand-in in
+// every request, the rate-limit headers and the limits read, and under
+// target.probe.limits_retained the limits body is replaced by its hash.
+// The retained file holds the values, readable by the owner only. A
+// record carrying them is exposed; a route withholding nothing writes no
+// retained file.
+func TestReleaseProbeRetains(t *testing.T) {
+	noSpacing(t)
+	const limitsBody = `{"rate_limits":{"rpm":"qz104729"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Ratelimit-Limit-Requests", "120")
+		w.Header().Set("X-Ratelimit-Remaining-Requests", "qz7919")
+		if r.Method == http.MethodGet {
+			io.WriteString(w, limitsBody) //nolint:errcheck
+			return
+		}
+		sseHandler(answerFrame, stopFrame, doneFrame)(w, r)
+	}))
+	defer srv.Close()
+	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
+	cfg.Target.ResponseHeaders = []string{"Retry-After", "X-Ratelimit-*"}
+	cfg.Target.RetainedHeaders = []string{"x-ratelimit-remaining-*"}
+	cfg.Target.Probe = &config.TargetProbe{LimitsURL: srv.URL + "/v1/model_apis/gpt-oss-120b", LimitsAuthScheme: "Bearer", LimitsRetained: true}
+
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	const published = "map[X-Ratelimit-Limit-Requests:[120] X-Ratelimit-Remaining-Requests:[[retained]]]"
+	for i, r := range rec.Requests {
+		if fmt.Sprint(r.Exchange.Headers) != published {
+			t.Fatalf("request %d headers %v", i, r.Exchange.Headers)
+		}
+	}
+	if fmt.Sprint(rec.RateLimitHeaders) != published || rec.Limits == nil || fmt.Sprint(rec.Limits.Headers) != published {
+		t.Fatalf("rate-limit headers %v, limits read %+v", rec.RateLimitHeaders, rec.Limits)
+	}
+	sum := sha256.Sum256([]byte(limitsBody))
+	if b := rec.Limits.Body; b == nil || b.Text != nil || b.Base64 != "" || !b.Retained || b.SHA256 != hex.EncodeToString(sum[:]) || rec.LimitsFrom != LimitsFromRead {
+		t.Fatalf("limits body %+v, limits from %q", b, rec.LimitsFrom)
+	}
+	if e := Exposed(&cfg.Target, rec); e != nil {
+		t.Fatalf("exposed %q", e)
+	}
+	path, err := Write(t.TempDir(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(path); err != nil || bytes.Contains(b, []byte("qz7919")) || bytes.Contains(b, []byte("qz104729")) {
+		t.Fatalf("%s carries a withheld value (%v):\n%s", File, err, b)
+	}
+
+	held, err := WriteRetained(filepath.Join(t.TempDir(), "frames"), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(held); err != nil || fi.Mode().Perm() != 0o600 || filepath.Base(held) != RetainedFile {
+		t.Fatalf("retained file %s: %v, %v", held, fi, err)
+	}
+	raw, err := os.ReadFile(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back RetainedRecord
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	const kept = "map[X-Ratelimit-Remaining-Requests:[qz7919]]"
+	if back.Target != "groq" || len(back.Exchanges) != CeilingRequests+1 {
+		t.Fatalf("retained record %s", raw)
+	}
+	for i := 0; i < CeilingRequests; i++ {
+		if e := back.Exchanges[fmt.Sprintf("requests.%d", i)]; e == nil || fmt.Sprint(e.Headers) != kept || e.Body != nil {
+			t.Fatalf("retained request %d: %+v", i, e)
+		}
+	}
+	if l := back.Exchanges["limits"]; l == nil || fmt.Sprint(l.Headers) != kept || l.Body == nil || l.Body.Text == nil || *l.Body.Text != limitsBody {
+		t.Fatalf("retained limits read %+v", l)
+	}
+	if _, err := WriteRetained(filepath.Dir(held), rec); err == nil {
+		t.Fatal("an existing retained file was overwritten")
+	}
+
+	exposed := *rec
+	exposed.Requests = append([]CheckRequest(nil), rec.Requests...)
+	exposed.Requests[2].Exchange.Headers = map[string][]string{"X-Ratelimit-Remaining-Requests": {"qz7919"}}
+	limits := *rec.Limits
+	limits.Body = rec.Limits.Retained.Body
+	exposed.Limits = &limits
+	if e := Exposed(&cfg.Target, &exposed); fmt.Sprint(e) != "[X-Ratelimit-Remaining-Requests limits body]" {
+		t.Fatalf("exposed %q", e)
+	}
+
+	cfg.Target.RetainedHeaders, cfg.Target.Probe.LimitsRetained = nil, false
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if fmt.Sprint(rec.RateLimitHeaders) != "map[X-Ratelimit-Limit-Requests:[120] X-Ratelimit-Remaining-Requests:[qz7919]]" || *rec.Limits.Body.Text != limitsBody {
+		t.Fatalf("withholding nothing: headers %v, limits body %+v", rec.RateLimitHeaders, rec.Limits.Body)
+	}
+	if p, err := WriteRetained(t.TempDir(), rec); p != "" || err != nil {
+		t.Fatalf("withholding nothing wrote %q, %v", p, err)
+	}
+}
+
 // Each limit record is carried; a file source's retained copy is hashed
 // and a mismatch or a missing copy is a finding.
 func TestReleaseProbeSnapshots(t *testing.T) {

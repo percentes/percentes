@@ -155,7 +155,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if err != nil {
 		return rec, err
 	}
-	ev.probePath = probePath
+	ev.probePath, ev.probe = probePath, pr
 	rec.ProbeStatus = pr.Request.Status
 	var probeBody []byte
 	if b := pr.Request.Body; b != nil && b.Text != nil {
@@ -231,7 +231,8 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 // cellFiles are what a cell has recorded before its evidence is
 // retained: the running dispatch series, the clock record, the start
 // status, refresh record and balance, the operator records it read, the
-// ledger position and the probe record where the cell reached them. A
+// ledger position and the probe record, with what it withholds, where
+// the cell reached them. A
 // missed or interrupted cell that labelCell labels has no running
 // series: own is its series as last written, lastUTC the latest time its
 // records show it running, and dispatched whether it sent a ladder
@@ -248,6 +249,7 @@ type cellFiles struct {
 	op                     *evidence.Operator
 	ledger                 *evidence.LedgerRef
 	probePath              string
+	probe                  *probe.Record
 
 	own        *dispatchSeries
 	lastUTC    time.Time
@@ -255,7 +257,8 @@ type cellFiles struct {
 }
 
 // retain writes a finished cell's evidence: the final dispatch series,
-// the end status and balance, the frame store and operator copies, the
+// the end status and balance, the frame store, the probe's withheld
+// values and the operator copies, the
 // attempts file, the manifest carrying the cell's label, the host's
 // aggregate dispatch series and the inter-chunk gap histograms, and the
 // report pair. A nil res is a cell with no ladder result: its attempts
@@ -296,6 +299,9 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	framesPath, ferr := evidence.WriteRunFrames(r.framesRoot, res)
 	if ferr == nil {
 		ferr = ev.op.WriteCopies(filepath.Dir(framesPath))
+	}
+	if ferr == nil && ev.probe != nil {
+		_, ferr = probe.WriteRetained(filepath.Dir(framesPath), ev.probe)
 	}
 	invalid := slices.Clone(rec.Reasons)
 	if rec.Outcome == outcomeCounted {

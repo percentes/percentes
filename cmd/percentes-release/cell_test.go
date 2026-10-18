@@ -530,6 +530,81 @@ func TestCellStopsAndBlocks(t *testing.T) {
 	}
 }
 
+// A cell's probe withholds what the route retains: no file under the
+// release output directory carries a retained header value or the
+// retained limits body, and the probe's retained file in the run's frame
+// directory, readable by the owner only, holds them.
+func TestCellProbeWithholds(t *testing.T) {
+	const limitsBody = `{"rate_limits":{"rpm":"qz104729"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Ratelimit-Limit-Requests", "1000")
+		w.Header().Set("X-Ratelimit-Remaining-Requests", "qz7919")
+		if r.Method == http.MethodGet {
+			io.WriteString(w, limitsBody) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"error":{"message":"model not found"}}`) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	cfg := releaseConfig(t, srv.URL+"/openai/v1/chat/completions")
+	cfg.Target.RetainedHeaders = []string{"x-ratelimit-remaining-*"}
+	cfg.Target.Probe = &config.TargetProbe{LimitsURL: srv.URL + "/openai/v1/models", LimitsAuthScheme: "Bearer", LimitsRetained: true}
+	r, f := newTestRoute(t, cfg, "+0.005")
+	run := r.runs[0]
+	rec, err := r.runCell(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Outcome != outcomeBlocked || rec.ProbeStatus != http.StatusNotFound {
+		t.Fatalf("outcome %s, probe status %d", rec.Outcome, rec.ProbeStatus)
+	}
+	m, _ := checkRetained(t, r, run)
+	if m.Artifact(probe.File) == nil {
+		t.Fatalf("artifacts %+v", m.Artifacts)
+	}
+	var published int
+	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		published++
+		for _, v := range []string{"qz7919", "qz104729"} {
+			if bytes.Contains(b, []byte(v)) {
+				t.Errorf("%s carries the withheld %s", p, v)
+			}
+		}
+		return nil
+	}); err != nil || published == 0 {
+		t.Fatalf("walk: %d files, %v", published, err)
+	}
+	b, err := os.ReadFile(filepath.Join(r.cellDir(run), probe.File))
+	if err != nil || !bytes.Contains(b, []byte(`"[retained]"`)) {
+		t.Fatalf("%s: %v\n%s", probe.File, err, b)
+	}
+	held := filepath.Join(r.framesRoot, filepath.Dir(m.Frames.Name), probe.RetainedFile)
+	raw, err := os.ReadFile(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(held); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("retained file mode %v, %v", fi, err)
+	}
+	var back probe.RetainedRecord
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	const kept = "map[X-Ratelimit-Remaining-Requests:[qz7919]]"
+	if q, l := back.Exchanges["request"], back.Exchanges["limits"]; q == nil || fmt.Sprint(q.Headers) != kept || l == nil || fmt.Sprint(l.Headers) != kept ||
+		l.Body == nil || l.Body.Text == nil || *l.Body.Text != limitsBody {
+		t.Fatalf("retained record %s", raw)
+	}
+}
+
 // A failed balance check, a balance below the cell's reservation, and a
 // balance unavailable where the route records no balance_unavailable
 // ruling each block the cell before admission: the ledger gains no line

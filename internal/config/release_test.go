@@ -269,6 +269,35 @@ func TestReleaseLimitAndNamingForms(t *testing.T) {
 	}
 }
 
+// target.probe.limits_retained loads from YAML on a release target with
+// a limits read, and is refused without one.
+func TestReleaseLimitsRetained(t *testing.T) {
+	raw, err := os.ReadFile(releaseRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := "  response_headers: [Retry-After, x-ratelimit-*]\n"
+	read := "    limits_url: https://api.groq.com/openai/v1/models\n    limits_auth_scheme: Bearer\n"
+	for _, tc := range []struct {
+		name, probe, want string
+	}{
+		{"with a limits read", read + "    limits_retained: true\n", ""},
+		{"without a limits read", "    limits_retained: true\n", "target.probe.limits_retained: set without limits_url"},
+	} {
+		edited := strings.Replace(string(raw), line, line+"  probe:\n"+tc.probe, 1)
+		if edited == string(raw) {
+			t.Fatal("reference no longer carries the response_headers line this test edits")
+		}
+		c, err := Parse([]byte(edited))
+		switch {
+		case tc.want == "" && (err != nil || c.Target.Probe == nil || !c.Target.Probe.LimitsRetained):
+			t.Errorf("%s: must load with limits_retained set, got %v", tc.name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: must fail naming %q, got: %v", tc.name, tc.want, err)
+		}
+	}
+}
+
 // Unpublished limits load from YAML, with URL and file sources and a
 // ruling on the retrieval date or later, beside a recorded limit of
 // another dimension.

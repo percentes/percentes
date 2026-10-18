@@ -39,7 +39,7 @@
 //	percentes-release ledger price --ledger FILE --config FILE --input USD
 //	    --output USD --source URL --retrieved DATE
 //	percentes-release ceiling-check --config FILE --env FILE --ledger FILE
-//	    --out DIR --byte-cap N [--snapshots DIR]
+//	    --out DIR --byte-cap N [--frames DIR] [--snapshots DIR]
 //	percentes-release run --config FILE --env FILE --ledger FILE
 //	    --schedule FILE --out DIR --frames DIR --clock-sync CMD
 //	    --status-cmd CMD --balance-cmd CMD --refresh-cmd CMD

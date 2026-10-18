@@ -331,6 +331,70 @@ func TestProbeWrongModelAndLimitsOutsideTheGate(t *testing.T) {
 	}
 }
 
+// A release route's one-request probe withholds what the route retains:
+// the probe request's and the limits read's retained header values, and
+// the limits body under target.probe.limits_retained; the retained file
+// holds them.
+func TestProbeRetains(t *testing.T) {
+	const limitsBody = `{"rate_limits":{"rpm":"qz104729"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Ratelimit-Limit-Requests", "120")
+		w.Header().Set("X-Ratelimit-Remaining-Requests", "qz7919")
+		if r.Method == http.MethodGet {
+			io.WriteString(w, limitsBody) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"error":{"message":"model not found"}}`) //nolint:errcheck
+	}))
+	defer srv.Close()
+	c, err := config.LoadFile("../../configs/release.reference.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tg := &c.Target
+	tg.EndpointURL, tg.APIKeyEnv = srv.URL+"/v1/chat/completions", keyEnv
+	t.Setenv(keyEnv, testKey)
+	tg.RetainedHeaders = []string{"x-ratelimit-remaining-*"}
+	tg.Probe = &config.TargetProbe{LimitsURL: srv.URL + "/v1/model_apis/gpt-oss-120b", LimitsAuthScheme: "Bearer", LimitsRetained: true}
+
+	rec := probe(t, Input{Target: tg, CaseText: caseText})
+	const published = "map[X-Ratelimit-Limit-Requests:[120] X-Ratelimit-Remaining-Requests:[[retained]]]"
+	if fmt.Sprint(rec.Request.Headers) != published || rec.Request.Status != 404 || !rec.Start.Blocked || *rec.Request.Body.Text != `{"error":{"message":"model not found"}}` {
+		t.Fatalf("request %+v, start %+v", rec.Request, rec.Start)
+	}
+	if l := rec.Limits; l == nil || fmt.Sprint(l.Headers) != published || l.Body == nil || l.Body.Text != nil || !l.Body.Retained {
+		t.Fatalf("limits read %+v", l)
+	}
+	path, err := Write(t.TempDir(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(path); err != nil || bytes.Contains(b, []byte("qz7919")) || bytes.Contains(b, []byte("qz104729")) {
+		t.Fatalf("%s carries a withheld value (%v):\n%s", File, err, b)
+	}
+	held, err := WriteRetained(t.TempDir(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back RetainedRecord
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	const kept = "map[X-Ratelimit-Remaining-Requests:[qz7919]]"
+	if r, l := back.Exchanges["request"], back.Exchanges["limits"]; len(back.Exchanges) != 2 || r == nil || fmt.Sprint(r.Headers) != kept ||
+		l == nil || fmt.Sprint(l.Headers) != kept || l.Body == nil || *l.Body.Text != limitsBody {
+		t.Fatalf("retained record %s", raw)
+	}
+	if _, err := WriteRetained(t.TempDir(), "probe"); err == nil {
+		t.Fatal("a string was written as a probe record")
+	}
+}
+
 // Over TLS from a server offering h2, the probe negotiates HTTP/1.1 and
 // records the handshake; a host name is resolved and the answer
 // recorded.

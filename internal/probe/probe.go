@@ -39,6 +39,10 @@ import (
 // File is the probe record's file name in a window's output directory.
 const File = "probe.json"
 
+// RetainedFile is the file, outside the published output, holding what a
+// probe record withholds.
+const RetainedFile = "probe-retained.json"
+
 // requestTimeout bounds each exchange of a pilot probe from its dispatch.
 var requestTimeout = time.Duration(config.PinnedClientTimeoutS) * time.Second
 
@@ -119,8 +123,10 @@ type Exchange struct {
 	PeerAddr string    `json:"peer_addr,omitempty"`
 	Proto    string    `json:"proto,omitempty"`
 	Status   int       `json:"status,omitempty"`
-	// Headers holds the response headers target.response_headers allows;
-	// HeaderNames lists every response header name.
+	// Headers holds the response headers target.response_headers allows,
+	// with config.RetainedHeaderValue in place of each value of a header
+	// target.retained_headers names; HeaderNames lists every response
+	// header name.
 	Headers     map[string][]string `json:"headers,omitempty"`
 	HeaderNames []string            `json:"header_names,omitempty"`
 	FirstByteNs int64               `json:"first_byte_ns,omitempty"`
@@ -130,6 +136,16 @@ type Exchange struct {
 	// Error is the redacted Go error of a failure before or during the
 	// response.
 	Error string `json:"error,omitempty"`
+	// Retained holds what the record withholds, for RetainedFile.
+	Retained *Retained `json:"-"`
+}
+
+// Retained is what one exchange's record withholds: the values of the
+// headers target.retained_headers names, and the limits body when
+// target.probe.limits_retained is set.
+type Retained struct {
+	Headers map[string][]string `json:"headers,omitempty"`
+	Body    *Body               `json:"body,omitempty"`
 }
 
 // DNS is the resolution of the request's host.
@@ -168,10 +184,13 @@ type Certificate struct {
 
 // Body is response bytes: text when valid UTF-8, base64 otherwise.
 // Truncated says the body ran past the limit and the rest was not read.
+// A retained body carries only the SHA-256 of the bytes kept.
 type Body struct {
 	Text      *string `json:"text,omitempty"`
 	Base64    string  `json:"base64,omitempty"`
 	Truncated bool    `json:"truncated,omitempty"`
+	Retained  bool    `json:"retained,omitempty"`
+	SHA256    string  `json:"sha256,omitempty"`
 }
 
 func bodyOf(b []byte, truncated bool) *Body {
@@ -180,6 +199,15 @@ func bodyOf(b []byte, truncated bool) *Body {
 		return &Body{Text: &s, Truncated: truncated}
 	}
 	return &Body{Base64: base64.StdEncoding.EncodeToString(b), Truncated: truncated}
+}
+
+// raw returns the bytes bodyOf was given.
+func (b *Body) raw() []byte {
+	if b.Text != nil {
+		return []byte(*b.Text)
+	}
+	r, _ := base64.StdEncoding.DecodeString(b.Base64)
+	return r
 }
 
 // Gate returns the start decision for a probe request's status.
@@ -275,6 +303,79 @@ func Write(dir string, rec any) (string, error) {
 	}
 	path := filepath.Join(dir, File)
 	if err := os.WriteFile(path, b.Bytes(), 0o644); err != nil {
+		return "", fmt.Errorf("probe: %w", err)
+	}
+	return path, nil
+}
+
+// RetainedRecord is what a probe record withholds, by exchange:
+// "request", "limits" and "wrong_model" of a Record, "requests.<index>"
+// and "limits" of a ReleaseRecord.
+type RetainedRecord struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Target        string               `json:"target"`
+	StartUTC      time.Time            `json:"start_utc"`
+	Exchanges     map[string]*Retained `json:"exchanges"`
+}
+
+// Withheld returns what rec, a *Record or a *ReleaseRecord, withholds, or
+// nil when it withholds nothing.
+func Withheld(rec any) (*RetainedRecord, error) {
+	out := &RetainedRecord{SchemaVersion: 1, Exchanges: map[string]*Retained{}}
+	add := func(name string, ex *Exchange) {
+		if ex != nil && ex.Retained != nil {
+			out.Exchanges[name] = ex.Retained
+		}
+	}
+	switch r := rec.(type) {
+	case *Record:
+		out.Target, out.StartUTC = r.Target, r.StartUTC
+		add("request", &r.Request)
+		add("limits", r.Limits)
+		add("wrong_model", r.WrongModel)
+	case *ReleaseRecord:
+		out.Target, out.StartUTC = r.Route, r.StartUTC
+		for i := range r.Requests {
+			add(fmt.Sprintf("requests.%d", r.Requests[i].Index), &r.Requests[i].Exchange)
+		}
+		add("limits", r.Limits)
+	default:
+		return nil, fmt.Errorf("probe: %T is not a probe record", rec)
+	}
+	if len(out.Exchanges) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// WriteRetained writes what rec withholds (Withheld) to RetainedFile in
+// dir, readable by the owner only, and returns the file's path, or ""
+// when rec withholds nothing. It refuses an existing file.
+func WriteRetained(dir string, rec any) (string, error) {
+	held, err := Withheld(rec)
+	if err != nil || held == nil {
+		return "", err
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(held); err != nil {
+		return "", fmt.Errorf("probe: %w", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("probe: %w", err)
+	}
+	path := filepath.Join(dir, RetainedFile)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("probe: %w", err)
+	}
+	if _, err := f.Write(b.Bytes()); err != nil {
+		f.Close()
+		return "", fmt.Errorf("probe: %w", err)
+	}
+	if err := f.Close(); err != nil {
 		return "", fmt.Errorf("probe: %w", err)
 	}
 	return path, nil
@@ -439,7 +540,11 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 	defer resp.Body.Close()
 	mu.Lock()
 	ex.Proto, ex.Status = resp.Proto, resp.StatusCode
-	ex.Headers, ex.HeaderNames = p.headers(resp.Header)
+	var held map[string][]string
+	ex.Headers, ex.HeaderNames, held = p.headers(resp.Header)
+	if held != nil {
+		ex.Retained = &Retained{Headers: held}
+	}
 	mu.Unlock()
 	if resp.StatusCode == http.StatusOK && stream != nil {
 		stream(resp.Body, since)
@@ -462,10 +567,11 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 }
 
 // headers returns the allowlisted headers, any value carrying the key
-// dropped, and every header name. Names arrive case-folded, so they are
-// masked without regard to case.
-func (p *prober) headers(h http.Header) (map[string][]string, []string) {
-	var out map[string][]string
+// dropped and each retained value replaced by config.RetainedHeaderValue,
+// every header name, and the retained values. Names arrive case-folded,
+// so they are masked without regard to case.
+func (p *prober) headers(h http.Header) (map[string][]string, []string, map[string][]string) {
+	var out, held map[string][]string
 	names := make([]string, 0, len(h))
 	for name, vs := range h {
 		masked := p.mask.fold(name)
@@ -473,6 +579,7 @@ func (p *prober) headers(h http.Header) (map[string][]string, []string) {
 		if !config.HeaderAllowed(p.target.ResponseHeaders, name) || masked != name {
 			continue
 		}
+		retained := p.target.HeaderRetained(name)
 		for _, v := range vs {
 			if p.mask.str(v) != v {
 				continue
@@ -480,18 +587,34 @@ func (p *prober) headers(h http.Header) (map[string][]string, []string) {
 			if out == nil {
 				out = map[string][]string{}
 			}
+			if retained {
+				if held == nil {
+					held = map[string][]string{}
+				}
+				held[name] = append(held[name], v)
+				v = config.RetainedHeaderValue
+			}
 			out[name] = append(out[name], v)
 		}
 	}
 	sort.Strings(names)
-	return out, names
+	return out, names, held
 }
 
 // limits reads target.probe.limits_url with the key after the configured
 // Authorization scheme.
 func (p *prober) limits(ctx context.Context, key string) Exchange {
 	t := p.target
-	return p.exchange(ctx, http.MethodGet, t.Probe.LimitsURL, nil, [][2]string{{"Authorization", t.Probe.LimitsAuthScheme + " " + key}}, limitsBodyLimit, nil)
+	ex := p.exchange(ctx, http.MethodGet, t.Probe.LimitsURL, nil, [][2]string{{"Authorization", t.Probe.LimitsAuthScheme + " " + key}}, limitsBodyLimit, nil)
+	if t.Probe.LimitsRetained && ex.Body != nil {
+		if ex.Retained == nil {
+			ex.Retained = &Retained{}
+		}
+		ex.Retained.Body = ex.Body
+		sum := sha256.Sum256(ex.Body.raw())
+		ex.Body = &Body{Truncated: ex.Body.Truncated, Retained: true, SHA256: hex.EncodeToString(sum[:])}
+	}
+	return ex
 }
 
 func tlsOf(st tls.ConnectionState, err error, ns int64, timeout time.Duration) *TLS {

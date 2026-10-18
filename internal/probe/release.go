@@ -356,6 +356,45 @@ func rateLimitHeaders(h map[string][]string) map[string][]string {
 	return out
 }
 
+// Retains reports whether t withholds a probe value: the values of the
+// headers target.retained_headers names, or the limits body.
+func Retains(t *config.Target) bool {
+	return len(t.RetainedHeaders) > 0 || t.Probe != nil && t.Probe.LimitsRetained
+}
+
+// Exposed lists what rec, a probe of t's route, carries that t withholds:
+// each header target.retained_headers names with a value other than
+// config.RetainedHeaderValue, then "limits body" when
+// target.probe.limits_retained is set and the limits body is kept.
+func Exposed(t *config.Target, rec *ReleaseRecord) []string {
+	var out []string
+	note := func(h map[string][]string) {
+		for name, vs := range h {
+			if !t.HeaderRetained(name) || slices.Contains(out, name) {
+				continue
+			}
+			for _, v := range vs {
+				if v != config.RetainedHeaderValue {
+					out = append(out, name)
+					break
+				}
+			}
+		}
+	}
+	for _, r := range rec.Requests {
+		note(r.Exchange.Headers)
+	}
+	note(rec.RateLimitHeaders)
+	if rec.Limits != nil {
+		note(rec.Limits.Headers)
+	}
+	slices.Sort(out)
+	if b := rec.Limits; t.Probe != nil && t.Probe.LimitsRetained && b != nil && b.Body != nil && (b.Body.Text != nil || b.Body.Base64 != "") {
+		out = append(out, "limits body")
+	}
+	return out
+}
+
 // snapshot checks a file source's retained copy in dir against its
 // recorded hash.
 func snapshot(l config.Limit, dir string) Snapshot {
