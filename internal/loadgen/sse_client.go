@@ -28,12 +28,19 @@ import (
 // skew gate bounds the difference.
 func (g *gen) execute(r *Request) {
 	r.DispatchNs = g.now()
+	g.trip.start(r.DispatchNs)
+	defer g.trip.end()
 	deadline := g.epoch.Add(time.Duration(r.DispatchNs) + time.Duration(config.PinnedClientTimeoutS)*time.Second)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
+	conns := 0
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			r.PeerAddr, r.ConnReused = info.Conn.RemoteAddr().String(), info.Reused
+			// Each further connection for this request is a further send.
+			if conns++; conns > 1 {
+				g.trip.send(g.now())
+			}
 		},
 	})
 

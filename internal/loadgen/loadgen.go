@@ -24,12 +24,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
@@ -166,6 +168,110 @@ type Result struct {
 	ReportedModels  []string `json:"reported_models,omitempty"`
 	ModelMismatches int      `json:"model_mismatches,omitempty"`
 	SplitSeries     bool     `json:"split_series,omitempty"`
+
+	// Tripwires is set for a pilot run only. Interrupted is set when a
+	// safety stop cancelled the run's context.
+	Tripwires   *Tripwires    `json:"tripwires,omitempty"`
+	Interrupted *Interruption `json:"interrupted,omitempty"`
+}
+
+// Tripwires are the pilot's two local dispatch checks (SPEC-HOSTED HA2
+// §3). They record and never block or delay a dispatch; either one
+// firing makes the window client-invalid.
+type Tripwires struct {
+	// Dispatches counts every request sent, including a further
+	// connection taken by one request. ExtraDispatchNs is the first send
+	// beyond Scheduled (0 = none).
+	Scheduled       int   `json:"scheduled"`
+	Dispatches      int64 `json:"dispatches"`
+	ExtraDispatchNs int64 `json:"extra_dispatch_ns,omitempty"`
+	// MaxInFlight is the most requests between dispatch and terminal
+	// state at once. OverInFlightNs is the first dispatch that took the
+	// count above InFlightLimit (0 = none).
+	InFlightLimit  int   `json:"in_flight_limit"`
+	MaxInFlight    int64 `json:"max_in_flight"`
+	OverInFlightNs int64 `json:"over_in_flight_ns,omitempty"`
+	Fired          bool  `json:"fired"`
+}
+
+// Safety stops: the causes a caller cancels Run's context with
+// (context.WithCancelCause). Any other cancellation is recorded by its
+// cause's text.
+var (
+	ErrOperatorAbort = errors.New("operator abort")
+	ErrLedgerCap     = errors.New("ledger cap reached")
+)
+
+// Interruption records a safety stop. Requests dispatched before it run
+// to their terminal state; the unsent ones are never sent.
+type Interruption struct {
+	Cause      string `json:"cause"`
+	StopNs     int64  `json:"stop_ns"`
+	Scheduled  int    `json:"scheduled"`
+	Dispatched int    `json:"dispatched"`
+	Unsent     int    `json:"unsent"`
+}
+
+// tripwire holds a pilot run's counts in atomics only, so a dispatch
+// never waits on it. A nil tripwire records nothing.
+type tripwire struct {
+	scheduled, limit                  int64
+	dispatches, inFlight, maxInFlight atomic.Int64
+	extraNs, overNs                   atomic.Int64
+}
+
+func newTripwire(cfg *config.Config, scheduled int) *tripwire {
+	if cfg.Profile != config.ProfilePilot {
+		return nil
+	}
+	return &tripwire{scheduled: int64(scheduled), limit: config.PinnedPilotInFlightTripwire}
+}
+
+// send counts one request sent at now.
+func (t *tripwire) send(now int64) {
+	if t == nil {
+		return
+	}
+	if t.dispatches.Add(1) > t.scheduled {
+		t.extraNs.CompareAndSwap(0, now)
+	}
+}
+
+// start counts a dispatch at now and its request in flight; end counts
+// its terminal state.
+func (t *tripwire) start(now int64) {
+	if t == nil {
+		return
+	}
+	t.send(now)
+	n := t.inFlight.Add(1)
+	for m := t.maxInFlight.Load(); n > m && !t.maxInFlight.CompareAndSwap(m, n); m = t.maxInFlight.Load() {
+	}
+	if n > t.limit {
+		t.overNs.CompareAndSwap(0, now)
+	}
+}
+
+func (t *tripwire) end() {
+	if t != nil {
+		t.inFlight.Add(-1)
+	}
+}
+
+func (t *tripwire) report() *Tripwires {
+	if t == nil {
+		return nil
+	}
+	w := &Tripwires{
+		Scheduled:       int(t.scheduled),
+		Dispatches:      t.dispatches.Load(),
+		ExtraDispatchNs: t.extraNs.Load(),
+		InFlightLimit:   int(t.limit),
+		MaxInFlight:     t.maxInFlight.Load(),
+		OverInFlightNs:  t.overNs.Load(),
+	}
+	w.Fired = w.Dispatches > t.scheduled || w.MaxInFlight > t.limit
+	return w
 }
 
 type gen struct {
@@ -178,6 +284,7 @@ type gen struct {
 	// cfg.Target.APIKeyEnv ("" = send no Authorization header).
 	model  string
 	apiKey string
+	trip   *tripwire
 }
 
 // now returns nanoseconds since the run epoch (monotonic).
@@ -223,6 +330,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 		filler: buildFiller(cfg.Load.InputLengthTokens),
 		model:  model,
 		apiKey: apiKey,
+		trip:   newTripwire(cfg, len(schedule)),
 	}
 
 	p := cfg.Run.Phases
@@ -246,6 +354,13 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	if hooks != nil && hooks.OnEpoch != nil {
 		hooks.OnEpoch(g.epoch)
 	}
+	var stopNs int64
+	stopped := make(chan struct{})
+	unwatch := context.AfterFunc(ctx, func() {
+		stopNs = g.now()
+		close(stopped)
+	})
+	defer unwatch()
 	cpuMon := startCPUMonitor()
 	gcMon := startGCMonitor(res.WarmupEndNs, res.FaultEndNs)
 
@@ -295,13 +410,28 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	res.Requests = requests
 	res.Gates = evaluateGates(cfg, requests, cpuSamples, gcLoMs, gcHiMs, res.WarmupEndNs, res.FaultEndNs)
 	compareModels(cfg, g.model, res)
+	res.Tripwires = g.trip.report()
 	if aborted || ctx.Err() != nil {
+		<-stopped
+		res.Interrupted = interruption(context.Cause(ctx), stopNs, requests)
 		return res, fmt.Errorf("loadgen: run aborted by context: %w", ctx.Err())
 	}
 	if err := checkProtocols(cfg, requests); err != nil {
 		return res, err
 	}
 	return res, nil
+}
+
+// interruption counts a stopped run's requests.
+func interruption(cause error, stopNs int64, requests []Request) *Interruption {
+	in := &Interruption{Cause: cause.Error(), StopNs: stopNs, Scheduled: len(requests)}
+	for i := range requests {
+		if requests[i].DispatchNs != 0 {
+			in.Dispatched++
+		}
+	}
+	in.Unsent = in.Scheduled - in.Dispatched
+	return in
 }
 
 // NewTransport pins HTTP/1.1 on plain and TLS connections, so each

@@ -149,6 +149,10 @@ const (
 	PinnedPilotCompletionCeiling = 4096
 	PinnedPilotConnections       = 32
 
+	// SPEC-HOSTED HA2 §3: a request in flight beyond this many trips the
+	// in-flight tripwire.
+	PinnedPilotInFlightTripwire = 4
+
 	// SPEC-HOSTED §9: a hosted run whose client clock offset against its
 	// time-synchronization source at run start exceeds this does not
 	// count.
