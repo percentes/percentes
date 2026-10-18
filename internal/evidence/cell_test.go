@@ -195,6 +195,39 @@ func TestManifestCellRecord(t *testing.T) {
 	}
 }
 
+// A release target's not-applied parameters publish in its manifest's
+// endpoint record.
+func TestManifestReleaseNotApplied(t *testing.T) {
+	raw, err := os.ReadFile("../../configs/release.reference.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	with := strings.Replace(string(raw), `, "reasoning_format": "parsed"}`, "}", 1)
+	with = strings.Replace(with, "  naming:\n", "  not_applied: [reasoning_format]\n  naming:\n", 1)
+	cfg, err := config.Parse([]byte(with))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, out := manifestRun(t)
+	in.Config, in.Target, in.Release = cfg, &cfg.Target, releaseCell(cfg)
+	in.RunValid, in.InvalidReasons = true, nil
+	m, err := NewManifest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := WriteManifest(out, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := ReadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"reasoning_format"}; !reflect.DeepEqual(back.Endpoint.NotApplied, want) {
+		t.Errorf("endpoint not_applied %q, want %q", back.Endpoint.NotApplied, want)
+	}
+}
+
 func TestManifestCellRefusals(t *testing.T) {
 	in, _ := manifestRun(t)
 	in.Release = releaseCell(releaseCfg(t))

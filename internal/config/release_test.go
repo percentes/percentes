@@ -105,7 +105,15 @@ func TestReleaseRefusals(t *testing.T) {
 		{"base url", func(c *Config) { c.Target.BaseURL = "https://api.groq.com/openai" }, "target.base_url: must be absent"},
 		{"replicas", func(c *Config) { c.Target.Replicas = 1 }, "target.replicas: must be absent"},
 		{"metrics", func(c *Config) { c.Target.MetricsURLs = []string{"http://x/metrics"} }, "not read for a hosted target"},
-		{"params", func(c *Config) { c.Target.Params = &Params{MaxTokens: 512} }, "params and not_applied are set on pilot.targets entries only"},
+		{"params", func(c *Config) { c.Target.Params = &Params{MaxTokens: 512} }, "target.params: set on pilot.targets entries only"},
+		{"not_applied sampling control", func(c *Config) { c.Target.NotApplied = []string{"temperature"} }, `target.not_applied[0]: "temperature" is not one of the "chat_completions" adapter's parameters`},
+		{"not_applied ceiling key", func(c *Config) { c.Target.NotApplied = []string{"max_completion_tokens"} }, `target.not_applied[0]: "max_completion_tokens" is not one of`},
+		{"not_applied of the other adapter", func(c *Config) { c.Target.NotApplied = []string{"thinking"} }, `target.not_applied[0]: "thinking" is not one of the "chat_completions" adapter's parameters`},
+		{"not_applied sent", func(c *Config) { c.Target.NotApplied = []string{"reasoning_format"} }, `target.not_applied[0]: "reasoning_format" is sent in target.body`},
+		{"not_applied listed twice", func(c *Config) {
+			c.Target.Body = strings.Replace(c.Target.Body, `, "reasoning_format": "parsed"`, "", 1)
+			c.Target.NotApplied = []string{"reasoning_format", "reasoning_format"}
+		}, `target.not_applied[1]: "reasoning_format" listed twice`},
 		{"no adapter", func(c *Config) { c.Target.Adapter = "" }, "target.adapter: must be one of"},
 		{"unknown adapter", func(c *Config) { c.Target.Adapter = "responses" }, "target.adapter: must be one of"},
 		{"response shape on messages", func(c *Config) {
@@ -317,6 +325,42 @@ func TestReleaseRetainedHeaders(t *testing.T) {
 	} {
 		if got := c.Target.HeaderRetained(name); got != want {
 			t.Errorf("HeaderRetained(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// A parameter the target rejects loads as not applied, from YAML for a
+// chat-completions target and for each Messages parameter, when the body
+// omits it.
+func TestReleaseNotApplied(t *testing.T) {
+	raw, err := os.ReadFile(releaseRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with := strings.Replace(string(raw), `, "reasoning_format": "parsed"}`, "}", 1)
+	with = strings.Replace(with, "  naming:\n", "  not_applied: [reasoning_format]\n  naming:\n", 1)
+	if strings.Contains(with, "reasoning_format\": ") || !strings.Contains(with, "not_applied: [reasoning_format]") {
+		t.Fatal("the reference no longer carries the body line or the naming block this test edits")
+	}
+	c, err := Parse([]byte(with))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(c.Target.NotApplied, []string{"reasoning_format"}) {
+		t.Errorf("not_applied %q", c.Target.NotApplied)
+	}
+
+	const messages = `{"model":"m","system":"s","messages":[{"role":"user","content":"{{case}}"}],"stream":true,"max_tokens":512%s}`
+	for _, tc := range []struct{ body, notApplied string }{
+		{`,"output_config":{"effort":"low"}`, "thinking"},
+		{`,"thinking":{"type":"between_tools"}`, "output_config"},
+	} {
+		c := loadRef(t, releaseRef)
+		c.Target.Adapter = AdapterMessages
+		c.Target.Body = strings.Replace(messages, "%s", tc.body, 1)
+		c.Target.NotApplied = []string{tc.notApplied}
+		if err := c.Validate(); err != nil {
+			t.Errorf("messages, %s not applied: %v", tc.notApplied, err)
 		}
 	}
 }

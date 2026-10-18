@@ -201,6 +201,14 @@ var releaseUnsentKeys = []string{
 	"repetition_penalty", "ignore_eos", "min_tokens",
 }
 
+// releaseParams are the body parameters SPEC-HOSTED HA3 point 3 names
+// per adapter other than the model, the texts, stream and the ceiling; a
+// target that rejects one lists it in not_applied.
+var releaseParams = map[string][]string{
+	AdapterChatCompletions: {"stream_options", "reasoning_effort", "reasoning_format"},
+	AdapterMessages:        {"thinking", "output_config"},
+}
+
 // ReleaseConnectionProvision is the release transport provision: two
 // times the top step's rate times the hard timeout, plus
 // load.connections. The config must have passed Validate under the
@@ -347,8 +355,8 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	if len(t.MetricsURLs) > 0 || t.QueueGauge != "" || len(t.MetricsFamilies) > 0 || t.TTFTHistogram != "" {
 		v.errf("%s: metrics_urls, queue_gauge, metrics_families and ttft_histogram are not read for a hosted target (§6)", field)
 	}
-	if t.Params != nil || len(t.NotApplied) > 0 {
-		v.errf("%s: params and not_applied are set on pilot.targets entries only; target.body is the whole request", field)
+	if t.Params != nil {
+		v.errf("%s.params: set on pilot.targets entries only; target.body is the whole request", field)
 	}
 	if !slices.Contains(adapters, t.Adapter) {
 		v.errf("%s.adapter: must be one of %q, got %q", field, adapters, t.Adapter)
@@ -359,6 +367,7 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 			v.errf("%s.body: %v", field, err)
 		}
 	}
+	validateReleaseNotApplied(v, field, t)
 	validateResponseHeaders(v, field, t)
 	validateRetainedHeaders(v, field, t)
 	validateResponseShape(v, field, t)
@@ -438,6 +447,30 @@ func checkReleaseBody(body, adapter string, ceiling int) error {
 		}
 	}
 	return nil
+}
+
+// validateReleaseNotApplied refuses a not_applied entry that is not one
+// of the adapter's releaseParams, repeats another, or is a key target.body
+// sends.
+func validateReleaseNotApplied(v *validator, field string, t *Target) {
+	params, ok := releaseParams[t.Adapter]
+	if !ok {
+		return
+	}
+	var top map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(t.Body), &top)
+	seen := map[string]bool{}
+	for i, k := range t.NotApplied {
+		switch {
+		case !slices.Contains(params, k):
+			v.errf("%s.not_applied[%d]: %q is not one of the %q adapter's parameters %q (SPEC-HOSTED HA3 point 3)", field, i, k, t.Adapter, params)
+		case seen[k]:
+			v.errf("%s.not_applied[%d]: %q listed twice", field, i, k)
+		case top[k] != nil:
+			v.errf("%s.not_applied[%d]: %q is sent in target.body", field, i, k)
+		}
+		seen[k] = true
+	}
 }
 
 func validateLimit(v *validator, field string, l *Limit) {

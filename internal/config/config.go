@@ -434,7 +434,9 @@ type Target struct {
 	// targets only.
 	Params *Params `yaml:"params,omitempty" json:"params,omitempty"`
 	// NotApplied lists settings the other endpoint sends that this one
-	// does not support; pilot targets only.
+	// does not support. On the release profile's target it lists the
+	// body parameters of SPEC-HOSTED HA3 point 3 that the target rejects,
+	// which target.body omits.
 	NotApplied []string `yaml:"not_applied,omitempty" json:"not_applied,omitempty"`
 	// Probe configures the pre-run probe's limits read and start gate.
 	Probe *TargetProbe `yaml:"probe,omitempty" json:"probe,omitempty"`
