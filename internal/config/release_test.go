@@ -32,6 +32,10 @@ func TestReleaseReferenceLoads(t *testing.T) {
 // Each mutation breaks one release pin; the error names the field.
 func TestReleaseRefusals(t *testing.T) {
 	limit := func(c *Config) *Limit { return &c.Target.Limits[0] }
+	doc := func(c *Config) *StatusDoc {
+		c.Target.StatusDocs = []StatusDoc{{Status: 529, Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
+		return &c.Target.StatusDocs[0]
+	}
 	tpm := func(c *Config) *Limit { return &c.Target.Limits[1] }
 	for _, tc := range []struct {
 		name   string
@@ -124,6 +128,17 @@ func TestReleaseRefusals(t *testing.T) {
 		{"naming empty line", func(c *Config) { c.Target.Naming.Lines[1] = " " }, "target.naming.lines[1]: empty"},
 		{"naming repeated line", func(c *Config) { c.Target.Naming.Lines[1] = c.Target.Naming.Lines[0] }, "target.naming.lines[1]: listed twice"},
 		{"permission unrecorded", func(c *Config) { c.Target.Naming.PermissionRequired = true }, "target.naming.permission_record: required"},
+		{"status 200 documented", func(c *Config) { doc(c).Status = 200 }, "target.status_docs[0].status: an HTTP status from 100 to 599 other than 200 required, got 200"},
+		{"status 600 documented", func(c *Config) { doc(c).Status = 600 }, "target.status_docs[0].status: an HTTP status"},
+		{"status unset", func(c *Config) { doc(c).Status = 0 }, "target.status_docs[0].status: an HTTP status"},
+		{"status documented twice", func(c *Config) {
+			doc(c)
+			c.Target.StatusDocs = append(c.Target.StatusDocs, c.Target.StatusDocs[0])
+		}, "target.status_docs[1].status: 529 documented twice"},
+		{"status meaning", func(c *Config) { doc(c).Meaning = " " }, "target.status_docs[0].meaning: required"},
+		{"status source", func(c *Config) { doc(c).Source = "" }, "target.status_docs[0].source: required"},
+		{"status source scheme", func(c *Config) { doc(c).Source = "ftp://example.com/errors" }, "target.status_docs[0].source: \"ftp://example.com/errors\" is not an http"},
+		{"status date", func(c *Config) { doc(c).Retrieved = "7 October 2026" }, "target.status_docs[0].retrieved: a date as YYYY-MM-DD"},
 	} {
 		c := loadRef(t, releaseRef)
 		tc.mutate(c)
@@ -134,7 +149,7 @@ func TestReleaseRefusals(t *testing.T) {
 }
 
 // Operator-set limits, rolling spend windows, token countings, URL
-// sources and recorded permission load.
+// sources, recorded permission and documented statuses load.
 func TestReleaseLimitAndNamingForms(t *testing.T) {
 	c := loadRef(t, releaseRef)
 	c.Target.Limits = append(c.Target.Limits,
@@ -144,6 +159,10 @@ func TestReleaseLimitAndNamingForms(t *testing.T) {
 		Limit{Dimension: LimitTPM, Value: 1e6, Counting: CountingInput, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
 	)
 	c.Target.Naming.PermissionRequired, c.Target.Naming.PermissionRecord = true, "manifest: written permission"
+	c.Target.StatusDocs = []StatusDoc{
+		{Status: 529, Meaning: "overloaded", Source: "https://example.test/errors", Retrieved: "2026-10-07"},
+		{Status: 503, Meaning: "service unavailable", Source: "errors.png", Retrieved: "2026-10-07"},
+	}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -205,17 +224,20 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 		func(t *Target) { t.Adapter = AdapterChatCompletions },
 		func(t *Target) { t.Limits = rel.Target.Limits },
 		func(t *Target) { t.Naming = rel.Target.Naming },
+		func(t *Target) {
+			t.StatusDocs = []StatusDoc{{Status: 529, Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"}}
+		},
 	} {
 		for _, ref := range []string{acRef, experimentRef} {
 			c := loadRef(t, ref)
 			f(&c.Target)
-			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits and naming are set on the release profile's target only") {
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, naming and status_docs are set on the release profile's target only") {
 				t.Errorf("%s: got %v", ref, err)
 			}
 		}
 		p := loadRef(t, pilotRef)
 		f(&p.Pilot.Targets[1])
-		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits and naming are set on the release profile's target only") {
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, naming and status_docs are set on the release profile's target only") {
 			t.Errorf("pilot: got %v", err)
 		}
 	}

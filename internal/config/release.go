@@ -135,6 +135,16 @@ type Naming struct {
 	PermissionRecord   string `yaml:"permission_record,omitempty" json:"permission_record,omitempty"`
 }
 
+// StatusDoc is the provider's documented meaning of one HTTP status.
+type StatusDoc struct {
+	Status  int    `yaml:"status" json:"status"`
+	Meaning string `yaml:"meaning" json:"meaning"`
+	// Source is the page's URL or the retained screenshot's file name;
+	// Retrieved is the retrieval date, YYYY-MM-DD in UTC.
+	Source    string `yaml:"source" json:"source"`
+	Retrieved string `yaml:"retrieved" json:"retrieved"`
+}
+
 // releaseUnsentKeys may not appear at the top level of a release body:
 // sampling controls stay at each provider's default, and no output-length
 // forcing is sent (SPEC-HOSTED HA3 points 3 and 7).
@@ -320,6 +330,10 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	} else {
 		validateNaming(v, field+".naming", t.Naming)
 	}
+	seen := map[int]bool{}
+	for i := range t.StatusDocs {
+		validateStatusDoc(v, fmt.Sprintf("%s.status_docs[%d]", field, i), &t.StatusDocs[i], seen)
+	}
 }
 
 // checkReleaseBody reports why a literal body breaks the release shape:
@@ -402,6 +416,30 @@ func validateLimit(v *validator, field string, l *Limit) {
 	}
 }
 
+// validateStatusDoc requires a status other than 200 that no earlier
+// entry documents, a meaning, a source and a retrieval date.
+func validateStatusDoc(v *validator, field string, d *StatusDoc, seen map[int]bool) {
+	switch {
+	case d.Status < 100 || d.Status > 599 || d.Status == 200:
+		v.errf("%s.status: an HTTP status from 100 to 599 other than 200 required, got %d", field, d.Status)
+	case seen[d.Status]:
+		v.errf("%s.status: %d documented twice", field, d.Status)
+	}
+	seen[d.Status] = true
+	if strings.TrimSpace(d.Meaning) == "" {
+		v.errf("%s.meaning: required", field)
+	}
+	switch src := strings.TrimSpace(d.Source); {
+	case src == "":
+		v.errf("%s.source: required (the page's URL or the retained screenshot's file name)", field)
+	case strings.Contains(src, "://") && !parsesAsURL(src):
+		v.errf("%s.source: %q is not an http or https URL with a host", field, d.Source)
+	}
+	if _, err := time.Parse(time.DateOnly, d.Retrieved); err != nil {
+		v.errf("%s.retrieved: a date as YYYY-MM-DD required, got %q", field, d.Retrieved)
+	}
+}
+
 func validateNaming(v *validator, field string, n *Naming) {
 	if strings.TrimSpace(n.Provider) == "" {
 		v.errf("%s.provider: required", field)
@@ -427,8 +465,8 @@ func validateNaming(v *validator, field string, n *Naming) {
 // refuseReleaseFields refuses the release-only target fields on a target
 // outside the release profile.
 func refuseReleaseFields(v *validator, field string, t *Target) {
-	if t.Adapter != "" || len(t.Limits) > 0 || t.Naming != nil {
-		v.errf("%s: adapter, limits and naming are set on the release profile's target only", field)
+	if t.Adapter != "" || len(t.Limits) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 {
+		v.errf("%s: adapter, limits, naming and status_docs are set on the release profile's target only", field)
 	}
 }
 

@@ -445,6 +445,9 @@ type Target struct {
 	Limits []Limit `yaml:"limits,omitempty" json:"limits,omitempty"`
 	// Naming records how the route's provider may be named.
 	Naming *Naming `yaml:"naming,omitempty" json:"naming,omitempty"`
+	// StatusDocs records the provider's documented meaning of HTTP
+	// statuses, printed beside each status line of the per-step tables.
+	StatusDocs []StatusDoc `yaml:"status_docs,omitempty" json:"status_docs,omitempty"`
 }
 
 // ResponseShape names where a target's stream chunks carry each field.
