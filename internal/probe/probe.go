@@ -218,7 +218,7 @@ func Run(ctx context.Context, in Input) (*Record, error) {
 	rec.Start = Gate(t, rec.Request.Status)
 
 	if t.Probe != nil && t.Probe.LimitsURL != "" {
-		ex := p.exchange(ctx, http.MethodGet, t.Probe.LimitsURL, nil, t.Probe.LimitsAuthScheme+" "+key, limitsBodyLimit, nil)
+		ex := p.exchange(ctx, http.MethodGet, t.Probe.LimitsURL, nil, [2]string{"Authorization", t.Probe.LimitsAuthScheme + " " + key}, limitsBodyLimit, nil)
 		rec.Limits = &ex
 	}
 
@@ -274,7 +274,8 @@ type posted struct {
 // [DONE] through the shape reader.
 func (p *prober) post(ctx context.Context, url, model string, body []byte, key string) posted {
 	var out posted
-	out.ex = p.exchange(ctx, http.MethodPost, url, body, "Bearer "+key, errorBodyLimit, func(r io.Reader, since func() int64) {
+	name, value := p.target.KeyHeader(key)
+	out.ex = p.exchange(ctx, http.MethodPost, url, body, [2]string{name, value}, errorBodyLimit, func(r io.Reader, since func() int64) {
 		out.shape = readShape(r, p.target.Shape(), p.mask, since)
 	})
 	out.ex.Model = p.mask.str(model)
@@ -282,9 +283,10 @@ func (p *prober) post(ctx context.Context, url, model string, body []byte, key s
 }
 
 // exchange sends one request with the run's transport, never following
-// a redirect or retrying, and records it. A 200 body goes to stream when
-// set; any other body is kept up to limit bytes.
-func (p *prober) exchange(ctx context.Context, method, url string, body []byte, auth string, limit int, stream func(io.Reader, func() int64)) Exchange {
+// a redirect or retrying, and records it. auth is the credential
+// header's name and value. A 200 body goes to stream when set; any other
+// body is kept up to limit bytes.
+func (p *prober) exchange(ctx context.Context, method, url string, body []byte, auth [2]string, limit int, stream func(io.Reader, func() int64)) Exchange {
 	ex := Exchange{Method: method, URL: redact.URL(url), DispatchUTC: time.Now().UTC()}
 	start := time.Now()
 	since := func() int64 { return time.Since(start).Nanoseconds() }
@@ -395,7 +397,7 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 	} else {
 		req.Header.Set("Accept", "application/json")
 	}
-	req.Header.Set("Authorization", auth)
+	req.Header.Set(auth[0], auth[1])
 	req.GetBody = nil
 	resp, err := p.rt.RoundTrip(req)
 	if err != nil {

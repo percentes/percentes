@@ -350,13 +350,20 @@ type Target struct {
 	// endpoints) set it and it is recorded as a §6 pin in the report.
 	ModelName string `yaml:"model_name" json:"model_name"`
 	// Hosted marks a managed OpenAI-compatible endpoint: the request body
-	// omits vLLM-only extensions (ignore_eos) and a bearer token is
-	// required via APIKeyEnv.
+	// omits vLLM-only extensions (ignore_eos) and a key is required via
+	// APIKeyEnv.
 	Hosted bool `yaml:"hosted" json:"hosted"`
-	// APIKeyEnv names the environment variable holding the bearer token.
+	// APIKeyEnv names the environment variable holding the key.
 	// Only the variable NAME is configuration, so configs stay publishable;
 	// the value is resolved at run start and never recorded.
 	APIKeyEnv string `yaml:"api_key_env" json:"api_key_env"`
+	// AuthHeader names the one header that carries the key: AuthBearer
+	// (the default when empty), AuthXAPIKey or AuthAPIKey.
+	AuthHeader string `yaml:"auth_header,omitempty" json:"auth_header,omitempty"`
+	// Body is the complete request body as literal JSON holding
+	// PilotCaseSlot once; each request sends LiteralBody with its case
+	// text.
+	Body string `yaml:"body,omitempty" json:"body,omitempty"`
 	// MetricsURLs are the replicas' Prometheus text endpoints, one per
 	// replica, sampled over the baseline window for G7 (§10). Empty
 	// leaves G7 reported not applicable.
@@ -443,7 +450,7 @@ func (t *Target) Shape() ResponseShape {
 }
 
 // credentialHeaders are never recorded, whatever the allowlist says.
-var credentialHeaders = []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie"}
+var credentialHeaders = []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "X-Api-Key", "Api-Key"}
 
 // CredentialHeader reports whether name carries a credential.
 func CredentialHeader(name string) bool {

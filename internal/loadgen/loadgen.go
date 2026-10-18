@@ -280,8 +280,8 @@ type gen struct {
 	epoch  time.Time
 	filler string
 	// model and apiKey are resolved once at Run start: the requested
-	// model name (mock default when unset) and the bearer token from
-	// cfg.Target.APIKeyEnv ("" = send no Authorization header).
+	// model name (mock default when unset) and the key from
+	// cfg.Target.APIKeyEnv ("" = send no key header).
 	model  string
 	apiKey string
 	trip   *tripwire
@@ -297,8 +297,9 @@ type Hooks struct {
 	// OnEpoch fires once the run epoch is anchored, before the first
 	// dispatch; the orchestrator uses it to pre-arm T_inject.
 	OnEpoch func(epoch time.Time)
-	// Cases are the user texts of a run whose config carries a pilot
-	// body, one per scheduled request, by index.
+	// Cases are the user texts of a run whose target carries a literal
+	// body or whose config carries a pilot body, one per scheduled
+	// request, by index.
 	Cases []string
 }
 
@@ -314,6 +315,17 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	var cases []string
 	if hooks != nil {
 		cases = hooks.Cases
+	}
+	if cfg.Target.Body != "" {
+		if cfg.Pilot != nil {
+			return nil, errors.New("loadgen: target.body and pilot.body both set")
+		}
+		if err := config.CheckLiteralBody(cfg.Target.Body); err != nil {
+			return nil, fmt.Errorf("loadgen: target.body: %w", err)
+		}
+		if len(cases) != len(schedule) {
+			return nil, fmt.Errorf("loadgen: target body: %d case texts for %d scheduled requests", len(cases), len(schedule))
+		}
 	}
 	if cfg.Pilot != nil && len(cases) != len(schedule) {
 		return nil, fmt.Errorf("loadgen: pilot body: %d case texts for %d scheduled requests", len(cases), len(schedule))

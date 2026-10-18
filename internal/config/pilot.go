@@ -12,8 +12,8 @@ import (
 	"strings"
 )
 
-// PilotCaseSlot is the JSON string in pilot.body that the case text
-// replaces. It appears once, unescaped, as the user message content.
+// PilotCaseSlot is the JSON string in pilot.body, or in a target's
+// literal body, that the case text replaces. It appears once, unescaped.
 const PilotCaseSlot = `"{{case}}"`
 
 // Pilot is the pilot profile's request definition (SPEC-HOSTED HA2 §2):
@@ -219,7 +219,7 @@ func validatePilotTarget(v *validator, field string, t *Target) {
 		v.errf("%s.model_name: required", field)
 	}
 	if t.APIKeyEnv == "" {
-		v.errf("%s.api_key_env: required (name of the env var holding the bearer token; never the token itself)", field)
+		v.errf("%s.api_key_env: required (name of the env var holding the key; never the key itself)", field)
 	}
 	if err := checkEndpointURL(t.EndpointURL); err != nil {
 		v.errf("%s.endpoint_url: %v", field, err)
@@ -233,6 +233,7 @@ func validatePilotTarget(v *validator, field string, t *Target) {
 	if len(t.MetricsURLs) > 0 || t.QueueGauge != "" || len(t.MetricsFamilies) > 0 || t.TTFTHistogram != "" {
 		v.errf("%s: metrics_urls, queue_gauge, metrics_families and ttft_histogram are not read for a hosted target (§6)", field)
 	}
+	validateTargetRequest(v, field, ProfilePilot, t)
 	validateResponseHeaders(v, field, t)
 	validateResponseShape(v, field, t)
 	if t.Probe != nil {

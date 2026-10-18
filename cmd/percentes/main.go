@@ -105,6 +105,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("percentes: %v", err)
 	}
+	if err := run.CheckConfig(cfg); err != nil {
+		log.Fatalf("percentes: %v", err)
+	}
 	var (
 		clockCmd   evidence.ClockCommand
 		statusArgs []string

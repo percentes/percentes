@@ -72,6 +72,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("percentes-campaign: %v", err)
 	}
+	if err := run.CheckConfig(cfg); err != nil {
+		log.Fatalf("percentes-campaign: %v", err)
+	}
 	overrides, err := applyOverrides(cfg, *target, *metrics)
 	if err != nil {
 		log.Fatalf("percentes-campaign: %v", err)

@@ -392,9 +392,13 @@ func completionTokens(usage json.RawMessage) (n int, ok bool) {
 // budget (§6); a hosted target omits it, since a provider's handling of
 // the field is not pinned, and accepts natural stops. A self-hosted target
 // is asked for the usage object in the stream's last chunk; the hosted
-// body carries no such request. A config with a pilot body sends that
-// body with the request's case text instead.
+// body carries no such request. A target with a literal body, or a
+// config with a pilot body, sends that body with the request's case text
+// instead.
 func (g *gen) requestBody(r *Request) string {
+	if g.cfg.Target.Body != "" {
+		return string(config.LiteralBody(g.cfg.Target.Body, g.cases[r.Index]))
+	}
 	if g.cfg.Pilot != nil {
 		return string(g.cfg.Pilot.RequestBody(&g.cfg.Target, g.cases[r.Index]))
 	}
@@ -443,8 +447,9 @@ func (g *gen) roundTrip(req *http.Request) (*http.Response, error) {
 	return rt.RoundTrip(req)
 }
 
-// newRequest attaches the fixed headers. The bearer token is added only
-// when resolved (hosted targets); it exists nowhere but this header.
+// newRequest attaches the fixed headers. The key is added only when
+// resolved (hosted targets), in the one header the target names; it
+// exists nowhere but that header.
 func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error) {
 	endpoint := g.cfg.Target.EndpointURL
 	if endpoint == "" {
@@ -456,7 +461,7 @@ func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if g.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+g.apiKey)
+		req.Header.Set(g.cfg.Target.KeyHeader(g.apiKey))
 	}
 	// A POST with no GetBody is never replayed by the transport.
 	req.GetBody = nil
@@ -542,7 +547,7 @@ func hostnameShaped(s string) bool {
 }
 
 // secrets are the credential values a recorded header or body must not
-// carry: the bearer token and the base URL's userinfo and query values,
+// carry: the key and the base URL's userinfo and query values,
 // longest first, so a shorter secret never splits a longer one's match.
 func (g *gen) secrets() []string {
 	s := redact.Secrets(g.cfg.Target.BaseURL)

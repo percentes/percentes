@@ -7,6 +7,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -165,9 +166,24 @@ func (a *Artifacts) attach(o Observed, canaryError string, canary func(collect.W
 	}
 }
 
+// CheckConfig refuses a configuration Execute cannot run: a pilot
+// profile or section, and a target whose body needs case texts.
+func CheckConfig(cfg *config.Config) error {
+	if cfg.Profile == config.ProfilePilot || cfg.Pilot != nil {
+		return errors.New("run: a pilot configuration runs under percentes-pilot only")
+	}
+	if cfg.Target.Body != "" {
+		return errors.New("run: target.body needs one case text per request, which this run does not supply")
+	}
+	return nil
+}
+
 // Execute performs one full run. An error after load generation also
 // returns the artifacts so far, with the error among InvalidReasons.
 func Execute(ctx context.Context, cfg *config.Config, opts Options) (*Artifacts, error) {
+	if err := CheckConfig(cfg); err != nil {
+		return nil, err
+	}
 	art := &Artifacts{Config: cfg, Windows: map[string]*collect.Stats{}}
 
 	var epoch time.Time

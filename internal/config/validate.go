@@ -250,12 +250,13 @@ func (c *Config) validateTarget(v *validator) {
 			v.errf("target.model_name: required for a hosted target")
 		}
 		if c.Target.APIKeyEnv == "" {
-			v.errf("target.api_key_env: required for a hosted target (name of the env var holding the bearer token; never the token itself)")
+			v.errf("target.api_key_env: required for a hosted target (name of the env var holding the key; never the key itself)")
 		}
 	}
 	if t := c.Target; t.Name != "" || t.EndpointURL != "" || t.Params != nil || len(t.NotApplied) > 0 || t.Probe != nil {
 		v.errf("target: name, endpoint_url, params, not_applied and probe are set on pilot.targets entries only")
 	}
+	validateTargetRequest(v, "target", c.Profile, &c.Target)
 	validateResponseHeaders(v, "target", &c.Target)
 	validateResponseShape(v, "target", &c.Target)
 	// §10 G7: the scrape needs one endpoint per replica and a gauge name;

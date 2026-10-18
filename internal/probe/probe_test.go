@@ -496,3 +496,38 @@ func TestProbeBodyCutAtLimit(t *testing.T) {
 		t.Fatalf("body %+v", b)
 	}
 }
+
+// A target's auth_header carries the key on the probe request, alone;
+// the limits read keeps its own Authorization scheme.
+func TestProbeKeyHeader(t *testing.T) {
+	var mu sync.Mutex
+	var post, get http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if r.Method == http.MethodGet {
+			get = r.Header.Clone()
+			mu.Unlock()
+			io.WriteString(w, `{}`) //nolint:errcheck
+			return
+		}
+		post = r.Header.Clone()
+		mu.Unlock()
+		sseHandler(answerFrame, stopFrame, doneFrame)(w, r)
+	}))
+	defer srv.Close()
+	pilot, tg := reference(t, srv.URL+"/v1/messages")
+	tg.AuthHeader = config.AuthXAPIKey
+	tg.Probe = &config.TargetProbe{LimitsURL: srv.URL + "/v1/limits", LimitsAuthScheme: "Api-Key"}
+	probe(t, Input{Pilot: pilot, Target: tg, CaseText: caseText})
+	mu.Lock()
+	defer mu.Unlock()
+	if v := post.Values("X-Api-Key"); len(v) != 1 || v[0] != testKey {
+		t.Errorf("probe request X-Api-Key %q", v)
+	}
+	if v := post.Values("Authorization"); len(v) != 0 {
+		t.Errorf("probe request also sent Authorization %q", v)
+	}
+	if v := get.Get("Authorization"); v != "Api-Key "+testKey || len(get.Values("X-Api-Key")) != 0 {
+		t.Errorf("limits read Authorization %q, X-Api-Key %q", v, get.Values("X-Api-Key"))
+	}
+}
