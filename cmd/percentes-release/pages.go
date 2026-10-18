@@ -126,7 +126,9 @@ func marshalPage(v any) ([]byte, error) {
 // frame store, and every manifest must carry the same verdict. An
 // attempt enters the route's frame when its run record and its manifest
 // both count it, at most one attempt per scheduled cell; a missed or
-// interrupted attempt has its run record only.
+// interrupted attempt has its run record only. Each counted cell carries
+// its scheduled start and the documentation state its manifest records,
+// which the drift rule compares.
 func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, error) {
 	name := cfg.Target.Name
 	paths, err := filepath.Glob(filepath.Join(out, name, "*", cellFile))
@@ -186,7 +188,8 @@ func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, 
 		if err != nil {
 			return nil, err
 		}
-		rr.cells = append(rr.cells, report.CellRecords{Cell: cellLabel(rec.Run), Outcome: m.Release.Outcome, Gaps: m.Release.Gaps, Records: recs})
+		rr.cells = append(rr.cells, report.CellRecords{Cell: cellLabel(rec.Run), Outcome: m.Release.Outcome, Gaps: m.Release.Gaps, Records: recs,
+			Start: m.Release.Run.Start, Docs: report.DocsOf(m)})
 	}
 	if rr.verdict == nil {
 		return nil, fmt.Errorf("pages: route %s has no cell with a %s under %s", name, evidence.ManifestFile, out)

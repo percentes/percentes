@@ -6,6 +6,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
@@ -257,7 +258,10 @@ type PooledStep struct {
 // the ceiling rule's verdict per step with the step's nominal demand as
 // a fraction of each recorded limit, one table per cell, and, for a
 // complete frame of admission.ReleaseCells cells, the cells pooled per
-// step. Pooled is nil for an incomplete frame. Each attempted step
+// step. Pooled is nil for an incomplete frame. A change of limits or
+// documentation between cells (SPEC-HOSTED §4 drift rule) is listed in
+// DriftChanges, and a complete frame then pools each side apart in
+// DriftParts, with Pooled nil. Each attempted step
 // carries its completion-incidence curve with pointwise bands and its
 // quantiles inside the hard timeout. LengthValue is the finish reason
 // the route's adapter reports when the output ceiling stopped the
@@ -272,16 +276,22 @@ type StepTables struct {
 	Cells         []CellTable      `json:"cells"`
 	FrameCells    int              `json:"frame_cells"`
 	Pooled        []PooledStep     `json:"pooled,omitempty"`
+	DriftChanges  []DriftChange    `json:"drift_changes,omitempty"`
+	DriftParts    []DriftPart      `json:"drift_parts,omitempty"`
 }
 
 // CellRecords is one cell's label, the outcome and inter-chunk gap
 // histograms its manifest records (evidence.Cell) and the records of its
-// attempts file.
+// attempts file. Start is the attempt's scheduled start and Docs the
+// documentation state its manifest records (DocsOf); the drift rule
+// reads both.
 type CellRecords struct {
 	Cell    string
 	Outcome string
 	Gaps    []evidence.GapHistogram
 	Records []evidence.Record
+	Start   time.Time
+	Docs    []DocRecord
 }
 
 // stepTally counts one step's requests per line, the status_other
@@ -418,8 +428,23 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 		t.Cells = append(t.Cells, ct)
 		t.tallies = append(t.tallies, tally)
 	}
+	parts, err := t.drift(sorted)
+	if err != nil {
+		return nil, err
+	}
 	if len(t.Cells) == admission.ReleaseCells {
-		t.pool()
+		if len(parts) == 1 {
+			t.Pooled = t.pool(parts[0].cells)
+		} else {
+			for _, p := range parts {
+				dp := DriftPart{FirstStartUTC: sorted[p.cells[0]].Start.UTC(), LastStartUTC: sorted[p.cells[len(p.cells)-1]].Start.UTC(),
+					Docs: p.docs, Pooled: t.pool(p.cells)}
+				for _, i := range p.cells {
+					dp.Cells = append(dp.Cells, t.Cells[i].Cell)
+				}
+				t.DriftParts = append(t.DriftParts, dp)
+			}
+		}
 	}
 	return t.StepTables, nil
 }
@@ -559,15 +584,16 @@ func (t *tables) lines(c *stepTally, rate func(int) Rate) []Line {
 	return out
 }
 
-// pool fills Pooled from the cell tables: at each step, the cells that
-// attempted it with requests scheduled.
-func (t *tables) pool() {
+// pool pools the cell tables at indexes idx: at each step, the cells
+// that attempted it with requests scheduled.
+func (t *tables) pool(idx []int) []PooledStep {
+	var out []PooledStep
 	for k, lim := range t.Limits {
 		ps := PooledStep{Step: k + 1, RPS: lim.RPS, Admitted: lim.Admitted}
 		var cs []*stepTally
 		var n []int
 		codes, labels, reasons := map[int]bool{}, map[string]bool{}, map[string]bool{}
-		for i := range t.Cells {
+		for _, i := range idx {
 			s := &t.Cells[i].Steps[k]
 			if s.State != StepAttempted || s.Scheduled == 0 {
 				continue
@@ -656,8 +682,9 @@ func (t *tables) pool() {
 			ps.Incidence = incidence(cs, t.HardTimeoutS)
 			ps.Signals = signals(cs, ps.Scheduled, t.retryRecorded)
 		}
-		t.Pooled = append(t.Pooled, ps)
+		out = append(out, ps)
 	}
+	return out
 }
 
 // Text renders the tables. Rates print as percentages.
@@ -761,7 +788,17 @@ func (t *StepTables) text(frame bool) string {
 	if !frame {
 		return b.String()
 	}
-	if t.Pooled == nil {
+	for _, c := range t.DriftChanges {
+		w("-- Change of limits or documentation, first observed at cell %s, started %s --", c.Cell, c.StartUTC.Format(time.DateOnly))
+		for _, d := range c.Removed {
+			w("  removed: %s", d)
+		}
+		for _, d := range c.Added {
+			w("  added: %s", d)
+		}
+		w("")
+	}
+	if t.Pooled == nil && t.DriftParts == nil {
 		w("-- Incomplete frame: %d of %d cells; no pooled figures --", len(t.Cells), t.FrameCells)
 		return b.String()
 	}
@@ -773,31 +810,43 @@ func (t *StepTables) text(frame bool) string {
 		return fmt.Sprintf("%d/%d %s; cell rates %s to %s; %d of %d cells with events; %s; effective n %.1f; 95%% Wilson [%s, %s]",
 			p.Count, p.Scheduled, pct(p.Rate), pct(p.CellMin), pct(p.CellMax), p.CellsWithEvents, p.Cells, dep, p.EffectiveN, pct(p.Lo), pct(p.Hi))
 	}
-	w("-- Pooled per step over the frame's %d cells: each step pools the cells that attempted it --", t.FrameCells)
-	for _, s := range t.Pooled {
-		switch {
-		case !s.Admitted:
-			w("step %d, %g rps: excluded by the ceiling rule", s.Step, s.RPS)
-			continue
-		case s.Cells == 0:
-			w("step %d, %g rps: attempted in no cell", s.Step, s.RPS)
-			continue
-		}
-		w("step %d, %g rps, %d of %d cells, %d scheduled:", s.Step, s.RPS, s.Cells, t.FrameCells, s.Scheduled)
-		for _, l := range s.Lines {
-			w("  %-22s %s%s", label(l.Name, l.Status, l.InBand, l.Finish), pooled(l.Pooled), note(l.Status, l.Doc, l.InBand, l.ErrorDoc))
-			if l.Name == loadgen.ErrStatus429 {
-				retryAfterText(w, s.Signals, t.Limits[s.Step-1])
+	steps := func(pooledSteps []PooledStep, cells int) {
+		for _, s := range pooledSteps {
+			switch {
+			case !s.Admitted:
+				w("step %d, %g rps: excluded by the ceiling rule", s.Step, s.RPS)
+				continue
+			case s.Cells == 0:
+				w("step %d, %g rps: attempted in no cell", s.Step, s.RPS)
+				continue
 			}
+			w("step %d, %g rps, %d of %d cells, %d scheduled:", s.Step, s.RPS, s.Cells, cells, s.Scheduled)
+			for _, l := range s.Lines {
+				w("  %-22s %s%s", label(l.Name, l.Status, l.InBand, l.Finish), pooled(l.Pooled), note(l.Status, l.Doc, l.InBand, l.ErrorDoc))
+				if l.Name == loadgen.ErrStatus429 {
+					retryAfterText(w, s.Signals, t.Limits[s.Step-1])
+				}
+			}
+			w("  hosted-G6 (completion within %d s over scheduled): %s against %.2f: %s (reported, not run-invalidating)",
+				t.DeadlineS, pooled(s.G6.InTime), config.PinnedBaselineGoodputMin, passText(s.G6.Pass))
+			if p := s.G6.ExcludingConnectReset; p != nil {
+				w("  hosted-G6 excluding connect and reset: %s", pooled(*p))
+			}
+			pooledCurveText(w, s.Curve, s.Scheduled, s.Cells, t.DeadlineS)
+			incidenceQuantilesText(w, s.Incidence)
+			signalsText(w, s.Signals)
 		}
-		w("  hosted-G6 (completion within %d s over scheduled): %s against %.2f: %s (reported, not run-invalidating)",
-			t.DeadlineS, pooled(s.G6.InTime), config.PinnedBaselineGoodputMin, passText(s.G6.Pass))
-		if p := s.G6.ExcludingConnectReset; p != nil {
-			w("  hosted-G6 excluding connect and reset: %s", pooled(*p))
-		}
-		pooledCurveText(w, s.Curve, s.Scheduled, s.Cells, t.DeadlineS)
-		incidenceQuantilesText(w, s.Incidence)
-		signalsText(w, s.Signals)
+	}
+	if t.DriftParts == nil {
+		w("-- Pooled per step over the frame's %d cells: each step pools the cells that attempted it --", t.FrameCells)
+		steps(t.Pooled, t.FrameCells)
+		return b.String()
+	}
+	for i, p := range t.DriftParts {
+		w("-- Part %d of %d under the drift rule: %d cells started %s to %s; each step pools the part's cells that attempted it --",
+			i+1, len(t.DriftParts), len(p.Cells), p.FirstStartUTC.Format(time.DateOnly), p.LastStartUTC.Format(time.DateOnly))
+		w("cells %s", strings.Join(p.Cells, ", "))
+		steps(p.Pooled, len(p.Cells))
 	}
 	return b.String()
 }

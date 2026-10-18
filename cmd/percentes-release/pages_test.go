@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
@@ -90,8 +92,9 @@ func editJSON[T any](t *testing.T, path string, edit func(*T)) {
 // The index page and each route's page are written from the cells'
 // records: a counted cell enters its route's page and the index counts;
 // a labelled or missed attempt does not; the index carries no forbidden
-// string; the pages regenerate byte for byte; and a second counted
-// attempt of one cell is refused.
+// string; the pages regenerate byte for byte; a second counted attempt
+// of one cell is refused; and a later cell whose manifest records
+// another account tier is named on the route page as a change.
 func TestPagesCmd(t *testing.T) {
 	var block atomic.Bool
 	e := newEndpoint(t, func(int64) (int, string) {
@@ -248,6 +251,48 @@ func TestPagesCmd(t *testing.T) {
 	code, err := pagesCmd(args)
 	if code != exitError || err == nil || !strings.Contains(err.Error(), "cell "+counted.Label+" of route groq counted twice") {
 		t.Fatalf("exit %d: %v", code, err)
+	}
+
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	later := groq.runs[2]
+	if !later.Start.After(counted.Start) {
+		t.Fatalf("run %s starts %s, before %s", later.Label, later.Start, counted.Start)
+	}
+	dir = groq.cellDir(later)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, ent := range ents {
+		b, err := os.ReadFile(filepath.Join(groq.cellDir(counted), ent.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, dir, ent.Name(), b)
+	}
+	editJSON(t, filepath.Join(dir, cellFile), func(c *cellRecord) { c.Run = later })
+	editJSON(t, filepath.Join(dir, evidence.ManifestFile), func(m *evidence.Manifest) {
+		m.Release.Run, m.Release.Dispatch.Sources[0].Run = later, later
+		m.Endpoint.AccountTier = "Scale"
+	})
+	if code, err := pagesCmd(args); code != exitOK || err != nil {
+		t.Fatalf("exit %d: %v", code, err)
+	}
+	files = readPages(t, pages)
+	var split report.StepTables
+	if err := json.Unmarshal(files["routes/groq.json"], &split); err != nil {
+		t.Fatal(err)
+	}
+	want := []report.DriftChange{{Cell: cellLabel(later), StartUTC: later.Start.UTC(),
+		Removed: []report.DocRecord{{Kind: report.DocTier, Tier: "Developer"}}, Added: []report.DocRecord{{Kind: report.DocTier, Tier: "Scale"}}}}
+	if !reflect.DeepEqual(split.DriftChanges, want) || len(split.Cells) != 2 {
+		t.Errorf("groq tables: %d cells, changes %+v", len(split.Cells), split.DriftChanges)
+	}
+	page = string(files["routes/groq.txt"])
+	if line := "-- Change of limits or documentation, first observed at cell " + cellLabel(later) + ", started " + later.Start.UTC().Format(time.DateOnly) +
+		" --\n  removed: account tier Developer\n  added: account tier Scale\n"; !strings.Contains(page, line) {
+		t.Errorf("groq page lacks %q:\n%s", line, page)
 	}
 }
 

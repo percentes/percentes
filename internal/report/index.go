@@ -38,8 +38,9 @@ type IndexCount struct {
 // requests scheduled. Counts has one entry per stepLines line, summed
 // over those cells; the entries sum to Scheduled. Cells, Scheduled and
 // Counts are the route's pooled figures: zero and nil for an incomplete
-// frame (HA3 point 9). Counts is also nil for an excluded step and a
-// step no cell attempted.
+// frame (HA3 point 9) and for a frame the drift rule splits, whose
+// DriftParts counts the parts its route page pools apart. Counts is also
+// nil for an excluded step and a step no cell attempted.
 type IndexRow struct {
 	Provider         string       `json:"provider"`
 	Route            string       `json:"route"`
@@ -55,6 +56,7 @@ type IndexRow struct {
 	Cells            int          `json:"cells_attempted"`
 	Scheduled        int          `json:"scheduled"`
 	Counts           []IndexCount `json:"counts,omitempty"`
+	DriftParts       int          `json:"drift_parts,omitempty"`
 	Page             string       `json:"page"`
 }
 
@@ -162,6 +164,7 @@ func indexRows(provider, model, page string, st *StepTables) []IndexRow {
 		if !lim.Admitted {
 			row.Binding = lim.Binding.Dimension
 		}
+		row.DriftParts = len(st.DriftParts)
 		if st.Pooled != nil {
 			ps := st.Pooled[k]
 			row.Cells, row.Scheduled = ps.Cells, ps.Scheduled
@@ -205,8 +208,12 @@ func (ix *Index) Markdown() string {
 		}
 		cells := fmt.Sprintf("%d of %d", r.Cells, r.FrameCells)
 		scheduled := fmt.Sprint(r.Scheduled)
-		if r.RecordedCells < r.FrameCells {
+		switch {
+		case r.RecordedCells < r.FrameCells:
 			cells = fmt.Sprintf("incomplete frame, %d of %d cells recorded", r.RecordedCells, r.FrameCells)
+			scheduled = ""
+		case r.DriftParts > 0:
+			cells = fmt.Sprintf("split in %d parts by a change of limits or documentation; counts on the route page", r.DriftParts)
 			scheduled = ""
 		}
 		row := []string{r.Provider, r.Route, r.Model, fmt.Sprint(r.Step), fmt.Sprintf("%g", r.RPS), adm, highest,
