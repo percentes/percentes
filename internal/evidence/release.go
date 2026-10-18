@@ -131,7 +131,7 @@ func CheckRelease(r Release) (*Manifest, error) {
 		case c == nil:
 			fail("cell record: not in the manifest")
 		default:
-			if err := c.checkLabel(m.RunValid, m.InvalidReasons); err != nil {
+			if err := c.checkLabel(m.RunValid, m.InvalidReasons, m.Gates); err != nil {
 				fail("cell record: %v", err)
 			}
 			if !c.LadderStarted && len(recs) > 0 {

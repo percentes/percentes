@@ -25,6 +25,7 @@ import (
 	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 // chatStream is a complete chat-completions stream of two content
@@ -211,6 +212,54 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	if d := c.Dispatch; d == nil || len(d.Sources) != 1 || d.Sources[0].Run != run || d.Sources[0].Dispatches != sent || !d.Sources[0].Final {
 		t.Fatalf("aggregate dispatch series %+v", d)
 	}
+	// The manifest carries G2 over the whole ladder and at each attempted
+	// step, as the cell record has them, then hosted-G6 per step.
+	var g2, g6 []validity.Gate
+	for _, g := range m.Gates {
+		switch g.ID {
+		case "G2":
+			g2 = append(g2, g)
+		case "G6":
+			g6 = append(g6, g)
+		default:
+			t.Errorf("gate %+v", g)
+		}
+	}
+	want := []validity.Gate{validity.G2(0, nil)}
+	for k, s := range rec.Ladder.Steps {
+		if s.Attempted {
+			want = append(want, validity.G2(k+1, s.Gates))
+		}
+	}
+	if len(g2) != len(want) {
+		t.Fatalf("G2 results %+v for %d attempted steps", g2, len(want)-1)
+	}
+	for i := range want {
+		if g2[i].Step != want[i].Step || i > 0 && g2[i] != want[i] {
+			t.Errorf("G2 %+v, want %+v", g2[i], want[i])
+		}
+	}
+	if g := g2[0]; !g.Observed || rec.Outcome == outcomeCounted && !g.Pass {
+		t.Errorf("%s cell, whole-ladder G2 %+v", rec.Outcome, g)
+	}
+	inTime, scheduled := map[int]int{}, map[int]int{}
+	for _, a := range recs {
+		if !a.Warmup {
+			scheduled[a.Step]++
+			if a.InTime {
+				inTime[a.Step]++
+			}
+		}
+	}
+	if len(g6) == 0 {
+		t.Fatal("no hosted-G6 result")
+	}
+	for k, g := range g6 {
+		if w := validity.ReleaseG6(k+1, inTime[k+1], scheduled[k+1], r.cfg.Release.Shape.DeadlineS); g != w {
+			t.Errorf("hosted-G6 %+v, want %+v", g, w)
+		}
+	}
+
 	completed := map[int]int64{}
 	for _, a := range recs {
 		if a.Outcome == loadgen.OutcomeCompleted && !a.Warmup {

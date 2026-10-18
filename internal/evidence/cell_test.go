@@ -15,6 +15,7 @@ import (
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/schedule"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 func releaseCfg(t *testing.T) *config.Config {
@@ -48,6 +49,16 @@ func releaseCell(cfg *config.Config) *Cell {
 		LadderStarted:     true,
 		Gaps:              []GapHistogram{},
 	}, 3)
+}
+
+// releaseInput makes in a release run's input under cfg, valid, with no
+// gate report and a one-step ladder whose gates passed.
+func releaseInput(in *ManifestInput, cfg *config.Config) {
+	res := *in.Result
+	res.Gates = loadgen.GateReport{Pass: true, CPUMeasured: true}
+	res.Ladder = &loadgen.LadderRecord{Steps: []loadgen.StepRecord{{RateRPS: 0.25, Attempted: true, Gates: &loadgen.GateReport{Pass: true, CPUMeasured: true}}}}
+	in.Config, in.Target, in.Result, in.Gates = cfg, &cfg.Target, &res, nil
+	in.RunValid, in.InvalidReasons = true, nil
 }
 
 // withDispatch gives c an aggregate dispatch series in which its own run
@@ -165,8 +176,8 @@ func TestManifestCellRecord(t *testing.T) {
 	}
 
 	cfg := releaseCfg(t)
-	in.Config, in.Target, in.Release = cfg, &cfg.Target, releaseCell(cfg)
-	in.RunValid, in.InvalidReasons = true, nil
+	releaseInput(&in, cfg)
+	in.Release = releaseCell(cfg)
 	m, err = NewManifest(in)
 	if err != nil {
 		t.Fatal(err)
@@ -227,8 +238,8 @@ func TestManifestReleaseNotApplied(t *testing.T) {
 		t.Fatal(err)
 	}
 	in, out := manifestRun(t)
-	in.Config, in.Target, in.Release = cfg, &cfg.Target, releaseCell(cfg)
-	in.RunValid, in.InvalidReasons = true, nil
+	releaseInput(&in, cfg)
+	in.Release = releaseCell(cfg)
 	m, err := NewManifest(in)
 	if err != nil {
 		t.Fatal(err)
@@ -253,8 +264,8 @@ func TestManifestCellRefusals(t *testing.T) {
 		t.Errorf("cell record on a pilot run: %v", err)
 	}
 	cfg := releaseCfg(t)
-	in.Config, in.Target, in.Release = cfg, &cfg.Target, nil
-	in.RunValid, in.InvalidReasons = true, nil
+	releaseInput(&in, cfg)
+	in.Release = nil
 	if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "needs its cell record") {
 		t.Errorf("release run without a cell record: %v", err)
 	}
@@ -313,7 +324,7 @@ func TestManifestCellLabel(t *testing.T) {
 		t.Error("a pilot manifest counted toward a release frame")
 	}
 	cfg := releaseCfg(t)
-	in.Config, in.Target = cfg, &cfg.Target
+	releaseInput(&in, cfg)
 	base := *in.Result
 	stop := []string{"route stop: clock offset: 75 s from sntp exceeds 60 s"}
 	ended := []string{"ladder ended at step 4: status_429 above half the step's scheduled requests"}
@@ -373,6 +384,109 @@ func TestManifestCellLabel(t *testing.T) {
 				t.Errorf("error %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// A release cell's manifest carries G2 over the whole ladder and at each
+// attempted step, and hosted-G6 at each step its measured records reach:
+// completion within the deadline over the step's scheduled requests,
+// the warm-up and the steps after the last dispatch left out. A run a
+// stop interrupted has no whole-ladder G2, and a step it left before the
+// drain's end has an unobserved G2. A cell with no ladder has no gates.
+func TestManifestReleaseGates(t *testing.T) {
+	cfg := releaseCfg(t)
+	pass, fail := &loadgen.GateReport{Pass: true, CPUMeasured: true}, &loadgen.GateReport{Pass: false, CPUMeasured: true, Undispatched: 1}
+	done := func(step int, late bool) loadgen.Request {
+		return loadgen.Request{Step: step, DispatchNs: 1, Outcome: loadgen.OutcomeCompleted, Late: late}
+	}
+	requests := []loadgen.Request{
+		{Step: 1, Warmup: true, DispatchNs: 1, Outcome: loadgen.OutcomeCompleted},
+		done(1, false), done(1, false), done(1, false), done(1, true),
+		done(2, false), {Step: 2, DispatchNs: 1, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrStatus429}, {Step: 2},
+		{Step: 3}, {Step: 3},
+	}
+	for i := range requests {
+		requests[i].Index = int64(i)
+	}
+	ladder := func(steps ...*loadgen.GateReport) *loadgen.LadderRecord {
+		l := &loadgen.LadderRecord{Steps: make([]loadgen.StepRecord, 3)}
+		for k, g := range steps {
+			l.Steps[k].Attempted, l.Steps[k].Gates = true, g
+		}
+		return l
+	}
+	g6 := func(step, in, n int) validity.Gate { return validity.ReleaseG6(step, in, n, 30) }
+	stopped := []string{"route stop: HTTP 402, the documented billing refusal: balance exhausted"}
+	for _, tc := range []struct {
+		name        string
+		res         loadgen.Result
+		outcome     string
+		reasons     []string
+		want        []validity.Gate
+		wantErr     string
+		ladderStart bool
+	}{
+		{"counted", loadgen.Result{Gates: *pass, Ladder: ladder(pass, pass), Requests: requests}, CellCounted, nil,
+			[]validity.Gate{validity.G2(0, pass), validity.G2(1, pass), validity.G2(2, pass), g6(1, 3, 4), g6(2, 1, 3)}, "", true},
+		{"client-invalid at step 2", loadgen.Result{Gates: *fail, Ladder: ladder(pass, fail), Requests: requests}, CellInvalid, []string{"client-validity gate failed (§2)"},
+			[]validity.Gate{validity.G2(0, fail), validity.G2(1, pass), validity.G2(2, fail), g6(1, 3, 4), g6(2, 1, 3)}, "", true},
+		{"stopped inside step 2", loadgen.Result{Gates: *fail, Ladder: ladder(pass, nil), Interrupted: &loadgen.Interruption{Cause: "route stop"}, Requests: requests}, CellStopped, stopped,
+			[]validity.Gate{validity.G2(1, pass), validity.G2(2, nil), g6(1, 3, 4), g6(2, 1, 3)}, "", true},
+		{"stopped before the ladder", loadgen.Result{}, CellStopped, stopped, nil, "", false},
+		{"counted with a failed step", loadgen.Result{Gates: *pass, Ladder: ladder(pass, fail), Requests: requests}, CellCounted, nil,
+			nil, "counted, and G2 at step 2 failed: skew p99=0us/max=0us; undispatched=1", true},
+		{"counted and interrupted", loadgen.Result{Gates: *pass, Ladder: ladder(pass, pass), Interrupted: &loadgen.Interruption{}, Requests: requests}, CellCounted, nil,
+			nil, "counted with no whole-ladder G2 result", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in, out := manifestRun(t)
+			releaseInput(&in, cfg)
+			res := tc.res
+			res.EpochWall = in.Result.EpochWall
+			c := releaseCell(cfg)
+			c.Outcome, c.Reasons, c.LadderStarted = tc.outcome, tc.reasons, tc.ladderStart
+			in.Result, in.Release, in.RunValid, in.InvalidReasons = &res, c, tc.outcome == CellCounted, tc.reasons
+			m, err := NewManifest(in)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(m.Gates, tc.want) {
+				t.Fatalf("gates\n%+v\nwant\n%+v", m.Gates, tc.want)
+			}
+			path, err := WriteManifest(out, m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := ReadManifest(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(back.Gates, m.Gates) {
+				t.Errorf("gates read back\n%+v\nwritten\n%+v", back.Gates, m.Gates)
+			}
+		})
+	}
+	g := g6(2, 1, 3)
+	if g.Pass || !g.ReportedOnly || g.Detail != "completion within 30 s 0.3333: 1 of 3 scheduled (pinned line 0.99, SPEC-HOSTED §7; reported, not run-invalidating)" ||
+		g.Name != "completion within the 30 s deadline >= 0.99 (hosted G6, SPEC-HOSTED HA3 point 13)" {
+		t.Errorf("hosted-G6 %+v", g)
+	}
+	if g := validity.G2(2, nil); g.Observed || g.Pass || g.Detail != "no verdict: the run stopped before the step's drain ended" {
+		t.Errorf("G2 with no verdict %+v", g)
+	}
+
+	in, _ := manifestRun(t)
+	gates := in.Gates
+	releaseInput(&in, cfg)
+	in.Release, in.Gates = releaseCell(cfg), gates
+	if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "gates come from its ladder") {
+		t.Errorf("a release run given a gate report: %v", err)
 	}
 }
 
@@ -512,10 +626,25 @@ func TestCheckReleaseCellAndAnswer(t *testing.T) {
 		t.Fatalf("release run without answers: %v", err)
 	}
 	r.m.Release = releaseCell(releaseCfg(t))
+	r.m.Gates = []validity.Gate{validity.G2(0, &loadgen.GateReport{Pass: true})}
 	r.write(t)
 	if _, err := r.check(); err != nil {
 		t.Fatalf("complete release run: %v", err)
 	}
+
+	// A counted cell's manifest has a whole-ladder G2, and no G2 failed.
+	gates := r.m.Gates
+	r.m.Gates = append(gates, validity.G2(1, &loadgen.GateReport{CPUMeasured: true}))
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "cell record: evidence: cell label: counted, and G2 at step 1 failed") {
+		t.Errorf("counted cell with a failed G2: %v", err)
+	}
+	r.m.Gates = nil
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "cell label: counted with no whole-ladder G2 result") {
+		t.Errorf("counted cell with no gates: %v", err)
+	}
+	r.m.Gates = gates
 
 	// A release run needs its start balance record.
 	start := r.m.BalanceStart

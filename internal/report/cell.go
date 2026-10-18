@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/schedule"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 // CellReport is one release cell's report: its run, the label its cell
@@ -46,6 +48,9 @@ func cellReport(m *evidence.Manifest, cfg *config.Config, recs []evidence.Record
 	if err != nil {
 		return nil, "", err
 	}
+	if err := checkG6(m.Gates, recs, cfg.Release.Shape.DeadlineS); err != nil {
+		return nil, "", err
+	}
 	rep := &CellReport{
 		SchemaVersion:    1,
 		ConfigSHA256:     m.Config.SHA256,
@@ -63,6 +68,21 @@ func cellReport(m *evidence.Manifest, cfg *config.Config, recs []evidence.Record
 		return nil, "", fmt.Errorf("report: marshal: %w", err)
 	}
 	return raw, rep.text(), nil
+}
+
+// checkG6 reports an error unless the manifest's hosted-G6 results are
+// the ones the records give.
+func checkG6(gates []validity.Gate, recs []evidence.Record, deadlineS int) error {
+	var got []validity.Gate
+	for _, g := range gates {
+		if g.ID == "G6" {
+			got = append(got, g)
+		}
+	}
+	if !reflect.DeepEqual(got, evidence.ReleaseG6(recs, deadlineS)) {
+		return errors.New("report: hosted-G6 from the records differs from the manifest's")
+	}
+	return nil
 }
 
 func (r *CellReport) text() string {

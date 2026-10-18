@@ -11,6 +11,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/schedule"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 // Cell outcomes (SPEC-HOSTED HA3 point 16). A counted cell enters its
@@ -196,8 +197,8 @@ func checkCell(cfg *config.Config, t *config.Target, c *Cell) error {
 }
 
 // checkLabel reports every way c's label disagrees with itself and with
-// the manifest's run validity and invalid reasons.
-func (c *Cell) checkLabel(runValid bool, invalid []string) error {
+// the manifest's run validity, invalid reasons and gates.
+func (c *Cell) checkLabel(runValid bool, invalid []string, gates []validity.Gate) error {
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
 	switch c.Outcome {
@@ -207,6 +208,16 @@ func (c *Cell) checkLabel(runValid bool, invalid []string) error {
 		}
 		if !runValid || len(invalid) > 0 {
 			fail("counted, and the manifest records the run invalid %q", invalid)
+		}
+		whole := false
+		for _, g := range gates {
+			whole = whole || g.ID == "G2" && g.Step == 0
+			if !g.Pass && !g.ReportedOnly {
+				fail("counted, and %s at step %d failed: %s", g.ID, g.Step, g.Detail)
+			}
+		}
+		if !whole {
+			fail("counted with no whole-ladder G2 result")
 		}
 	case CellInvalid, CellBlocked, CellStopped, CellMissed, CellInterrupted:
 		if len(c.Reasons) == 0 {

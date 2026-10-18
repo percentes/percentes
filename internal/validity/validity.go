@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/run"
 	"github.com/percentes/percentes/internal/serverstats"
 )
@@ -40,6 +41,9 @@ type Gate struct {
 	Applicable bool   `json:"applicable"`
 	Observed   bool   `json:"observed"`
 	Pass       bool   `json:"pass"`
+	// Step is the 1-based ladder step a release cell's gate covers; 0 is
+	// the whole run.
+	Step int `json:"step,omitempty"`
 	// LabelDetermining marks the black-hole assertion gates G3 and G4:
 	// failure or non-observation strips the node-loss-representative label
 	// and leaves the run valid (§10).
@@ -224,6 +228,24 @@ func gateG6Hosted(art *run.Artifacts) Gate {
 	return g
 }
 
+// ReleaseG6 is hosted-G6 at one ladder step of a release cell:
+// completion within the deadline over the step's scheduled requests,
+// which number at least one (SPEC-HOSTED HA3 points 7 and 13). Reported,
+// never run-invalidating.
+func ReleaseG6(step, inTime, scheduled, deadlineS int) Gate {
+	frac := float64(inTime) / float64(scheduled)
+	return Gate{
+		ID:           "G6",
+		Step:         step,
+		Name:         fmt.Sprintf("completion within the %d s deadline >= %.2f (hosted G6, SPEC-HOSTED HA3 point 13)", deadlineS, config.PinnedBaselineGoodputMin),
+		Applicable:   true,
+		Observed:     true,
+		Pass:         frac >= config.PinnedBaselineGoodputMin,
+		ReportedOnly: true,
+		Detail:       fmt.Sprintf("completion within %d s %.4f: %d of %d scheduled (pinned line %.2f, SPEC-HOSTED §7; reported, not run-invalidating)", deadlineS, frac, inTime, scheduled, config.PinnedBaselineGoodputMin),
+	}
+}
+
 // G1: per-replica share 45-55% pre-fault (§1, §10). Applicable to
 // multi-replica targets; derived from the harness share gate.
 func gateG1(art *run.Artifacts) Gate {
@@ -248,9 +270,19 @@ func gateG1(art *run.Artifacts) Gate {
 
 // G2: client-validity gate clean (§2, §10).
 func gateG2(art *run.Artifacts) Gate {
-	g := Gate{ID: "G2", Name: "client-validity gate clean", Applicable: true, Observed: true}
-	cg := art.Loadgen.Gates
-	g.Pass = cg.Pass
+	return G2(0, &art.Loadgen.Gates)
+}
+
+// G2 is the client-validity gate at a release ladder step, or over the
+// whole run at step 0. A nil cg is a step the run left before its drain
+// ended: unobserved, and so not passed.
+func G2(step int, cg *loadgen.GateReport) Gate {
+	g := Gate{ID: "G2", Step: step, Name: "client-validity gate clean", Applicable: true}
+	if cg == nil {
+		g.Detail = "no verdict: the run stopped before the step's drain ended"
+		return g
+	}
+	g.Observed, g.Pass = true, cg.Pass
 	g.Detail = fmt.Sprintf("skew p99=%dus/max=%dus; undispatched=%d; cpu_measured=%v worst=%.1f%%; %s",
 		cg.SendSkewP99Us, cg.SendSkewMaxUs, cg.Undispatched, cg.CPUMeasured, cg.CPUWorstWindowPct, cg.GCPauseText())
 	return g

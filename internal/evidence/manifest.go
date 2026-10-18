@@ -83,10 +83,12 @@ type Manifest struct {
 	// Artifacts are the run's other published files.
 	Artifacts []FileRef `json:"artifacts"`
 	// Frames is the raw-frame store file, named from the store's root.
-	Frames         *FileRef        `json:"frames,omitempty"`
-	RunValid       bool            `json:"run_valid"`
-	InvalidReasons []string        `json:"invalid_reasons,omitempty"`
-	Gates          []validity.Gate `json:"gates,omitempty"`
+	Frames         *FileRef `json:"frames,omitempty"`
+	RunValid       bool     `json:"run_valid"`
+	InvalidReasons []string `json:"invalid_reasons,omitempty"`
+	// Gates are the G2 and G6 results; a release cell's are per ladder
+	// step (releaseGates).
+	Gates []validity.Gate `json:"gates,omitempty"`
 	// Replay is what the report pair reads beside the config and the
 	// attempts file; absent for a run that ended in an error and for a
 	// release cell, whose pair reads its cell record.
@@ -223,7 +225,7 @@ func CheckSource(info *debug.BuildInfo, op *Operator) error {
 
 // ManifestInput is what a run's manifest is built from. The paths name
 // files already written; Gates and Replay are nil for a run that ended in
-// an error and for a release cell.
+// an error and for a release cell, whose gates come from Result.
 type ManifestInput struct {
 	Config *config.Config
 	// ConfigName names the configuration file.
@@ -259,6 +261,7 @@ type ManifestInput struct {
 // NewManifest builds the manifest of one hosted run.
 func NewManifest(in ManifestInput) (*Manifest, error) {
 	cfg, t, res, op := in.Config, in.Target, in.Result, in.Operator
+	var gates []validity.Gate
 	switch release := cfg.Profile == config.ProfileRelease && cfg.Release != nil; {
 	case release && in.Release == nil:
 		return nil, errors.New("evidence: a release run's manifest needs its cell record")
@@ -266,11 +269,14 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		return nil, fmt.Errorf("evidence: a cell record under the %q profile", cfg.Profile)
 	case release && in.BalanceStartPath == "":
 		return nil, errors.New("evidence: a release run's manifest needs its start balance record")
+	case release && in.Gates != nil:
+		return nil, errors.New("evidence: a release run's gates come from its ladder, not a gate report")
 	case release:
+		gates = releaseGates(cfg, res)
 		if err := checkCell(cfg, t, in.Release); err != nil {
 			return nil, err
 		}
-		if err := in.Release.checkLabel(in.RunValid, in.InvalidReasons); err != nil {
+		if err := in.Release.checkLabel(in.RunValid, in.InvalidReasons, gates); err != nil {
 			return nil, err
 		}
 		if !in.Release.LadderStarted && len(res.Requests) > 0 {
@@ -298,6 +304,7 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		Artifacts:      []FileRef{},
 		RunValid:       in.RunValid,
 		InvalidReasons: in.InvalidReasons,
+		Gates:          gates,
 		Replay:         in.Replay,
 	}
 	if d := op.find(RecordSourceDiff); d != nil {
@@ -382,6 +389,65 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		}
 	}
 	return m, nil
+}
+
+// releaseGates are a release cell's G2 and hosted-G6 results: G2 over
+// the whole ladder, then at each attempted step, then hosted-G6 at each
+// step its records count (ReleaseG6). A run a stop interrupted has no
+// whole-ladder G2, since the requests it left unsent fail that gate and
+// its steps' verdicts stand alone. A cell whose ladder never ran has
+// none.
+func releaseGates(cfg *config.Config, res *loadgen.Result) []validity.Gate {
+	l := res.Ladder
+	if l == nil {
+		return nil
+	}
+	var out []validity.Gate
+	if res.Interrupted == nil {
+		out = append(out, validity.G2(0, &res.Gates))
+	}
+	for k := range l.Steps {
+		if l.Steps[k].Attempted {
+			out = append(out, validity.G2(k+1, l.Steps[k].Gates))
+		}
+	}
+	recs := make([]Record, len(res.Requests))
+	for i := range res.Requests {
+		recs[i] = record(&res.Requests[i], cfg)
+	}
+	return append(out, ReleaseG6(recs, cfg.Release.Shape.DeadlineS)...)
+}
+
+// ReleaseG6 is hosted-G6 at each step of a release cell's records, in
+// step order: the steps with measured records up to the last step that
+// dispatched one, which the cell's per-step table counts as attempted.
+// Warm-up records are left out.
+func ReleaseG6(recs []Record, deadlineS int) []validity.Gate {
+	var scheduled, inTime []int
+	last := 0
+	for i := range recs {
+		r := &recs[i]
+		if r.Warmup || r.Step < 1 {
+			continue
+		}
+		for len(scheduled) < r.Step {
+			scheduled, inTime = append(scheduled, 0), append(inTime, 0)
+		}
+		scheduled[r.Step-1]++
+		if r.InTime {
+			inTime[r.Step-1]++
+		}
+		if r.DispatchNs != 0 {
+			last = max(last, r.Step)
+		}
+	}
+	var out []validity.Gate
+	for k := 0; k < last; k++ {
+		if scheduled[k] > 0 {
+			out = append(out, validity.ReleaseG6(k+1, inTime[k], scheduled[k], deadlineS))
+		}
+	}
+	return out
 }
 
 // hashOptional returns the reference of the file at path under its base

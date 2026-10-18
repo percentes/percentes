@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/schedule"
+	"github.com/percentes/percentes/internal/validity"
 )
 
 // cellManifest is a release cell's manifest under stepsConfig with the
@@ -82,6 +84,7 @@ func TestCellReport(t *testing.T) {
 
 	m, cfg = cellManifest(t, evidence.CellCounted, nil, true)
 	recs := cellOf("x", outcome{1, LineInTime, 0, 3}, outcome{2, loadgen.ErrStatus429, 0, 1}).Records
+	m.Gates = []validity.Gate{validity.G2(0, &loadgen.GateReport{Pass: true}), validity.ReleaseG6(1, 3, 3, 30), validity.ReleaseG6(2, 0, 1, 30)}
 	raw, text, err = cellReport(m, cfg, recs)
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +100,24 @@ func TestCellReport(t *testing.T) {
 		t.Errorf("counted text:\n%s", text)
 	}
 
+	// The manifest's hosted-G6 results are the records'.
+	gates := m.Gates
+	for name, edit := range map[string][]validity.Gate{
+		"a step left out":      gates[:2],
+		"another count":        {gates[0], gates[1], validity.ReleaseG6(2, 1, 1, 30)},
+		"another step":         {gates[0], gates[1], validity.ReleaseG6(3, 0, 1, 30)},
+		"none":                 gates[:1],
+		"a verdict reversed":   {gates[0], gates[1], func() validity.Gate { g := gates[2]; g.Pass = true; return g }()},
+		"another deadline":     {gates[0], gates[1], validity.ReleaseG6(2, 0, 1, 90)},
+		"a step not attempted": append(append([]validity.Gate{}, gates...), validity.ReleaseG6(3, 0, 1, 30)),
+	} {
+		m.Gates = edit
+		if _, _, err := cellReport(m, cfg, recs); err == nil || !strings.Contains(err.Error(), "hosted-G6 from the records differs from the manifest's") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	m.Gates = gates
+
 	recs[1].RunFailures = []string{"tripwire fired"}
 	if _, _, err := cellReport(m, cfg, recs); err == nil || !strings.Contains(err.Error(), "record 1 run failures") {
 		t.Errorf("records with another run's failures: %v", err)
@@ -104,6 +125,41 @@ func TestCellReport(t *testing.T) {
 	m.Release = nil
 	if _, _, err := cellReport(m, cfg, nil); err == nil || !strings.Contains(err.Error(), "no cell record") {
 		t.Errorf("no cell record: %v", err)
+	}
+}
+
+// A release cell manifest's hosted-G6 results are its step table's: the
+// same steps with the same counts and verdicts.
+func TestReleaseG6MatchesStepTable(t *testing.T) {
+	cfg, v := stepsConfig(t)
+	for name, c := range map[string]CellRecords{
+		"every line": cellOf("x",
+			outcome{1, LineInTime, 0, 100}, outcome{1, LineLate, 0, 3}, outcome{1, loadgen.ErrStatus429, 0, 2},
+			outcome{1, loadgen.ErrConnect, 0, 1}, outcome{1, LineCensored, 0, 2},
+			outcome{2, LineInTime, 0, 238}, outcome{2, LineUnsent, 0, 2},
+			outcome{3, LineUnsent, 0, 470}, outcome{4, LineUnsent, 0, 950}),
+		"ended at step 1":           cellOf("x", outcome{1, LineInTime, 0, 4}, outcome{2, LineUnsent, 0, 8}, outcome{3, LineUnsent, 0, 16}),
+		"step 1 unsent":             cellOf("x", outcome{1, LineUnsent, 0, 4}, outcome{2, LineInTime, 0, 8}),
+		"warm-up only":              cellOf("x"),
+		"every step below the line": cellOf("x", outcome{1, LineLate, 0, 4}, outcome{2, loadgen.ErrReset, 0, 8}, outcome{3, LineInTime, 0, 16}),
+	} {
+		st, err := stepTables(cfg, v, []CellRecords{c})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var table []validity.Gate
+		for _, s := range st.Cells[0].Steps {
+			if g := s.G6; g != nil {
+				tg := validity.ReleaseG6(s.Step, g.InTime.Count, g.InTime.Scheduled, st.DeadlineS)
+				if tg.Pass != g.Pass {
+					t.Errorf("%s: step %d: table verdict %t, gate %t", name, s.Step, g.Pass, tg.Pass)
+				}
+				table = append(table, tg)
+			}
+		}
+		if got := evidence.ReleaseG6(c.Records, st.DeadlineS); !reflect.DeepEqual(got, table) {
+			t.Errorf("%s: hosted-G6\n%+v\nthe table's\n%+v", name, got, table)
+		}
 	}
 }
 
