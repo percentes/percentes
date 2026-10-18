@@ -248,6 +248,7 @@ func (c *Config) validateTarget(v *validator) {
 		}
 	}
 	c.validateResponseHeaders(v)
+	c.validateResponseShape(v)
 	// §10 G7: the scrape needs one endpoint per replica and a gauge name;
 	// a hosted target has no replica endpoints (§6).
 	if n := len(c.Target.MetricsURLs); n > 0 {
@@ -313,6 +314,75 @@ func (c *Config) validateResponseHeaders(v *validator) {
 			}
 		}
 	}
+}
+
+// validateResponseShape refuses a key or path segment outside
+// [A-Za-z0-9_-], a repeated entry, and a reasoning key equal to the
+// content key.
+func (c *Config) validateResponseShape(v *validator) {
+	s := c.Target.ResponseShape
+	if s == nil {
+		return
+	}
+	content := c.Target.Shape().Content
+	if s.Content != "" && !fieldKey(s.Content) {
+		v.errf("target.response_shape.content: %q is not a key", s.Content)
+	}
+	seen := map[string]bool{}
+	for i, k := range s.Reasoning {
+		switch {
+		case !fieldKey(k):
+			v.errf("target.response_shape.reasoning[%d]: %q is not a key", i, k)
+		case k == content:
+			v.errf("target.response_shape.reasoning[%d]: %q is the content key", i, k)
+		case seen[k]:
+			v.errf("target.response_shape.reasoning[%d]: %q listed twice", i, k)
+		}
+		seen[k] = true
+	}
+	if s.Model != "" && !fieldPath(s.Model) {
+		v.errf("target.response_shape.model: %q is not a path", s.Model)
+	}
+	for _, f := range []struct {
+		name  string
+		paths []string
+	}{{"usage", s.Usage}, {"error", s.Error}} {
+		seen := map[string]bool{}
+		for i, p := range f.paths {
+			switch {
+			case !fieldPath(p):
+				v.errf("target.response_shape.%s[%d]: %q is not a path", f.name, i, p)
+			case seen[p]:
+				v.errf("target.response_shape.%s[%d]: %q listed twice", f.name, i, p)
+			}
+			seen[p] = true
+		}
+	}
+}
+
+// fieldPath accepts one or more keys joined by ".".
+func fieldPath(s string) bool {
+	for _, seg := range strings.Split(s, ".") {
+		if !fieldKey(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+// fieldKey accepts one or more characters from a-z, A-Z, 0-9, underscore
+// and hyphen.
+func fieldKey(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // headerToken accepts one or more characters from a-z, A-Z, 0-9 and hyphen.

@@ -11,6 +11,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -68,6 +69,9 @@ func (g *gen) execute(r *Request) {
 		return
 	}
 
+	shape := g.cfg.Target.Shape()
+	keepText := g.cfg.Target.Hosted
+	var content, reasoning strings.Builder
 	var malformed, sawDone bool
 	var prevTokNs int64
 	_, dropped, err := sse.Events(resp.Body, eventLimit, func(payload []byte) bool {
@@ -79,15 +83,16 @@ func (g *gen) execute(r *Request) {
 		// A chunk counts as a token only when its decoded delta carries
 		// nonempty content; an undecodable payload is a malformed
 		// stream (§3).
-		content, ok := ContentDelta(payload)
+		c, ok := parseChunk(payload, shape)
 		if !ok {
 			malformed = true
 			return true
 		}
-		if n, ok := usageTokens(payload); ok {
-			r.CompletionTokens, r.UsageSeen = n, true
+		g.recordChunk(r, &c, secrets)
+		if c.reasoning != "" && keepText {
+			reasoning.WriteString(c.reasoning)
 		}
-		if content != "" {
+		if c.content != "" {
 			r.Tokens++
 			now := g.now()
 			if r.FirstTokNs == 0 {
@@ -96,9 +101,13 @@ func (g *gen) execute(r *Request) {
 				r.ITLsUs = append(r.ITLsUs, (now-prevTokNs)/1000)
 			}
 			prevTokNs = now
+			if keepText {
+				content.WriteString(c.content)
+			}
 		}
 		return false
 	})
+	r.Content, r.Reasoning = content.String(), reasoning.String()
 	switch {
 	case err != nil:
 		// A read error, or a line over the bound, leaves the partial event untrusted.
@@ -106,6 +115,9 @@ func (g *gen) execute(r *Request) {
 	case malformed || dropped > 0 || !sawDone:
 		// An undecodable or oversized event, or a stream that ended before
 		// [DONE]: malformed stream (§3).
+		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, g.now()
+	case r.StreamError != "" && g.cfg.Target.Hosted:
+		// An in-band error object anywhere in a hosted stream.
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, g.now()
 	case r.FirstTokNs == 0:
 		// [DONE] with no prior content event: an empty stream is errored,
@@ -121,37 +133,164 @@ func (g *gen) execute(r *Request) {
 	}
 }
 
+// recordChunk keeps a chunk's usage, finish reason, reported model,
+// in-band error and reasoning arrival on r.
+func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
+	if !c.known {
+		r.UnknownEvents++
+	}
+	if c.usage != nil {
+		r.Usage = c.usage
+		if n, ok := completionTokens(c.usage); ok {
+			r.CompletionTokens, r.UsageSeen = n, true
+		}
+	}
+	if c.finish != "" {
+		r.FinishReason = c.finish
+	}
+	if c.model != "" && r.ReportedModel == "" {
+		r.ReportedModel = c.model
+	}
+	if c.err != nil && r.StreamError == "" {
+		var b bytes.Buffer
+		json.Compact(&b, c.err) //nolint:errcheck
+		r.StreamError = string(readErrorBody(&b, secrets))
+	}
+	if c.reasoning != "" {
+		r.ReasoningChunks++
+		if r.FirstReasoningNs == 0 {
+			r.FirstReasoningNs = g.now()
+		}
+	}
+}
+
+// chunk is one stream event read through a target's response shape.
+type chunk struct {
+	content, reasoning string
+	finish, model      string
+	usage, err         json.RawMessage
+	// known: the event carried choices, a usage object or an error.
+	known bool
+}
+
+// parseChunk decodes one chat-completion chunk. ok is false when the
+// payload is not a JSON object or null, or when any choice, delta, or
+// content or reasoning value has the wrong type. Field names match
+// exactly.
+func parseChunk(payload []byte, sh config.ResponseShape) (c chunk, ok bool) {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(payload, &root) != nil {
+		return c, false
+	}
+	if raw, has := root["choices"]; has {
+		c.known = true
+		var choices []map[string]json.RawMessage
+		if json.Unmarshal(raw, &choices) != nil {
+			return c, false
+		}
+		for i, choice := range choices {
+			var delta map[string]json.RawMessage
+			if json.Unmarshal(orNull(choice["delta"]), &delta) != nil {
+				return c, false
+			}
+			var content, reasoning string
+			if !stringField(delta[sh.Content], &content) {
+				return c, false
+			}
+			for _, k := range sh.Reasoning {
+				var s string
+				if !stringField(delta[k], &s) {
+					return c, false
+				}
+				reasoning += s
+			}
+			if i == 0 {
+				c.content, c.reasoning = content, reasoning
+				json.Unmarshal(orNull(choice["finish_reason"]), &c.finish) //nolint:errcheck
+			}
+		}
+	}
+	json.Unmarshal(orNull(lookup(root, sh.Model)), &c.model) //nolint:errcheck
+	for _, p := range sh.Usage {
+		if v := lookup(root, p); v != nil {
+			c.usage, c.known = v, true
+		}
+	}
+	for _, p := range sh.Error {
+		if v := lookup(root, p); v != nil && c.err == nil {
+			c.err, c.known = v, true
+		}
+	}
+	return c, true
+}
+
+// lookup returns the non-null value at path, or nil.
+func lookup(root map[string]json.RawMessage, path string) json.RawMessage {
+	segs := strings.Split(path, ".")
+	v := root[segs[0]]
+	for _, seg := range segs[1:] {
+		if v == nil {
+			return nil
+		}
+		if i, err := strconv.Atoi(seg); err == nil {
+			var a []json.RawMessage
+			if json.Unmarshal(v, &a) != nil || i < 0 || i >= len(a) {
+				return nil
+			}
+			v = a[i]
+			continue
+		}
+		var m map[string]json.RawMessage
+		if json.Unmarshal(v, &m) != nil {
+			return nil
+		}
+		v = m[seg]
+	}
+	if v == nil || string(v) == "null" {
+		return nil
+	}
+	return v
+}
+
+// stringField decodes a string or null into s; it is false for any other
+// type.
+func stringField(raw json.RawMessage, s *string) bool {
+	return json.Unmarshal(orNull(raw), s) == nil
+}
+
+func orNull(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return json.RawMessage("null")
+	}
+	return raw
+}
+
 // ContentDelta decodes one chat-completion chunk and returns the first
 // choice's delta content; ok is false for a payload that does not decode.
 func ContentDelta(payload []byte) (content string, ok bool) {
-	var chunk struct {
-		Choices []struct {
-			Delta struct {
-				Content string `json:"content"`
-			} `json:"delta"`
-		} `json:"choices"`
-	}
-	if json.Unmarshal(payload, &chunk) != nil {
-		return "", false
-	}
-	if len(chunk.Choices) == 0 {
-		return "", true
-	}
-	return chunk.Choices[0].Delta.Content, true
+	c, ok := parseChunk(payload, (&config.Target{}).Shape())
+	return c.content, ok
 }
 
-// usageTokens returns the completion token count of a chunk's usage
-// object, when the chunk carries one.
+// usageTokens returns the completion token count of a chunk's top-level
+// usage object, when the chunk carries one.
 func usageTokens(payload []byte) (n int, ok bool) {
-	var chunk struct {
-		Usage *struct {
-			CompletionTokens int `json:"completion_tokens"`
-		} `json:"usage"`
-	}
-	if json.Unmarshal(payload, &chunk) != nil || chunk.Usage == nil {
+	c, ok := parseChunk(payload, (&config.Target{}).Shape())
+	if !ok || c.usage == nil {
 		return 0, false
 	}
-	return chunk.Usage.CompletionTokens, true
+	return completionTokens(c.usage)
+}
+
+// completionTokens reads completion_tokens from a usage object.
+func completionTokens(usage json.RawMessage) (n int, ok bool) {
+	var u struct {
+		CompletionTokens int `json:"completion_tokens"`
+	}
+	if json.Unmarshal(usage, &u) != nil {
+		return 0, false
+	}
+	return u.CompletionTokens, true
 }
 
 // requestBody builds the OpenAI-compatible chat-completion request.

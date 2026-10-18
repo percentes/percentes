@@ -351,6 +351,50 @@ type Target struct {
 	// matched without regard to case; an entry ending in "*" matches a
 	// name prefix. Empty records none.
 	ResponseHeaders []string `yaml:"response_headers,omitempty" json:"response_headers,omitempty"`
+	// ResponseShape names the stream-chunk fields read per request; nil
+	// reads the OpenAI chat-completion chunk with no reasoning field.
+	ResponseShape *ResponseShape `yaml:"response_shape,omitempty" json:"response_shape,omitempty"`
+}
+
+// ResponseShape names where a target's stream chunks carry each field.
+// Content and Reasoning are keys of choices[0].delta. Model, Usage and
+// Error are paths from the chunk root, segments joined by ".", where a
+// segment of digits indexes an array. An empty field takes its default.
+type ResponseShape struct {
+	// Content is the visible-answer key (default "content").
+	Content string `yaml:"content,omitempty" json:"content,omitempty"`
+	// Reasoning lists the keys recorded as reasoning, apart from the
+	// visible answer (default none).
+	Reasoning []string `yaml:"reasoning,omitempty" json:"reasoning,omitempty"`
+	// Model is the reported model id (default "model").
+	Model string `yaml:"model,omitempty" json:"model,omitempty"`
+	// Usage lists where a usage object may appear (default "usage").
+	Usage []string `yaml:"usage,omitempty" json:"usage,omitempty"`
+	// Error lists where an in-band error object may appear (default
+	// "error").
+	Error []string `yaml:"error,omitempty" json:"error,omitempty"`
+}
+
+// Shape returns the target's response shape with defaults filled in.
+func (t *Target) Shape() ResponseShape {
+	s := ResponseShape{Content: "content", Model: "model", Usage: []string{"usage"}, Error: []string{"error"}}
+	if t.ResponseShape == nil {
+		return s
+	}
+	if t.ResponseShape.Content != "" {
+		s.Content = t.ResponseShape.Content
+	}
+	s.Reasoning = t.ResponseShape.Reasoning
+	if t.ResponseShape.Model != "" {
+		s.Model = t.ResponseShape.Model
+	}
+	if len(t.ResponseShape.Usage) > 0 {
+		s.Usage = t.ResponseShape.Usage
+	}
+	if len(t.ResponseShape.Error) > 0 {
+		s.Error = t.ResponseShape.Error
+	}
+	return s
 }
 
 // credentialHeaders are never recorded, whatever the allowlist says.

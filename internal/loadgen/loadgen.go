@@ -23,6 +23,7 @@ package loadgen
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -69,6 +70,28 @@ type Request struct {
 	CompletionTokens int    `json:"completion_tokens,omitempty"`
 	UsageSeen        bool   `json:"usage_seen,omitempty"`
 	Replica          string `json:"replica,omitempty"`
+	// Usage is the last usage object the stream carried, at any path
+	// target.response_shape names.
+	Usage json.RawMessage `json:"usage,omitempty"`
+	// FinishReason is the last finish_reason of the first choice;
+	// ReportedModel is the first model id a chunk reported.
+	FinishReason  string `json:"finish_reason,omitempty"`
+	ReportedModel string `json:"reported_model,omitempty"`
+	// StreamError is the first in-band error object, compacted, with
+	// credentials masked and cut at errorBodyLimit bytes.
+	StreamError string `json:"stream_error,omitempty"`
+	// ReasoningChunks counts chunks carrying reasoning text;
+	// FirstReasoningNs is the first one's arrival. Reasoning never counts
+	// as a token or stamps FirstTokNs.
+	ReasoningChunks  int   `json:"reasoning_chunks,omitempty"`
+	FirstReasoningNs int64 `json:"first_reasoning_ns,omitempty"`
+	// UnknownEvents counts decodable events carrying no choices, usage
+	// or error.
+	UnknownEvents int `json:"unknown_events,omitempty"`
+	// Content and Reasoning are the visible answer and the reasoning text,
+	// kept for hosted targets only; never in JSON.
+	Content   string `json:"-"`
+	Reasoning string `json:"-"`
 	// Proto is the response's protocol version ("" = no response).
 	Proto string `json:"proto,omitempty"`
 	// Status is the HTTP status code (0 = no response). Headers holds the

@@ -1,0 +1,297 @@
+package loadgen
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/mock"
+)
+
+// shapeGen is a gen for one target: hosted or self-hosted, with the given
+// response shape, holding testKey when hosted.
+func shapeGen(baseURL string, client *http.Client, hosted bool, sh *config.ResponseShape) *gen {
+	cfg := &config.Config{}
+	cfg.Run.Seed = 1
+	cfg.Load.MaxTokens = 256
+	cfg.Target.BaseURL = baseURL
+	cfg.Target.Hosted = hosted
+	cfg.Target.ResponseShape = sh
+	g := &gen{cfg: cfg, client: client, epoch: time.Now(), filler: "xyz", model: "m"}
+	if hosted {
+		g.apiKey = testKey
+	}
+	return g
+}
+
+func executeShaped(t *testing.T, hosted bool, sh *config.ResponseShape, frames ...string) *Request {
+	t.Helper()
+	srv := sseServer(t, frames...)
+	defer srv.Close()
+	r := &Request{Index: 1}
+	shapeGen(srv.URL, srv.Client(), hosted, sh).execute(r)
+	return r
+}
+
+const (
+	answerFrame = "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"route\\\":\\\"billing\\\"}\"}}]}\n\n"
+	stopFrame   = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+	doneFrame   = "data: [DONE]\n\n"
+)
+
+// One event may span several data lines; every field it carries is kept,
+// and reasoning stays apart from the visible answer.
+func TestMultilineEventsKeepEveryField(t *testing.T) {
+	sh := &config.ResponseShape{Reasoning: []string{"reasoning"}, Usage: []string{"x_groq.usage"}}
+	r := executeShaped(t, true, sh,
+		"data: {\"model\":\"openai/gpt-oss-120b\",\ndata: \"choices\":[{\"delta\":{\"reasoning\":\"think \"},\ndata: \"finish_reason\":null}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"reasoning\":\"more\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":\ndata: {\"content\":\"{\\\"route\\\":\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"content\":\"\\\"billing\\\"}\"}}]}\n\n",
+		stopFrame,
+		"data: {\"choices\":[],\ndata: \"x_groq\":{\"usage\":{\"prompt_tokens\":5,\ndata: \"completion_tokens\":9}}}\n\n",
+		doneFrame)
+	if r.Outcome != OutcomeCompleted || r.Tokens != 2 {
+		t.Fatalf("got %v/%q tokens=%d, want completed with two tokens", r.Outcome, r.ErrClass, r.Tokens)
+	}
+	if r.Content != `{"route":"billing"}` || r.Reasoning != "think more" || r.ReasoningChunks != 2 {
+		t.Fatalf("content %q reasoning %q chunks %d", r.Content, r.Reasoning, r.ReasoningChunks)
+	}
+	if r.FirstReasoningNs == 0 || r.FirstReasoningNs > r.FirstTokNs {
+		t.Fatalf("first reasoning %d, first token %d", r.FirstReasoningNs, r.FirstTokNs)
+	}
+	if r.FinishReason != "stop" || r.ReportedModel != "openai/gpt-oss-120b" || !r.UsageSeen || r.CompletionTokens != 9 {
+		t.Fatalf("finish %q model %q usage %v/%d", r.FinishReason, r.ReportedModel, r.UsageSeen, r.CompletionTokens)
+	}
+	b, _ := json.Marshal(r)
+	if !strings.Contains(string(b), `"usage":{"prompt_tokens":5,"completion_tokens":9}`) {
+		t.Fatalf("usage not kept compact in JSON: %s", b)
+	}
+	if strings.Contains(string(b), "billing") || strings.Contains(string(b), "think") {
+		t.Fatalf("answer or reasoning text in JSON: %s", b)
+	}
+}
+
+// A usage-only chunk is read at the paths the shape names, and only there.
+func TestUsageOnlyChunkAtConfiguredPath(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		usage []string
+		frame string
+		seen  bool
+	}{
+		{"top level, default", nil, `{"choices":[],"usage":{"completion_tokens":4}}`, true},
+		{"vendor object", []string{"x_groq.usage"}, `{"choices":[],"x_groq":{"usage":{"completion_tokens":4}}}`, true},
+		{"vendor object, unconfigured", nil, `{"choices":[],"x_groq":{"usage":{"completion_tokens":4}}}`, false},
+		{"inside the choice", []string{"usage", "choices.0.usage"}, `{"choices":[{"delta":{},"usage":{"completion_tokens":4}}]}`, true},
+		{"null", nil, `{"choices":[],"usage":null}`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := executeShaped(t, true, &config.ResponseShape{Usage: c.usage}, answerFrame, stopFrame, "data: "+c.frame+"\n\n", doneFrame)
+			if r.Outcome != OutcomeCompleted || r.Tokens != 1 {
+				t.Fatalf("got %v/%q tokens=%d", r.Outcome, r.ErrClass, r.Tokens)
+			}
+			if r.UsageSeen != c.seen || (c.seen && r.CompletionTokens != 4) || (r.Usage != nil) != c.seen {
+				t.Fatalf("usage seen %v tokens %d raw %s, want seen %v", r.UsageSeen, r.CompletionTokens, r.Usage, c.seen)
+			}
+			if r.UnknownEvents != 0 {
+				t.Fatalf("%d unknown events", r.UnknownEvents)
+			}
+		})
+	}
+}
+
+// A stream that spends its ceiling on reasoning has no visible answer: an
+// empty stream whose finish reason and reasoning are kept.
+func TestReasoningOnlyStream(t *testing.T) {
+	frames := []string{
+		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"r1 \"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"r2 \"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+		doneFrame,
+	}
+	r := executeShaped(t, true, &config.ResponseShape{Reasoning: []string{"reasoning_content"}}, frames...)
+	if r.Outcome != OutcomeErrored || r.ErrClass != ErrEmptyStream {
+		t.Fatalf("got %v/%q, want errored/%s", r.Outcome, r.ErrClass, ErrEmptyStream)
+	}
+	if r.Tokens != 0 || r.FirstTokNs != 0 || r.Content != "" {
+		t.Fatalf("reasoning counted as content: tokens=%d first=%d content=%q", r.Tokens, r.FirstTokNs, r.Content)
+	}
+	if r.ReasoningChunks != 2 || r.Reasoning != "r1 r2 " || r.FirstReasoningNs == 0 || r.FinishReason != "length" {
+		t.Fatalf("chunks %d reasoning %q first %d finish %q", r.ReasoningChunks, r.Reasoning, r.FirstReasoningNs, r.FinishReason)
+	}
+
+	r = executeShaped(t, false, nil, frames...)
+	if r.ErrClass != ErrEmptyStream || r.ReasoningChunks != 0 || r.Reasoning != "" {
+		t.Fatalf("unconfigured reasoning key read: %q chunks=%d reasoning=%q", r.ErrClass, r.ReasoningChunks, r.Reasoning)
+	}
+}
+
+// Content, then an in-band error, then [DONE]: a hosted request is not
+// completed; a self-hosted one keeps its §3 class. Both keep the error
+// object with the bearer token masked.
+func TestContentThenErrorThenDone(t *testing.T) {
+	errFrame := "data: {\"error\": {\"message\": \"upstream failed for " + testKey + "\",\ndata: \"type\": \"server_error\"}}\n\n"
+	masked := `{"message":"upstream failed for ` + strings.Repeat("*", len(testKey)) + `","type":"server_error"}`
+
+	r := executeShaped(t, true, nil, answerFrame, answerFrame, errFrame, doneFrame)
+	if r.Outcome != OutcomeErrored || r.ErrClass != ErrMalformedStream {
+		t.Fatalf("hosted: got %v/%q, want errored/%s", r.Outcome, r.ErrClass, ErrMalformedStream)
+	}
+	if r.Tokens != 2 || r.StreamError != masked {
+		t.Fatalf("hosted: tokens=%d stream error %q, want %q", r.Tokens, r.StreamError, masked)
+	}
+
+	srv := sseServer(t, answerFrame, answerFrame, errFrame, doneFrame)
+	defer srv.Close()
+	g := shapeGen(srv.URL, srv.Client(), false, nil)
+	g.apiKey = testKey
+	r = &Request{Index: 1}
+	g.execute(r)
+	if r.Outcome != OutcomeCompleted || r.Tokens != 2 || r.StreamError != masked {
+		t.Fatalf("self-hosted: got %v/%q tokens=%d stream error %q", r.Outcome, r.ErrClass, r.Tokens, r.StreamError)
+	}
+}
+
+// An explicit error object with no content: a hosted request is a
+// malformed stream with the object kept, at any path the shape names.
+func TestExplicitErrorEvent(t *testing.T) {
+	r := executeShaped(t, true, nil, "data: {\"error\":{\"message\":\"rate limited\",\"code\":429}}\n\n", doneFrame)
+	if r.ErrClass != ErrMalformedStream || r.StreamError != `{"message":"rate limited","code":429}` {
+		t.Fatalf("hosted: %v/%q stream error %q", r.Outcome, r.ErrClass, r.StreamError)
+	}
+	r = executeShaped(t, false, nil, "data: {\"error\":{\"message\":\"rate limited\"}}\n\n", doneFrame)
+	if r.ErrClass != ErrEmptyStream || r.StreamError == "" {
+		t.Fatalf("self-hosted: %v/%q stream error %q", r.Outcome, r.ErrClass, r.StreamError)
+	}
+
+	vendor := "data: {\"choices\":[],\"x_groq\":{\"error\":\"overloaded\"}}\n\n"
+	r = executeShaped(t, true, &config.ResponseShape{Error: []string{"error", "x_groq.error"}}, answerFrame, vendor, doneFrame)
+	if r.ErrClass != ErrMalformedStream || r.StreamError != `"overloaded"` {
+		t.Fatalf("vendor path: %v/%q stream error %q", r.Outcome, r.ErrClass, r.StreamError)
+	}
+	r = executeShaped(t, true, nil, answerFrame, vendor, doneFrame)
+	if r.Outcome != OutcomeCompleted || r.StreamError != "" {
+		t.Fatalf("unconfigured path: %v/%q stream error %q", r.Outcome, r.ErrClass, r.StreamError)
+	}
+
+	r = executeShaped(t, true, nil, "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}],\"error\":null}\n\n", doneFrame)
+	if r.Outcome != OutcomeCompleted || r.StreamError != "" {
+		t.Fatalf("null error: %v/%q stream error %q", r.Outcome, r.ErrClass, r.StreamError)
+	}
+}
+
+// Events of another schema are counted and carry no token; extra keys on
+// a known chunk are ignored; a configured field of the wrong type is a
+// malformed stream.
+func TestUnknownSchema(t *testing.T) {
+	other := "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
+	r := executeShaped(t, true, nil, other, other, doneFrame)
+	if r.ErrClass != ErrEmptyStream || r.UnknownEvents != 2 || r.Tokens != 0 {
+		t.Fatalf("other schema: %v/%q unknown=%d tokens=%d", r.Outcome, r.ErrClass, r.UnknownEvents, r.Tokens)
+	}
+
+	extra := "data: {\"x_mock_unknown\":\"mock\",\"choices\":[{\"delta\":{\"content\":\"hi\",\"x_mock_unknown\":\"mock\"}}]}\n\n"
+	r = executeShaped(t, true, nil, extra, doneFrame)
+	if r.Outcome != OutcomeCompleted || r.UnknownEvents != 0 || r.Content != "hi" {
+		t.Fatalf("extra keys: %v/%q unknown=%d content=%q", r.Outcome, r.ErrClass, r.UnknownEvents, r.Content)
+	}
+
+	sh := &config.ResponseShape{Reasoning: []string{"reasoning"}}
+	r = executeShaped(t, true, sh, "data: {\"choices\":[{\"delta\":{\"reasoning\":{\"text\":\"r\"}}}]}\n\n", answerFrame, doneFrame)
+	if r.ErrClass != ErrMalformedStream {
+		t.Fatalf("reasoning object: %v/%q, want %s", r.Outcome, r.ErrClass, ErrMalformedStream)
+	}
+}
+
+// failingBody streams frames and then fails the read with err.
+type failingBody struct {
+	io.Reader
+	err error
+}
+
+func (b *failingBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if err == io.EOF {
+		return n, b.err
+	}
+	return n, err
+}
+
+func (b *failingBody) Close() error { return nil }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// A reset or a timeout mid-stream keeps its §3 class, and the fields read
+// before it are kept, an in-band error included.
+func TestResetAndTimeoutKeepParsedFields(t *testing.T) {
+	frames := "data: {\"model\":\"reported\",\"choices\":[{\"delta\":{\"reasoning\":\"r\"}}]}\n\n" +
+		answerFrame + "data: {\"error\":{\"message\":\"cut\"}}\n\n"
+	for _, c := range []struct {
+		err     error
+		outcome Outcome
+		class   string
+	}{
+		{syscall.ECONNRESET, OutcomeErrored, ErrReset},
+		{context.DeadlineExceeded, OutcomeCensored, ""},
+	} {
+		client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK, Proto: "HTTP/1.1", Header: http.Header{},
+				Body: &failingBody{strings.NewReader(frames), c.err}, Request: req,
+			}, nil
+		})}
+		r := &Request{Index: 1}
+		shapeGen("http://127.0.0.1:1", client, true, &config.ResponseShape{Reasoning: []string{"reasoning"}}).execute(r)
+		if r.Outcome != c.outcome || r.ErrClass != c.class {
+			t.Fatalf("%v: got %v/%q, want %v/%q", c.err, r.Outcome, r.ErrClass, c.outcome, c.class)
+		}
+		if r.ReportedModel != "reported" || r.ReasoningChunks != 1 || r.Content != `{"route":"billing"}` || r.StreamError != `{"message":"cut"}` {
+			t.Fatalf("%v: model %q reasoning %d content %q error %q", c.err, r.ReportedModel, r.ReasoningChunks, r.Content, r.StreamError)
+		}
+	}
+}
+
+// The D1 mock's hosted stream form, read end to end.
+func TestShapedMockStream(t *testing.T) {
+	start := func(sh mock.Shape) string {
+		fixed := config.LatencyDist{Distribution: "fixed", FixedMs: 1}
+		s := mock.NewShaped(config.Mock{ListenAddr: "127.0.0.1:0", Seed: 1, TTFT: fixed, ITL: fixed}, sh)
+		if err := s.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		return "http://" + s.Addr()
+	}
+	run := func(base string, hosted bool) *Request {
+		r := &Request{Index: 1}
+		shapeGen(base, &http.Client{}, hosted, &config.ResponseShape{Reasoning: []string{"reasoning"}}).execute(r)
+		return r
+	}
+
+	base := start(mock.Shape{ReasoningKey: "reasoning", ReasoningTokens: 3, Answer: `{"route":"billing"}`, Usage: mock.UsageAlways})
+	r := run(base, true)
+	if r.Outcome != OutcomeCompleted || r.Content != `{"route":"billing"}` || r.Reasoning != "r1 r2 r3 " {
+		t.Fatalf("got %v/%q content %q reasoning %q", r.Outcome, r.ErrClass, r.Content, r.Reasoning)
+	}
+	if r.Tokens != 5 || r.CompletionTokens != 8 || r.FinishReason != "stop" || r.ReportedModel != "m" || r.FirstReasoningNs > r.FirstTokNs {
+		t.Fatalf("tokens %d completion %d finish %q model %q reasoning at %d, content at %d",
+			r.Tokens, r.CompletionTokens, r.FinishReason, r.ReportedModel, r.FirstReasoningNs, r.FirstTokNs)
+	}
+
+	base = start(mock.Shape{Answer: `{"route":"billing"}`, Error: map[string]any{"message": "boom"}, ErrorAfterContent: 2})
+	if r := run(base, true); r.ErrClass != ErrMalformedStream || r.Tokens != 2 || r.StreamError != `{"message":"boom"}` {
+		t.Fatalf("hosted: %v/%q tokens=%d stream error %q", r.Outcome, r.ErrClass, r.Tokens, r.StreamError)
+	}
+	if r := run(base, false); r.Outcome != OutcomeCompleted || r.StreamError != `{"message":"boom"}` {
+		t.Fatalf("self-hosted: %v/%q stream error %q", r.Outcome, r.ErrClass, r.StreamError)
+	}
+}
