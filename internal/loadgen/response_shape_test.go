@@ -275,32 +275,129 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // A reset or a timeout mid-stream keeps its §3 class, and the fields read
-// before it are kept, an in-band error included.
+// before it are kept: on a hosted stream with no in-band error or with one
+// in an event the read error cut short, and on a self-hosted stream whose
+// in-band error is kept beside the class.
 func TestResetAndTimeoutKeepParsedFields(t *testing.T) {
-	frames := "data: {\"model\":\"reported\",\"choices\":[{\"delta\":{\"reasoning\":\"r\"}}]}\n\n" +
-		answerFrame + "data: {\"error\":{\"message\":\"cut\"}}\n\n"
+	head := "data: {\"model\":\"reported\",\"choices\":[{\"delta\":{\"reasoning\":\"r\"}}]}\n\n" + answerFrame
+	inBand := "data: {\"error\":{\"message\":\"cut\"}}\n"
 	for _, c := range []struct {
+		name    string
+		hosted  bool
+		frames  string
 		err     error
 		outcome Outcome
 		class   string
+		stream  string
 	}{
-		{syscall.ECONNRESET, OutcomeErrored, ErrReset},
-		{context.DeadlineExceeded, OutcomeCensored, ""},
+		{"hosted reset", true, head, syscall.ECONNRESET, OutcomeErrored, ErrReset, ""},
+		{"hosted timeout", true, head, context.DeadlineExceeded, OutcomeCensored, "", ""},
+		{"hosted reset inside an error event", true, head + inBand, syscall.ECONNRESET, OutcomeErrored, ErrReset, `{"message":"cut"}`},
+		{"self-hosted reset", false, head + inBand + "\n", syscall.ECONNRESET, OutcomeErrored, ErrReset, `{"message":"cut"}`},
+		{"self-hosted timeout", false, head + inBand + "\n", context.DeadlineExceeded, OutcomeCensored, "", `{"message":"cut"}`},
 	} {
-		client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK, Proto: "HTTP/1.1", Header: http.Header{},
-				Body: &failingBody{strings.NewReader(frames), c.err}, Request: req,
-			}, nil
-		})}
-		r := &Request{Index: 1}
-		shapeGen("http://127.0.0.1:1", client, true, &config.ResponseShape{Reasoning: []string{"reasoning"}}).execute(r)
-		if r.Outcome != c.outcome || r.ErrClass != c.class {
-			t.Fatalf("%v: got %v/%q, want %v/%q", c.err, r.Outcome, r.ErrClass, c.outcome, c.class)
-		}
-		if r.ReportedModel != "reported" || r.ReasoningChunks != 1 || r.Content != `{"route":"billing"}` || r.StreamError != `{"message":"cut"}` {
-			t.Fatalf("%v: model %q reasoning %d content %q error %q", c.err, r.ReportedModel, r.ReasoningChunks, r.Content, r.StreamError)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK, Proto: "HTTP/1.1", Header: http.Header{},
+					Body: &failingBody{strings.NewReader(c.frames), c.err}, Request: req,
+				}, nil
+			})}
+			r := &Request{Index: 1}
+			shapeGen("http://127.0.0.1:1", client, c.hosted, &config.ResponseShape{Reasoning: []string{"reasoning"}}).execute(r)
+			if r.Outcome != c.outcome || r.ErrClass != c.class {
+				t.Fatalf("got %v/%q, want %v/%q", r.Outcome, r.ErrClass, c.outcome, c.class)
+			}
+			if r.ReportedModel != "reported" || r.ReasoningChunks != 1 || r.Tokens != 1 || r.StreamError != c.stream {
+				t.Fatalf("model %q reasoning %d tokens %d error %q", r.ReportedModel, r.ReasoningChunks, r.Tokens, r.StreamError)
+			}
+			if c.hosted && r.Content != `{"route":"billing"}` {
+				t.Fatalf("content %q", r.Content)
+			}
+		})
+	}
+}
+
+// stagedBody returns head on the first read, then after delay tail and
+// err.
+type stagedBody struct {
+	head, tail string
+	delay      time.Duration
+	err        error
+	reads      int
+}
+
+func (b *stagedBody) Read(p []byte) (int, error) {
+	b.reads++
+	switch {
+	case b.reads == 1:
+		return copy(p, b.head), nil
+	case b.reads == 2 && b.tail != "":
+		time.Sleep(b.delay)
+		return copy(p, b.tail), nil
+	case b.reads == 2:
+		time.Sleep(b.delay)
+	}
+	return 0, b.err
+}
+
+func (b *stagedBody) Close() error { return nil }
+
+// In a hosted stream the first in-band error ends the request as
+// malformed_stream at the error's arrival. A reset, a timeout or a
+// terminator after it changes neither the class nor the failure time; the
+// content and usage read before it are kept, and later events are not read.
+func TestInBandErrorEndsHostedRequest(t *testing.T) {
+	const later = 2 * time.Second
+	usage := "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n"
+	chatHead := answerFrame + usage + "data: {\"error\":{\"message\":\"cut\"}}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":9}}\n\n"
+	chatGen := func(c *http.Client) *gen { return shapeGen("http://127.0.0.1:1", c, true, nil) }
+	msgGen := func(c *http.Client) *gen { return messagesGen("http://127.0.0.1:1/v1/messages", c, config.AuthXAPIKey) }
+	msgHead := msgStart + textStart + text("x") + overload + msgDelta
+	for _, c := range []struct {
+		name       string
+		gen        func(*http.Client) *gen
+		head, tail string
+		err        error
+		stream     string
+		usage      string
+	}{
+		{"reset", chatGen, chatHead, "", syscall.ECONNRESET, `{"message":"cut"}`, `{"prompt_tokens":5,"completion_tokens":1}`},
+		{"timeout", chatGen, chatHead, "", context.DeadlineExceeded, `{"message":"cut"}`, `{"prompt_tokens":5,"completion_tokens":1}`},
+		{"terminator", chatGen, chatHead, doneFrame, io.EOF, `{"message":"cut"}`, `{"prompt_tokens":5,"completion_tokens":1}`},
+		{"messages reset", msgGen, msgHead, "", syscall.ECONNRESET,
+			`{"type":"overloaded_error","message":"Overloaded"}`, `{"input_tokens":25,"output_tokens":1}`},
+		{"messages terminator", msgGen, msgHead, msgStop, io.EOF,
+			`{"type":"overloaded_error","message":"Overloaded"}`, `{"input_tokens":25,"output_tokens":1}`},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK, Proto: "HTTP/1.1", Header: http.Header{},
+					Body: &stagedBody{head: c.head, tail: c.tail, delay: later, err: c.err}, Request: req,
+				}, nil
+			})}
+			r := &Request{Index: 1}
+			c.gen(client).execute(r)
+			if r.Outcome != OutcomeErrored || r.ErrClass != ErrMalformedStream {
+				t.Fatalf("got %v/%q, want errored/%s", r.Outcome, r.ErrClass, ErrMalformedStream)
+			}
+			if r.StreamError != c.stream || r.Tokens != 1 || string(r.Usage) != c.usage || r.FinishReason != "" {
+				t.Fatalf("error %q tokens %d usage %s finish %q", r.StreamError, r.Tokens, r.Usage, r.FinishReason)
+			}
+			var errNs int64
+			for _, f := range r.Frames {
+				if strings.Contains(string(f.Data), `"error"`) {
+					errNs = f.Ns
+				}
+			}
+			if errNs == 0 || r.DoneNs < errNs || r.DoneNs-errNs > (later/2).Nanoseconds() {
+				t.Fatalf("done at %d, error frame at %d", r.DoneNs, errNs)
+			}
+		})
 	}
 }
 

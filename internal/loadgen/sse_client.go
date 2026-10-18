@@ -93,7 +93,7 @@ func (g *gen) execute(r *Request) {
 	messages := g.cfg.Target.Adapter == config.AdapterMessages
 	var content, reasoning strings.Builder
 	var malformed, sawDone bool
-	var prevTokNs int64
+	var prevTokNs, inBandNs int64
 	_, dropped, err := sse.Events(body, eventLimit, func(payload []byte) bool {
 		// A chunk counts as a token only when its decoded delta carries
 		// nonempty content; an undecodable payload is a malformed
@@ -134,19 +134,24 @@ func (g *gen) execute(r *Request) {
 				content.WriteString(c.content)
 			}
 		}
+		if c.err != nil && g.cfg.Target.Hosted {
+			// A hosted stream's first in-band error ends the request at its
+			// arrival (SPEC-HOSTED HA3 point 8); nothing after it is read.
+			inBandNs = g.now()
+			return true
+		}
 		return false
 	})
 	r.Content, r.Reasoning = content.String(), reasoning.String()
 	switch {
+	case inBandNs > 0 && err == nil:
+		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, inBandNs
 	case err != nil:
 		// A read error, or a line over the bound, leaves the partial event untrusted.
 		g.classifyStreamErr(r, err)
 	case malformed || dropped > 0 || !sawDone:
 		// An undecodable or oversized event, or a stream that ended before
 		// its terminator: malformed stream (§3).
-		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, g.now()
-	case r.StreamError != "" && g.cfg.Target.Hosted:
-		// An in-band error object anywhere in a hosted stream.
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, g.now()
 	case r.FirstTokNs == 0:
 		// A terminator with no prior content event: an empty stream is
