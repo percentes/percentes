@@ -125,15 +125,17 @@ type G6 struct {
 }
 
 // CellStep is one step of a cell. An attempted step with scheduled
-// requests carries its lines, hosted-G6 and signals.
+// requests carries its lines, hosted-G6, completion-incidence curve and
+// signals.
 type CellStep struct {
-	Step      int      `json:"step"`
-	RPS       float64  `json:"rps"`
-	State     string   `json:"state"`
-	Scheduled int      `json:"scheduled"`
-	Lines     []Line   `json:"lines,omitempty"`
-	G6        *G6      `json:"hosted_g6,omitempty"`
-	Signals   *Signals `json:"signals,omitempty"`
+	Step      int          `json:"step"`
+	RPS       float64      `json:"rps"`
+	State     string       `json:"state"`
+	Scheduled int          `json:"scheduled"`
+	Lines     []Line       `json:"lines,omitempty"`
+	G6        *G6          `json:"hosted_g6,omitempty"`
+	Curve     []CurvePoint `json:"completion_incidence,omitempty"`
+	Signals   *Signals     `json:"signals,omitempty"`
 }
 
 // CellTable is one cell's per-step table.
@@ -206,21 +208,23 @@ type PooledG6 struct {
 // PooledStep is one step pooled over the cells that attempted it with
 // requests scheduled; Cells counts them. No figure pools across steps.
 type PooledStep struct {
-	Step      int          `json:"step"`
-	RPS       float64      `json:"rps"`
-	Admitted  bool         `json:"admitted"`
-	Cells     int          `json:"cells"`
-	Scheduled int          `json:"scheduled"`
-	Lines     []PooledLine `json:"lines,omitempty"`
-	G6        *PooledG6    `json:"hosted_g6,omitempty"`
-	Signals   *Signals     `json:"signals,omitempty"`
+	Step      int                `json:"step"`
+	RPS       float64            `json:"rps"`
+	Admitted  bool               `json:"admitted"`
+	Cells     int                `json:"cells"`
+	Scheduled int                `json:"scheduled"`
+	Lines     []PooledLine       `json:"lines,omitempty"`
+	G6        *PooledG6          `json:"hosted_g6,omitempty"`
+	Curve     []PooledCurvePoint `json:"completion_incidence,omitempty"`
+	Signals   *Signals           `json:"signals,omitempty"`
 }
 
 // StepTables is one route's per-step tables (SPEC-HOSTED HA3 point 13):
 // the ceiling rule's verdict per step with the step's nominal demand as
 // a fraction of each recorded limit, one table per cell, and, for a
 // complete frame of admission.ReleaseCells cells, the cells pooled per
-// step. Pooled is nil for an incomplete frame.
+// step. Pooled is nil for an incomplete frame. Each attempted step
+// carries its completion-incidence curve with pointwise bands.
 type StepTables struct {
 	Route         string           `json:"route"`
 	CeilingTokens int              `json:"ceiling_tokens"`
@@ -448,6 +452,7 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 			r := newRate(tl.lines[LineInTime], tl.reachable)
 			s.G6.ExcludingConnectReset = &r
 		}
+		s.Curve = curve(completionTimes(tl), s.Scheduled)
 	}
 	return ct, tally, nil
 }
@@ -549,6 +554,11 @@ func (t *tables) pool() {
 				p := newPooled(rk, rn)
 				ps.G6.ExcludingConnectReset = &p
 			}
+			times := make([][]int64, len(cs))
+			for i, s := range cs {
+				times[i] = completionTimes(s)
+			}
+			ps.Curve = pooledCurve(times, n)
 			ps.Signals = signals(cs, ps.Scheduled, t.retryRecorded)
 		}
 		t.Pooled = append(t.Pooled, ps)
@@ -639,6 +649,7 @@ func (t *StepTables) text(frame bool) string {
 			if r := s.G6.ExcludingConnectReset; r != nil {
 				w("  hosted-G6 excluding connect and reset: %d/%d %s [%s, %s]", r.Count, r.Scheduled, pct(r.Value), pct(r.Lo), pct(r.Hi))
 			}
+			curveText(w, s.Curve, s.Scheduled, t.DeadlineS)
 			signalsText(w, s.Signals)
 		}
 		w("")
@@ -680,6 +691,7 @@ func (t *StepTables) text(frame bool) string {
 		if p := s.G6.ExcludingConnectReset; p != nil {
 			w("  hosted-G6 excluding connect and reset: %s", pooled(*p))
 		}
+		pooledCurveText(w, s.Curve, s.Scheduled, s.Cells, t.DeadlineS)
 		signalsText(w, s.Signals)
 	}
 	return b.String()
