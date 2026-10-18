@@ -157,18 +157,19 @@ type G6 struct {
 }
 
 // CellStep is one step of a cell. An attempted step with scheduled
-// requests carries its lines, hosted-G6, completion-incidence curve with
-// its quantiles, and signals.
+// requests carries its lines, hosted-G6, throughput, completion-incidence
+// curve with its quantiles, and signals.
 type CellStep struct {
-	Step      int                 `json:"step"`
-	RPS       float64             `json:"rps"`
-	State     string              `json:"state"`
-	Scheduled int                 `json:"scheduled"`
-	Lines     []Line              `json:"lines,omitempty"`
-	G6        *G6                 `json:"hosted_g6,omitempty"`
-	Curve     []CurvePoint        `json:"completion_incidence,omitempty"`
-	Incidence *IncidenceQuantiles `json:"incidence_quantiles,omitempty"`
-	Signals   *Signals            `json:"signals,omitempty"`
+	Step       int                 `json:"step"`
+	RPS        float64             `json:"rps"`
+	State      string              `json:"state"`
+	Scheduled  int                 `json:"scheduled"`
+	Lines      []Line              `json:"lines,omitempty"`
+	G6         *G6                 `json:"hosted_g6,omitempty"`
+	Throughput *Throughput         `json:"throughput,omitempty"`
+	Curve      []CurvePoint        `json:"completion_incidence,omitempty"`
+	Incidence  *IncidenceQuantiles `json:"incidence_quantiles,omitempty"`
+	Signals    *Signals            `json:"signals,omitempty"`
 }
 
 // CellTable is one cell's per-step table.
@@ -242,16 +243,17 @@ type PooledG6 struct {
 // PooledStep is one step pooled over the cells that attempted it with
 // requests scheduled; Cells counts them. No figure pools across steps.
 type PooledStep struct {
-	Step      int                 `json:"step"`
-	RPS       float64             `json:"rps"`
-	Admitted  bool                `json:"admitted"`
-	Cells     int                 `json:"cells"`
-	Scheduled int                 `json:"scheduled"`
-	Lines     []PooledLine        `json:"lines,omitempty"`
-	G6        *PooledG6           `json:"hosted_g6,omitempty"`
-	Curve     []PooledCurvePoint  `json:"completion_incidence,omitempty"`
-	Incidence *IncidenceQuantiles `json:"incidence_quantiles,omitempty"`
-	Signals   *Signals            `json:"signals,omitempty"`
+	Step       int                 `json:"step"`
+	RPS        float64             `json:"rps"`
+	Admitted   bool                `json:"admitted"`
+	Cells      int                 `json:"cells"`
+	Scheduled  int                 `json:"scheduled"`
+	Lines      []PooledLine        `json:"lines,omitempty"`
+	G6         *PooledG6           `json:"hosted_g6,omitempty"`
+	Throughput *PooledThroughput   `json:"throughput,omitempty"`
+	Curve      []PooledCurvePoint  `json:"completion_incidence,omitempty"`
+	Incidence  *IncidenceQuantiles `json:"incidence_quantiles,omitempty"`
+	Signals    *Signals            `json:"signals,omitempty"`
 }
 
 // StepTables is one route's per-step tables (SPEC-HOSTED HA3 point 13):
@@ -265,12 +267,13 @@ type PooledStep struct {
 // carries its completion-incidence curve with pointwise bands and its
 // quantiles inside the hard timeout. LengthValue is the finish reason
 // the route's adapter reports when the output ceiling stopped the
-// answer.
+// answer. StepS is the configured step window throughput is over.
 type StepTables struct {
 	Route         string           `json:"route"`
 	CeilingTokens int              `json:"ceiling_tokens"`
 	LengthValue   string           `json:"length_value"`
 	DeadlineS     int              `json:"deadline_s"`
+	StepS         float64          `json:"step_s"`
 	HardTimeoutS  int              `json:"hard_timeout_s"`
 	Limits        []admission.Step `json:"limits"`
 	Cells         []CellTable      `json:"cells"`
@@ -383,6 +386,8 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 			v.Route, v.CeilingTokens, cfg.Target.Name, rel.Shape.CeilingTokens)
 	case len(v.Steps) != len(steps):
 		return nil, fmt.Errorf("report: step tables: verdict has %d steps, the ladder %d", len(v.Steps), len(steps))
+	case !(rel.Ladder.StepS > 0):
+		return nil, fmt.Errorf("report: step tables: a step window of %g s", rel.Ladder.StepS)
 	}
 	for k := range steps {
 		switch s := v.Steps[k]; {
@@ -398,7 +403,7 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 	t := &tables{
 		StepTables: &StepTables{
 			Route: cfg.Target.Name, CeilingTokens: rel.Shape.CeilingTokens, LengthValue: lengthValue(cfg.Target.Adapter),
-			DeadlineS: rel.Shape.DeadlineS, HardTimeoutS: cfg.Client.HTTPTimeoutS, Limits: v.Steps, FrameCells: admission.ReleaseCells,
+			DeadlineS: rel.Shape.DeadlineS, StepS: rel.Ladder.StepS, HardTimeoutS: cfg.Client.HTTPTimeoutS, Limits: v.Steps, FrameCells: admission.ReleaseCells,
 		},
 		docs:          map[int]*config.StatusDoc{},
 		errorDocs:     map[string]*config.ErrorDoc{},
@@ -545,6 +550,8 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 			r := newRate(tl.lines[LineInTime], tl.reachable)
 			s.G6.ExcludingConnectReset = &r
 		}
+		tp := throughput([]*stepTally{tl}, t.StepS)
+		s.Throughput = &tp
 		s.Curve = curve(completionTimes(tl), s.Scheduled)
 		s.Incidence = incidence([]*stepTally{tl}, t.HardTimeoutS)
 	}
@@ -674,6 +681,8 @@ func (t *tables) pool(idx []int) []PooledStep {
 				p := newPooled(rk, rn)
 				ps.G6.ExcludingConnectReset = &p
 			}
+			tp := pooledThroughput(cs, t.StepS)
+			ps.Throughput = &tp
 			times := make([][]int64, len(cs))
 			for i, s := range cs {
 				times[i] = completionTimes(s)
@@ -779,6 +788,7 @@ func (t *StepTables) text(frame bool) string {
 			if r := s.G6.ExcludingConnectReset; r != nil {
 				w("  hosted-G6 excluding connect and reset: %d/%d %s [%s, %s]", r.Count, r.Scheduled, pct(r.Value), pct(r.Lo), pct(r.Hi))
 			}
+			throughputText(w, *s.Throughput)
 			curveText(w, s.Curve, s.Scheduled, t.DeadlineS)
 			incidenceQuantilesText(w, s.Incidence)
 			signalsText(w, s.Signals)
@@ -832,6 +842,7 @@ func (t *StepTables) text(frame bool) string {
 			if p := s.G6.ExcludingConnectReset; p != nil {
 				w("  hosted-G6 excluding connect and reset: %s", pooled(*p))
 			}
+			pooledThroughputText(w, *s.Throughput, s.Cells, t.StepS)
 			pooledCurveText(w, s.Curve, s.Scheduled, s.Cells, t.DeadlineS)
 			incidenceQuantilesText(w, s.Incidence)
 			signalsText(w, s.Signals)

@@ -193,9 +193,23 @@ func TestPagesCmd(t *testing.T) {
 	}
 	// Each completion of the endpoint's two content events gives one gap.
 	var completions, gaps int64
+	perStep := map[int]int{}
 	for i := range recs {
 		if !recs[i].Warmup && recs[i].Outcome == loadgen.OutcomeCompleted {
 			completions++
+			perStep[recs[i].Step]++
+		}
+	}
+	// Throughput is over the configuration file's step window, the pinned
+	// one, whatever ladder the test ran.
+	for _, s := range st.Cells[0].Steps {
+		if s.State != report.StepAttempted || s.Scheduled == 0 {
+			continue
+		}
+		line := fmt.Sprintf("  throughput over the step's configured %d s window: %d completions, %.3f per second; no completion carried provider-reported completion tokens\n",
+			config.PinnedReleaseStepS, perStep[s.Step], float64(perStep[s.Step])/config.PinnedReleaseStepS)
+		if s.Throughput == nil || s.Throughput.Completions != perStep[s.Step] || !strings.Contains(page, line) {
+			t.Errorf("step %d: throughput %+v; groq page lacks %q", s.Step, s.Throughput, line)
 		}
 	}
 	for _, s := range st.Cells[0].Steps {
