@@ -54,6 +54,8 @@ type cellRecord struct {
 	AdmittedRPS    []float64  `json:"admitted_rps"`
 	OpenFilesLimit uint64     `json:"open_files_limit"`
 	ProbeStatus    int        `json:"probe_status,omitempty"`
+	// AuthStatuses counts the ladder's 401 and 403 responses by status.
+	AuthStatuses map[int]int `json:"auth_statuses,omitempty"`
 	// Ladder, Tripwires and Interrupted are loadgen's records of the run.
 	Ladder      *loadgen.LadderRecord   `json:"ladder,omitempty"`
 	Tripwires   *loadgen.Tripwires      `json:"tripwires,omitempty"`

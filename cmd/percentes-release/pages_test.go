@@ -310,7 +310,7 @@ func keys(m map[string][]byte) []string {
 // manifest, a run record that disagrees with its directory or manifest,
 // and a verdict that differs between cells.
 func TestPagesCmdRefusals(t *testing.T) {
-	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	for _, c := range []struct {
 		name string
 		// edit changes the release after groq's first two cells are

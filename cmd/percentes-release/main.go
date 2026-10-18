@@ -44,8 +44,9 @@
 // the ceiling check passed with the input bound; 2 = the runs are over
 // and a cell does not count, or the ceiling check failed or was blocked;
 // 3 = the route stopped (a ledger refusal, a documented billing refusal,
-// a clock offset above the pinned bound, or an operator abort); 1 =
-// execution error or refusal to start.
+// a clock offset above the pinned bound, a probe 401 or 403 the route's
+// previous probed cell also saw, or an operator abort); 1 = execution
+// error or refusal to start.
 package main
 
 import (

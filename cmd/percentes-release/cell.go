@@ -35,9 +35,11 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 // runCell runs one cell attempt (SPEC-HOSTED HA3 point 16) and returns its
 // record, also written to the cell's directory. A clock offset above the
 // pinned bound or a ledger refusal stops the route before any request; a
-// probe status that blocks the start ends the cell before the ladder; a
-// documented billing refusal on the probe or inside the ladder stops the
-// route; an EMFILE error ends the ladder and the cell is client-invalid.
+// probe status that blocks the start ends the cell before the ladder,
+// unless it is a 401 or 403 the route's previous probed cell also saw,
+// which stops the route; a documented billing refusal on the probe or
+// inside the ladder stops the route; an EMFILE error ends the ladder and
+// the cell is client-invalid.
 // Every finished cell keeps its evidence with a labelled manifest and a
 // report pair (retain). An error is an execution error.
 func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord, err error) {
@@ -131,7 +133,15 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		return rec, r.retain(ctx, ev, rec, nil)
 	}
 	if pr.Start.Blocked {
-		finish(outcomeBlocked, pr.Start.Reason)
+		stop, err := r.authFault(rec, pr.Request.Status)
+		if err != nil {
+			return rec, err
+		}
+		if stop != nil {
+			finish(outcomeStopped, stop.Error())
+		} else {
+			finish(outcomeBlocked, pr.Start.Reason)
+		}
 		return rec, r.retain(ctx, ev, rec, nil)
 	}
 	interval := time.Duration(float64(time.Second) / cfg.Release.Ladder.StepsRPS[0])
@@ -171,6 +181,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	epoch := res.EpochWall.UTC()
 	rec.EpochUTC = &epoch
 	rec.Ladder, rec.Tripwires, rec.Interrupted = res.Ladder, res.Tripwires, res.Interrupted
+	rec.AuthStatuses = countAuth(res.Requests)
 	if res.Ladder != nil {
 		for _, st := range res.Ladder.Steps {
 			if st.Attempted {

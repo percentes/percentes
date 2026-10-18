@@ -275,6 +275,139 @@ func TestBillingRefusalStopsRoute(t *testing.T) {
 	}
 }
 
+// A probe 401 after a cell whose ladder met 401s stops the route: the
+// probed cell keeps a labelled manifest and report pair naming the
+// earlier cell, the earlier cell keeps its record and its count, and the
+// loop ends with the stop code.
+func TestAuthFaultStopsRoute(t *testing.T) {
+	e := newEndpoint(t, func(n int64) (int, string) {
+		if n >= 3 {
+			return http.StatusUnauthorized, `{"error":{"message":"Invalid API Key","code":"invalid_api_key"}}`
+		}
+		return http.StatusOK, ""
+	})
+	r, _ := newTestRoute(t, releaseConfig(t, e.url()), "+0.005032")
+	shortLadder(r)
+	now := r.runs[0].Start
+	r.now = func() time.Time { return now }
+	r.wait = func(_ context.Context, t time.Time) error {
+		now = t
+		return nil
+	}
+	code, err := r.loop(context.Background())
+	if err != nil || code != exitStopped {
+		t.Fatalf("loop: code %d, %v", code, err)
+	}
+	first := readCell(t, r, r.runs[0])
+	if first.Outcome == outcomeStopped || first.Outcome == outcomeBlocked || first.ProbeStatus != http.StatusOK {
+		t.Fatalf("first cell %+v", first)
+	}
+	b, err := os.ReadFile(filepath.Join(r.cellDir(r.runs[0]), evidence.AttemptsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, err := evidence.ReadRecords(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := 0
+	for _, a := range recs {
+		if a.Status == http.StatusUnauthorized {
+			refused++
+		}
+	}
+	if refused == 0 || len(first.AuthStatuses) != 1 || first.AuthStatuses[http.StatusUnauthorized] != refused {
+		t.Fatalf("first cell counts %v; attempts file holds %d 401s", first.AuthStatuses, refused)
+	}
+
+	st, err := r.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var second *cellRecord
+	for _, run := range st.runs {
+		if c := st.records[runKey(run)]; c != nil && run != r.runs[0] {
+			if second != nil {
+				t.Fatalf("cells %+v and %+v after the first", second.Run, c.Run)
+			}
+			second = c
+		}
+	}
+	if second == nil {
+		t.Fatal("no second cell")
+	}
+	want := fmt.Sprintf("route stop: probe request returned 401, as did %d requests inside its ladder at %s attempt 1: independent evidence of a credential or account fault (SPEC-HOSTED HA3 point 16)",
+		refused, r.runs[0].Label)
+	if second.Outcome != outcomeStopped || !slices.Equal(second.Reasons, []string{want}) || second.ProbeStatus != http.StatusUnauthorized || second.Sent != (admission.Counts{Probe: 1}) {
+		t.Fatalf("second cell %+v", second)
+	}
+	m, text := checkRetained(t, r, second.Run)
+	if c := m.Release; m.Counted() || c.Outcome != outcomeStopped || c.LadderStarted || !slices.Equal(c.Reasons, second.Reasons) {
+		t.Fatalf("manifest: counted %t, cell %+v", m.Counted(), c)
+	}
+	if !strings.Contains(text, "\n  "+want+"\n") {
+		t.Fatalf("report text:\n%s", text)
+	}
+	if again := readCell(t, r, r.runs[0]); again.Outcome != first.Outcome || !slices.Equal(again.Reasons, first.Reasons) {
+		t.Fatalf("first cell rewritten: %+v", again)
+	}
+}
+
+// A probe's 401 or 403 stops the route only when the route's previous
+// cell to send its probe saw the same status: cells that sent nothing are
+// passed over, and an interrupted cell with no probe recorded ends the
+// search.
+func TestAuthFaultEvidence(t *testing.T) {
+	base := time.Date(2026, 10, 17, 9, 0, 0, 0, time.UTC)
+	cell := func(i int, outcome string, probeStatus int, auth map[int]int) *cellRecord {
+		c := &cellRecord{Run: schedule.Run{Route: "groq", Label: fmt.Sprintf("weekday-%02d", i), Attempt: 1}, Outcome: outcome, StartUTC: base.Add(time.Duration(i) * time.Hour),
+			ProbeStatus: probeStatus, AuthStatuses: auth}
+		if probeStatus != 0 {
+			c.Sent.Probe = 1
+		}
+		return c
+	}
+	cur := cell(10, outcomeRunning, 0, nil)
+	for _, tc := range []struct {
+		name    string
+		status  int
+		earlier []*cellRecord
+		want    string
+	}{
+		{"no earlier cell", 401, nil, ""},
+		{"probe 401 again", 401, []*cellRecord{cell(1, outcomeBlocked, 401, nil)}, "probe request returned 401, as did its probe at weekday-01 attempt 1"},
+		{"probe 403 again", 403, []*cellRecord{cell(1, outcomeBlocked, 403, nil)}, "probe request returned 403, as did its probe at weekday-01 attempt 1"},
+		{"ladder 403s", 403, []*cellRecord{cell(1, outcomeCounted, 200, map[int]int{403: 5})}, "probe request returned 403, as did 5 requests inside its ladder at weekday-01 attempt 1"},
+		{"another status", 401, []*cellRecord{cell(1, outcomeBlocked, 403, map[int]int{403: 2})}, ""},
+		{"not an auth status", 404, []*cellRecord{cell(1, outcomeBlocked, 404, nil)}, ""},
+		{"a clean cell between", 401, []*cellRecord{cell(1, outcomeCounted, 200, map[int]int{401: 3}), cell(2, outcomeCounted, 200, nil)}, ""},
+		{"a 5xx probe between", 401, []*cellRecord{cell(1, outcomeBlocked, 401, nil), cell(2, outcomeCounted, 503, nil)}, ""},
+		{"cells that sent nothing between", 401, []*cellRecord{cell(1, outcomeCounted, 200, map[int]int{401: 3}), cell(2, outcomeMissed, 0, nil), cell(3, outcomeStopped, 0, nil)},
+			"probe request returned 401, as did 3 requests inside its ladder at weekday-01 attempt 1"},
+		{"an interrupted cell between", 401, []*cellRecord{cell(1, outcomeBlocked, 401, nil), cell(2, outcomeInterrupted, 0, nil)}, ""},
+		{"a later cell only", 401, []*cellRecord{cell(11, outcomeBlocked, 401, nil)}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &route{dir: t.TempDir()}
+			for _, c := range append(tc.earlier, cur) {
+				if err := replaceJSON(filepath.Join(runDir(r.dir, c.Run), cellFile), c); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stop, err := r.authFault(cur, tc.status)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case tc.want == "" && stop != nil:
+				t.Fatalf("stop %q", stop.Error())
+			case tc.want != "" && (stop == nil || stop.Error() != "route stop: "+tc.want+": independent evidence of a credential or account fault (SPEC-HOSTED HA3 point 16)"):
+				t.Fatalf("stop %v, want %q", stop, tc.want)
+			}
+		})
+	}
+}
+
 // Before the ladder: a clock offset above the bound or a ledger refusal
 // stops the route with nothing sent; a probe the start gate blocks ends
 // the cell after one request; a probe answered with a billing refusal
