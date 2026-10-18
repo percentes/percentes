@@ -136,6 +136,8 @@ func TestReleaseRefusals(t *testing.T) {
 		{"body ceiling off the shape", func(c *Config) { c.Release.Shape.CeilingTokens = 1024 }, "\"max_completion_tokens\" must be release.shape.ceiling_tokens (1024), got 512"},
 		{"probe status", func(c *Config) { c.Target.Probe = &TargetProbe{AccountLimitStatuses: []int{401}} }, "target.probe.account_limit_statuses[0]"},
 		{"credential header recorded", func(c *Config) { c.Target.ResponseHeaders = []string{"Authorization"} }, "never recorded"},
+		{"no response headers", func(c *Config) { c.Target.ResponseHeaders = nil }, "target.response_headers: must record Retry-After"},
+		{"Retry-After unrecorded", func(c *Config) { c.Target.ResponseHeaders = []string{"x-ratelimit-*"} }, "target.response_headers: must record Retry-After"},
 		{"no limits", func(c *Config) { c.Target.Limits = nil }, "target.limits: required"},
 		{"limit dimension", func(c *Config) { limit(c).Dimension = "rpm" }, "target.limits[0].dimension: must be one of"},
 		{"limit value", func(c *Config) { limit(c).Value = 0 }, "target.limits[0].value: must be > 0"},
@@ -338,6 +340,30 @@ func TestReleaseRetainedHeaders(t *testing.T) {
 	} {
 		if got := c.Target.HeaderRetained(name); got != want {
 			t.Errorf("HeaderRetained(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// Retry-After is recorded by a literal name or a prefix, in any case; a
+// near miss does not record it.
+func TestReleaseRetryAfterRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		allow    []string
+		recorded bool
+	}{
+		{[]string{"retry-after"}, true},
+		{[]string{"RETRY-AFTER"}, true},
+		{[]string{"x-ratelimit-*", "Retry-*"}, true},
+		{[]string{"Retry-After-*"}, false},
+		{[]string{"Retry"}, false},
+		{[]string{"x-retry-after"}, false},
+	} {
+		c := loadRef(t, releaseRef)
+		c.Target.ResponseHeaders = tc.allow
+		err := c.Validate()
+		refused := err != nil && strings.Contains(err.Error(), "target.response_headers: must record Retry-After")
+		if refused == tc.recorded || (tc.recorded && err != nil) {
+			t.Errorf("%q: recorded %v, got: %v", tc.allow, tc.recorded, err)
 		}
 	}
 }

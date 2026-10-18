@@ -406,6 +406,9 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	}
 	validateReleaseNotApplied(v, field, t)
 	validateResponseHeaders(v, field, t)
+	if !HeaderAllowed(t.ResponseHeaders, "Retry-After") {
+		v.errf("%s.response_headers: must record Retry-After under the release profile (SPEC-HOSTED §5)", field)
+	}
 	validateRetainedHeaders(v, field, t)
 	validateResponseShape(v, field, t)
 	if t.Adapter == AdapterMessages && t.ResponseShape != nil {
