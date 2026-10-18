@@ -1,10 +1,11 @@
-// Package pilot holds the pilot's task data: the synthetic support-ticket
-// fixture (SPEC-HOSTED HA2 terms: 120 measured cases and 24 development
-// cases, each with one frozen label).
+// Package pilot holds synthetic support-ticket text: the pilot's fixture
+// (SPEC-HOSTED HA2 terms: 120 measured cases and 24 development cases,
+// each with one frozen label), and Shape S's longer tickets and frozen
+// system text for a release (HA3 point 7).
 //
-// Every ticket is assembled from templates, and its label is Route of the
-// request and trigger it was assembled with. The templates, names,
-// amounts and products are invented.
+// Every ticket is assembled from templates; a fixture ticket's label is
+// Route of the request and trigger it was assembled with. The templates,
+// names, organisations, amounts and products are invented.
 package pilot
 
 import (
