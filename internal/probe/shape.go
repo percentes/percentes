@@ -313,13 +313,14 @@ func (s *Shape) count(c map[string]int, k string) {
 	c[k]++
 }
 
-// tokens returns the integer at key in the stream's usage.
+// tokens returns the integer at key in the stream's usage; it is false
+// when the key is missing or null.
 func (s *Shape) tokens(key string) (int, bool) {
-	var n int
-	if v, ok := s.usage[key]; !ok || json.Unmarshal(v, &n) != nil {
+	var n *int
+	if v, ok := s.usage[key]; !ok || json.Unmarshal(v, &n) != nil || n == nil {
 		return 0, false
 	}
-	return n, true
+	return *n, true
 }
 
 func (s *Shape) deltaKey(k string, v json.RawMessage) {

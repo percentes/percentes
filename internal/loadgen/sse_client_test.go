@@ -255,15 +255,55 @@ func TestUserinfoBecomesBasicAuth(t *testing.T) {
 	}
 }
 
-// A chunk's usage object yields the completion token count; chunks
-// without one yield nothing.
+// A chunk's usage object yields the completion token count, an explicit
+// zero included; a usage object whose count is missing or null, and a
+// chunk without one, yield nothing.
 func TestUsageTokens(t *testing.T) {
 	if n, ok := usageTokens([]byte(`{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":17,"total_tokens":26}}`)); !ok || n != 17 {
 		t.Fatalf("usage chunk: %d %v", n, ok)
 	}
-	for _, p := range []string{`{"choices":[{"delta":{"content":"x"}}]}`, `{"usage":null}`, `not json`} {
-		if _, ok := usageTokens([]byte(p)); ok {
-			t.Fatalf("%s must carry no usage", p)
+	if n, ok := usageTokens([]byte(`{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":0}}`)); !ok || n != 0 {
+		t.Fatalf("explicit zero: %d %v", n, ok)
+	}
+	for _, p := range []string{
+		`{"choices":[{"delta":{"content":"x"}}]}`, `{"usage":null}`, `not json`,
+		`{"choices":[],"usage":{"prompt_tokens":12}}`, `{"choices":[],"usage":{}}`,
+		`{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":null}}`,
+	} {
+		if n, ok := usageTokens([]byte(p)); ok {
+			t.Fatalf("%s must carry no completion count, got %d", p, n)
 		}
+	}
+}
+
+// A later usage object without a completion count replaces the raw usage
+// and keeps the earlier count; a stream whose only usage object lacks the
+// count records none.
+func TestUsageWithoutCompletionCount(t *testing.T) {
+	usage := func(u string) string { return `data: {"choices":[],"usage":` + u + "}\n\n" }
+	for _, c := range []struct {
+		name   string
+		frames []string
+		seen   bool
+		n      int
+		raw    string
+	}{
+		{"prompt only after a count", []string{usage(`{"completion_tokens":7}`), usage(`{"prompt_tokens":12}`)}, true, 7, `{"prompt_tokens":12}`},
+		{"null after a count", []string{usage(`{"completion_tokens":7}`), usage(`{"completion_tokens":null}`)}, true, 7, `{"completion_tokens":null}`},
+		{"zero after a count", []string{usage(`{"completion_tokens":7}`), usage(`{"completion_tokens":0}`)}, true, 0, `{"completion_tokens":0}`},
+		{"prompt only", []string{usage(`{"prompt_tokens":12}`)}, false, 0, `{"prompt_tokens":12}`},
+		{"empty", []string{usage(`{}`)}, false, 0, `{}`},
+		{"null count", []string{usage(`{"prompt_tokens":3,"completion_tokens":null}`)}, false, 0, `{"prompt_tokens":3,"completion_tokens":null}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			frames := append(append([]string{answerFrame, stopFrame}, c.frames...), doneFrame)
+			r := executeShaped(t, true, nil, frames...)
+			if r.Outcome != OutcomeCompleted || r.Tokens != 1 {
+				t.Fatalf("got %v/%q tokens=%d", r.Outcome, r.ErrClass, r.Tokens)
+			}
+			if r.UsageSeen != c.seen || r.CompletionTokens != c.n || string(r.Usage) != c.raw {
+				t.Fatalf("usage seen %v tokens %d raw %s, want %v %d %s", r.UsageSeen, r.CompletionTokens, r.Usage, c.seen, c.n, c.raw)
+			}
+		})
 	}
 }

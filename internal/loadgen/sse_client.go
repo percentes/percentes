@@ -529,15 +529,16 @@ func usageTokens(payload []byte) (n int, ok bool) {
 	return completionTokens(c.usage)
 }
 
-// completionTokens reads completion_tokens from a usage object.
+// completionTokens reads completion_tokens from a usage object; ok is
+// false when the key is missing or null.
 func completionTokens(usage json.RawMessage) (n int, ok bool) {
 	var u struct {
-		CompletionTokens int `json:"completion_tokens"`
+		CompletionTokens *int `json:"completion_tokens"`
 	}
-	if json.Unmarshal(usage, &u) != nil {
+	if json.Unmarshal(usage, &u) != nil || u.CompletionTokens == nil {
 		return 0, false
 	}
-	return u.CompletionTokens, true
+	return *u.CompletionTokens, true
 }
 
 // requestBody builds the OpenAI-compatible chat-completion request.

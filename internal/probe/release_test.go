@@ -207,6 +207,41 @@ func TestReleaseProbeInputBound(t *testing.T) {
 	}
 }
 
+// A null prompt or completion count in a chat usage object is absent, so
+// the input bound is not reported as met; an explicit zero is a count.
+func TestReleaseProbeNullUsageCounts(t *testing.T) {
+	noSpacing(t)
+	for _, c := range []struct {
+		name  string
+		usage string
+		want  string
+		input InputCheck
+	}{
+		{"null", `{"prompt_tokens":null,"completion_tokens":null}`, "absent", InputCheck{BoundTokens: 1200}},
+		{"zero", `{"prompt_tokens":0,"completion_tokens":0}`, "0", InputCheck{BoundTokens: 1200, Reported: 10, Pass: true}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			usage := `data: {"model":"openai/gpt-oss-120b","choices":[],"usage":` + c.usage + "}\n\n"
+			srv := httptest.NewServer(sseHandler(answerFrame, stopFrame, usage, doneFrame))
+			defer srv.Close()
+			rec := releaseProbe(t, ReleaseInput{Config: releaseConfig(t, srv.URL+"/v1/chat/completions"), Texts: texts(0), ByteCap: byteCap})
+			r := rec.Requests[0]
+			count := func(p *int) string {
+				if p == nil {
+					return "absent"
+				}
+				return fmt.Sprint(*p)
+			}
+			if count(r.PromptTokens) != c.want || count(r.CompletionTokens) != c.want {
+				t.Errorf("prompt %s completion %s, want %s", count(r.PromptTokens), count(r.CompletionTokens), c.want)
+			}
+			if rec.InputBound != c.input || !rec.Ceiling.Pass {
+				t.Errorf("input %+v, ceiling %+v", rec.InputBound, rec.Ceiling)
+			}
+		})
+	}
+}
+
 // The Messages adapter: the key travels in x-api-key with the
 // anthropic-version header, the shape is read from the event types, and
 // the ceiling check reads stop_reason.

@@ -89,11 +89,11 @@ type Stats struct {
 
 	// Completion length over completed requests: the client-side count of
 	// content events, and the completion token count from the usage
-	// object over the requests whose stream carried one (§6, §10).
+	// object over the requests whose stream carried a count (§6, §10).
 	ContentEvents    CountSummary `json:"content_events"`
 	CompletionTokens CountSummary `json:"completion_tokens"`
 	// TokenCheck compares the two counts on each completed request that
-	// carried usage (§10).
+	// carried a completion token count (§10).
 	TokenCheck TokenCheck `json:"token_check"`
 
 	Incidence IncidenceCurve `json:"completion_incidence"`

@@ -77,7 +77,7 @@ type Request struct {
 	Late   bool `json:"late,omitempty"`
 	// CompletionTokens is the completion token count from a usage object
 	// in the stream (a Messages message_delta's output_tokens); UsageSeen
-	// says one arrived.
+	// says a count arrived.
 	CompletionTokens int    `json:"completion_tokens,omitempty"`
 	UsageSeen        bool   `json:"usage_seen,omitempty"`
 	Replica          string `json:"replica,omitempty"`
