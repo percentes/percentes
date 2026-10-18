@@ -38,6 +38,7 @@ func (g *gen) execute(r *Request) {
 		return
 	}
 	defer resp.Body.Close()
+	r.Proto = resp.Proto
 	// Only the mock's replica header is recorded (§1); any other endpoint controls the value.
 	r.Replica = replicaFrom(resp.Header, g.cfg.Mock != nil && !g.cfg.Target.Hosted, g.cfg.Target.BaseURL, g.apiKey)
 

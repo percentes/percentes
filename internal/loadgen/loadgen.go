@@ -22,6 +22,7 @@ package loadgen
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"os"
@@ -68,6 +69,8 @@ type Request struct {
 	CompletionTokens int    `json:"completion_tokens,omitempty"`
 	UsageSeen        bool   `json:"usage_seen,omitempty"`
 	Replica          string `json:"replica,omitempty"`
+	// Proto is the response's protocol version ("" = no response).
+	Proto string `json:"proto,omitempty"`
 
 	// ITLsUs are inter-token latency (ITL) gaps (us) for pooled per-window ITL
 	// histograms (§3: per-request p99 is forbidden; pooling happens in
@@ -133,14 +136,7 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	// is bounded by the pinned 30 s timeout, so 2x lambda x timeout can
 	// absorb every request blackholing simultaneously.
 	provision := int(cfg.Load.RateRPS*float64(config.PinnedClientTimeoutS)*2) + cfg.Load.Connections
-	transport := &http.Transport{
-		ForceAttemptHTTP2:   false, // one request per connection over plain HTTP; TLS may still negotiate HTTP/2
-		MaxIdleConns:        provision,
-		MaxIdleConnsPerHost: provision,
-		MaxConnsPerHost:     0, // never throttle dispatch on connection count
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
-	}
+	transport := newTransport(provision)
 	defer transport.CloseIdleConnections()
 	model := cfg.Target.ModelName
 	if model == "" {
@@ -234,7 +230,46 @@ func Run(ctx context.Context, cfg *config.Config, hooks *Hooks) (*Result, error)
 	if aborted || ctx.Err() != nil {
 		return res, fmt.Errorf("loadgen: run aborted by context: %w", ctx.Err())
 	}
+	if err := checkProtocols(cfg, requests); err != nil {
+		return res, err
+	}
 	return res, nil
+}
+
+// newTransport pins HTTP/1.1 on plain and TLS connections, so each
+// in-flight request holds its own connection. A non-nil empty
+// TLSNextProto stops the transport from offering h2 in the TLS handshake.
+func newTransport(provision int) *http.Transport {
+	return &http.Transport{
+		ForceAttemptHTTP2:   false,
+		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
+		MaxIdleConns:        provision,
+		MaxIdleConnsPerHost: provision,
+		MaxConnsPerHost:     0, // never throttle dispatch on connection count
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true,
+	}
+}
+
+// checkProtocols fails a hosted run in which any response arrived over
+// a protocol other than HTTP/1.1.
+func checkProtocols(cfg *config.Config, requests []Request) error {
+	if !cfg.Target.Hosted {
+		return nil
+	}
+	n, first := 0, ""
+	for i := range requests {
+		if p := requests[i].Proto; p != "" && p != "HTTP/1.1" {
+			if n == 0 {
+				first = fmt.Sprintf("request %d over %s", requests[i].Index, p)
+			}
+			n++
+		}
+	}
+	if n > 0 {
+		return fmt.Errorf("loadgen: hosted target: %d responses not over HTTP/1.1 (first: %s)", n, first)
+	}
+	return nil
 }
 
 func buildFiller(tokens int) string {
