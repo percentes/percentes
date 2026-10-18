@@ -1,0 +1,326 @@
+package evidence
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"time"
+
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/redact"
+	"github.com/percentes/percentes/internal/validity"
+)
+
+// ManifestFile is the run manifest's file name in a run's output
+// directory.
+const ManifestFile = "manifest.json"
+
+// FileRef names a file and its content's SHA-256.
+type FileRef struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+	Bytes  int64  `json:"bytes"`
+}
+
+func refOf(name string, b []byte) FileRef {
+	sum := sha256.Sum256(b)
+	return FileRef{Name: name, SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(b))}
+}
+
+// HashFile returns the reference of the file at path under name.
+func HashFile(path, name string) (FileRef, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return FileRef{}, fmt.Errorf("evidence: %w", err)
+	}
+	return refOf(name, b), nil
+}
+
+// Manifest is the SPEC-HOSTED §9 run manifest, with the HA2 §9 hashes and
+// roles. Every file it names is referenced by SHA-256; paths are relative
+// to the output directory, the frame store root, or the operator file's
+// directory.
+type Manifest struct {
+	SchemaVersion int `json:"schema_version"`
+	// StartUTC is the run epoch.
+	StartUTC   time.Time      `json:"start_utc"`
+	WrittenUTC time.Time      `json:"written_utc"`
+	Profile    config.Profile `json:"profile"`
+	Cell       string         `json:"cell,omitempty"`
+	Seed       int64          `json:"seed"`
+	Source     Source         `json:"source"`
+	// Config is the configuration file as loaded, verbatim.
+	Config   FileRef  `json:"config"`
+	Endpoint Endpoint `json:"endpoint"`
+	Client   Client   `json:"client"`
+	Clock    ClockRef `json:"clock"`
+	// StatusStart and StatusEnd are the endpoint-status records.
+	StatusStart FileRef          `json:"status_start"`
+	StatusEnd   *FileRef         `json:"status_end,omitempty"`
+	Operator    FileRef          `json:"operator"`
+	Roles       *Roles           `json:"roles,omitempty"`
+	Records     []OperatorRecord `json:"records"`
+	Ledger      *LedgerRef       `json:"ledger,omitempty"`
+	// Artifacts are the run's other published files.
+	Artifacts []FileRef `json:"artifacts"`
+	// Frames is the raw-frame store file, named from the store's root.
+	Frames         *FileRef        `json:"frames,omitempty"`
+	RunValid       bool            `json:"run_valid"`
+	InvalidReasons []string        `json:"invalid_reasons,omitempty"`
+	Gates          []validity.Gate `json:"gates,omitempty"`
+}
+
+// Source is the instrument build. Diff is the operator's source_diff
+// record.
+type Source struct {
+	Revision string   `json:"revision"`
+	Modified bool     `json:"modified"`
+	VCSTime  string   `json:"vcs_time,omitempty"`
+	Diff     *FileRef `json:"diff,omitempty"`
+}
+
+// Endpoint is the target as configured and as the run observed it.
+// MaxTokens is the single-target body's ceiling; a pilot target's ceiling
+// is in Params.
+type Endpoint struct {
+	Provider        string         `json:"provider"`
+	AccountTier     string         `json:"account_tier"`
+	Name            string         `json:"name,omitempty"`
+	BaseURL         string         `json:"base_url,omitempty"`
+	EndpointURL     string         `json:"endpoint_url,omitempty"`
+	RequestedModel  string         `json:"requested_model"`
+	ReportedModels  []string       `json:"reported_models,omitempty"`
+	ModelMismatches int            `json:"model_mismatches,omitempty"`
+	SplitSeries     bool           `json:"split_series,omitempty"`
+	Params          *config.Params `json:"params,omitempty"`
+	MaxTokens       int            `json:"max_tokens,omitempty"`
+	NotApplied      []string       `json:"not_applied,omitempty"`
+	// Protocols counts responses by negotiated protocol.
+	Protocols map[string]int `json:"protocols"`
+}
+
+// Client is the client host: the operator's description of it and the
+// build and machine the binary ran on.
+type Client struct {
+	Host       string `json:"host"`
+	OS         string `json:"os"`
+	Arch       string `json:"arch"`
+	CPUs       int    `json:"cpus"`
+	GoVersion  string `json:"go_version"`
+	CgoEnabled string `json:"cgo_enabled,omitempty"`
+}
+
+// ClockRef is the clock-offset record. ReadBeforeEpochNs is the time from
+// the clock-sync command's end to the run epoch on the host's wall clock.
+type ClockRef struct {
+	File              FileRef  `json:"file"`
+	AbsOffsetS        *float64 `json:"abs_offset_s,omitempty"`
+	Flag              string   `json:"flag,omitempty"`
+	ReadBeforeEpochNs int64    `json:"read_before_epoch_ns"`
+}
+
+// LedgerRef is the admission ledger as read at run start: its hash, size
+// and line count.
+type LedgerRef struct {
+	FileRef
+	Lines int `json:"lines"`
+}
+
+// ReadLedger reads the ledger file at path.
+func ReadLedger(path string) (*LedgerRef, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("evidence: ledger: %w", err)
+	}
+	return &LedgerRef{FileRef: refOf(filepath.Base(path), b), Lines: bytes.Count(b, []byte("\n"))}, nil
+}
+
+// SourceOf reads the revision, modified flag and commit time from a
+// build's version-control stamp.
+func SourceOf(info *debug.BuildInfo) Source {
+	var s Source
+	if info != nil {
+		for _, kv := range info.Settings {
+			switch kv.Key {
+			case "vcs.revision":
+				s.Revision = kv.Value
+			case "vcs.modified":
+				s.Modified = kv.Value == "true"
+			case "vcs.time":
+				s.VCSTime = kv.Value
+			}
+		}
+	}
+	return s
+}
+
+// CheckSource reports an error when info carries no revision, or when
+// the build is modified and op has no source_diff record.
+func CheckSource(info *debug.BuildInfo, op *Operator) error {
+	s := SourceOf(info)
+	if s.Revision == "" {
+		return errors.New("evidence: the binary carries no version-control revision (build it inside a git checkout; go run needs -buildvcs=true)")
+	}
+	if s.Modified && op.find(RecordSourceDiff) == nil {
+		return fmt.Errorf("evidence: the binary was built from a modified tree at %s and the operator file has no %s record", s.Revision, RecordSourceDiff)
+	}
+	return nil
+}
+
+// ManifestInput is what a run's manifest is built from. The paths name
+// files already written; Gates is nil for a run that ended in an error.
+type ManifestInput struct {
+	Config *config.Config
+	// ConfigName names the configuration file.
+	ConfigName string
+	Target     *config.Target
+	Result     *loadgen.Result
+	Build      *debug.BuildInfo
+	Operator   *Operator
+	Ledger     *LedgerRef
+	Clock      *ClockRecord
+
+	ClockPath       string
+	StatusStartPath string
+	// StatusEndPath is empty when the end status was not recorded.
+	StatusEndPath string
+	ArtifactPaths []string
+	// FramesPath is empty when no frame store was written.
+	FramesRoot, FramesPath string
+
+	Gates          *validity.Report
+	RunValid       bool
+	InvalidReasons []string
+}
+
+// NewManifest builds the manifest of one hosted run.
+func NewManifest(in ManifestInput) (*Manifest, error) {
+	cfg, t, res, op := in.Config, in.Target, in.Result, in.Operator
+	m := &Manifest{
+		SchemaVersion:  1,
+		StartUTC:       res.EpochWall.UTC(),
+		WrittenUTC:     time.Now().UTC(),
+		Profile:        cfg.Profile,
+		Cell:           op.Cell,
+		Seed:           cfg.Run.Seed,
+		Source:         SourceOf(in.Build),
+		Config:         refOf(in.ConfigName, cfg.Raw),
+		Operator:       op.File,
+		Roles:          op.Roles,
+		Records:        op.Records,
+		Ledger:         in.Ledger,
+		Artifacts:      []FileRef{},
+		RunValid:       in.RunValid,
+		InvalidReasons: in.InvalidReasons,
+	}
+	if d := op.find(RecordSourceDiff); d != nil {
+		ref := d.FileRef
+		m.Source.Diff = &ref
+	}
+	m.Endpoint = Endpoint{
+		Provider:        op.Provider,
+		AccountTier:     op.AccountTier,
+		Name:            t.Name,
+		BaseURL:         redact.URL(t.BaseURL),
+		EndpointURL:     redact.URL(t.EndpointURL),
+		RequestedModel:  t.ModelName,
+		ReportedModels:  res.ReportedModels,
+		ModelMismatches: res.ModelMismatches,
+		SplitSeries:     res.SplitSeries,
+		Params:          t.Params,
+		NotApplied:      t.NotApplied,
+		Protocols:       map[string]int{},
+	}
+	if t.Params == nil {
+		m.Endpoint.MaxTokens = cfg.Load.MaxTokens
+	}
+	for i := range res.Requests {
+		if p := res.Requests[i].Proto; p != "" {
+			m.Endpoint.Protocols[p]++
+		}
+	}
+	m.Client = Client{Host: op.ClientHost, OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: runtime.NumCPU(), GoVersion: runtime.Version()}
+	if in.Build != nil {
+		for _, kv := range in.Build.Settings {
+			if kv.Key == "CGO_ENABLED" {
+				m.Client.CgoEnabled = kv.Value
+			}
+		}
+	}
+	var err error
+	if m.Clock.File, err = HashFile(in.ClockPath, filepath.Base(in.ClockPath)); err != nil {
+		return nil, err
+	}
+	m.Clock.AbsOffsetS, m.Clock.Flag = in.Clock.AbsOffsetS, in.Clock.Flag
+	m.Clock.ReadBeforeEpochNs = res.EpochWall.Round(0).Sub(in.Clock.EndUTC).Nanoseconds()
+	if m.StatusStart, err = HashFile(in.StatusStartPath, filepath.Base(in.StatusStartPath)); err != nil {
+		return nil, err
+	}
+	if in.StatusEndPath != "" {
+		ref, err := HashFile(in.StatusEndPath, filepath.Base(in.StatusEndPath))
+		if err != nil {
+			return nil, err
+		}
+		m.StatusEnd = &ref
+	}
+	for _, p := range in.ArtifactPaths {
+		ref, err := HashFile(p, filepath.Base(p))
+		if err != nil {
+			return nil, err
+		}
+		m.Artifacts = append(m.Artifacts, ref)
+	}
+	if in.FramesPath != "" {
+		rel, err := filepath.Rel(in.FramesRoot, in.FramesPath)
+		if err != nil {
+			return nil, fmt.Errorf("evidence: %w", err)
+		}
+		ref, err := HashFile(in.FramesPath, filepath.ToSlash(rel))
+		if err != nil {
+			return nil, err
+		}
+		m.Frames = &ref
+	}
+	if in.Gates != nil {
+		for _, g := range in.Gates.Gates {
+			if g.ID == "G2" || g.ID == "G6" {
+				m.Gates = append(m.Gates, g)
+			}
+		}
+	}
+	return m, nil
+}
+
+// WriteManifest writes m to ManifestFile in dir and returns the file's
+// path.
+func WriteManifest(dir string, m *Manifest) (string, error) {
+	return writeJSON(dir, ManifestFile, m)
+}
+
+// writeJSON writes v, indented, to name in dir and returns the file's
+// path.
+func writeJSON(dir, name string, v any) (string, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return "", fmt.Errorf("evidence: %s: %w", name, err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("evidence: %w", err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, b.Bytes(), 0o644); err != nil {
+		return "", fmt.Errorf("evidence: %w", err)
+	}
+	return path, nil
+}

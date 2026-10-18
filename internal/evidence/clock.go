@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -102,32 +101,20 @@ type ClockRecord struct {
 // records its output and the offset parsed from it. A command that fails,
 // times out, or prints anything other than one reading gives no reading.
 func ReadClock(ctx context.Context, cmd ClockCommand) *ClockRecord {
-	rec := &ClockRecord{Command: cmd.Args, Tool: cmd.Tool}
-	ctx, cancel := context.WithTimeout(ctx, clockTimeout)
-	defer cancel()
-	c := exec.CommandContext(ctx, cmd.Args[0], cmd.Args[1:]...)
-	c.Env = []string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C"}
-	c.WaitDelay = time.Second
-	var stdout, stderr cappedBuffer
-	c.Stdout, c.Stderr = &stdout, &stderr
-	rec.StartUTC = time.Now().UTC()
-	err := c.Run()
-	rec.EndUTC = time.Now().UTC()
-	if c.ProcessState != nil {
-		code := c.ProcessState.ExitCode()
-		rec.ExitCode = &code
+	run := runCommand(ctx, cmd.Args, clockTimeout, clockOutputLimit)
+	rec := &ClockRecord{
+		Command:      cmd.Args,
+		Tool:         cmd.Tool,
+		StartUTC:     run.start,
+		EndUTC:       run.end,
+		ExitCode:     run.exitCode,
+		Stdout:       bytesOf(run.stdout),
+		Stderr:       bytesOf(run.stderr),
+		DroppedBytes: run.dropped,
+		Error:        run.err,
 	}
-	rec.Stdout, rec.Stderr = bytesOf(stdout.b), bytesOf(stderr.b)
-	rec.DroppedBytes = stdout.dropped + stderr.dropped
-	switch {
-	case ctx.Err() == context.DeadlineExceeded:
-		rec.Error = fmt.Sprintf("timed out after %s", clockTimeout)
-	case err != nil:
-		rec.Error = err.Error()
-	case rec.DroppedBytes > 0:
-		rec.Error = "output over the size limit"
-	default:
-		off, src, perr := parseClock(cmd.Tool, stdout.b)
+	if rec.Error == "" {
+		off, src, perr := parseClock(cmd.Tool, run.stdout)
 		if perr != nil {
 			rec.Error = perr.Error()
 		} else {
@@ -156,22 +143,6 @@ func WriteClock(dir string, rec *ClockRecord) (string, error) {
 		return "", fmt.Errorf("evidence: %w", err)
 	}
 	return path, nil
-}
-
-type cappedBuffer struct {
-	b       []byte
-	dropped int64
-}
-
-func (w *cappedBuffer) Write(p []byte) (int, error) {
-	n := len(p)
-	if room := clockOutputLimit - len(w.b); room < len(p) {
-		room = max(room, 0)
-		w.dropped += int64(len(p) - room)
-		p = p[:room]
-	}
-	w.b = append(w.b, p...)
-	return n, nil
 }
 
 var (

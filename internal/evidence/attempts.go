@@ -2,7 +2,8 @@
 // store (SPEC-HOSTED §9): JSON Lines files, one JSON object per scheduled
 // request, in index order, for every run that reached load generation,
 // including a run that failed a run-level check. It also records the
-// client clock offset read at run start.
+// client clock offset read at run start, the endpoint status at run start
+// and end, and the run manifest.
 package evidence
 
 import (
