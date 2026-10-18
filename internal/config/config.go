@@ -148,6 +148,11 @@ const (
 	PinnedPilotMeasuredS         = 1200
 	PinnedPilotCompletionCeiling = 4096
 	PinnedPilotConnections       = 32
+
+	// SPEC-HOSTED §9: a hosted run whose client clock offset against its
+	// time-synchronization source at run start exceeds this does not
+	// count.
+	PinnedClockOffsetMaxS = 60
 )
 
 // Pre-registered sweep grids (§4 SLO sweep, §5 detector sensitivity).

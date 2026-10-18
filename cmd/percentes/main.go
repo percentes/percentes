@@ -2,7 +2,8 @@
 // JavaScript Object Notation (JSON) and human-readable report pair, and
 // the per-attempt JSON Lines file of every run that dispatched, failed
 // runs included. A hosted run also writes its raw-frame store under
-// --frames, a directory outside the instrument's source tree. Exit codes:
+// --frames, a directory outside the instrument's source tree, and the
+// client clock offset that --clock-sync reads at run start. Exit codes:
 // 0 = run valid, 2 = run completed but a run-failing gate marked it
 // invalid, 1 = execution error.
 package main
@@ -38,6 +39,7 @@ func main() {
 	probeDirect := flag.String("probe-direct", "", "victim-direct inference URL for the replica-ready probe")
 	probeService := flag.String("probe-service", "", "service inference URL for the traffic-restored probe")
 	framesRoot := flag.String("frames", "", "raw-frame store directory outside the source tree (hosted targets, required); each run writes <UTC epoch>/"+evidence.FramesFile)
+	clockSync := flag.String("clock-sync", "", "host clock-sync command run at run start, split on spaces with no shell: sntp [options] server, or chronyc [options] tracking (hosted targets, required); writes "+evidence.ClockFile+" to --out")
 	flag.Parse()
 	for name, u := range map[string]string{"--probe-direct": *probeDirect, "--probe-service": *probeService} {
 		if u == "" {
@@ -55,12 +57,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("percentes: %v", err)
 	}
+	var clockCmd evidence.ClockCommand
 	if cfg.Target.Hosted {
 		if err := evidence.CheckFramesRoot(*framesRoot); err != nil {
 			log.Fatalf("percentes: %v", err)
 		}
-	} else if *framesRoot != "" {
-		log.Fatal("percentes: --frames applies to hosted targets only")
+		if clockCmd, err = evidence.ParseClockCommand(*clockSync); err != nil {
+			log.Fatalf("percentes: %v", err)
+		}
+	} else if *framesRoot != "" || *clockSync != "" {
+		log.Fatal("percentes: --frames and --clock-sync apply to hosted targets only")
 	}
 
 	// Wire an interrupt-aware context so Ctrl-C / SIGTERM cancels the in-flight
@@ -79,6 +85,25 @@ func main() {
 	// §10 G7: sample each replica's waiting-queue gauge from the run
 	// epoch when target.metrics_urls is configured.
 	sampler := serverstats.ForRun(cfg.Target.MetricsURLs, cfg.Target.QueueGauge, cfg.Target.MetricsFamilies, time.Duration(config.PinnedQueueSampleIntervalS)*time.Second)
+	// A flagged clock reading invalidates the run without stopping it.
+	var clock *evidence.ClockRecord
+	if cfg.Target.Hosted {
+		clock = evidence.ReadClock(ctx, clockCmd)
+		path, cerr := evidence.WriteClock(*outDir, clock)
+		if cerr != nil {
+			log.Fatalf("percentes: %v", cerr)
+		}
+		log.Printf("percentes: clock offset written: %s", path)
+		if clock.Flag != "" {
+			log.Printf("percentes: %s", clock.Flag)
+		}
+	}
+	flagClock := func(a *run.Artifacts) {
+		if clock != nil && clock.Flag != "" {
+			a.RunValid = false
+			a.InvalidReasons = append(a.InvalidReasons, clock.Flag)
+		}
+	}
 	// The §2 loopback canary runs through the same read path from the epoch.
 	var canary *loadgen.Canary
 	var canaryErr error
@@ -116,6 +141,7 @@ func main() {
 			sampler.Stop()
 		}
 		if art != nil {
+			flagClock(art)
 			if path, werr := evidence.WriteRun(*outDir, cfg, art.Loadgen, evidence.Options{RunFailures: art.InvalidReasons}); werr != nil {
 				log.Printf("percentes: %v", werr)
 			} else if path != "" {
@@ -146,6 +172,7 @@ func main() {
 		art.RunValid = false
 		art.InvalidReasons = append(art.InvalidReasons, reasons...)
 	}
+	flagClock(art)
 
 	attemptsPath, err := evidence.WriteRun(*outDir, cfg, art.Loadgen, evidence.Options{RunFailures: art.InvalidReasons})
 	if err != nil {
