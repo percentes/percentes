@@ -3,7 +3,8 @@
 // with configurable time to first token (TTFT) and inter-token latency
 // (ITL), and scriptable fault modes: stall, error, throttle (429),
 // stream-abort, silent-hang and slow-reload-on-reschedule. A silent hang
-// sends no Transmission Control Protocol (TCP) reset (RST).
+// sends no Transmission Control Protocol (TCP) reset (RST). NewShaped
+// serves the hosted-provider stream form a Shape describes.
 //
 // The data plane is /v1/chat/completions and /health. /admin and /metrics
 // are out-of-band harness instrumentation and stay reachable during
@@ -28,6 +29,7 @@ import (
 type Server struct {
 	cfg    config.Mock
 	engine *engine
+	shape  *Shape // nil: the Phase 0 stream
 
 	start   time.Time // monotonic anchor
 	readyAt time.Time // start + slow-reload duration
@@ -80,6 +82,11 @@ func New(cfg config.Mock) *Server {
 // Start listens on cfg.ListenAddr, anchors the monotonic clock, arms the
 // config-scripted fault schedule, and serves in the background.
 func (s *Server) Start() error {
+	if s.shape != nil {
+		if err := s.shape.validate(); err != nil {
+			return fmt.Errorf("mock: shape: %w", err)
+		}
+	}
 	l, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("mock: listen %s: %w", s.cfg.ListenAddr, err)

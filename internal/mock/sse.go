@@ -33,6 +33,8 @@ type chatRequest struct {
 	Stream    bool          `json:"stream"`
 	MaxTokens int           `json:"max_tokens"`
 	IgnoreEOS bool          `json:"ignore_eos"`
+	// MaxCompletionTokens is read by a shaped server only.
+	MaxCompletionTokens int `json:"max_completion_tokens"`
 	// StreamOptions.IncludeUsage asks for a usage chunk after the finish
 	// chunk.
 	StreamOptions struct {
@@ -53,10 +55,11 @@ type chatChunk struct {
 	Model   string        `json:"model"`
 	Choices []chunkChoice `json:"choices"`
 	Usage   *chatUsage    `json:"usage,omitempty"`
+	Unknown *string       `json:"x_mock_unknown,omitempty"`
 }
 
 // chatUsage is the usage object of the stream's last chunk; the mock's
-// completion count is the content chunks it emitted.
+// completion count is the reasoning and content chunks it emitted.
 type chatUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
@@ -65,8 +68,9 @@ type chatUsage struct {
 
 // handleChatCompletions is the OpenAI-compatible streaming endpoint. The
 // mock is streaming-only (the harness client reads Server-Sent Events,
-// §2) and always emits exactly max_tokens content tokens: ignore_eos
-// semantics, there is no early stop.
+// §2). Unshaped, it always emits exactly max_tokens content tokens:
+// ignore_eos semantics, there is no early stop. A shaped server streams
+// the plan its Shape gives.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Silent-hang outranks everything, including the slow-reload 503 and
 	// request validation: during a full-node partition nothing on the
@@ -89,7 +93,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "malformed request body"})
 		return
 	}
-	if !req.Stream || req.MaxTokens < 1 || len(req.Messages) == 0 {
+	limit := req.MaxTokens
+	if s.shape != nil && req.MaxCompletionTokens > 0 {
+		limit = req.MaxCompletionTokens
+	}
+	if !req.Stream || limit < 1 || len(req.Messages) == 0 {
 		s.requestsTotal.WithLabelValues("400").Inc()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "stream must be true, max_tokens >= 1, messages required"})
 		return
@@ -132,8 +140,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// accumulate across 256 tokens: the injected distribution stays a
 	// *known* distribution at AC1 precision. After a stall, overdue
 	// targets flush immediately.
+	plan := s.plan(&req, limit)
 	admitAt := time.Now()
-	targets := make([]time.Duration, req.MaxTokens)
+	targets := make([]time.Duration, max(len(plan.pieces), 1))
 	acc := sample(s.cfg.TTFT, rng)
 	for i := range targets {
 		if i > 0 {
@@ -163,7 +172,29 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		model = "percentes-mock"
 	}
 
-	for token := 1; token <= req.MaxTokens; token++ {
+	writeHeader := func() {
+		h := w.Header()
+		h.Set("Content-Type", "text/event-stream")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("X-Percentes-Request-Id", id)
+		// Replica identity for in-flight loss attribution (§3): in
+		// Kubernetes the hostname is the pod name.
+		h.Set("X-Percentes-Replica", hostname())
+		w.WriteHeader(http.StatusOK)
+	}
+	var unknown *string
+	if s.shape != nil && s.shape.UnknownKeys {
+		v := "mock"
+		unknown = &v
+	}
+	delta := func(m map[string]any) map[string]any {
+		if unknown != nil {
+			m[unknownKey] = *unknown
+		}
+		return m
+	}
+
+	for token := 1; token <= len(plan.pieces); token++ {
 		if token > 1 {
 			// Overdue targets (post-stall flush) skip the timer entirely
 			// (the gateEmit below still checks fault state), so a released
@@ -208,23 +239,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if token == 1 {
-			h := w.Header()
-			h.Set("Content-Type", "text/event-stream")
-			h.Set("Cache-Control", "no-cache")
-			h.Set("X-Percentes-Request-Id", id)
-			// Replica identity for in-flight loss attribution (§3): in
-			// Kubernetes the hostname is the pod name.
-			h.Set("X-Percentes-Replica", hostname())
-			w.WriteHeader(http.StatusOK)
+			writeHeader()
 		}
+		p := plan.pieces[token-1]
 		if err := writeChunk(w, rc, chatChunk{
 			ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
-			Choices: []chunkChoice{{Index: 0, Delta: map[string]any{"content": fmt.Sprintf("t%d ", token)}, FinishReason: nil}},
+			Choices: []chunkChoice{{Index: 0, Delta: delta(map[string]any{p.key: p.text}), FinishReason: nil}},
+			Unknown: unknown,
 		}); err != nil {
 			s.requestsTotal.WithLabelValues("abandoned").Inc()
 			return
 		}
-		s.tokensTotal.Inc()
+		if p.key == "content" {
+			s.tokensTotal.Inc()
+		}
 
 		// stream_abort window: new streams are RST after the configured
 		// number of tokens.
@@ -235,19 +263,37 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	finish := "length" // full budget always emitted (ignore_eos semantics)
-	if err := writeChunk(w, rc, chatChunk{
-		ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
-		Choices: []chunkChoice{{Index: 0, Delta: map[string]any{}, FinishReason: &finish}},
-	}); err != nil {
-		s.requestsTotal.WithLabelValues("abandoned").Inc()
-		return
+	if len(plan.pieces) == 0 {
+		writeHeader()
 	}
-	if req.StreamOptions.IncludeUsage {
-		prompt := len(strings.Fields(req.Messages[len(req.Messages)-1].Content))
+	if plan.err != nil {
+		raw, err := json.Marshal(map[string]any{"error": plan.err})
+		if err == nil {
+			_, err = fmt.Fprintf(w, "data: %s\n\n", raw)
+		}
+		if err != nil {
+			s.requestsTotal.WithLabelValues("abandoned").Inc()
+			return
+		}
+	}
+	if plan.finish != "" {
+		finish := plan.finish
 		if err := writeChunk(w, rc, chatChunk{
 			ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
-			Choices: []chunkChoice{}, Usage: &chatUsage{PromptTokens: prompt, CompletionTokens: req.MaxTokens, TotalTokens: prompt + req.MaxTokens},
+			Choices: []chunkChoice{{Index: 0, Delta: delta(map[string]any{}), FinishReason: &finish}},
+			Unknown: unknown,
+		}); err != nil {
+			s.requestsTotal.WithLabelValues("abandoned").Inc()
+			return
+		}
+	}
+	if plan.usage {
+		prompt := len(strings.Fields(req.Messages[len(req.Messages)-1].Content))
+		completion := len(plan.pieces)
+		if err := writeChunk(w, rc, chatChunk{
+			ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
+			Choices: []chunkChoice{}, Usage: &chatUsage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: prompt + completion},
+			Unknown: unknown,
 		}); err != nil {
 			s.requestsTotal.WithLabelValues("abandoned").Inc()
 			return
