@@ -23,6 +23,12 @@
 // the window, pages writes the index page and each route's page from the
 // cells' records.
 //
+// Before the freeze, rehearse runs the acceptance run: one cell of each
+// of six mock routes, served on loopback by this process in the
+// release's request forms and credential headers, concurrently at their
+// pinned offsets up the whole ladder, and writes the cells' evidence and
+// a summary that says whether the rehearsal is green.
+//
 //	percentes-release schedule --master-seed SEED --first DATE --last DATE
 //	    --config FILE ... --schedule FILE
 //	percentes-release ledger create --ledger FILE --config FILE ...
@@ -38,6 +44,8 @@
 //	percentes-release dispatch --out DIR
 //	percentes-release pages --out DIR --frames DIR --config FILE ...
 //	    --pages DIR
+//	percentes-release rehearse --out DIR --frames DIR --clock-sync CMD
+//	    --byte-cap N [--scale N] [--master-seed SEED] [--source-diff FILE]
 //	percentes-release check-cpu
 //
 // Exit codes: 0 = the route's runs are over and every cell counts, or
@@ -46,7 +54,8 @@
 // 3 = the route stopped (a ledger refusal, a documented billing refusal,
 // a clock offset above the pinned bound, a probe 401 or 403 the route's
 // previous probed cell also saw, or an operator abort); 1 = execution
-// error or refusal to start.
+// error or refusal to start. rehearse exits 0 when the rehearsal is
+// green and 2 when it is not.
 package main
 
 import (
@@ -82,6 +91,7 @@ commands:
   run             run one route's cells over the committed window
   dispatch        sum every cell's dispatch series under --out
   pages           write the index page and each route's page
+  rehearse        run six mock routes' cells up the ladder at their offsets
   check-cpu       whether this build measures host CPU
 
 Run percentes-release <command> -h for the command's flags.
@@ -115,6 +125,8 @@ func dispatch(args []string) int {
 		code, err = dispatchCmd(args[1:])
 	case "pages":
 		code, err = pagesCmd(args[1:])
+	case "rehearse":
+		code, err = rehearseCmd(ctx, args[1:])
 	case "check-cpu":
 		code, err = checkCPUCmd(args[1:])
 	default:

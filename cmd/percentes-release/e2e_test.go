@@ -4,17 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/percentes/percentes/configs"
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
@@ -23,7 +22,6 @@ import (
 	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
-	"gopkg.in/yaml.v3"
 )
 
 // e2eMinute is one minute of a route's pinned offset in the scaled run.
@@ -32,102 +30,36 @@ import (
 // apart when both start on time.
 const e2eMinute = 400 * time.Millisecond
 
-// e2eRoute is one mock route: its request form and the mock's stream.
-type e2eRoute struct {
-	name, adapter, auth, path, body string
-	// reasoning is the chat target's reasoning delta key, empty where none
-	// is configured.
-	reasoning string
-	shape     mock.Shape
-}
-
 const e2eAnswer = "Two sentences about the ticket."
 
-// chatBody is a chat-completions body (SPEC-HOSTED HA3 point 3) with the
-// ceiling under ceilingKey.
-func chatBody(ceilingKey, extra string) string {
-	return `{"model": "mock-model", "messages": [{"role": "system", "content": "System text."}, {"role": "user", "content": "{{case}}"}],` +
-		` "stream": true, "stream_options": {"include_usage": true}, "` + ceilingKey + `": 512, "reasoning_effort": "low"` + extra + `}`
-}
+// e2eReasoning is the reasoning tokens of a form that reasons.
+const e2eReasoning = 3
 
-// messagesBody is a Messages body (SPEC-HOSTED HA3 point 3).
-const messagesBody = `{"model": "mock-model", "system": "System text.", "messages": [{"role": "user", "content": "{{case}}"}],` +
-	` "stream": true, "max_tokens": 512, "thinking": {"type": "between_tools"}, "output_config": {"effort": "low"}}`
+func e2eKey(f *mockForm) string { return testKey + "-" + f.name }
 
-// e2eRoutes are the release's six request forms: chat completions with
-// either ceiling key and the key as a bearer token or in api-key, and
-// Messages at the direct and the Bedrock path with the key in x-api-key
-// or as a bearer token.
-var e2eRoutes = []e2eRoute{
-	{"anthropic", config.AdapterMessages, config.AuthXAPIKey, "/v1/messages", messagesBody, "",
-		mock.Shape{Messages: true, ReasoningTokens: 3, Answer: e2eAnswer}},
-	{"azure", config.AdapterChatCompletions, config.AuthAPIKey, "/v1/chat/completions", chatBody("max_completion_tokens", ""), "",
-		mock.Shape{Answer: e2eAnswer}},
-	{"baseten", config.AdapterChatCompletions, config.AuthBearer, "/v1/chat/completions", chatBody("max_tokens", ""), "reasoning_content",
-		mock.Shape{ReasoningKey: "reasoning_content", ReasoningTokens: 3, Answer: e2eAnswer}},
-	{"bedrock", config.AdapterMessages, config.AuthBearer, "/anthropic/v1/messages", messagesBody, "",
-		mock.Shape{Messages: true, Answer: e2eAnswer}},
-	{"google", config.AdapterChatCompletions, config.AuthBearer, "/v1/chat/completions", chatBody("max_tokens", ""), "",
-		mock.Shape{Answer: e2eAnswer}},
-	{"groq", config.AdapterChatCompletions, config.AuthBearer, "/v1/chat/completions", chatBody("max_completion_tokens", `, "reasoning_format": "parsed"`), "reasoning",
-		mock.Shape{ReasoningKey: "reasoning", ReasoningTokens: 3, Answer: e2eAnswer}},
-}
-
-func (rt *e2eRoute) key() string { return testKey + "-" + rt.name }
-
-// start serves the route's mock, which refuses the key in any header but
-// the route's.
-func (rt *e2eRoute) start(t *testing.T) *mock.Server {
+// startE2E serves form f's mock, which refuses the key in any header but
+// the form's.
+func startE2E(t *testing.T, f *mockForm) *mock.Server {
 	t.Helper()
-	sh := rt.shape
-	sh.Key, sh.AuthHeader = rt.key(), rt.auth
-	s := mock.NewShaped(config.Mock{ListenAddr: "127.0.0.1:0", Seed: 1,
-		TTFT: config.LatencyDist{Distribution: "fixed", FixedMs: 20}, ITL: config.LatencyDist{Distribution: "fixed", FixedMs: 1}}, sh)
-	if err := s.Start(); err != nil {
+	s, err := f.startMock(1, config.LatencyDist{Distribution: "fixed", FixedMs: 20}, config.LatencyDist{Distribution: "fixed", FixedMs: 1},
+		e2eReasoning, e2eAnswer, e2eKey(f))
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
 }
 
-// config is the release reference turned into the route at endpoint,
-// with limits that admit the whole ladder at the 512 ceiling and its key
-// set in its own variable, parsed from bytes that hold the route as
-// edited, since a cell's report pair is rendered from them.
-func (rt *e2eRoute) config(t *testing.T, endpoint string) *config.Config {
+// e2eConfig is form f's route at endpoint with its key set in its own
+// variable.
+func e2eConfig(t *testing.T, f *mockForm, endpoint string) *config.Config {
 	t.Helper()
-	cfg := releaseConfig(t, endpoint)
-	tg := &cfg.Target
-	tg.Name, tg.Adapter, tg.AuthHeader, tg.Body, tg.ModelName = rt.name, rt.adapter, rt.auth, rt.body, "mock-model"
-	tg.APIKeyEnv = "PERCENTES_E2E_KEY_" + strings.ToUpper(rt.name)
-	t.Setenv(tg.APIKeyEnv, rt.key())
-	if rt.reasoning != "" {
-		tg.ResponseShape = &config.ResponseShape{Reasoning: []string{rt.reasoning}}
-	}
-	for i := range tg.Limits {
-		if tg.Limits[i].Dimension == config.LimitTPM {
-			tg.Limits[i].Value = 1_000_000
-		}
-	}
-	tg.Naming = &config.Naming{Provider: "Mock " + rt.name, Lines: []string{"A mock route of the release end-to-end test."}}
-	cfg.Release.Caps.RouteUSD = "40"
-	b, err := yaml.Marshal(cfg)
+	env := "PERCENTES_E2E_KEY_" + strings.ToUpper(f.name)
+	cfg, err := f.routeConfig(configs.ReleaseReference, endpoint, env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var doc map[string]any
-	if err := yaml.Unmarshal(b, &doc); err != nil {
-		t.Fatal(err)
-	}
-	// Marshal writes the empty blocks the release profile refuses.
-	delete(doc, "slo")
-	delete(doc, "recovery_detector")
-	if b, err = yaml.Marshal(doc); err != nil {
-		t.Fatal(err)
-	}
-	if cfg, err = config.Parse(b); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv(env, e2eKey(f))
 	return cfg
 }
 
@@ -145,29 +77,11 @@ func gateReasons(reasons []string) bool {
 // mockCounts is the mock's count of finished requests by outcome label.
 func mockCounts(t *testing.T, s *mock.Server) map[string]int {
 	t.Helper()
-	resp, err := http.Get("http://" + s.Addr() + "/metrics")
+	c, err := mockFinished(s.Addr())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := map[string]int{}
-	for _, line := range strings.Split(string(b), "\n") {
-		rest, ok := strings.CutPrefix(line, `percentes_mock_requests_total{outcome="`)
-		if !ok {
-			continue
-		}
-		label, value, _ := strings.Cut(rest, `"} `)
-		v, err := strconv.ParseFloat(value, 64)
-		if err != nil {
-			t.Fatalf("metrics line %q: %v", line, err)
-		}
-		out[label] = int(v)
-	}
-	return out
+	return c
 }
 
 // Six mock routes in the release's mixed request forms run one cell each,
@@ -191,15 +105,15 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	writeFile(t, dir, "r.txt", []byte("record"))
 	opPath := writeFile(t, dir, "operator.json", []byte(operatorJSON))
 
-	n := len(e2eRoutes)
+	n := len(releaseForms)
 	mocks := make([]*mock.Server, n)
 	cfgs := make([]*config.Config, n)
 	names := make([]string, n)
-	for i := range e2eRoutes {
-		rt := &e2eRoutes[i]
-		mocks[i] = rt.start(t)
-		cfgs[i] = rt.config(t, "http://"+mocks[i].Addr()+rt.path)
-		names[i] = rt.name
+	for i := range releaseForms {
+		f := &releaseForms[i]
+		mocks[i] = startE2E(t, f)
+		cfgs[i] = e2eConfig(t, f, "http://"+mocks[i].Addr()+f.path)
+		names[i] = f.name
 	}
 	sb, err := testSchedule(t, names...).JSON()
 	if err != nil {
@@ -332,8 +246,11 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		reasoning, finish := e2eRoutes[i].shape.ReasoningTokens, "stop"
-		if e2eRoutes[i].adapter == config.AdapterMessages {
+		reasoning, finish := 0, "stop"
+		if releaseForms[i].reasons {
+			reasoning = e2eReasoning
+		}
+		if releaseForms[i].adapter == config.AdapterMessages {
 			finish = "end_turn"
 		}
 		dispatched := 0
