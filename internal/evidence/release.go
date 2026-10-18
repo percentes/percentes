@@ -28,13 +28,17 @@ type Release struct {
 // has every SPEC-HOSTED §9 artifact: the commit record (a revision, and
 // the source diff when the build was modified), the verbatim config, the
 // attempts file, the report pair, the manifest, the scorer output on
-// every measured attempt of a pilot run, the cell record and an attempts
-// file without answer text for a release run, and the frame store with
-// one line per attempt. Every file the manifest names must exist with the
-// SHA-256 and size it records: the config, the attempts file, the report
-// pair and the clock and status records in r.Dir, and the frame store
-// and the operator copies in the run's frame directory. Otherwise it
-// returns an error naming every missing item and every mismatch.
+// every measured attempt of a pilot run, the cell record with a
+// consistent label and an attempts file without answer text for a
+// release run, and the frame store with one line per attempt. A release
+// cell that does not count passes as a labelled record, which never
+// enters its route's frame (Manifest.Counted); one whose ladder never
+// started has empty attempts and frame files. Every file the manifest
+// names must exist with the SHA-256 and size it records: the config, the
+// attempts file, the report pair and the clock and status records in
+// r.Dir, and the frame store and the operator copies in the run's frame
+// directory. Otherwise it returns an error naming every missing item and
+// every mismatch.
 func CheckRelease(r Release) (*Manifest, error) {
 	m, err := ReadManifest(filepath.Join(r.Dir, ManifestFile))
 	if err != nil {
@@ -109,8 +113,16 @@ func CheckRelease(r Release) (*Manifest, error) {
 		}
 	}
 	if m.Profile == config.ProfileRelease {
-		if m.Release == nil {
+		switch c := m.Release; {
+		case c == nil:
 			fail("cell record: not in the manifest")
+		default:
+			if err := c.checkLabel(m.RunValid, m.InvalidReasons); err != nil {
+				fail("cell record: %v", err)
+			}
+			if !c.LadderStarted && len(recs) > 0 {
+				fail("%s: %d attempts in a cell whose ladder never started", AttemptsFile, len(recs))
+			}
 		}
 		for i := range recs {
 			if recs[i].Answer != nil {

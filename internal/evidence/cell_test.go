@@ -44,6 +44,8 @@ func releaseCell(cfg *config.Config) *Cell {
 		Probes:            []FileRef{refOf("probe-groq-512.json", []byte("{}"))},
 		AccountCreated:    "2026-09-15",
 		PreWindowRequests: 25,
+		Outcome:           CellCounted,
+		LadderStarted:     true,
 	}
 }
 
@@ -145,6 +147,7 @@ func TestManifestCellRecord(t *testing.T) {
 
 	cfg := releaseCfg(t)
 	in.Config, in.Target, in.Release = cfg, &cfg.Target, releaseCell(cfg)
+	in.RunValid, in.InvalidReasons = true, nil
 	m, err = NewManifest(in)
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +161,8 @@ func TestManifestCellRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, field := range []string{`"frame_limit_bytes": 8388608`, `"error_body_limit_bytes": 4096`, `"error_body_wait_ns": 1000000000`,
-		`"offset_minutes": 20`, `"concurrent_runs": [`, `"binding": {`, `"ceiling_choice": {`, `"account_created": "2026-09-15"`, `"pre_window_requests": 25`} {
+		`"offset_minutes": 20`, `"concurrent_runs": [`, `"binding": {`, `"ceiling_choice": {`, `"account_created": "2026-09-15"`, `"pre_window_requests": 25`,
+		`"outcome": "counted"`, `"ladder_started": true`} {
 		if !strings.Contains(string(b), field) {
 			t.Errorf("manifest lacks %s", field)
 		}
@@ -180,6 +184,7 @@ func TestManifestCellRefusals(t *testing.T) {
 	}
 	cfg := releaseCfg(t)
 	in.Config, in.Target, in.Release = cfg, &cfg.Target, nil
+	in.RunValid, in.InvalidReasons = true, nil
 	if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "needs its cell record") {
 		t.Errorf("release run without a cell record: %v", err)
 	}
@@ -208,6 +213,143 @@ func TestManifestCellRefusals(t *testing.T) {
 		if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "release cell") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// A release cell's label agrees with the manifest's run validity and
+// invalid reasons: a counted cell started its ladder and is valid; any
+// other outcome is invalid for the reasons it carries; a cell whose
+// ladder never started has no requests. Only a counted release cell
+// enters its route's frame.
+func TestManifestCellLabel(t *testing.T) {
+	in, _ := manifestRun(t)
+	pilot, err := NewManifest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pilot.Counted() {
+		t.Error("a pilot manifest counted toward a release frame")
+	}
+	cfg := releaseCfg(t)
+	in.Config, in.Target = cfg, &cfg.Target
+	base := *in.Result
+	stop := []string{"route stop: clock offset: 75 s from sntp exceeds 60 s"}
+	ended := []string{"ladder ended at step 4: status_429 above half the step's scheduled requests"}
+	blocked := []string{"probe request returned 401"}
+	for _, tc := range []struct {
+		name     string
+		outcome  string
+		reasons  []string
+		ladder   bool
+		valid    bool
+		invalid  []string
+		requests bool
+		want     string
+	}{
+		{"counted", CellCounted, nil, true, true, nil, true, ""},
+		{"counted with its ladder ended", CellCounted, ended, true, true, nil, true, ""},
+		{"stopped inside the ladder", CellStopped, stop, true, false, stop, true, ""},
+		{"stopped before the ladder", CellStopped, stop, false, false, stop, false, ""},
+		{"blocked", CellBlocked, blocked, false, false, blocked, false, ""},
+		{"client-invalid", CellInvalid, ended, true, false, ended, true, ""},
+		{"no outcome", "", nil, true, true, nil, true, `outcome "" is not counted`},
+		{"missed", "missed", stop, false, false, stop, false, `outcome "missed" is not`},
+		{"counted with no ladder", CellCounted, nil, false, true, nil, false, "counted with no ladder"},
+		{"counted and invalid", CellCounted, nil, true, false, stop, true, "counted, and the manifest records the run invalid"},
+		{"stopped with no reason", CellStopped, nil, true, false, nil, true, "stopped with no reason"},
+		{"stopped and valid", CellStopped, stop, true, true, nil, true, "and the manifest records valid=true"},
+		{"stopped for other reasons", CellStopped, stop, true, false, blocked, true, "and the manifest records valid=false"},
+		{"blocked inside the ladder", CellBlocked, blocked, true, false, blocked, true, "blocked after its ladder started"},
+		{"requests with no ladder", CellStopped, stop, false, false, stop, true, "ladder never started has 4 requests"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := releaseCell(cfg)
+			c.Outcome, c.Reasons, c.LadderStarted = tc.outcome, tc.reasons, tc.ladder
+			res := base
+			if !tc.requests {
+				res.Requests = nil
+			}
+			in.Result, in.Release, in.RunValid, in.InvalidReasons = &res, c, tc.valid, tc.invalid
+			m, err := NewManifest(in)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatal(err)
+			case tc.want == "":
+				if m.Counted() != (tc.outcome == CellCounted) {
+					t.Errorf("counted %t for a %s cell", m.Counted(), tc.outcome)
+				}
+			case err == nil || !strings.Contains(err.Error(), tc.want):
+				t.Errorf("error %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A labelled release cell passes the check and does not count; one whose
+// ladder never started passes with empty attempts and frame files. The
+// check refuses a label that disagrees with the manifest and attempts in
+// a cell whose ladder never started.
+func TestCheckReleaseLabelledCell(t *testing.T) {
+	put := func(t *testing.T, dir, name string, b []byte) FileRef {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return refOf(name, b)
+	}
+	stop := []string{"route stop: HTTP 402, the documented billing refusal: balance exhausted"}
+	// labelled is a release run stopped with its label; before the ladder
+	// it has empty attempts and frame files.
+	labelled := func(t *testing.T, ladder bool) *releaseRun {
+		r := newReleaseRun(t, config.ProfileRelease)
+		recs, err := ReadRecords(bytes.NewReader(mustRead(t, filepath.Join(r.dir, AttemptsFile))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range recs {
+			recs[i].Answer, recs[i].Score, recs[i].RunFailures = nil, nil, stop
+		}
+		frames := mustRead(t, filepath.Join(r.runDir, FramesFile))
+		if !ladder {
+			recs, frames = nil, nil
+		}
+		var b bytes.Buffer
+		if err := Write(&b, recs); err != nil {
+			t.Fatal(err)
+		}
+		r.m.Artifacts[0] = put(t, r.dir, AttemptsFile, b.Bytes())
+		ref := put(t, r.runDir, FramesFile, frames)
+		ref.Name = releaseRunDir + "/" + FramesFile
+		r.m.Frames = &ref
+		c := releaseCell(releaseCfg(t))
+		c.Outcome, c.Reasons, c.LadderStarted = CellStopped, stop, ladder
+		r.m.Release, r.m.RunValid, r.m.InvalidReasons = c, false, stop
+		r.write(t)
+		return r
+	}
+	for _, ladder := range []bool{true, false} {
+		r := labelled(t, ladder)
+		m, err := r.check()
+		if err != nil {
+			t.Fatalf("stopped cell, ladder %t: %v", ladder, err)
+		}
+		if m.Counted() || m.Release.Outcome != CellStopped {
+			t.Errorf("stopped cell, ladder %t: counted %t, outcome %q", ladder, m.Counted(), m.Release.Outcome)
+		}
+	}
+
+	r := labelled(t, false)
+	r.m.RunValid, r.m.InvalidReasons = true, nil
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "cell record: evidence: cell label: stopped") {
+		t.Errorf("stopped cell recorded valid: %v", err)
+	}
+
+	r = labelled(t, true)
+	r.m.Release.LadderStarted = false
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), AttemptsFile+": 3 attempts in a cell whose ladder never started") {
+		t.Errorf("attempts with no ladder: %v", err)
 	}
 }
 

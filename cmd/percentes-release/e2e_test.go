@@ -23,6 +23,7 @@ import (
 	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
+	"gopkg.in/yaml.v3"
 )
 
 // e2eMinute is one minute of a route's pinned offset in the scaled run.
@@ -91,7 +92,8 @@ func (rt *e2eRoute) start(t *testing.T) *mock.Server {
 
 // config is the release reference turned into the route at endpoint,
 // with limits that admit the whole ladder at the 512 ceiling and its key
-// set in its own variable.
+// set in its own variable, parsed from bytes that hold the route as
+// edited, since a cell's report pair is rendered from them.
 func (rt *e2eRoute) config(t *testing.T, endpoint string) *config.Config {
 	t.Helper()
 	cfg := releaseConfig(t, endpoint)
@@ -109,7 +111,21 @@ func (rt *e2eRoute) config(t *testing.T, endpoint string) *config.Config {
 	}
 	tg.Naming = &config.Naming{Provider: "Mock " + rt.name, Lines: []string{"A mock route of the release end-to-end test."}}
 	cfg.Release.Caps.RouteUSD = "40"
-	if err := cfg.Validate(); err != nil {
+	b, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	// Marshal writes the empty blocks the release profile refuses.
+	delete(doc, "slo")
+	delete(doc, "recovery_detector")
+	if b, err = yaml.Marshal(doc); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = config.Parse(b); err != nil {
 		t.Fatal(err)
 	}
 	return cfg
@@ -161,10 +177,11 @@ func mockCounts(t *testing.T, s *mock.Server) map[string]int {
 // the key in its route's header, so a completion is also the check that
 // the key arrived there alone. Every cell counts with the client-validity
 // gate passing at each of the five steps; the evidence of every route
-// reads back into its per-step tables. Under the race detector, with six
-// routes sharing one process's garbage collector, the gate can fail; when
-// that is the only reason a cell does not count, the rest is checked over
-// the attempted steps and the test is skipped.
+// passes the completeness check, with its per-step table in its report
+// pair. Under the race detector, with six routes sharing one process's
+// garbage collector, the gate can fail; when that is the only reason a
+// cell does not count, the rest is checked over the attempted steps and
+// the test is skipped.
 func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	enoughOpenFiles(t)
 	dir := t.TempDir()
@@ -199,7 +216,6 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	}
 
 	routes := make([]*route, n)
-	pinned := make([]*config.Config, n)
 	var offsets []int
 	for i, cfg := range cfgs {
 		name := cfg.Target.Name
@@ -226,9 +242,6 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		if got := r.verdict.Admitted(); !slices.Equal(got, config.PinnedReleaseStepsRPS) {
 			t.Fatalf("%s: admitted %v, want the whole ladder", name, got)
 		}
-		p, rel := *cfg, *cfg.Release
-		p.Release = &rel
-		pinned[i] = &p
 		shortLadder(r)
 		routes[i] = r
 		offsets = append(offsets, r.offsetMinutes)
@@ -350,11 +363,17 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		if c := m.Release; c == nil || c.Run != runs[i] || c.OffsetMinutes != r.offsetMinutes || m.RunValid != (rec.Outcome == outcomeCounted) {
 			t.Errorf("%s: manifest cell %+v, valid %t", name, m.Release, m.RunValid)
 		}
-		tables, err := report.NewStepTables(pinned[i], r.verdict, []report.CellRecords{{Cell: label, Records: records}})
-		if err != nil {
-			t.Fatal(err)
+		if _, err := evidence.CheckRelease(evidence.Release{Dir: cellDir, Config: r.cfg.Raw, FramesRoot: frames, Pair: [2]string{report.JSONFile, report.TextFile}}); err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
-		for k, s := range tables.Cells[0].Steps {
+		var cr report.CellReport
+		if b, err := os.ReadFile(filepath.Join(cellDir, report.JSONFile)); err != nil || json.Unmarshal(b, &cr) != nil {
+			t.Fatalf("%s: report: %v", name, err)
+		}
+		if cr.Outcome != rec.Outcome || cr.CountedInFrame != (rec.Outcome == outcomeCounted) || !cr.LadderStarted || cr.Tables == nil || len(cr.Tables.Cells) != 1 {
+			t.Fatalf("%s: report %+v", name, cr)
+		}
+		for k, s := range cr.Tables.Cells[0].Steps {
 			if k >= top {
 				continue
 			}

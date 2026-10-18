@@ -231,9 +231,11 @@ type StepTables struct {
 	Pooled        []PooledStep     `json:"pooled,omitempty"`
 }
 
-// CellRecords is one cell's label and the records of its attempts file.
+// CellRecords is one cell's label, the outcome its manifest records
+// (evidence.Cell) and the records of its attempts file.
 type CellRecords struct {
 	Cell    string
+	Outcome string
 	Records []evidence.Record
 }
 
@@ -293,8 +295,19 @@ func lineOf(r *evidence.Record) (string, error) {
 // NewStepTables builds a release route's per-step tables from the
 // ceiling rule's verdict v and each cell's records. Warm-up records are
 // left out. A step is attempted when it or a later step dispatched a
-// request; a step v excludes must have dispatched none.
+// request; a step v excludes must have dispatched none. Every cell must
+// be counted: a labelled cell never enters the route's frame.
 func NewStepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (*StepTables, error) {
+	for _, c := range cells {
+		if c.Outcome != evidence.CellCounted {
+			return nil, fmt.Errorf("report: step tables: cell %q is %q: a labelled cell never enters a route's frame", c.Cell, c.Outcome)
+		}
+	}
+	return stepTables(cfg, v, cells)
+}
+
+// stepTables builds the tables of cells whatever their outcomes.
+func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (*StepTables, error) {
 	if cfg.Profile != config.ProfileRelease || cfg.Release == nil {
 		return nil, errors.New("report: step tables: not a release configuration")
 	}
@@ -543,7 +556,11 @@ func (t *tables) pool() {
 }
 
 // Text renders the tables. Rates print as percentages.
-func (t *StepTables) Text() string {
+func (t *StepTables) Text() string { return t.text(true) }
+
+// text renders the tables, with the frame's pooled figures or the
+// incomplete-frame line when frame is set.
+func (t *StepTables) text(frame bool) string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	pct := func(f float64) string { return fmt.Sprintf("%.2f%%", 100*f) }
@@ -625,6 +642,9 @@ func (t *StepTables) Text() string {
 			signalsText(w, s.Signals)
 		}
 		w("")
+	}
+	if !frame {
+		return b.String()
 	}
 	if t.Pooled == nil {
 		w("-- Incomplete frame: %d of %d cells; no pooled figures --", len(t.Cells), t.FrameCells)

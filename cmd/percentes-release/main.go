@@ -1,10 +1,12 @@
 // percentes-release runs one release route's cells unattended over the
 // committed window (SPEC-HOSTED HA3). At each scheduled start, at the
-// route's offset inside the slot, it records the clock offset, admits the
-// cell in the ledger, records the endpoint status, sends a one-request
+// route's offset inside the slot, it records the clock offset and the
+// endpoint status, admits the cell in the ledger, sends a one-request
 // probe and runs the ladder up to the route's top admitted step with the
-// loopback canary, then writes the cell's evidence. A cell that does not
-// count is re-run on its attempt 2 date within the route's two re-runs.
+// loopback canary, then writes the cell's evidence with a labelled
+// manifest and report pair, also for a cell stopped or blocked before its
+// ladder. A cell that does not count is re-run on its attempt 2 date
+// within the route's two re-runs.
 // Each route of a release runs as its own process on one client host, all
 // writing under one --out directory. The key comes from the env file
 // named with --env, never from the inherited environment, and is never

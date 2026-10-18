@@ -52,7 +52,8 @@ func HashFile(path, name string) (FileRef, error) {
 // directory.
 type Manifest struct {
 	SchemaVersion int `json:"schema_version"`
-	// StartUTC is the run epoch.
+	// StartUTC is the run epoch; for a release cell whose ladder never
+	// started, the cell's start.
 	StartUTC   time.Time      `json:"start_utc"`
 	WrittenUTC time.Time      `json:"written_utc"`
 	Profile    config.Profile `json:"profile"`
@@ -83,7 +84,8 @@ type Manifest struct {
 	InvalidReasons []string        `json:"invalid_reasons,omitempty"`
 	Gates          []validity.Gate `json:"gates,omitempty"`
 	// Replay is what the report pair reads beside the config and the
-	// attempts file; absent for a run that ended in an error.
+	// attempts file; absent for a run that ended in an error and for a
+	// release cell, whose pair reads its cell record.
 	Replay *run.Record `json:"replay,omitempty"`
 }
 
@@ -157,7 +159,9 @@ type Client struct {
 }
 
 // ClockRef is the clock-offset record. ReadBeforeEpochNs is the time from
-// the clock-sync command's end to the run epoch on the host's wall clock.
+// the clock-sync command's end to the run epoch on the host's wall clock,
+// negative where the epoch is a release cell's start before the clock
+// was read.
 type ClockRef struct {
 	File              FileRef  `json:"file"`
 	AbsOffsetS        *float64 `json:"abs_offset_s,omitempty"`
@@ -215,7 +219,7 @@ func CheckSource(info *debug.BuildInfo, op *Operator) error {
 
 // ManifestInput is what a run's manifest is built from. The paths name
 // files already written; Gates and Replay are nil for a run that ended in
-// an error.
+// an error and for a release cell.
 type ManifestInput struct {
 	Config *config.Config
 	// ConfigName names the configuration file.
@@ -255,6 +259,12 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 	case release:
 		if err := checkCell(cfg, t, in.Release); err != nil {
 			return nil, err
+		}
+		if err := in.Release.checkLabel(in.RunValid, in.InvalidReasons); err != nil {
+			return nil, err
+		}
+		if !in.Release.LadderStarted && len(res.Requests) > 0 {
+			return nil, fmt.Errorf("evidence: a release cell whose ladder never started has %d requests", len(res.Requests))
 		}
 	}
 	m := &Manifest{

@@ -13,10 +13,11 @@
 // hosted run's release unless the commit record, the config, the
 // per-attempt file, the report pair, the manifest, the scorer output and
 // the frame store under --frames all exist with the hashes DIR's manifest
-// records. Exit codes: 0 = run valid, the replayed pair matches byte for
-// byte, or the release check passed; 2 = run completed but a run-failing
-// gate marked it invalid; 1 = execution error, a replayed pair that
-// differs, or a refused release.
+// records, and prints the label of a release cell that does not count.
+// Exit codes: 0 = run valid, the replayed pair matches byte for byte, or
+// the release check passed; 2 = run completed but a run-failing gate
+// marked it invalid; 1 = execution error, a replayed pair that differs,
+// or a refused release.
 package main
 
 import (
@@ -72,10 +73,14 @@ func main() {
 		if err != nil {
 			log.Fatalf("percentes: %v", err)
 		}
-		if _, err := evidence.CheckRelease(evidence.Release{Dir: *checkDir, Config: raw, FramesRoot: *framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}}); err != nil {
+		m, err := evidence.CheckRelease(evidence.Release{Dir: *checkDir, Config: raw, FramesRoot: *framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}})
+		if err != nil {
 			log.Fatalf("percentes: %v", err)
 		}
 		fmt.Printf("release check passed: %s\n", *checkDir)
+		if c := m.Release; c != nil && !m.Counted() {
+			fmt.Printf("labelled %s, outside the route's frame: %q\n", c.Outcome, c.Reasons)
+		}
 		return
 	}
 	if *replayDir != "" {

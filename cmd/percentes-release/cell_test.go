@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,8 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/report"
+	"github.com/percentes/percentes/internal/schedule"
 )
 
 // chatStream is a complete chat-completions stream.
@@ -73,6 +76,28 @@ func newTestRoute(t *testing.T, cfg *config.Config, offset string) (*route, *fix
 	return r, f
 }
 
+// checkRetained runs the completeness check over run's directory,
+// requires its report pair to replay byte for byte, and returns its
+// manifest and report text.
+func checkRetained(t *testing.T, r *route, run schedule.Run) (*evidence.Manifest, string) {
+	t.Helper()
+	dir := r.cellDir(run)
+	m, err := evidence.CheckRelease(evidence.Release{Dir: dir, Config: r.cfg.Raw, FramesRoot: r.framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, text, err := report.FromRun(dir, r.cfg.Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, b := range map[string][]byte{report.JSONFile: raw, report.TextFile: []byte(text)} {
+		if got, err := os.ReadFile(filepath.Join(dir, name)); err != nil || !bytes.Equal(got, b) {
+			t.Fatalf("%s does not replay byte for byte: %v", name, err)
+		}
+	}
+	return m, text
+}
+
 func ledgerState(t *testing.T, path string) *admission.State {
 	t.Helper()
 	l, err := admission.Open(path)
@@ -88,8 +113,8 @@ func ledgerState(t *testing.T, path string) *admission.State {
 
 // A cell runs the ladder at the admitted steps only, with Shape S texts
 // under the run's seed, settles what it sent, and writes its evidence:
-// the attempts without answer text, the probe, the dispatch series and a
-// manifest carrying the cell record.
+// the attempts without answer text, the probe, the dispatch series, a
+// manifest carrying the cell record and its label, and the report pair.
 func TestCellRunsAdmittedSteps(t *testing.T) {
 	e := newEndpoint(t, always200)
 	r, f := newTestRoute(t, releaseConfig(t, e.url()), "+0.005032")
@@ -154,13 +179,13 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	}
 	e.mu.Unlock()
 
-	m, err := evidence.ReadManifest(filepath.Join(dir, evidence.ManifestFile))
-	if err != nil {
-		t.Fatal(err)
-	}
+	m, _ := checkRetained(t, r, run)
 	c := m.Release
 	if c == nil || c.Run != run || c.OffsetMinutes != r.offsetMinutes || c.AccountCreated != "2026-09-15" || len(c.Probes) != 1 || c.Admission.TopRPS != 1 || c.CeilingTokens != 512 {
 		t.Fatalf("cell record %+v", c)
+	}
+	if m.Counted() != (rec.Outcome == outcomeCounted) || c.Outcome != rec.Outcome || !c.LadderStarted || !slices.Equal(c.Reasons, rec.Reasons) {
+		t.Fatalf("manifest: counted %t, cell %+v", m.Counted(), c)
 	}
 	if m.Seed != run.Seed || m.RunValid != (rec.Outcome == outcomeCounted) || m.Artifact(dispatchFile) == nil {
 		t.Fatalf("manifest seed %d, valid %t, artifacts %+v", m.Seed, m.RunValid, m.Artifacts)
@@ -179,8 +204,8 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 }
 
 // A documented billing refusal inside the ladder stops the route: the
-// cell keeps its evidence, labelled with the refusal, and the loop ends
-// with the stop code.
+// cell keeps its evidence, labelled with the refusal and outside the
+// route's frame, and the loop ends with the stop code.
 func TestBillingRefusalStopsRoute(t *testing.T) {
 	e := newEndpoint(t, func(n int64) (int, string) {
 		if n >= 3 {
@@ -208,9 +233,12 @@ func TestBillingRefusalStopsRoute(t *testing.T) {
 	if n := e.hits.Load(); n < 3 {
 		t.Fatalf("server saw %d requests", n)
 	}
-	m, err := evidence.ReadManifest(filepath.Join(r.cellDir(run), evidence.ManifestFile))
-	if err != nil || m.RunValid || len(m.InvalidReasons) == 0 || m.InvalidReasons[0] != rec.Reasons[0] {
-		t.Fatalf("manifest: %v, %+v", err, m)
+	m, _ := checkRetained(t, r, run)
+	if m.RunValid || len(m.InvalidReasons) == 0 || m.InvalidReasons[0] != rec.Reasons[0] {
+		t.Fatalf("manifest %+v", m)
+	}
+	if c := m.Release; m.Counted() || c.Outcome != outcomeStopped || !c.LadderStarted || !slices.Equal(c.Reasons, rec.Reasons) {
+		t.Fatalf("cell label %+v", c)
 	}
 	st, err := r.state()
 	if err != nil {
@@ -224,7 +252,8 @@ func TestBillingRefusalStopsRoute(t *testing.T) {
 // Before the ladder: a clock offset above the bound or a ledger refusal
 // stops the route with nothing sent; a probe the start gate blocks ends
 // the cell after one request; a probe answered with a billing refusal
-// stops the route.
+// stops the route. Each cell keeps a labelled manifest and report pair
+// that pass the completeness check outside the route's frame.
 func TestCellStopsAndBlocks(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -267,8 +296,16 @@ func TestCellStopsAndBlocks(t *testing.T) {
 			if n := e.hits.Load(); n != int64(tc.probes) || rec.Sent != (admission.Counts{Probe: tc.probes}) {
 				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
 			}
-			if _, err := os.Stat(filepath.Join(r.cellDir(run), evidence.ManifestFile)); err == nil {
-				t.Fatal("a cell that never reached the ladder wrote a manifest")
+			m, text := checkRetained(t, r, run)
+			c := m.Release
+			if m.Counted() || c.Outcome != tc.outcome || c.LadderStarted || !slices.Equal(c.Reasons, rec.Reasons) || (m.Artifact(probe.File) != nil) != (tc.probes == 1) {
+				t.Fatalf("manifest: counted %t, cell %+v, artifacts %+v", m.Counted(), c, m.Artifacts)
+			}
+			if b, err := os.ReadFile(filepath.Join(r.cellDir(run), evidence.AttemptsFile)); err != nil || len(b) != 0 {
+				t.Fatalf("attempts file %q: %v", b, err)
+			}
+			if !strings.Contains(text, "Outcome: "+tc.outcome+"; a labelled record, outside the route's frame of 12 cells\n  "+rec.Reasons[0]+"\n") {
+				t.Fatalf("report text:\n%s", text)
 			}
 			if u := ledgerState(t, f.ledger).Routes["groq"]; u != nil && u.Reserved != 0 {
 				t.Fatalf("reservation left open: %+v", u)

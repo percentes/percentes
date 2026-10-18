@@ -116,7 +116,7 @@ type outcome struct {
 // requests (count n). A completion or error ends 1 ns after intended
 // dispatch.
 func cellOf(label string, outs ...outcome) CellRecords {
-	c := CellRecords{Cell: label}
+	c := CellRecords{Cell: label, Outcome: evidence.CellCounted}
 	add := func(r evidence.Record) {
 		r.Index, r.Shape, r.CeilingTokens = int64(len(c.Records)), "S", 512
 		c.Records = append(c.Records, r)
@@ -410,6 +410,14 @@ func TestStepTablesRefusals(t *testing.T) {
 			}
 			return v
 		}, "13 cells, a frame holds 12"},
+		{"labelled cell", func(_ *config.Config, v *admission.Verdict, cs *[]CellRecords) *admission.Verdict {
+			(*cs)[0].Outcome = evidence.CellStopped
+			return v
+		}, `cell "a" is "stopped": a labelled cell never enters a route's frame`},
+		{"no outcome", func(_ *config.Config, v *admission.Verdict, cs *[]CellRecords) *admission.Verdict {
+			(*cs)[0].Outcome = ""
+			return v
+		}, `cell "a" is "": a labelled cell never enters a route's frame`},
 		{"no label", func(_ *config.Config, v *admission.Verdict, cs *[]CellRecords) *admission.Verdict {
 			(*cs)[0].Cell = ""
 			return v

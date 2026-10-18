@@ -29,10 +29,10 @@ const cellFile = "cell.json"
 // takes a re-run within the route's bound.
 const (
 	outcomeRunning     = "running"
-	outcomeCounted     = "counted"
-	outcomeInvalid     = "client_invalid"
-	outcomeBlocked     = "blocked"
-	outcomeStopped     = "stopped"
+	outcomeCounted     = evidence.CellCounted
+	outcomeInvalid     = evidence.CellInvalid
+	outcomeBlocked     = evidence.CellBlocked
+	outcomeStopped     = evidence.CellStopped
 	outcomeMissed      = "missed"
 	outcomeInterrupted = "interrupted"
 )

@@ -16,6 +16,7 @@ import (
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
@@ -37,7 +38,8 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 // probe status that blocks the start ends the cell before the ladder; a
 // documented billing refusal on the probe or inside the ladder stops the
 // route; an EMFILE error ends the ladder and the cell is client-invalid.
-// An error is an execution error.
+// Every finished cell keeps its evidence with a labelled manifest and a
+// report pair (retain). An error is an execution error.
 func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord, err error) {
 	dir := r.cellDir(run)
 	rec = r.newRecord(run)
@@ -61,18 +63,21 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		}
 	}()
 
-	clock := evidence.ReadClock(ctx, r.clock)
-	clockPath, err := evidence.WriteClock(dir, clock)
-	if err != nil {
-		return rec, err
-	}
-	if clock.AbsOffsetS != nil && *clock.AbsOffsetS > config.PinnedClockOffsetMaxS {
-		finish(outcomeStopped, (&routeStop{clock.Flag}).Error())
-		return rec, nil
-	}
-
 	cfg := cellConfig(r.cfg, run.Seed, r.steps)
 	t := &cfg.Target
+	ev := &cellFiles{dir: dir, run: run, cfg: cfg}
+	ev.clock = evidence.ReadClock(ctx, r.clock)
+	if ev.clockPath, err = evidence.WriteClock(dir, ev.clock); err != nil {
+		return rec, err
+	}
+	if ev.statusStart, err = evidence.WriteStatus(dir, evidence.StatusStartFile, evidence.ReadStatus(ctx, r.status)); err != nil {
+		return rec, err
+	}
+	if c := ev.clock; c.AbsOffsetS != nil && *c.AbsOffsetS > config.PinnedClockOffsetMaxS {
+		finish(outcomeStopped, (&routeStop{c.Flag}).Error())
+		return rec, r.retain(ctx, ev, rec, nil)
+	}
+
 	offsets := loadgen.BuildSchedule(cfg)
 	cases := make([]string, len(offsets))
 	for i := range cases {
@@ -82,7 +87,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	var refused *admission.Refusal
 	if errors.As(err, &refused) {
 		finish(outcomeStopped, (&routeStop{refused.Error()}).Error())
-		return rec, nil
+		return rec, r.retain(ctx, ev, rec, nil)
 	}
 	if err != nil {
 		return rec, err
@@ -98,12 +103,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		}
 	}()
 
-	ledgerRef, err := evidence.ReadLedger(r.ledgerPath)
-	if err != nil {
-		return rec, err
-	}
-	statusStart, err := evidence.WriteStatus(dir, evidence.StatusStartFile, evidence.ReadStatus(ctx, r.status))
-	if err != nil {
+	if ev.ledger, err = evidence.ReadLedger(r.ledgerPath); err != nil {
 		return rec, err
 	}
 	if pr, err = probe.Run(ctx, probe.Input{Target: t, CaseText: r.shape.UserText(run.Seed, len(offsets)), Timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second}); err != nil {
@@ -113,6 +113,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if err != nil {
 		return rec, err
 	}
+	ev.probePath = probePath
 	rec.ProbeStatus = pr.Request.Status
 	var probeBody []byte
 	if b := pr.Request.Body; b != nil && b.Text != nil {
@@ -120,16 +121,16 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	}
 	if stop := billingRefusal(t, pr.Request.Status, probeBody); stop != nil {
 		finish(outcomeStopped, stop.Error())
-		return rec, nil
+		return rec, r.retain(ctx, ev, rec, nil)
 	}
 	if pr.Start.Blocked {
 		finish(outcomeBlocked, pr.Start.Reason)
-		return rec, nil
+		return rec, r.retain(ctx, ev, rec, nil)
 	}
 	interval := time.Duration(float64(time.Second) / cfg.Release.Ladder.StepsRPS[0])
 	if werr := waitUntil(ctx, pr.Request.DispatchUTC.Add(interval)); werr != nil {
 		finish(outcomeStopped, "stopped before the first dispatch: "+werr.Error())
-		return rec, nil
+		return rec, r.retain(ctx, ev, rec, nil)
 	}
 
 	cellCtx, stop := context.WithCancelCause(ctx)
@@ -169,65 +170,101 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		}
 	}
 
-	outcome, reasons := cellOutcome(res, runErr, context.Cause(cellCtx), clock, canaryErr)
+	outcome, reasons := cellOutcome(res, runErr, context.Cause(cellCtx), ev.clock, canaryErr)
 	finish(outcome, reasons...)
+	return rec, r.retain(ctx, ev, rec, res)
+}
 
-	statusEnd, serr := evidence.WriteStatus(dir, evidence.StatusEndFile, evidence.ReadStatus(ctx, r.status))
+// cellFiles are what a cell has recorded before its evidence is
+// retained: the clock record, the start status, the ledger position and
+// the probe record where the cell reached them.
+type cellFiles struct {
+	dir                    string
+	run                    schedule.Run
+	cfg                    *config.Config
+	clock                  *evidence.ClockRecord
+	clockPath, statusStart string
+	ledger                 *evidence.LedgerRef
+	probePath              string
+}
+
+// retain writes a finished cell's evidence: the end status, the frame
+// store and operator copies, the attempts file, the dispatch series, the
+// manifest carrying the cell's label, and the report pair. A nil res is
+// a cell whose ladder never started: its attempts file and frame store
+// are empty, and its epoch is the cell's start. A frame store that fails
+// to write leaves the rest to be written; the failure is returned after
+// them.
+func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res *loadgen.Result) error {
+	ladder := res != nil
+	if !ladder {
+		res = &loadgen.Result{EpochWall: rec.StartUTC}
+	}
+	var err error
+	if ev.ledger == nil {
+		if ev.ledger, err = evidence.ReadLedger(r.ledgerPath); err != nil {
+			return err
+		}
+	}
+	statusEnd, serr := evidence.WriteStatus(ev.dir, evidence.StatusEndFile, evidence.ReadStatus(ctx, r.status))
 	if serr != nil {
 		statusEnd = ""
 	}
-	// A frame store that fails to write leaves the attempts and manifest
-	// to be written; the failure is returned after them.
 	framesPath, ferr := evidence.WriteRunFrames(r.framesRoot, res)
 	if ferr == nil {
 		ferr = r.op.WriteCopies(filepath.Dir(framesPath))
 	}
 	invalid := slices.Clone(rec.Reasons)
-	if outcome == outcomeCounted {
+	if rec.Outcome == outcomeCounted {
 		invalid = nil
 	}
-	attempts, err := evidence.WriteRun(dir, cfg, res, evidence.Options{RunFailures: invalid})
+	attempts, err := evidence.WriteRun(ev.dir, ev.cfg, res, evidence.Options{RunFailures: invalid})
 	if err != nil {
-		return rec, errors.Join(ferr, err)
+		return errors.Join(ferr, err)
 	}
-	dispatchPath := filepath.Join(dir, dispatchFile)
-	if err := replaceJSON(dispatchPath, newDispatchSeries(run, res)); err != nil {
-		return rec, errors.Join(ferr, err)
+	artifacts := []string{attempts}
+	if ev.probePath != "" {
+		artifacts = append(artifacts, ev.probePath)
 	}
-	rec.Concurrent, err = r.concurrent(rec.StartUTC, r.now().UTC())
+	dispatchPath := filepath.Join(ev.dir, dispatchFile)
+	if err := replaceJSON(dispatchPath, newDispatchSeries(ev.run, res)); err != nil {
+		return errors.Join(ferr, err)
+	}
+	artifacts = append(artifacts, dispatchPath)
+	if rec.Concurrent, err = r.concurrent(rec.StartUTC, r.now().UTC()); err != nil {
+		return errors.Join(ferr, err)
+	}
+	cell, err := r.cellEvidence(ev.dir, ev.run, rec)
 	if err != nil {
-		return rec, errors.Join(ferr, err)
+		return errors.Join(ferr, err)
 	}
-	cell, err := r.cellEvidence(dir, run, rec)
-	if err != nil {
-		return rec, errors.Join(ferr, err)
-	}
+	cell.Outcome, cell.Reasons, cell.LadderStarted = rec.Outcome, rec.Reasons, ladder
 	m, err := evidence.NewManifest(evidence.ManifestInput{
-		Config:          cfg,
+		Config:          ev.cfg,
 		ConfigName:      r.configName,
-		Target:          t,
+		Target:          &ev.cfg.Target,
 		Result:          res,
 		Build:           r.build,
 		Operator:        r.op,
-		Ledger:          ledgerRef,
-		Clock:           clock,
-		ClockPath:       clockPath,
-		StatusStartPath: statusStart,
+		Ledger:          ev.ledger,
+		Clock:           ev.clock,
+		ClockPath:       ev.clockPath,
+		StatusStartPath: ev.statusStart,
 		StatusEndPath:   statusEnd,
-		ArtifactPaths:   []string{attempts, probePath, dispatchPath},
+		ArtifactPaths:   artifacts,
 		FramesRoot:      r.framesRoot,
 		FramesPath:      framesPath,
-		RunValid:        outcome == outcomeCounted,
+		RunValid:        rec.Outcome == outcomeCounted,
 		InvalidReasons:  invalid,
 		Release:         cell,
 	})
 	if err != nil {
-		return rec, errors.Join(ferr, err)
+		return errors.Join(ferr, err)
 	}
-	if _, err := evidence.WriteManifest(dir, m); err != nil {
-		return rec, errors.Join(ferr, err)
+	if _, _, _, err := report.WriteHostedPair(ev.dir, ev.cfg.Raw, m); err != nil {
+		return errors.Join(ferr, err)
 	}
-	return rec, ferr
+	return ferr
 }
 
 // cellOutcome classifies a run that reached the ladder. cause is the

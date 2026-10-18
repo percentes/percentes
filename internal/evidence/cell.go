@@ -3,6 +3,7 @@ package evidence
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,6 +13,16 @@ import (
 	"github.com/percentes/percentes/internal/schedule"
 )
 
+// Cell outcomes (SPEC-HOSTED HA3 point 16). A counted cell enters its
+// route's frame; a cell with any other outcome is a labelled record that
+// never does.
+const (
+	CellCounted = "counted"
+	CellInvalid = "client_invalid"
+	CellBlocked = "blocked"
+	CellStopped = "stopped"
+)
+
 // Cell is a release run's cell record in its manifest (SPEC-HOSTED HA3
 // point 15).
 type Cell struct {
@@ -19,6 +30,13 @@ type Cell struct {
 	// pinned start offset inside the slot.
 	Run           schedule.Run `json:"run"`
 	OffsetMinutes int          `json:"offset_minutes"`
+	// Outcome and Reasons are the cell's label: why it does not count, or
+	// where the backoff rule ended a counted cell's ladder. LadderStarted
+	// is false for a cell stopped or blocked before its ladder, whose
+	// attempts file and frame store are empty.
+	Outcome       string   `json:"outcome"`
+	Reasons       []string `json:"reasons,omitempty"`
+	LadderStarted bool     `json:"ladder_started"`
 	// Concurrent lists the other routes' runs from the same client host
 	// whose cells overlap this one.
 	Concurrent []schedule.Run `json:"concurrent_runs"`
@@ -82,4 +100,42 @@ func checkCell(cfg *config.Config, t *config.Target, c *Cell) error {
 		return errors.New("evidence: release cell: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// checkLabel reports every way c's label disagrees with itself and with
+// the manifest's run validity and invalid reasons.
+func (c *Cell) checkLabel(runValid bool, invalid []string) error {
+	var problems []string
+	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
+	switch c.Outcome {
+	case CellCounted:
+		if !c.LadderStarted {
+			fail("counted with no ladder")
+		}
+		if !runValid || len(invalid) > 0 {
+			fail("counted, and the manifest records the run invalid %q", invalid)
+		}
+	case CellInvalid, CellBlocked, CellStopped:
+		if len(c.Reasons) == 0 {
+			fail("%s with no reason", c.Outcome)
+		}
+		if runValid || !slices.Equal(c.Reasons, invalid) {
+			fail("%s %q, and the manifest records valid=%t %q", c.Outcome, c.Reasons, runValid, invalid)
+		}
+	default:
+		fail("outcome %q is not %s, %s, %s or %s", c.Outcome, CellCounted, CellInvalid, CellBlocked, CellStopped)
+	}
+	if c.Outcome == CellBlocked && c.LadderStarted {
+		fail("blocked after its ladder started")
+	}
+	if len(problems) > 0 {
+		return errors.New("evidence: cell label: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// Counted reports whether m is a release cell that enters its route's
+// frame (SPEC-HOSTED HA3 point 9).
+func (m *Manifest) Counted() bool {
+	return m.Profile == config.ProfileRelease && m.Release != nil && m.Release.Outcome == CellCounted && m.RunValid
 }

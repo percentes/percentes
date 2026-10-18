@@ -31,7 +31,8 @@ const (
 // attempts file both state is checked against the requests: undispatched
 // requests, reported models and mismatches, protocols, run validity, the
 // invalid reasons on the manifest and on every record, and the G2 and G6
-// gates.
+// gates. A release cell's pair is its CellReport, checked for protocols
+// and the invalid reasons on every record.
 func FromRun(dir string, cfgRaw []byte) ([]byte, string, error) {
 	m, err := evidence.ReadManifest(filepath.Join(dir, evidence.ManifestFile))
 	if err != nil {
@@ -40,7 +41,8 @@ func FromRun(dir string, cfgRaw []byte) ([]byte, string, error) {
 	if sum := sha256.Sum256(cfgRaw); hex.EncodeToString(sum[:]) != m.Config.SHA256 {
 		return nil, "", fmt.Errorf("report: the config is not %s, the file the manifest names", m.Config.Name)
 	}
-	if m.Replay == nil {
+	release := m.Profile == config.ProfileRelease
+	if m.Replay == nil && !release {
 		return nil, "", errors.New("report: the manifest has no replay record (the run ended in an error)")
 	}
 	cfg, err := config.Parse(cfgRaw)
@@ -74,11 +76,14 @@ func FromRun(dir string, cfgRaw []byte) ([]byte, string, error) {
 			undispatched++
 		}
 	}
-	if undispatched != m.Replay.ClientGates.Undispatched {
-		return nil, "", fmt.Errorf("report: %d undispatched records, the client gate counted %d", undispatched, m.Replay.ClientGates.Undispatched)
-	}
 	if !maps.Equal(protocols, m.Endpoint.Protocols) {
 		return nil, "", fmt.Errorf("report: protocols %v in the records, %v in the manifest", protocols, m.Endpoint.Protocols)
+	}
+	if release {
+		return cellReport(m, cfg, recs)
+	}
+	if undispatched != m.Replay.ClientGates.Undispatched {
+		return nil, "", fmt.Errorf("report: %d undispatched records, the client gate counted %d", undispatched, m.Replay.ClientGates.Undispatched)
 	}
 
 	art, err := run.Replay(cfg, m.StartUTC, requests, m.Replay)
