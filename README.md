@@ -8,6 +8,9 @@ replica loss kills or strands, the degradation the surviving replica
 takes on, and how long recovery takes, decomposed into measured
 sub-phases (SPEC.md §1). The current fault class is replica loss in a
 Kubernetes-served vLLM (an open-source LLM serving engine) deployment.
+The same harness measures managed provider endpoints from one client
+host under [SPEC-HOSTED.md](SPEC-HOSTED.md), the pre-registered hosted
+protocol ([Measuring a hosted endpoint](#measuring-a-hosted-endpoint)).
 
 The harness makes three commitments:
 
@@ -37,9 +40,12 @@ The harness makes three commitments:
 every gate, tolerance, and detector parameter carries a pinned number,
 enforced at config-load time: a configuration that weakens one refuses
 to load. [CHANGELOG.md](CHANGELOG.md) lists every change to those rules
-since first publication, dated. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+since first publication, dated. [SPEC-HOSTED.md](SPEC-HOSTED.md) is the
+hosted protocol SPEC.md §6 requires before any provider data is
+collected, with its amendment log. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 maps each package to the spec clauses it serves and traces the report
-fields to the code that computes them, with diagrams.
+fields and the evidence files to the code that computes them, with
+diagrams.
 
 ## Scope
 
@@ -61,10 +67,11 @@ kubectl, python3 and curl. The Makefile and the git hooks select Go
 `GOTOOLCHAIN` yourself to override.
 
 ```
-make hooks       # once per clone: continuous-integration (CI) gates on commit and push
-make test-unit   # fast path: unit and integration tests only
-make reproduce   # AC7: one-command full harness run against the local cluster
-make test        # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
+make hooks            # once per clone: continuous-integration (CI) gates on commit and push
+make test-unit        # fast path: unit and integration tests only
+make reproduce        # AC7: one-command full harness run against the local cluster
+make test             # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
+make percentes-pilot  # bin/percentes-pilot, the hosted pilot command
 ```
 
 In that order: `make hooks` before your first commit, `make test-unit` to see
@@ -97,16 +104,51 @@ this platform cannot supply one of their inputs. Reports are written to
 ## Layout
 
 ```
-cmd/percentes            single-run harness command-line interface (CLI)
+cmd/percentes            single-run harness command-line interface (CLI); hosted runs, replay and the completeness check
 cmd/percentes-campaign   N-run campaign runner (SPEC §5 repetition, §10 gates)
 cmd/percentes-calibrate  SPEC §10 capacity ramp and §5 single-replica reference
+cmd/percentes-pilot      the SPEC-HOSTED HA2 pilot: ledger, probe, dev, session, check-cpu
 cmd/mockserver           fault-injectable mock inference server
 cmd/naivesweep           standalone reconnaissance probe, outside the instrument
 internal/                loadgen, collect, detect, orchestrator, validity, ...
-configs/                 pinned reference configurations
+                         hosted: probe, admission, evidence, pilot, score
+configs/                 pinned configurations; a *.reference.yaml per profile
 deploy/                  kind, mock and Phase 1 manifests; reproduce and capture scripts
 docs/                    ARCHITECTURE.md and the draw.io diagrams under docs/diagrams/
 ```
+
+## Measuring a hosted endpoint
+
+A hosted target (`target.hosted: true`) is a provider's managed endpoint.
+SPEC-HOSTED.md pins what a hosted run sends and records; the `pilot`
+configuration profile carries the pins of its amendment HA2 (hosted
+amendment 2) and refuses a value outside them. Every hosted run writes,
+beside the report pair, the evidence SPEC-HOSTED §9 requires: a
+per-request record file (`attempts.jsonl`), the raw response frames in a
+store outside the source tree, the client clock offset and the endpoint
+status at start and end, the pre-run probe's record, and a manifest that
+hashes them all with the configuration, the operator's documentation
+records and the admission ledger's position. The report pair is rendered
+from those files alone, so `percentes --replay DIR --config FILE` renders
+it again and fails unless the result matches byte for byte, and
+`percentes --check-release DIR --config FILE --frames ROOT` refuses a run
+whose files are missing or differ from their recorded hashes.
+
+`percentes-pilot` runs the descriptive pilot of SPEC-HOSTED amendment HA2:
+two endpoints, one task, six paired sessions on dates derived from a
+master seed. Keys come from a file given with `--env` (`NAME=value`,
+readable by its owner only) and are never printed or recorded; every
+request is reserved in the admission ledger before it is sent. The
+command's package documentation lists its subcommands and exit codes:
+
+```
+go doc ./cmd/percentes-pilot
+```
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#hosted-runs-and-the-evidence-files)
+describes the probe, the ledger, each evidence file and the mock's shaped
+form, and follows one request from its schedule to its line in the record
+file.
 
 ## Pointing the probe at an endpoint
 

@@ -2,9 +2,13 @@
 
 Percentes is a measurement instrument. It drives open-loop load at a large
 language model (LLM) inference service while one replica is
-lost, and reports what the loss cost and how recovery unfolded. This page
-describes how the code implements [SPEC.md](../SPEC.md), which is
-authoritative. A § number always refers to a SPEC.md section.
+lost, and reports what the loss cost and how recovery unfolded. It also
+drives managed provider endpoints under the hosted protocol,
+[SPEC-HOSTED.md](../SPEC-HOSTED.md), and keeps the evidence those runs
+publish. This page describes how the code implements
+[SPEC.md](../SPEC.md), which is authoritative, and the hosted protocol
+that is subordinate to it. A § number refers to a SPEC.md section unless
+it is prefixed SPEC-HOSTED.
 
 - [Overview](#overview)
 - [A run on the clock](#a-run-on-the-clock)
@@ -15,6 +19,7 @@ authoritative. A § number always refers to a SPEC.md section.
 - [Gates and where each bites](#gates-and-where-each-bites)
 - [Server-side sampling and the receive path](#server-side-sampling-and-the-receive-path)
 - [Fault modes](#fault-modes)
+- [Hosted runs and the evidence files](#hosted-runs-and-the-evidence-files)
 - [Tracing a published number](#tracing-a-published-number)
 - [Changing things safely](#changing-things-safely)
 - [Glossary](#glossary)
@@ -49,10 +54,13 @@ application programming interface (API) server process of one standalone
 container, and the container runtime's restart policy starts the same
 container again; with one replica there is no survivor and no Service.
 
-The instrument can also drive a managed provider endpoint
-(`target.hosted`). Hosted runs sit outside the §1 experiment; §6 lists what
-changes for them, and [Gates](#gates-and-where-each-bites) shows the gates
-they carry.
+The instrument also drives a managed provider endpoint (`target.hosted`).
+A hosted run sits outside the §1 experiment: §6 lists what changes for it,
+[Gates](#gates-and-where-each-bites) shows the two gates it carries, and
+[Hosted runs](#hosted-runs-and-the-evidence-files) describes the pre-run
+probe, the admission ledger, the evidence files every hosted run writes,
+and the pilot of SPEC-HOSTED amendment HA2 that `cmd/percentes-pilot`
+runs.
 
 ### Design rules the code enforces
 
@@ -83,10 +91,11 @@ they carry.
 
 | Binary | What it does | Output | Exit codes |
 |---|---|---|---|
-| `cmd/percentes` | one run | `report.json`, `report.txt` | 0 valid, 2 a gate invalidated the run, 1 error |
+| `cmd/percentes` | one run; against a hosted target it also writes the evidence files, and `--replay DIR` and `--check-release DIR` act on a finished hosted run ([Hosted runs](#hosted-runs-and-the-evidence-files)) | `report.json`, `report.txt`; a hosted run adds `attempts.jsonl`, `clock.json`, `status-start.json`, `status-end.json` and `manifest.json`, and the frame store under `--frames` | 0 valid, or the replayed pair matches byte for byte, or the release check passed; 2 a gate invalidated the run; 1 error, a replayed pair that differs, or a refused release |
 | `cmd/percentes-campaign` | N runs of one fault variant, gates per run, §7 aggregation; `--dry-kill` makes one process kill with no load | `run-N.json` and `run-N.txt` as each run ends; `campaign.json`, `campaign.txt`, partial after an error or a halt; under process kill `run-N-server.log`, `run-N-fingerprint-before.txt` and `run-N-fingerprint-after.txt`; `dry-kill.json` and `dry-kill-server.log` from `--dry-kill` | 0 every run valid, 2 at least one invalid run or a halted campaign, 1 error |
 | `cmd/percentes-calibrate` | the §10 capacity calibration and the §5 single-replica reference; `--check` validates a configuration and lists its placeholders | `calibration.json`, `calibration.txt` | 0 valid, 2 calibration invalid, 1 error |
-| `cmd/mockserver` | the mock inference server | | |
+| `cmd/percentes-pilot` | the SPEC-HOSTED HA2 pilot: `ledger` (`create`, `price`, `hosting`, `show`), `probe`, `dev`, `session` and `check-cpu` | the ledger file; `probe-<UTC time>/<target>/probe.json`; `dev-1/` and `dev-2/` with `config.yaml`, `dev.json` and the targets' `attempts.jsonl` files; `<session>/session.json` and, per target, `<session>/<target>/` with the evidence files; the frame store under `--frames` | 0 done, every window client-valid, every probe unblocked and every endpoint through the development gate; 2 a window client-invalid or not started, a probe blocked, the second window late, or an endpoint failing the gate; 1 error or refusal |
+| `cmd/mockserver` | the mock inference server in its Phase 0 form; the shaped hosted-provider form is built in Go only ([the mock's shaped form](#the-mocks-shaped-form)) | | |
 | `cmd/naivesweep` | a reconnaissance sweep of an OpenAI-compatible endpoint, outside the instrument: closed loop, no client-validity gates | | |
 
 ## A run on the clock
@@ -135,8 +144,10 @@ detection](#recovery-detection).
 `loadgen.BuildSchedule` fixes every t_i before the run. The pacer spawns a
 worker 10 ms before t_i, and the worker dispatches at t_i. The
 server-sent events (SSE) client (`internal/loadgen/sse_client.go`, with the
-framing in `internal/sse`) posts to `/v1/chat/completions` and reads the
-stream. The 30 s deadline runs from the actual dispatch.
+framing in `internal/sse`) posts to the target's complete `endpoint_url`,
+or to `base_url` plus `/v1/chat/completions` when no `endpoint_url` is
+set, and reads the stream. The pinned 30 s client timeout runs from the
+actual dispatch.
 
 ### Pacer timing
 
@@ -173,7 +184,9 @@ The client stamps four moments:
   minus t_i.
 
 A content event is an SSE event whose decoded delta carries non-empty
-content. Gaps between content events are inter-chunk latencies. On a
+content at the key `target.response_shape.content` names (`content` by
+default). Keys the shape lists as reasoning are recorded apart and never
+count as content. Gaps between content events are inter-chunk latencies. On a
 self-hosted or mock target the report calls them inter-token latency (ITL)
 where the §10 check passes. A hosted target's gaps stay inter-chunk, and a
 mock run without usage is labelled one token per content event by
@@ -343,13 +356,15 @@ those, the code measures the probe and detector ones.
 
 ![Package dependencies, from go list](diagrams/package-layers.drawio.svg)
 
+The diagram predates the hosted packages, which the table lists.
+
 | Group | Package | Role | SPEC | Entry points | Tests |
 |---|---|---|---|---|---|
-| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode, pins checked at load | §1 to §6, §8, §10 | `LoadFile`, `Config.Validate`, `CheckBaseURL` | a mutation case per pin |
-| Load | `internal/loadgen` | schedule, pacer, SSE client, outcome classification, client gate, loopback canary | §2, §3 | `BuildSchedule`, `Run`, `StartCanary`, `SummarizeCanary` | request-body, stream-hardening and gate units; canary oracle; AC1 to AC2d |
+| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Config.Validate`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
+| Load | `internal/loadgen` | schedule, pacer, SSE client with the HTTP/1.1 pin, outcome classification, per-request status, header, peer and protocol records, the credential header and literal body per target, the pilot tripwires, client gate, loopback canary | §2, §3; SPEC-HOSTED §3, §5, §9 | `BuildSchedule`, `Run`, `NewTransport`, `StartCanary`, `SummarizeCanary`, `CPUMeasured` | request-body, stream-hardening, capture and gate units; canary oracle; AC1 to AC2d |
 | | `internal/sse` | SSE framing for the client, the recovery probes and naivesweep | §3 | `SplitLines`, `Events` | a unit per grammar case |
 | | `internal/histo` | the pinned HdrHistogram wrapper; `RecordValue` only, and a test fails the suite if a correction API appears | §3 | `New`, `H.Record`, `H.Summarize` | the correction-API ban; AC1 oracles |
-| | `internal/mock`, `cmd/mockserver` | OpenAI-compatible SSE mock: five scriptable fault modes and a slow-reload startup setting | §2 | `New`, `Server.Start`, `/admin/faults` | a behaviour test per mode, including a raw Transmission Control Protocol (TCP) silent-hang test |
+| | `internal/mock`, `cmd/mockserver` | OpenAI-compatible SSE mock: five scriptable fault modes and a slow-reload startup setting; the shaped hosted-provider form ([the mock's shaped form](#the-mocks-shaped-form)) | §2; SPEC-HOSTED §2, §5 | `New`, `NewShaped`, `Server.Start`, `/admin/faults` | a behaviour test per mode, including a raw Transmission Control Protocol (TCP) silent-hang test; a test per shape mode |
 | Fault | `internal/orchestrator` | pre-armed fault execution with armed, fire and expiry records; mock-admin, clean-delete and process-kill injectors; container commands over SSH (Secure Shell) | §1, §2, AC3 | `Execute`, `NewMockInjector`, `NewCleanDeleteInjector`, `NewProcessKillInjector`, `SSHContainerOps` | AC3; fake-ops tests; a fake `ssh` on PATH |
 | Server side | `internal/serverstats` | Prometheus sampler, per-window reductions, G7 baseline means | §2, §6, §10 | `ForRun`, `Sampler.Start`, `Sampler.Stop`, `Preflight`, `BaselineMeans`, `ReduceWindow` | test servers; window, reset and per-label-set oracles |
 | Analysis | `internal/collect` | windows, incidence curves, in-flight accounting, threshold analysis, tail CIs, receive-path report | §3, §4, §7 | `Collect`, `EstimateIncidence`, `AccountInFlight`, `SplitAtFire`, `AnalyzeThresholds` | hand-computed incidence oracles; AC4, AC4b |
@@ -357,11 +372,16 @@ those, the code measures the probe and detector ones.
 | | `internal/vllmlog` | vLLM startup-log boundaries and printed figures, patterns pinned to vLLM 0.29.0, applied to the process-kill decomposition | §5 | `Parse`, `Apply`, `VLLM0290`, `Mock` | the 16 September 2026 vLLM start log as a byte-exact fixture |
 | | `internal/validity` | the G1 to G7 run-validity gates | §10 | `Evaluate` | a unit per gate |
 | | `internal/stats` | §7 statistics: values, median, mean, t-interval, coefficient of variation | §7 | `Summarize` | hand-computed oracles |
-| Composition | `internal/run` | one run's artifacts | §2 | `Execute` | the whole pipeline in process under the race detector |
+| Composition | `internal/run` | one run's artifacts; the profiles the single-run path refuses; a hosted run re-analysed from its records | §2; SPEC-HOSTED §9 | `Execute`, `CheckConfig`, `Replay` | the whole pipeline in process under the race detector |
 | | `internal/campaign` | N runs, per-run scalars, endpoint summaries with drop counts, halt after an invalid run | §5, §7, §10 | `Run`, `RunWith` | fake-runner units |
 | | `internal/calibrate` | the §10 ramps and the §5 reference | §10, §5 | `RunRamp`, `Calibrate`, `Reference`, `LoadRunner` | a capacity-model fake runner; one step against the mock |
-| Output | `internal/report` | the report pairs for a run and a campaign | §2 to §5, §7 | `Generate`, `GenerateCampaign` | renderer units; AC6 field assertions |
+| Output | `internal/report` | the report pairs for a run and a campaign; the hosted report without SLO fields; a hosted run's pair from its manifest and attempts file; the paired pilot report | §2 to §5, §7; SPEC-HOSTED §7 to §9, HA2 §8 | `Generate`, `GenerateCampaign`, `FromRun`, `WriteHostedPair`, `GeneratePilot` | renderer units; AC6 field assertions; byte-for-byte replay |
 | | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
+| Hosted | `internal/probe` | the pre-run probe: DNS, TLS, one request, the response shape, the start gate; the release ceiling check | SPEC-HOSTED §2, §5; HA3 point 7 | `Run`, `RunRelease`, `ChooseCeiling`, `Gate`, `Write` | an httptest server per shape and failure |
+| | `internal/admission` | the request and liability ledger, hash-chained; the release ceiling rule | SPEC-HOSTED HA2 §3; HA3 point 6 | `Create`, `Open`, `Ledger.Admit`, `Ledger.Settle`, `CeilingRule` | chain, cap and settlement units |
+| | `internal/evidence` | per-attempt records, the frame store, the clock and status records, the operator file, the manifest, the completeness check | SPEC-HOSTED §9 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `LoadOperator`, `NewManifest`, `CheckRelease` | round-trip, hash and refusal units |
+| | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
+| | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
 | Test support | `internal/hostqual` | the host qualification probe the timing-coupled tests run first | §2, §8 | `Measure`, `Observation.Qualify`, `Qualified`, `Allocation` | per-limit units |
 | | `internal/ac` | the §8 acceptance suite; the mock runs as a separate process, so it never shares the generator's Go scheduler | §8 | | |
 
@@ -376,7 +396,7 @@ yet.
 | `deploy/mock/` | the two-replica mock Deployment and its NodePort Service; a readiness probe on `/health` and no liveness probe, so silent_hang can hold `/health` silent |
 | `deploy/process-kill-e2e.sh` | the process-kill end-to-end: the mock in a Docker container under `--restart on-failure`, one dry kill and a two-run campaign that kill and restart it, and a check of the dry-kill record and the run files |
 | `deploy/phase1/` | the vLLM topology manifest, which does not deploy until its PIN-AT-PHASE1 placeholders are filled; capture scripts for the host fingerprint, the GPU sample series and the server log |
-| `configs/` | every runnable configuration; one file drives both the cluster ConfigMap and the host runner |
+| `configs/` | every runnable configuration; one file drives both the cluster ConfigMap and the host runner; `pilot.reference.yaml` is the pilot profile's reference file |
 
 ## Gates and where each bites
 
@@ -408,9 +428,14 @@ run in the code.
 **Hosted targets.** Only G2 and G6 are evaluated. Hosted G6 is completion
 within the 30 s timeout, computed over the baseline, guard and fault
 windows and reported without invalidating the run; §10 defines G6 over the
-baseline window. The request body omits `ignore_eos` and asks for no usage
-object, and the bearer token comes from the environment variable that
-`target.api_key_env` names.
+baseline window. The request body the client generates omits `ignore_eos`
+and asks for no usage object; a target with a literal `body` sends that
+body instead ([Hosted runs](#hosted-runs-and-the-evidence-files)). The key
+is read at run start from the environment variable `target.api_key_env`
+names and sent in the one header `target.auth_header` selects:
+`Authorization: Bearer` (the default), `x-api-key` or `api-key`. It is
+never recorded, and every recorded header, body and error string is
+masked for it.
 
 **Timing-coupled tests.** Before each timing-coupled acceptance test,
 `internal/hostqual` probes the host against limits set in
@@ -471,16 +496,18 @@ A window restricted to one replica carries no receive-path report.
 ### Token counts and the ITL label
 
 A self-hosted or mock request asks for the usage object
-(`stream_options.include_usage`); the hosted body does not. The client
-records the completion token count from any chunk that carries usage,
-beside its own content-event count. Each window reports both counts as
+(`stream_options.include_usage`); the hosted body the client generates
+does not, and a literal body carries whatever it says. The client
+records the completion token count from any chunk that carries usage at a
+path `target.response_shape.usage` names (`usage` by default), beside its
+own content-event count. Each window reports both counts as
 distributions (`content_events`, `completion_tokens`) and the §10 check
 over the completed requests that carried usage (`token_check`: sampled and
 matched).
 
 | Case | Pooled ITL label in `report.txt` |
 |---|---|
-| hosted target | inter-chunk, with the counts when a provider sent usage unasked |
+| hosted target | inter-chunk, with the counts when the stream carried usage |
 | usage sampled, every request matched | inter-token, with the counts |
 | usage sampled, a mismatch | inter-chunk, with the counts |
 | mock, no usage in the stream | one token per content event by construction |
@@ -530,6 +557,222 @@ continuous integration) runs the mock in a Docker container under the
 same restart policy, kills it once with `--dry-kill` and again in two
 campaign runs, and checks the dry-kill record and the run files; on macOS it reaches the container's process through a privileged
 helper container (`--kill-via docker-helper`).
+
+## Hosted runs and the evidence files
+
+A hosted target (`target.hosted`) is a managed provider endpoint the
+project does not operate. SPEC-HOSTED.md is the pre-registered protocol
+for measuring one; this section describes the code that runs it. Two
+commands drive hosted targets: `cmd/percentes` runs one hosted run through the
+experiment's phases with no fault injected, outside the SPEC-HOSTED §3
+pins, and `cmd/percentes-pilot` runs the descriptive pilot of
+SPEC-HOSTED amendment HA2: two endpoints, one task, six paired sessions.
+`run.CheckConfig` makes `cmd/percentes` and `cmd/percentes-campaign`
+refuse a pilot configuration, and any target that carries a literal body,
+before any setup.
+
+### What a hosted run reads first
+
+- **The operator file** (`--operator`, `internal/evidence`) names the
+  provider, the account tier and the client host, the pilot roles where
+  the run is a pilot, and one record of each required kind: limits,
+  prices, quota, terms, status mapping, eligibility, dedicated account and
+  affiliation. A record is a file beside the operator file, with the URL
+  it was taken from and the retrieval date. `LoadOperator` reads and
+  hashes every record before the run, and the manifest carries the
+  hashes. A binary that carries no version-control revision refuses to
+  run, and one built from a modified tree needs a `source_diff` record
+  (`CheckSource`).
+- **The admission ledger** (`--ledger`, `internal/admission`) is one
+  append-only JSON Lines (JSONL, one JSON object per line) file holding
+  every inference request sent to a route, the per-request prices and
+  hosting costs the operator entered, and, on its first line, the caps it
+  enforces. Each line carries its sequence number and the SHA-256
+  (256-bit Secure Hash Algorithm) digest of every byte before it; a ledger whose chain does not check admits
+  nothing. An admission reserves its requests before any is sent and is
+  settled with the count actually sent, so a run cut short still holds
+  its reservation. The pilot's caps are code constants (`PilotCaps`):
+  1,024 requests per route, 2,048 in all, and a projected liability of
+  US$40 at the highest per-request price recorded for each route.
+- **The key.** `target.api_key_env` names an environment variable. The
+  pilot command reads it from a file given with `--env` (`NAME=value`
+  lines, readable by its owner only) and never from the inherited
+  environment; `cmd/percentes` reads the variable itself. The key travels
+  in the one header `target.auth_header` selects and is masked out of
+  every recorded header, body and error string.
+
+### One hosted run, in order
+
+1. **Status and clock.** `--status-cmd` runs the operator's
+   endpoint-status command and keeps its output verbatim
+   (`status-start.json`). `--clock-sync` runs the host's clock-sync tool,
+   `sntp` or `chronyc tracking`, and parses the offset it reports
+   (`clock.json`). No reading, or an offset above 60 s, flags the run,
+   and a flagged run does not count.
+2. **The pre-run probe** (`internal/probe`, SPEC-HOSTED §5). From the
+   client host: Domain Name System (DNS) resolution, the Transport Layer
+   Security (TLS) handshake and one request at the run's settings, with
+   the response shape recorded: which keys carried
+   content or reasoning, the finish reasons, where usage objects and
+   refusal fields appeared, and the reported model. A 400, 401, 403 or
+   404, or a status the target lists in `probe.account_limit_statuses`,
+   blocks the start. Any other outcome is recorded and the run starts. A
+   pilot probe can add a wrong-model request and read a limits URL;
+   neither gates the start.
+3. **The load**, through `loadgen.Run`, with the loopback canary beside
+   it. A configuration with a pilot body, or a target with a literal
+   body, supplies one case text per scheduled request (`Hooks.Cases`);
+   the client sends the body with the case text in its one slot,
+   `"{{case}}"`, and every other byte unchanged. A pilot window carries
+   two tripwires that record and never block a dispatch: a send beyond
+   the schedule, and a fifth request in flight (the pinned limit is 4).
+   Either firing makes the window client-invalid.
+4. **After the last terminal event:** the end status; the frame store
+   under `--frames`, a directory outside the source tree, with the
+   operator file and its records copied beside it; `attempts.jsonl`; and
+   `manifest.json`. `cmd/percentes` then renders the report pair from
+   the manifest, the attempts file and the configuration alone
+   (`report.WriteHostedPair`) and names both files in the manifest. A
+   pilot window writes no report pair.
+
+### The evidence files
+
+| File | Contents | Written by |
+|---|---|---|
+| `attempts.jsonl` | one JSON object per scheduled request, in index order: the times from the run epoch (intended, dispatch, first content event, terminal event), the outcome and error class, the protocol and HTTP status, the response headers `target.response_headers` allows and the first `Retry-After` among them, the redacted error text, the peer address and whether the connection was reused, the content-event count, the usage object and completion token count where the stream carried them, the finish reason, the reported model and any mismatch, the system fingerprint, the first in-band error object, the unknown-event count, whether reasoning arrived, whether a refusal field carried text and its length where the shape names one, the scorer's verdict where the request had a label, and the run's invalid reasons repeated on every record. Outside the release profile a hosted record also carries the visible answer. | `evidence.WriteRun` |
+| `frames.jsonl` | per request, every read of a 200 body with its return time, up to 8 MiB per request, or the first 4,096 bytes of a non-200 body, read for at most 1 s after the status; credentials masked | `evidence.WriteRunFrames`, into a directory named by the run epoch under `--frames` |
+| `clock.json`, `status-start.json`, `status-end.json` | the command, its output verbatim, exit code and timing; for the clock, the parsed offset and its flag | `evidence.WriteClock`, `evidence.WriteStatus` |
+| `probe.json` | the probe record: the exchange (DNS, connects, TLS, peer, protocol, status, allowed headers, a non-200 body), the response shape, the findings against the configured shape and the start decision | `probe.Write` |
+| `manifest.json` | the build revision and whether the tree was modified; the capture limits; the configuration file by hash; the endpoint as configured and as observed (requested and reported models, mismatches, protocols); the client host; the clock and status records; the operator file and its records by hash; the ledger's hash and line count; every artifact and the frame store by hash; validity and its reasons; the G2 and G6 gates; and the replay record the report pair needs | `evidence.NewManifest` |
+| `operator.json`, `records/` | copies of the operator file and its records, beside the frame store | `Operator.WriteCopies` |
+
+### The pilot
+
+`cmd/percentes-pilot` runs the pilot profile: two hosted endpoints, one
+literal body (`pilot.body`, a system text and the case slot) to which
+each target's `model` and `params` are added, deterministic arrivals of
+one request every 10 s, a 60 s warm-up and a 1,200 s measured window, a
+4,096-token completion ceiling and the pinned 30 s timeout. Every number
+is a pin the pilot profile checks at load (`internal/config/pilot.go`).
+
+- **The cases** come from `internal/pilot`: synthetic support tickets
+  from a deterministic generator, 120 measured (30 per label) and 24
+  development (6 per label), each at most 600 bytes, labelled by the
+  route a reader would send the ticket to: `billing`, `technical`,
+  `account` or `escalation`. The generator's output is pinned by hash in
+  its tests.
+- **The scorer** (`internal/score`) applies the output contract, exactly
+  one JSON object whose one key is `route` and whose value is one of the
+  labels, and classes each attempt into one of ten task outcomes
+  (success, late correct, wrong label, schema failure, refusal, length
+  limit, partial answer, no answer, unknown termination,
+  instrument-incompatible) against the 10 s scoring cutoff from intended
+  dispatch. The verdict is written beside the transport outcome in the
+  attempts record.
+- **`probe`** probes each target and writes `probe.json`; **`dev`** sends
+  the 24 development cases through each target at the session rate and
+  applies the development gate (at least 22 correct, complete answers,
+  and at least 5 of the 6 per label); the first attempt is `dev-1`, and
+  one recorded revision, `dev-2`, may change only the body and the
+  targets' `params` and `not_applied`.
+- **`session`** runs one dated session from a schedule file that
+  `pilot.NewSchedule` derives from a master seed: six sessions, three on
+  weekdays and three on weekend days, one slot at 20:00 Coordinated
+  Universal Time (UTC), a reserve
+  date per day type, the endpoint order and a case permutation per
+  session. The command re-derives the schedule from the file's input and
+  refuses a file that differs; it refuses a session directory that
+  exists, and a start more than 15 minutes after the slot. Both windows
+  run in the session's order, the second starting as the first drains;
+  `session.json` records the gap and whether it exceeded five minutes. A
+  reserve replaces at most one session per output root, for a session
+  that never ran or whose window was client-invalid or did not start.
+- **Client-invalid** is a window with a failed G2 gate, a fired tripwire,
+  an interrupted run, a response over a protocol other than HTTP/1.1, or
+  a flagged clock. A 401 or 403 inside a window is counted and does not
+  invalidate it.
+
+### Replay and the completeness check
+
+`percentes --replay DIR --config FILE --out OUT` renders a hosted run's
+report pair again from `manifest.json`, `attempts.jsonl` and the
+configuration file (`report.FromRun`): it checks the configuration and
+attempts hashes against the manifest, re-analyses the records
+(`run.Replay`), checks every count the manifest also states (undispatched
+requests, reported models, protocols, validity and its reasons, the G2
+and G6 gates), writes the pair to OUT and exits 1 unless both files match
+the manifest's references byte for byte.
+
+`percentes --check-release DIR --config FILE --frames ROOT` runs
+`evidence.CheckRelease`: the commit record, the configuration, the
+attempts file, the report pair, the manifest, the scorer output on every
+measured attempt of a pilot run, and the frame store with one line per
+attempt must all exist with the hashes and sizes the manifest records,
+and the operator copies beside the frame store with them.
+
+Both commands serve the runs of `cmd/percentes`. A pilot window's manifest
+names no report pair, and its configuration file is the two-endpoint
+pilot file, whose top-level target `run.Replay` does not accept, so
+neither command applies to a pilot window as the tree stands. The paired
+pilot report has a renderer, `report.GeneratePilot`, and no command.
+
+### The mock's shaped form
+
+`mock.NewShaped` builds a mock that answers in a hosted provider's stream
+form, for the tests of the hosted code; `cmd/mockserver` builds the Phase 0
+form only, because a shape has no configuration file form. A `Shape`
+sets: a reasoning key and the number of reasoning chunks sent before the
+answer; the answer per request, chosen by the last message's content, in
+four-rune content chunks; the finish reason, or no finish chunk; when the
+usage chunk is sent (on request, always, never); an in-band error object
+sent after a set number of content chunks in place of the finish and
+usage chunks; an unknown key added to every chunk; a body cut before its
+terminator; and a key that must arrive in the one credential header the
+shape names and in no other, or the request is refused with 401. The
+request's `max_completion_tokens` (or `max_tokens` when absent) caps
+reasoning and content chunks together, and a capped stream ends with
+finish reason `length`. A shape with `Messages` set serves the Anthropic
+Messages stream instead, at `/v1/messages` and `/anthropic/v1/messages`:
+`message_start`, a thinking block, a text block, `message_delta` and
+`message_stop`; it refuses a request without `anthropic-version:
+2023-06-01`, and answers every non-200 status in the Messages error form.
+
+### Following one request of a hosted run
+
+A request of a hosted run of `cmd/percentes` goes through these steps,
+and each leaves a field a reader can check.
+
+1. **Schedule.** `loadgen.BuildSchedule` fixes the request's index i and
+   its intended dispatch time t_i, as nanoseconds from the run epoch,
+   from `load.rate_rps`, `load.arrival_process` and `run.seed`. The
+   record's `index` and `intended_ns` are these two values.
+2. **Body.** The client generates the chat-completions body: the model,
+   one user message whose content is the unique prefix `cs-<seed>-<i>`
+   followed by the pinned filler, `stream` true and `max_tokens` 256; a
+   hosted body carries no `ignore_eos` and no usage request.
+3. **Dispatch.** The worker sends at t_i and stamps `dispatch_ns`; the
+   difference is the send skew the G2 gate bounds. The pinned 30 s
+   timeout starts here.
+4. **Response.** The status, the allowed headers, the peer address and
+   the protocol are recorded as they arrive (`status`, `headers`,
+   `peer_addr`, `protocol`). On a 200, each SSE event is decoded: the
+   first non-empty content delta stamps `first_token_ns`; usage, finish
+   reason, model and fingerprint fields are kept as they pass; every read
+   of the body goes to the frame store with its time.
+5. **Outcome.** The terminator `[DONE]` after at least one content event
+   makes the request `completed` and stamps `done_ns`; a terminator with
+   no content event is `empty_stream`; a stream cut before it, an
+   undecodable event or an in-band error object is `malformed_stream`; a
+   reset is `reset`; a failure before any status is `connect`; no
+   terminal event by the timeout is `censored`. A non-200 status is
+   `status_429` or `status_other`.
+6. **Record.** The request is one line of `attempts.jsonl`, in index
+   order, with every field above.
+7. **Report.** `collect.Collect` assigns the record to the window of
+   t_i, so it enters that window's `err_classes`, `censored_rate`,
+   `completion_incidence` and, when completed, its TTFT and e2e
+   histograms in `report.json`. `percentes --replay` reproduces the
+   same figures from the record alone.
 
 ## Tracing a published number
 
@@ -583,12 +826,24 @@ helper container (`--kill-via docker-helper`).
 | `calibration.lambda_max`, `lambda_r`, `load_rate_rps`, `decision`, `valid`, `reason` | `calibrate.Calibrate` | §10 |
 | `calibration.reference` | `calibrate.Reference` | §5 |
 
+The evidence files of a hosted run ([Hosted runs](#hosted-runs-and-the-evidence-files)):
+
+| File or field | Computed in | SPEC |
+|---|---|---|
+| `attempts.jsonl`: the times, outcome, class, status, allowed headers, `retry_after`, `peer_addr`, `conn_reused`, `content_events`, `completion_tokens`, `usage`, `finish_reason`, `reported_model`, `model_mismatch`, `system_fingerprint`, `stream_error`, `unknown_events`, `reasoning`, `refusal` and `refusal_bytes` of each record | `loadgen.execute` and `recordChunk`, copied by `evidence.Records` | SPEC-HOSTED §9 |
+| `attempts.jsonl`: `score` | `score.Scorer.Score`, through `evidence.Records` | SPEC-HOSTED HA2 §5 |
+| `attempts.jsonl`: `run_failures` | the command's invalid reasons, repeated on every record | SPEC-HOSTED §7 |
+| `frames.jsonl` | `evidence.FrameRecords`, from the timed reads `loadgen.execute` kept | SPEC-HOSTED §9 |
+| `probe.json` | `probe.Run` | SPEC-HOSTED §2, §5 |
+| `clock.json`, `status-start.json`, `status-end.json` | `evidence.ReadClock`, `evidence.ReadStatus` | SPEC-HOSTED §9 |
+| `manifest.json` | `evidence.NewManifest` | SPEC-HOSTED §9 |
+
 ## Changing things safely
 
 - **A configuration pin** lives in one constant in
   `internal/config/config.go`, which `Config.Validate` checks. Every
   configuration under `configs/` that sets the field carries the new value:
-  the Go suite loads the two reference configurations, the kind stages load
+  the Go suite loads the four reference configurations, the kind stages load
   the kind configurations, and `configs/phase1.yaml` is checked with
   `percentes-calibrate --check`. The mutation case in
   `TestPinnedValueEnforcement` moves with the pin, and the SPEC text and a
@@ -629,19 +884,30 @@ helper container (`--kill-via docker-helper`).
 
 - **AC**: an acceptance criterion of §8; AC1 to AC7 certify the instrument
   against the mock.
+- **Attempts file**: `attempts.jsonl`, one record per scheduled request of
+  a hosted run (SPEC-HOSTED §9).
 - **Black-hole**: the §1 variant that partitions the victim's node for a
   pinned 120 s with a pre-armed expiry.
+- **Case slot**: the JSON string `"{{case}}"` that a literal body carries
+  once; the client replaces it with the request's user text and changes
+  nothing else.
 - **Censored**: no terminal event by the pinned 30 s client timeout. The
   request is a censored observation on the incidence curve and stays out
   of the latency histograms; an error is a competing event instead (§3).
 - **Clean delete**: the §1 variant that deletes the victim pod with grace
   period 0.
+- **Completeness check**: `evidence.CheckRelease`, run by
+  `percentes --check-release`: every file a hosted run's manifest names
+  must exist with the hash and size it records.
 - **Coordinated omission**: the under-sampling of slow periods by a load
   generator that waits for responses before sending more.
 - **e2e**: end-to-end latency, completion time minus t_i.
 - **Fire anchor**: the earlier of T_inject and the recorded actual fire
   time; the baseline window ends 30 s before it, and times to recovery are
   measured from it (§3).
+- **Frame store**: `frames.jsonl`, the timed raw reads of every response
+  body of a hosted run, kept outside the source tree and retained
+  unpublished (SPEC-HOSTED §9).
 - **G1 to G7**: the §10 run-validity gates.
 - **Goodput**: the fraction of a window's scheduled requests that complete
   within the §4 SLO: TTFT ≤ 1 s and e2e ≤ 14 s, without error.
@@ -653,7 +919,8 @@ helper container (`--kill-via docker-helper`).
 - **Heal anchor**: the observed partition expiry, else fire anchor + 120 s
   (§5).
 - **Hosted target**: a managed provider endpoint the project does not
-  operate (`target.hosted`, §6).
+  operate (`target.hosted`, §6); a hosted run is measured under
+  SPEC-HOSTED.md.
 - **ITL**: inter-token latency, the name the report gives the gaps between
   content events where the §10 check shows one token per event; [Token
   counts and the ITL label](#token-counts-and-the-itl-label) gives the
@@ -664,26 +931,44 @@ helper container (`--kill-via docker-helper`).
   measured single-replica capacity (§1, §10).
 - **Leading window**: a detector window [t, t + R) whose value is assigned
   to its start t.
+- **Ledger**: the admission ledger, the hash-chained JSONL file in which
+  every inference request to a hosted route is reserved before it is sent
+  and settled afterwards, under the caps on its first line.
+- **Manifest**: `manifest.json`, the hashes and records of one hosted run
+  (SPEC-HOSTED §9).
 - **Node-loss-representative**: the label a black-hole run keeps when both
   §1 runtime assertions (G3, G4) pass.
+- **Operator file**: the file naming the provider, account tier and client
+  host of a hosted run, and the documentation records read and hashed
+  before it.
 - **Outage**: under the process-kill variant, the kill to the first served
   inference (replica-ready); the variant's primary endpoint (§7).
 - **p99**: the 99th percentile.
 - **Partition-heal recovery**: under the black-hole variant, the first held
   entry at or after the heal anchor, measured from the fire anchor; never
   reported as node-loss recovery (§5).
+- **Pilot**: the descriptive comparison of two hosted endpoints on one
+  task over six paired sessions that SPEC-HOSTED amendment HA2 defines and
+  `cmd/percentes-pilot` runs.
 - **Pre-armed**: the injector knows its fire and expiry times before it
   fires, so nothing depends on reaching the victim afterwards (§1).
+- **Probe**: the pre-run request from the client host that records a
+  hosted endpoint's response shape and gates the start (SPEC-HOSTED §5).
 - **Process kill**: the §1 variant that sends SIGKILL from the host to the
   vLLM API server process of one container, which the runtime's restart
   policy starts again in place.
+- **Replay**: rendering a hosted run's report pair again from its
+  manifest, attempts file and configuration, and comparing it byte for
+  byte with the pair the manifest names.
 - **Report pair**: the JSON and text files a binary writes: `report.json`
-  and `report.txt` from `run.Artifacts`, `campaign.json` and `campaign.txt`
-  from `campaign.Report`, and `calibration.json` and `calibration.txt` from
-  `calibrate.Output`.
+  and `report.txt` from `run.Artifacts` or from a hosted run's records,
+  `campaign.json` and `campaign.txt` from `campaign.Report`, and
+  `calibration.json` and `calibration.txt` from `calibrate.Output`.
 - **Run-valid**: every applicable run-failing gate passed and was
   observed, and the fault-source and injection-timing checks passed.
 - **Send skew**: actual dispatch time minus t_i (§2).
+- **Shaped mock**: the mock built with `mock.NewShaped`, which answers in
+  a hosted provider's stream form for the tests of the hosted code.
 - **SSE**: server-sent events, the streaming format of the
   OpenAI-compatible API.
 - **Survivor cohort**: fault-window requests served by the one baseline
