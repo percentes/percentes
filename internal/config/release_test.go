@@ -91,6 +91,11 @@ func TestReleaseRefusals(t *testing.T) {
 		{"params", func(c *Config) { c.Target.Params = &Params{MaxTokens: 512} }, "params and not_applied are set on pilot.targets entries only"},
 		{"no adapter", func(c *Config) { c.Target.Adapter = "" }, "target.adapter: must be one of"},
 		{"unknown adapter", func(c *Config) { c.Target.Adapter = "responses" }, "target.adapter: must be one of"},
+		{"response shape on messages", func(c *Config) {
+			c.Target.Adapter = AdapterMessages
+			c.Target.Body = strings.Replace(c.Target.Body, `"max_completion_tokens"`, `"max_tokens"`, 1)
+			c.Target.ResponseShape = &ResponseShape{Reasoning: []string{"thinking"}}
+		}, "target.response_shape: must be absent for the \"messages\" adapter"},
 		{"no body", func(c *Config) { c.Target.Body = "" }, "target.body: required under the \"release\" profile"},
 		{"body without slot", func(c *Config) { c.Target.Body = `{"stream":true,"max_completion_tokens":512}` }, "target.body: \"{{case}}\" must appear once"},
 		{"body ceiling off the shape", func(c *Config) { c.Release.Shape.CeilingTokens = 1024 }, "\"max_completion_tokens\" must be release.shape.ceiling_tokens (1024), got 512"},

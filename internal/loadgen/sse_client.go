@@ -86,21 +86,31 @@ func (g *gen) execute(r *Request) {
 		frames = &frameRecorder{r: resp.Body, now: g.now, limit: frameLimit}
 		body = frames
 	}
+	messages := g.cfg.Target.Adapter == config.AdapterMessages
 	var content, reasoning strings.Builder
 	var malformed, sawDone bool
 	var prevTokNs int64
 	_, dropped, err := sse.Events(body, eventLimit, func(payload []byte) bool {
-		// [DONE] may carry trailing whitespace.
-		if string(bytes.TrimSpace(payload)) == "[DONE]" {
-			sawDone = true
-			return true
-		}
 		// A chunk counts as a token only when its decoded delta carries
 		// nonempty content; an undecodable payload is a malformed
 		// stream (§3).
-		c, ok := parseChunk(payload, shape)
+		var c chunk
+		var ok bool
+		switch {
+		case messages:
+			c, ok = parseMessagesEvent(payload)
+		case string(bytes.TrimSpace(payload)) == "[DONE]":
+			// [DONE] may carry trailing whitespace.
+			c, ok = chunk{end: true}, true
+		default:
+			c, ok = parseChunk(payload, shape)
+		}
 		if !ok {
 			malformed = true
+			return true
+		}
+		if c.end {
+			sawDone = true
 			return true
 		}
 		g.recordChunk(r, &c, secrets)
@@ -129,14 +139,14 @@ func (g *gen) execute(r *Request) {
 		g.classifyStreamErr(r, err)
 	case malformed || dropped > 0 || !sawDone:
 		// An undecodable or oversized event, or a stream that ended before
-		// [DONE]: malformed stream (§3).
+		// its terminator: malformed stream (§3).
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, g.now()
 	case r.StreamError != "" && g.cfg.Target.Hosted:
 		// An in-band error object anywhere in a hosted stream.
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrMalformedStream, g.now()
 	case r.FirstTokNs == 0:
-		// [DONE] with no prior content event: an empty stream is errored,
-		// never a completion (§3).
+		// A terminator with no prior content event: an empty stream is
+		// errored, never a completion (§3).
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrEmptyStream, g.now()
 	default:
 		r.Outcome, r.DoneNs = OutcomeCompleted, g.now()
@@ -145,7 +155,7 @@ func (g *gen) execute(r *Request) {
 		}
 	}
 	// The transport reuses the connection only once the body reads to
-	// its end, which [DONE] precedes.
+	// its end, which the terminator precedes.
 	if sawDone && err == nil {
 		io.Copy(io.Discard, io.LimitReader(body, drainLimit)) //nolint:errcheck
 	}
@@ -228,11 +238,17 @@ func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	if !c.known {
 		r.UnknownEvents++
 	}
-	if c.usage != nil {
+	switch {
+	case c.usage != nil && c.mergeUsage:
+		r.Usage = mergeUsage(r.Usage, c.usage)
+	case c.usage != nil:
 		r.Usage = c.usage
 		if n, ok := completionTokens(c.usage); ok {
 			r.CompletionTokens, r.UsageSeen = n, true
 		}
+	}
+	if c.outputSeen {
+		r.CompletionTokens, r.UsageSeen = c.outputTokens, true
 	}
 	if c.finish != "" {
 		r.FinishReason = c.finish
@@ -260,14 +276,24 @@ func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	}
 }
 
-// chunk is one stream event read through a target's response shape.
+// chunk is one stream event read through a target's response shape, or
+// through the Messages adapter.
 type chunk struct {
 	content, reasoning string
 	finish, model      string
 	fingerprint        string
 	usage, err         json.RawMessage
-	// known: the event carried choices, a usage object or an error.
+	// known: the event carried choices, a usage object or an error, or
+	// is a Messages event type the adapter reads.
 	known bool
+	// end: the stream's terminator.
+	end bool
+	// mergeUsage: usage is a Messages usage object, laid over the
+	// request's earlier one. outputTokens is a message_delta's
+	// output_tokens, when outputSeen.
+	mergeUsage   bool
+	outputTokens int
+	outputSeen   bool
 }
 
 // parseChunk decodes one chat-completion chunk. ok is false when the
@@ -320,6 +346,103 @@ func parseChunk(payload []byte, sh config.ResponseShape) (c chunk, ok bool) {
 		}
 	}
 	return c, true
+}
+
+// parseMessagesEvent decodes one Messages stream event by its data's
+// type: text_delta text is content, thinking_delta text is reasoning,
+// message_start carries the model and the first usage object,
+// message_delta the stop reason and the cumulative usage, an error event
+// its error object, and message_stop ends the stream. Another event or
+// delta type is decoded and counted unknown. ok is false when the payload
+// is not a JSON object with a string type, or when a field the adapter
+// reads has the wrong type. Field names match exactly.
+func parseMessagesEvent(payload []byte) (c chunk, ok bool) {
+	var root map[string]json.RawMessage
+	var typ string
+	if json.Unmarshal(payload, &root) != nil || !stringField(root["type"], &typ) || typ == "" {
+		return c, false
+	}
+	c.known = true
+	switch typ {
+	case "message_start":
+		m, ok := object(root["message"])
+		if !ok || m == nil || !stringField(m["model"], &c.model) {
+			return c, false
+		}
+		c.usage, c.mergeUsage = lookup(m, "usage"), true
+		_, ok = object(c.usage)
+		return c, ok
+	case "content_block_start":
+		b, ok := object(root["content_block"])
+		if !ok || b == nil {
+			return c, false
+		}
+		return c, stringField(b["text"], &c.content) && stringField(b["thinking"], &c.reasoning)
+	case "content_block_delta":
+		d, ok := object(root["delta"])
+		var dt string
+		if !ok || d == nil || !stringField(d["type"], &dt) {
+			return c, false
+		}
+		switch dt {
+		case "text_delta":
+			return c, stringField(d["text"], &c.content)
+		case "thinking_delta":
+			return c, stringField(d["thinking"], &c.reasoning)
+		case "signature_delta":
+		default:
+			c.known = false
+		}
+	case "message_delta":
+		d, ok := object(root["delta"])
+		if !ok || !stringField(d["stop_reason"], &c.finish) {
+			return c, false
+		}
+		c.usage, c.mergeUsage = lookup(root, "usage"), true
+		u, ok := object(c.usage)
+		if !ok {
+			return c, false
+		}
+		if v := lookup(u, "output_tokens"); v != nil {
+			if json.Unmarshal(v, &c.outputTokens) != nil {
+				return c, false
+			}
+			c.outputSeen = true
+		}
+	case "error":
+		if c.err = lookup(root, "error"); c.err == nil {
+			c.err = payload
+		}
+	case "message_stop":
+		c.end = true
+	case "content_block_stop", "ping":
+	default:
+		c.known = false
+	}
+	return c, true
+}
+
+// object decodes a JSON object or null (nil map); ok is false for any
+// other type.
+func object(raw json.RawMessage) (m map[string]json.RawMessage, ok bool) {
+	return m, json.Unmarshal(orNull(raw), &m) == nil
+}
+
+// mergeUsage lays next's non-null fields over prev; both are JSON objects
+// or nil.
+func mergeUsage(prev, next json.RawMessage) json.RawMessage {
+	m, _ := object(prev)
+	n, _ := object(next)
+	if m == nil {
+		m = map[string]json.RawMessage{}
+	}
+	for k, v := range n {
+		if string(v) != "null" {
+			m[k] = v
+		}
+	}
+	b, _ := json.Marshal(m)
+	return b
 }
 
 // lookup returns the non-null value at path, or nil.
@@ -467,6 +590,9 @@ func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error
 	if g.apiKey != "" {
 		req.Header.Set(g.cfg.Target.KeyHeader(g.apiKey))
 	}
+	if g.cfg.Target.Adapter == config.AdapterMessages {
+		req.Header.Set("anthropic-version", config.MessagesVersion)
+	}
 	// A POST with no GetBody is never replayed by the transport.
 	req.GetBody = nil
 	return req, nil
@@ -475,7 +601,7 @@ func (g *gen) newRequest(ctx context.Context, body string) (*http.Request, error
 // Ceiling on one scanned line and on the data fields assembled into one event.
 const eventLimit = 1 << 20
 
-// Bytes read after [DONE] before the body is closed unread.
+// Bytes read after the terminator before the body is closed unread.
 const drainLimit = 4096
 
 // Bytes of a 200 body kept as frames per request.
@@ -532,7 +658,8 @@ func (g *gen) classifyStreamErr(r *Request, err error) {
 	case isReset(err):
 		r.Outcome, r.ErrClass = OutcomeErrored, ErrReset
 	default:
-		// EOF or any framing error before [DONE]: malformed stream (§3).
+		// EOF or any framing error before the terminator: malformed
+		// stream (§3).
 		r.Outcome, r.ErrClass = OutcomeErrored, ErrMalformedStream
 	}
 }

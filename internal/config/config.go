@@ -414,7 +414,8 @@ type Target struct {
 	// name prefix. Empty records none.
 	ResponseHeaders []string `yaml:"response_headers,omitempty" json:"response_headers,omitempty"`
 	// ResponseShape names the stream-chunk fields read per request; nil
-	// reads the OpenAI chat-completion chunk with no reasoning field.
+	// reads the OpenAI chat-completion chunk with no reasoning field. A
+	// Messages target has none.
 	ResponseShape *ResponseShape `yaml:"response_shape,omitempty" json:"response_shape,omitempty"`
 
 	// The fields below are set on pilot.targets entries and on the

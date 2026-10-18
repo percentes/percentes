@@ -76,15 +76,18 @@ type Request struct {
 	Warmup bool `json:"warmup,omitempty"`
 	Late   bool `json:"late,omitempty"`
 	// CompletionTokens is the completion token count from a usage object
-	// in the stream; UsageSeen says one arrived.
+	// in the stream (a Messages message_delta's output_tokens); UsageSeen
+	// says one arrived.
 	CompletionTokens int    `json:"completion_tokens,omitempty"`
 	UsageSeen        bool   `json:"usage_seen,omitempty"`
 	Replica          string `json:"replica,omitempty"`
 	// Usage is the last usage object the stream carried, at any path
-	// target.response_shape names.
+	// target.response_shape names; on a Messages target, message_start's
+	// usage with each later usage object's non-null fields laid over it.
 	Usage json.RawMessage `json:"usage,omitempty"`
-	// FinishReason is the last finish_reason of the first choice;
-	// ReportedModel is the first model id a chunk reported.
+	// FinishReason is the last finish_reason of the first choice, or the
+	// last Messages stop_reason; ReportedModel is the first model id a
+	// chunk reported.
 	FinishReason  string `json:"finish_reason,omitempty"`
 	ReportedModel string `json:"reported_model,omitempty"`
 	// SystemFingerprint is the first top-level system_fingerprint a chunk
@@ -103,7 +106,7 @@ type Request struct {
 	ReasoningChunks  int   `json:"reasoning_chunks,omitempty"`
 	FirstReasoningNs int64 `json:"first_reasoning_ns,omitempty"`
 	// UnknownEvents counts decodable events carrying no choices, usage
-	// or error.
+	// or error, and Messages events of a type the adapter does not read.
 	UnknownEvents int `json:"unknown_events,omitempty"`
 	// Content and Reasoning are the visible answer and the reasoning text,
 	// kept for hosted targets only; never in JSON.

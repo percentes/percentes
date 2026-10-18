@@ -60,6 +60,10 @@ const (
 
 var adapters = []string{AdapterChatCompletions, AdapterMessages}
 
+// MessagesVersion is the anthropic-version header value every Messages
+// request carries (SPEC-HOSTED HA3 point 3).
+const MessagesVersion = "2023-06-01"
+
 // Limit is one recorded limit: a value the provider publishes, the
 // account console or a limits API shows, or the operator set.
 type Limit struct {
@@ -299,6 +303,9 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	}
 	validateResponseHeaders(v, field, t)
 	validateResponseShape(v, field, t)
+	if t.Adapter == AdapterMessages && t.ResponseShape != nil {
+		v.errf("%s.response_shape: must be absent for the %q adapter, which reads the Messages event fields", field, AdapterMessages)
+	}
 	if t.Probe != nil {
 		validateTargetProbe(v, field+".probe", t.Probe)
 	}
