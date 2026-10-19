@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -497,9 +498,11 @@ func TestPublishCheck(t *testing.T) {
 // On a route with a confidential limit, publish-check refuses, exiting 2
 // and printing none of them, a consented verbatim reply quoting the
 // notice's account, its recipient and the limit's value as configured,
-// and one quoting the value the refresh command read at the window
-// close; withheldValues holds the configured value and each value read
-// once, and nothing for a route with no confidential limit.
+// also split by format characters and with a decimal comma, and one
+// quoting the value the refresh command read at the window close; it
+// accepts a plain reply and writes it on the page; withheldValues holds the configured value and
+// each value read once, and nothing for a route with no confidential
+// limit.
 func TestPublishCheckWithheld(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	b, err := os.ReadFile(routeConfigFile(t, "groq", e.url(), "10"))
@@ -559,6 +562,12 @@ func TestPublishCheckWithheld(t *testing.T) {
 				"route groq: responses[0].text: holds the value of route groq's confidential tokens_per_minute limit\n"},
 		{"value read at the window close", "Raised to 320011 tokens a minute.\n",
 			"route groq: responses[0].text: holds the value of route groq's confidential tokens_per_minute limit\n"},
+		{"format characters and a decimal comma", "Account org\u200b-1 (sent to Groq\u00adsupport) checked: the limit is 250013,5 tpm.\n",
+			"route groq: responses[0].text: holds route groq's notice.account; route groq: responses[0].text: holds route groq's notice.recipient; " +
+				"route groq: responses[0].text: holds the value of route groq's confidential tokens_per_minute limit\n"},
+		{"value read at the window close with dot grouping", "Raised to 320.011,0 tokens a\u2060minute.\n",
+			"route groq: responses[0].text: holds the value of route groq's confidential tokens_per_minute limit\n"},
+		{"plain reply", "Thank you. The limits page stays as it is.\n", ""},
 	} {
 		record := publication(t, groq.out, pages, pack, nil)
 		dir := filepath.Dir(record)
@@ -579,12 +588,22 @@ func TestPublishCheckWithheld(t *testing.T) {
 		writeFile(t, dir, "publication.json", raw)
 		var code int
 		text := stdoutOf(t, func() {
-			code, err = publishCheckCmd(append(base[:len(base):len(base)], "--record", record))
+			code, err = publishCheckCmd(append(base[:len(base):len(base)], "--record", record, "--write-page"))
 		})
+		md, mdErr := os.ReadFile(filepath.Join(pages, publicationPage))
+		if c.want == "" {
+			if err != nil || code != exitOK || !strings.Contains(string(md), c.reply) {
+				t.Errorf("%s: exit %d: %v:\n%s\npage %v:\n%s", c.name, code, err, text, mdErr, md)
+			}
+			continue
+		}
+		if !errors.Is(mdErr, os.ErrNotExist) {
+			t.Errorf("%s: publication page written: %v", c.name, mdErr)
+		}
 		if err != nil || code != exitAdverse || text != "NOT READY to publish: evidence: publication refused: "+c.want {
 			t.Errorf("%s: exit %d: %v:\n%s", c.name, code, err, text)
 		}
-		for _, v := range []string{"org-1", "250,013.5", "250013.5", "320011"} {
+		for _, v := range []string{"org-1", "250,013.5", "250013.5", "320011", "250013,5", "320.011"} {
 			if strings.Contains(text, v) {
 				t.Errorf("%s: the refusal carries %q", c.name, v)
 			}

@@ -345,12 +345,14 @@ func TestPublicationRefuses(t *testing.T) {
 }
 
 // The check refuses a text the page prints that holds a notice's account
-// or recipient, in any letter case or spacing, or a withheld value as a
-// number of its own, naming the field and neither the identifier nor the
-// value: a consented reply quoting its account, its recipient and a
-// limit, a correction holding the account, and a disclosure's provider
-// holding another route's account. A longer number holding a value's
-// digits passes.
+// or recipient, in any letter case and with or without white space, or a
+// withheld value as a number of its own, naming the field and neither the
+// identifier nor the value: a consented reply quoting its account, its
+// recipient and a limit, a correction holding the account, and a
+// disclosure's provider holding another route's account, also with format
+// characters inside them or a decimal comma in the value. A longer number
+// holding a value's digits passes, and so does another value written with
+// a decimal comma.
 func TestPublicationWithheld(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -372,6 +374,16 @@ func TestPublicationWithheld(t *testing.T) {
 		{"disclosure provider holding another route's account", func(_ *testing.T, f *publicationFixture) {
 			f.p.Disclosures[0].Provider = "AWS (bedrock-account)"
 		}, []string{"disclosures[0].provider: holds route bedrock's notice.account"}},
+		{"reply with format characters inside the account, the recipient and a limit", func(t *testing.T, f *publicationFixture) {
+			f.p.Routes[0].Responses[0].Text = put(t, f.dir, "responses/groq.txt", "account groq\u200b-acc\u2060ount (sent to Groq\u00adsupport); tpm 250\ufeff013,5")
+		}, []string{"route groq: responses[0].text: holds route groq's notice.account", "route groq: responses[0].text: holds route groq's notice.recipient",
+			"route groq: responses[0].text: holds the value of route groq's confidential tokens_per_minute limit"}},
+		{"correction with a decimal comma and dot grouping", func(_ *testing.T, f *publicationFixture) {
+			f.p.Routes[1].Responses[0].Corrections = []string{"tpm corrected to 250.013,5"}
+		}, []string{"route azure: responses[0].corrections[0]: holds the value of route groq's confidential tokens_per_minute limit"}},
+		{"disclosure provider with a soft hyphen in another route's account", func(_ *testing.T, f *publicationFixture) {
+			f.p.Disclosures[0].Provider = "AWS (Bedrock\u00ad-Account)"
+		}, []string{"disclosures[0].provider: holds route bedrock's notice.account"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newPublicationFixture(t)
@@ -383,7 +395,7 @@ func TestPublicationWithheld(t *testing.T) {
 			if want := "evidence: publication refused: " + strings.Join(c.want, "; "); err.Error() != want {
 				t.Errorf("got %v\nwant %s", err, want)
 			}
-			for _, s := range []string{"groq-account", "support", "Azure-Account", "bedrock-account", "9999", "250,013.5", "250013.5"} {
+			for _, s := range []string{"groq-account", "support", "Azure-Account", "bedrock-account", "9999", "250,013.5", "250013.5", "250013,5", "013,5"} {
 				if strings.Contains(err.Error(), s) {
 					t.Errorf("the refusal carries %q", s)
 				}
@@ -393,9 +405,9 @@ func TestPublicationWithheld(t *testing.T) {
 	f := newPublicationFixture(t)
 	f.s.Withheld = append(f.s.Withheld, WithheldValue{Route: "groq", Dimension: "requests_per_minute", Value: 9999})
 	f.p.Routes[0].Responses[0].Text = put(t, f.dir, "responses/groq.txt", "batch 99990 and 2502013.5 accepted for the groq route")
-	f.p.Routes[1].Responses[0].Corrections = []string{"9999.5 tokens, version 1.9999"}
+	f.p.Routes[1].Responses[0].Corrections = []string{"9999.5 tokens, version 1.9999", "9.999,5 tokens from groq\u00a0route support"}
 	if err := f.check(t); err != nil {
-		t.Errorf("longer numbers and the route name: %v", err)
+		t.Errorf("longer numbers, another decimal comma value and the route name: %v", err)
 	}
 }
 

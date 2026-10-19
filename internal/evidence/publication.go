@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/percentes/percentes/internal/config"
@@ -187,8 +188,10 @@ func LoadPublication(path string) (*Publication, error) {
 // and each disclosure's provider one line, as Page prints them. No text
 // Page prints from the record (a verbatim response's text, a correction
 // or a disclosure's provider) may hold any notice's account or recipient,
-// in any letter case or spacing, or a value in s.Withheld written in a
-// form config.ValueForms gives as a number of its own (config.Carries).
+// in any letter case and with or without white space, or a value in
+// s.Withheld written in a form config.ValueForms gives as a number of its
+// own (config.Carries); both are matched once the text drops its format
+// characters (Unicode category Cf) and folds its white space.
 // Otherwise it returns an error naming every missing item and every
 // mismatch, and neither such an identifier nor such a value.
 func (p *Publication) Check(s PublicationState) error {
@@ -213,24 +216,24 @@ func (p *Publication) Check(s PublicationState) error {
 			fail("%s: one line required", field)
 		}
 	}
-	type identifier struct{ name, folded string }
+	type identifier struct{ name, bare string }
 	var ids []identifier
 	for _, r := range p.Routes {
 		if n := r.Notice; n != nil {
-			ids = append(ids, identifier{"route " + r.Route + "'s notice.account", fold(n.Account)}, identifier{"route " + r.Route + "'s notice.recipient", fold(n.Recipient)})
+			ids = append(ids, identifier{"route " + r.Route + "'s notice.account", bare(n.Account)}, identifier{"route " + r.Route + "'s notice.recipient", bare(n.Recipient)})
 		}
 	}
 	printed := func(field, v string) {
 		var held []string
-		folded := fold(v)
+		folded, b := fold(v), bare(v)
 		for _, id := range ids {
-			if h := "holds " + id.name; id.folded != "" && strings.Contains(folded, id.folded) && !slices.Contains(held, h) {
+			if h := "holds " + id.name; id.bare != "" && strings.Contains(b, id.bare) && !slices.Contains(held, h) {
 				held = append(held, h)
 			}
 		}
 		for _, w := range s.Withheld {
 			h := fmt.Sprintf("holds the value of route %s's confidential %s limit", w.Route, w.Dimension)
-			if _, ok := config.Carries(v, config.ValueForms(w.Value)); ok && !slices.Contains(held, h) {
+			if _, ok := config.Carries(folded, config.ValueForms(w.Value)); ok && !slices.Contains(held, h) {
 				held = append(held, h)
 			}
 		}
@@ -538,9 +541,22 @@ func workingDays(from, to time.Time, nonWorking map[string]bool) int {
 	return n
 }
 
-// fold is s in lower case with each run of white space one space.
+// fold is s in lower case without its format characters (Unicode
+// category Cf, such as a zero-width space or a soft hyphen) and with each
+// run of white space one space.
 func fold(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// bare is fold(s) without white space.
+func bare(s string) string {
+	return strings.ReplaceAll(fold(s), " ", "")
 }
 
 func sortedKeys(m map[string][]byte) []string {
