@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -100,15 +102,17 @@ func publication(t *testing.T, out, pages string, edit func(*evidence.Publicatio
 }
 
 // publish-check passes a complete record and prints the providers told
-// before the notices; pages runs with no record and no window-close
-// record; and the check refuses, exiting 2, a paged route with no
-// window-close record, a record that lacks the naming permission the
-// configuration requires, misses responses, has an open window, misses a
-// later cell's manifest or window-close record, or a page or window-close
-// record edited after the record named it. It exits 1 on a window-close
-// record of a refresh that failed, with an edited retained copy, or taken
-// before the route's last cell ended, and with no record, an absent one,
-// no schedule, or a schedule other than the one the cells ran under.
+// before the notices; pack writes groq's page files and manifests with
+// their inventory, the same bytes twice, and refuses an unknown route;
+// pages runs with no record and no window-close record; and the check
+// refuses, exiting 2, a paged route with no window-close record, a
+// record that lacks the naming permission the configuration requires,
+// misses responses, has an open window, misses a later cell's manifest
+// or window-close record, or a page or window-close record edited after
+// the record named it. It exits 1 on a window-close record of a refresh
+// that failed, with an edited retained copy, or taken before the route's
+// last cell ended, and with no record, an absent one, no schedule, or a
+// schedule other than the one the cells ran under.
 func TestPublishCheck(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	path := routeConfigFile(t, "groq", e.url(), "10")
@@ -181,6 +185,55 @@ func TestPublishCheck(t *testing.T) {
 	if code != exitOK || !strings.Contains(text, "publication record complete: 2 manifests, 4 pages, 1 routes\n") ||
 		!strings.HasSuffix(text, "told of the measurement before the notices:\n  Groq, by email, 2026-08-20\n") {
 		t.Fatalf("complete record: exit %d:\n%s", code, text)
+	}
+	release := base[: len(base)-2 : len(base)-2]
+	var packs [2][]byte
+	for i := range packs {
+		p := filepath.Join(t.TempDir(), "groq.tar")
+		text := stdoutOf(t, func() { code = dispatch(append([]string{"pack", "--route", "groq", "--pack", p}, release...)) })
+		if code != exitOK || !strings.HasPrefix(text, "pack written: "+p+"; route groq, sha256 ") {
+			t.Fatalf("pack: exit %d:\n%s", code, text)
+		}
+		if packs[i], err = os.ReadFile(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bytes.Equal(packs[0], packs[1]) {
+		t.Fatal("two builds of groq's pack differ")
+	}
+	packed, err := evidence.ReadPack(packs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inv evidence.PackInventory
+	if err := json.Unmarshal(packed[evidence.PackInventoryFile], &inv); err != nil {
+		t.Fatal(err)
+	}
+	var inventoried []string
+	for _, f := range inv.Files {
+		inventoried = append(inventoried, f.Path)
+		dir, rel, _ := strings.Cut(f.Path, "/")
+		root := map[string]string{"pages": pages, "out": groq.out}[dir]
+		if root == "" || *published(t, root, rel) != (evidence.PublishedFile{Path: rel, SHA256: f.SHA256}) || sha(string(packed[f.Path])) != f.SHA256 {
+			t.Errorf("inventory entry %+v", f)
+		}
+	}
+	wantPacked := []string{"out/groq/" + cellLabel(groq.runs[0]) + "/manifest.json", "out/groq/" + cellLabel(groq.runs[1]) + "/manifest.json", "pages/routes/groq.json", "pages/routes/groq.txt"}
+	slices.Sort(wantPacked)
+	if inv.Route != "groq" || !slices.Equal(inventoried, wantPacked) || len(packed) != len(wantPacked)+1 {
+		t.Errorf("pack route %s, inventory %q, %d files; want %q and the inventory", inv.Route, inventoried, len(packed), wantPacked)
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{append([]string{"--pack", filepath.Join(t.TempDir(), "x.tar")}, release...), "pack: --route is required"},
+		{append([]string{"--route", "groq"}, release...), "pack: --pack is required"},
+		{append([]string{"--route", "baseten", "--pack", filepath.Join(t.TempDir(), "x.tar")}, release...), "pack: --route baseten is not the route of any --config"},
+	} {
+		if code, err := packCmd(c.args); code != exitError || err == nil || err.Error() != c.want {
+			t.Errorf("%q: exit %d: %v, want %q", c.args, code, err, c.want)
+		}
 	}
 	for _, c := range []struct {
 		name string

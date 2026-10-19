@@ -42,9 +42,10 @@
 // the window, pages writes the index page and each route's page from the
 // cells' records, which must carry the SHA-256 of the schedule file
 // given and, across the hosts of a model, one ceiling choice and one set
-// of probe records, and publish-check checks
-// the release publication record against the cells, the pages and the
-// files it names.
+// of probe records, pack writes a route's evidence pack, its page files
+// and cell manifests with an inventory of their SHA-256 hashes, and
+// publish-check checks the release publication record against the
+// cells, the pages and the files it names.
 //
 // Before the freeze, rehearse runs the acceptance run: one cell of each
 // of six mock routes, served on loopback by this process in the
@@ -72,6 +73,8 @@
 //	percentes-release dispatch --out DIR
 //	percentes-release pages --out DIR --frames DIR --config FILE ...
 //	    --schedule FILE --pages DIR [--release-key FILE]
+//	percentes-release pack --out DIR --frames DIR --config FILE ...
+//	    --schedule FILE --route NAME --pack FILE [--release-key FILE]
 //	percentes-release publish-check --out DIR --frames DIR
 //	    --config FILE ... --schedule FILE --pages DIR --record FILE
 //	    [--release-key FILE]
@@ -130,6 +133,7 @@ commands:
   run             run one route's cells over the committed window
   dispatch        sum every cell's dispatch series under --out
   pages           write the index page and each route's page
+  pack            write a route's evidence pack
   publish-check   check the release publication record
   rehearse        run six mock routes' cells up the ladder at their offsets
   check-cpu       whether this build measures host CPU
@@ -169,6 +173,8 @@ func dispatch(args []string) int {
 		code, err = dispatchCmd(args[1:])
 	case "pages":
 		code, err = pagesCmd(args[1:])
+	case "pack":
+		code, err = packCmd(args[1:])
 	case "publish-check":
 		code, err = publishCheckCmd(args[1:])
 	case "rehearse":
