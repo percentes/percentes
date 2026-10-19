@@ -362,7 +362,8 @@ func TestRestartRefusesOtherSchedule(t *testing.T) {
 // the record. A refresh fault writes no record and returns an error.
 // pages refuses the record once a retained copy is edited, once a record
 // is dropped from its list, and once a cell has run after its refresh,
-// an interrupted cell with no end_utc by its dispatch series.
+// an interrupted cell with no end_utc by its dispatch series or by the
+// modification time of a truncated status record.
 func TestWindowCloseRecord(t *testing.T) {
 	enoughOpenFiles(t)
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
@@ -518,6 +519,29 @@ func TestWindowCloseRecord(t *testing.T) {
 		", not after the route's last cell ended at " + through.Format(time.RFC3339Nano)
 	if code, err := pagesCmd(args); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("an interrupted cell with no end_utc whose dispatch series runs past the record: exit %d: %v; want %q", code, err, want)
+	}
+	through = w.Refresh.StartUTC.Add(-30 * time.Second)
+	if err := replaceJSON(series, &dispatchSeries{Run: gone, StartUTC: rec.StartUTC, Counts: []int{1}, ThroughUTC: &through}); err != nil {
+		t.Fatal(err)
+	}
+	status := filepath.Join(r.cellDir(gone), evidence.StatusStartFile)
+	if err := os.WriteFile(status, []byte(`{"start_utc":"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(status, through, through); err != nil {
+		t.Fatal(err)
+	}
+	if code, err := pagesCmd(args); code != exitOK || err != nil {
+		t.Fatalf("a truncated status record written before the refresh: exit %d: %v", code, err)
+	}
+	cut := closed.Add(2 * time.Minute)
+	if err := os.Chtimes(status, cut, cut); err != nil {
+		t.Fatal(err)
+	}
+	want = "pages: route groq: evidence: window-close record refused: recorded " + closed.Format(time.RFC3339Nano) +
+		", not after the route's last cell ended at " + cut.Format(time.RFC3339Nano)
+	if code, err := pagesCmd(args); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("a truncated status record written after the record: exit %d: %v; want %q", code, err, want)
 	}
 	if err := os.RemoveAll(r.cellDir(gone)); err != nil {
 		t.Fatal(err)

@@ -340,8 +340,9 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 // end_utc, or for an interrupted cell with none the latest time its
 // records carry: start_utc, the dispatch series (to the end of each
 // second it counts a request in), the clock, status, balance and refresh
-// records, and each attempt's times from epoch_utc. Any other cell with
-// no end_utc ends at its start_utc.
+// records (a record that does not decode gives its file's modification
+// time), and each attempt's times from epoch_utc. Any other cell with no
+// end_utc ends at its start_utc.
 func cellEnd(dir string, rec *cellRecord) (time.Time, error) {
 	if rec.EndUTC != nil {
 		return *rec.EndUTC, nil
@@ -394,8 +395,13 @@ func cellEnd(dir string, rec *cellRecord) (time.Time, error) {
 			StartUTC time.Time `json:"start_utc"`
 			EndUTC   time.Time `json:"end_utc"`
 		}
-		if err := json.Unmarshal(b, &r); err != nil {
-			return fail(name, err)
+		if json.Unmarshal(b, &r) != nil {
+			fi, err := os.Stat(filepath.Join(dir, name))
+			if err != nil {
+				return fail(name, err)
+			}
+			later(fi.ModTime().UTC())
+			continue
 		}
 		later(r.StartUTC)
 		later(r.EndUTC)

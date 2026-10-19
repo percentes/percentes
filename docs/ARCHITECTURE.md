@@ -1549,8 +1549,9 @@ the latest end of any of the route's attempts (each `cell.json`'s
 `end_utc`; for an interrupted cell with none, the latest time its
 records carry: `start_utc`, the dispatch series to the end of each second
 it counts a request in, the clock, status, balance and refresh records
-and each attempt's times from `epoch_utc`; for any other cell with none,
-its `start_utc`); the refresh exited 0
+(one that does not decode, as when a crash cut it short, gives the time
+its file was last written) and each attempt's times from `epoch_utc`;
+for any other cell with none, its `start_utc`); the refresh exited 0
 and its published limits are the ones its output gives, read on a route
 with a confidential limit from the refresh record as run kept beside the
 copies; the copies in `window-close/<route>/<UTC time>/` under
