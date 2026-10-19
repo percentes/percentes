@@ -1060,6 +1060,32 @@ func TestExposedHeaders(t *testing.T) {
 	}
 }
 
+// A limits body kept in clear, as text or base64, is exposed unless the
+// target keeps it in clear: target.probe.limits_url is set and
+// target.probe.limits_retained is not. A stand-in is not exposed.
+func TestExposedLimitsBody(t *testing.T) {
+	text := `{"tokens_per_minute": 250000}`
+	read := "https://api.example.test/limits"
+	for _, c := range []struct {
+		name  string
+		probe *config.TargetProbe
+		body  *Body
+		want  string
+	}{
+		{"read in clear", &config.TargetProbe{LimitsURL: read}, &Body{Text: &text}, "[]"},
+		{"no probe block", nil, &Body{Text: &text}, "[limits body]"},
+		{"no limits_url", &config.TargetProbe{AccountLimitStatuses: []int{http.StatusTooManyRequests}}, &Body{Text: &text}, "[limits body]"},
+		{"limits_retained", &config.TargetProbe{LimitsURL: read, LimitsRetained: true}, &Body{Text: &text}, "[limits body]"},
+		{"base64 with no probe block", nil, &Body{Base64: "eyJ0b2tlbnNfcGVyX21pbnV0ZSI6IDI1MDAwMH0="}, "[limits body]"},
+		{"stand-in with no probe block", nil, &Body{Retained: true, SHA256: strings.Repeat("0", 64)}, "[]"},
+	} {
+		rec := &ReleaseRecord{Limits: &Exchange{Body: c.body}}
+		if e := Exposed(&config.Target{Probe: c.probe}, rec); fmt.Sprint(e) != c.want {
+			t.Errorf("%s: exposed %q, want %s", c.name, e, c.want)
+		}
+	}
+}
+
 // A record whose snapshots mark a limit confidential exposes each raw
 // header value other than Retry-After and a request identifier, a kept
 // limits body and the confidential value; one with no such marking

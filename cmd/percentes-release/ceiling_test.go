@@ -515,6 +515,79 @@ func TestCeilingCheckNarrowedHeaders(t *testing.T) {
 	}
 }
 
+// A record taken while the route had no tokens_per_minute limit and kept
+// its limits body in clear is refused, by the route's own run and by
+// another host's, once the frozen configuration adds that limit marked
+// confidential and reads no limits URL or keeps the limits body
+// unpublished: the body's echo of the limit is one that configuration
+// does not keep in clear.
+func TestCeilingCheckLimitsBody(t *testing.T) {
+	endpoint := startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."})
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: u.Scheme, Host: u.Host})
+	rp.FlushInterval = -1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/limits" {
+			fmt.Fprint(w, `{"tokens_per_minute": 250000}`)
+			return
+		}
+		rp.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	endpoint = srv.URL + u.Path
+	f := newCeilingFixture(t, endpoint, testKey)
+	orig, err := os.ReadFile(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const tpm = "    - dimension: tokens_per_minute\n      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256: \"0000000000000000000000000000000000000000000000000000000000000000\"\n"
+	if !bytes.Contains(orig, []byte(tpm)) || !bytes.Contains(orig, []byte(rateLimitHeaders)) {
+		t.Fatal("configuration: the lines this test edits not found")
+	}
+	const narrowed = "  response_headers: [Retry-After]\n"
+	read := "  probe:\n    limits_url: " + srv.URL + "/limits\n    limits_auth_scheme: Bearer\n"
+	taken := bytes.Replace(bytes.Replace(orig, []byte(tpm), nil, 1), []byte(rateLimitHeaders), []byte(narrowed+read), 1)
+	if err := os.WriteFile(f.cfg, taken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, err := ceilingCheckCmd(context.Background(), f.args()); err != nil || code != exitOK {
+		t.Fatalf("ceiling-check: %d, %v", code, err)
+	}
+	path, rec := f.record(t)
+	if b := rec.Limits; b == nil || b.Body == nil || b.Body.Text == nil || *b.Body.Text != `{"tokens_per_minute": 250000}` {
+		t.Fatalf("limits read %+v", rec.Limits)
+	}
+	conf := strings.Replace(strings.Replace(tpm, "marking: public", "marking: confidential", 1), "sha256:", "hmac_sha256:", 1)
+	open := ledgerOpenSHA256(t, f.ledger)
+	const want = "route groq at 512: carries values the route withholds: limits body"
+	for _, c := range []struct{ name, probe string }{
+		{"no probe block", ""},
+		{"no limits_url", "  probe:\n    account_limit_statuses: [429]\n"},
+		{"limits_retained", read + "    limits_retained: true\n"},
+	} {
+		frozen := bytes.Replace(bytes.Replace(orig, []byte(tpm), []byte(conf), 1), []byte(rateLimitHeaders), []byte(narrowed+c.probe), 1)
+		groq, err := config.LoadFile(writeFile(t, t.TempDir(), "groq.yaml", frozen))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		sibling := writeCeiling(t, hostCeiling(groq, 2000, "baseten", 512, true, open))
+		if _, _, err := readCeilingProbes(groq, byRoute(hostConfigs(t, groq)), []string{path, sibling}, 2000, open); err == nil || !strings.HasSuffix(err.Error(), want) {
+			t.Errorf("%s: groq's own run: %v; want %q", c.name, err, want)
+		}
+		cfgs, err := loadReleases([]string{routeConfigFile(t, "baseten", endpoint, "10")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		own := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true, open))
+		if _, _, err := readCeilingProbes(cfgs[0], byRoute([]*config.Config{groq}), []string{own, path}, 2000, open); err == nil || !strings.HasSuffix(err.Error(), want) {
+			t.Errorf("%s: baseten's run: %v; want %q", c.name, err, want)
+		}
+	}
+}
+
 // A check whose responses report a model id other than the requested
 // one, with no target.reported_model recorded, is written and exits
 // adverse with the refusal run gives its record.

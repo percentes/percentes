@@ -1272,7 +1272,10 @@ their outputs and refuses to start on any of these.
   than the `[retained]` stand-in, in a request's headers, in
   `rate_limit_headers` or in the limits read, where the configuration
   does not record that header (`target.response_headers`) or retains it
-  (`target.retained_headers`). A confidential limit's snapshot in a record carries
+  (`target.retained_headers`), and a limits body kept in clear, as text or
+  base64, where the configuration reads no limits URL
+  (`target.probe.limits_url`) or keeps the limits body unpublished
+  (`target.probe.limits_retained`). A confidential limit's snapshot in a record carries
   no value. The runner also refuses the route where its own records report a
   model identifier other than the expected one, worded
   `identifier-not-documented` where no `target.reported_model` is

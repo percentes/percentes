@@ -516,8 +516,9 @@ func Retains(t *config.Target) bool {
 // Exposed lists what rec, a probe of t's route, carries that t withholds:
 // each recorded header with a value other than config.RetainedHeaderValue
 // that t does not keep in clear, because target.response_headers does not
-// name it or target.retained_headers does, then "limits body" when
-// target.probe.limits_retained is set and the limits body is kept, then,
+// name it or target.retained_headers does, then "limits body" when the
+// limits body is kept and t does not keep it in clear, because t reads no
+// target.probe.limits_url or sets target.probe.limits_retained, then,
 // on a target with a confidential limit, "limits body sha256" when the
 // limits body's stand-in carries a SHA-256, "request <i> body" for each
 // request whose body is kept or "request <i> body sha256" whose stand-in
@@ -531,12 +532,14 @@ func Exposed(t *config.Target, rec *ReleaseRecord) []string {
 	inClear := func(name string) bool {
 		return config.HeaderAllowed(t.ResponseHeaders, name) && !t.HeaderRetained(name)
 	}
-	return exposed(t, rec, t.Confidential(), inClear)
+	limitsInClear := t.Probe != nil && t.Probe.LimitsURL != "" && !t.Probe.LimitsRetained
+	return exposed(t, rec, t.Confidential(), inClear, limitsInClear)
 }
 
-// exposed is Exposed with confidential in place of t.Confidential() and
-// inClear in place of its test of a header name.
-func exposed(t *config.Target, rec *ReleaseRecord, confidential bool, inClear func(string) bool) []string {
+// exposed is Exposed with confidential in place of t.Confidential(),
+// inClear in place of its test of a header name and limitsInClear in
+// place of its test of the limits body.
+func exposed(t *config.Target, rec *ReleaseRecord, confidential bool, inClear func(string) bool, limitsInClear bool) []string {
 	var out []string
 	note := func(h map[string][]string) {
 		for name, vs := range h {
@@ -559,7 +562,7 @@ func exposed(t *config.Target, rec *ReleaseRecord, confidential bool, inClear fu
 		note(rec.Limits.Headers)
 	}
 	slices.Sort(out)
-	if b := rec.Limits; t.Probe != nil && t.Probe.LimitsRetained && b != nil && b.Body != nil && (b.Body.Text != nil || b.Body.Base64 != "") {
+	if b := rec.Limits; !limitsInClear && b != nil && b.Body != nil && (b.Body.Text != nil || b.Body.Base64 != "") {
 		out = append(out, "limits body")
 	}
 	if b := rec.Limits; confidential && b != nil && b.Body != nil && b.Body.SHA256 != "" {
@@ -605,7 +608,6 @@ func ExposedByMarking(rec *ReleaseRecord) []string {
 	}
 	marked := slices.ContainsFunc(rec.Snapshots, func(s Snapshot) bool { return s.Marking == config.MarkingConfidential })
 	if marked {
-		t.Probe = &config.TargetProbe{LimitsRetained: true}
 		names := func(h map[string][]string) {
 			for name := range h {
 				if !strings.EqualFold(name, "Retry-After") && !config.RequestIDHeader(name) {
@@ -621,7 +623,7 @@ func ExposedByMarking(rec *ReleaseRecord) []string {
 			names(rec.Limits.Headers)
 		}
 	}
-	return exposed(t, rec, marked, func(name string) bool { return !t.HeaderRetained(name) })
+	return exposed(t, rec, marked, func(name string) bool { return !t.HeaderRetained(name) }, !marked)
 }
 
 // recordedHash names the field holding l's retained copy's hash.
