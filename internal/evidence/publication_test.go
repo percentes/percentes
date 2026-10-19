@@ -119,8 +119,8 @@ func packOf(t *testing.T, route string, s PublicationState) []byte {
 	return b
 }
 
-// check writes the record as JSON, loads it and checks it.
-func (f *publicationFixture) check(t *testing.T) error {
+// load writes the record as JSON and loads it.
+func (f *publicationFixture) load(t *testing.T) *Publication {
 	t.Helper()
 	b, err := json.Marshal(f.p)
 	if err != nil {
@@ -134,7 +134,13 @@ func (f *publicationFixture) check(t *testing.T) error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p.Check(f.s)
+	return p
+}
+
+// check loads the record and checks it.
+func (f *publicationFixture) check(t *testing.T) error {
+	t.Helper()
+	return f.load(t).Check(f.s)
 }
 
 // A complete record passes, and lists the providers told before the
@@ -254,6 +260,12 @@ func TestPublicationRefuses(t *testing.T) {
 			"route azure: responses[0].corrections: required when the response does not publish verbatim"},
 		{"empty correction", func(_ *testing.T, f *publicationFixture) { route(f, "azure").Responses[0].Corrections = []string{""} },
 			"route azure: responses[0].corrections[0]: required"},
+		{"correction of two lines", func(_ *testing.T, f *publicationFixture) {
+			route(f, "azure").Responses[0].Corrections = []string{"model version\n- spelt as documented"}
+		}, "route azure: responses[0].corrections[0]: one line required"},
+		{"verbatim text not UTF-8", func(t *testing.T, f *publicationFixture) {
+			route(f, "groq").Responses[0].Text = put(t, f.dir, "responses/groq.txt", "looks \xffright")
+		}, "route groq: responses[0].text: responses/groq.txt is not UTF-8 text"},
 		{"response before notice", func(_ *testing.T, f *publicationFixture) { route(f, "azure").Responses[0].Received = "2026-10-26" },
 			"route azure: responses[0].received: 2026-10-26, before the notice of 2026-10-27"},
 		{"no permission", func(_ *testing.T, f *publicationFixture) { route(f, "azure").Permission = nil },
@@ -280,6 +292,8 @@ func TestPublicationRefuses(t *testing.T) {
 			"disclosures[0].date: 2026-10-27, not before the first notice of 2026-10-27"},
 		{"disclosure how", func(_ *testing.T, f *publicationFixture) { f.p.Disclosures[0].How = "phone" }, `disclosures[0].how: "phone", want email or form`},
 		{"disclosure recipient", func(_ *testing.T, f *publicationFixture) { f.p.Disclosures[0].Recipient = "" }, "disclosures[0].recipient: required"},
+		{"disclosure provider of two lines", func(_ *testing.T, f *publicationFixture) { f.p.Disclosures[0].Provider = "OpenAI\r\nAWS" },
+			"disclosures[0].provider: one line required"},
 		{"disclosure copy changed", func(t *testing.T, f *publicationFixture) { put(t, f.dir, "told/groq.eml", "edited") },
 			"disclosures[1].copy: told/groq.eml has SHA-256"},
 		{"no prerelease", func(_ *testing.T, f *publicationFixture) { f.p.Prerelease = nil }, "prerelease: required"},
@@ -298,6 +312,75 @@ func TestPublicationRefuses(t *testing.T) {
 				t.Fatalf("got %v, want %q", err, want)
 			}
 		})
+	}
+}
+
+// The publication page holds each route's notice and window-close
+// dates, a consented response's text, another response's date and
+// corrections, the corrections log, the providers told before the
+// notices and the fixed lines, and no recipient, account identifier or
+// file path; a fence outruns the backticks in a verbatim text; and the
+// page is refused when a verbatim text changed after the check.
+func TestPublicationPage(t *testing.T) {
+	f := newPublicationFixture(t)
+	p := f.load(t)
+	if err := p.Check(f.s); err != nil {
+		t.Fatal(err)
+	}
+	pg, err := p.Page()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "# Publication record\n\n## Notices\n\n" +
+		"Each notice carried its route's evidence pack. The factual-accuracy window closed at the end of the date shown, UTC.\n\n" +
+		"| Route | Notice sent | Window closed | Named with written permission |\n| --- | --- | --- | --- |\n" +
+		"| azure | 2026-10-27 | 2026-11-02 | yes |\n| bedrock | 2026-10-27 | 2026-11-02 | no |\n| groq | 2026-10-27 | 2026-11-02 | no |\n\n" +
+		"## Responses\n\n### azure\n\nReceived 2026-10-30; corrections made: 1, in the corrections log.\n\n" +
+		"### bedrock\n\nNo response.\n\n" +
+		"### groq\n\nReceived 2026-10-29; published verbatim with the provider's written consent; no corrections made:\n\n```text\nlooks right\n```\n\n" +
+		"## Corrections log\n\n- azure, response of 2026-10-30: 2026-10-31: model version spelt as documented\n\n" +
+		"## Told of the measurement before the notices\n\n- Groq, by email, 2026-09-15\n- AWS, by form, 2026-10-07\n- OpenAI, by email, 2026-10-07\n\n" +
+		"## Naming, accounts and funding\n\n" +
+		"Each provider is named by its word mark in plain text. A provider whose terms permit naming only with its written permission is named with that permission, which the publication record keeps.\n\n" +
+		"Each route ran through an ordinary paid account with its provider.\n\nNo provider funded the measurement.\n"
+	md := pg.Markdown()
+	if md != want {
+		t.Errorf("markdown:\n%s\nwant:\n%s", md, want)
+	}
+	js, err := json.Marshal(pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{`"route":"groq","notice_sent":"2026-10-27","window_closes":"2026-11-02","named_with_permission":false`,
+		`{"received":"2026-10-29","verbatim":true,"text":"looks right","corrections":[]}`,
+		`{"received":"2026-10-30","verbatim":false,"corrections":["2026-10-31: model version spelt as documented"]}`,
+		`"corrections_log":[{"route":"azure","received":"2026-10-30","correction":"2026-10-31: model version spelt as documented"}]`,
+		`{"provider":"Groq","how":"email","date":"2026-09-15"}`, `"statements":["Each provider is named`} {
+		if !strings.Contains(string(js), s) {
+			t.Errorf("JSON lacks %s:\n%s", s, js)
+		}
+	}
+	for _, s := range []string{"support", "-account", "permissions", "FTU", "benchmarks", "named recipients", "responses/", "packs/", "told/", "naming/", "prerelease"} {
+		if strings.Contains(md, s) || strings.Contains(string(js), s) {
+			t.Errorf("the page carries %q", s)
+		}
+	}
+
+	f = newPublicationFixture(t)
+	f.p.Routes[0].Responses[0].Text = put(t, f.dir, "responses/groq.txt", "see ```go\nx\n```` here\n")
+	p = f.load(t)
+	if err := p.Check(f.s); err != nil {
+		t.Fatal(err)
+	}
+	if pg, err = p.Page(); err != nil {
+		t.Fatal(err)
+	}
+	if md := pg.Markdown(); !strings.Contains(md, "\n\n`````text\nsee ```go\nx\n```` here\n`````\n\n") {
+		t.Errorf("fence:\n%s", md)
+	}
+	put(t, f.dir, "responses/groq.txt", "edited")
+	if _, err := p.Page(); err == nil || !strings.Contains(err.Error(), "evidence: publication page: route groq: responses[0].text: responses/groq.txt has SHA-256 "+shaOf([]byte("edited"))) {
+		t.Errorf("text edited after the check: %v", err)
 	}
 }
 

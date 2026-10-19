@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // NoticeWorkingDays is the least number of working days after a notice's
@@ -168,8 +169,10 @@ func LoadPublication(path string) (*Publication, error) {
 // where required; every disclosure predates
 // the first notice; every pre-release copy withholds the routes that need
 // a replication pack; and every file the record names has the SHA-256 it
-// records. Otherwise it returns an error naming every missing item and
-// every mismatch.
+// records. A verbatim response's text must be UTF-8, and each correction
+// and each disclosure's provider one line, as Page prints them.
+// Otherwise it returns an error naming every missing item and every
+// mismatch.
 func (p *Publication) Check(s PublicationState) error {
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
@@ -184,6 +187,12 @@ func (p *Publication) Check(s PublicationState) error {
 	text := func(field, v string) {
 		if strings.TrimSpace(v) == "" {
 			fail("%s: required", field)
+		}
+	}
+	line := func(field, v string) {
+		text(field, v)
+		if strings.ContainsAny(v, "\r\n") {
+			fail("%s: one line required", field)
 		}
 	}
 
@@ -260,13 +269,15 @@ func (p *Publication) Check(s PublicationState) error {
 				fail("%s.received: %s, before the notice of %s", rf, resp.Received, r.Notice.Sent)
 			}
 			if resp.Verbatim {
-				p.file(rf+".text", resp.Text, fail)
+				if b := p.file(rf+".text", resp.Text, fail); b != nil && !utf8.Valid(b) {
+					fail("%s.text: %s is not UTF-8 text", rf, resp.Text.Path)
+				}
 				p.file(rf+".consent", resp.Consent, fail)
 			} else if resp.Corrections == nil {
 				fail("%s.corrections: required when the response does not publish verbatim (an empty list when none were made)", rf)
 			}
 			for k, c := range resp.Corrections {
-				text(fmt.Sprintf("%s.corrections[%d]", rf, k), c)
+				line(fmt.Sprintf("%s.corrections[%d]", rf, k), c)
 			}
 		}
 		switch {
@@ -304,7 +315,7 @@ func (p *Publication) Check(s PublicationState) error {
 	}
 	for i, d := range p.Disclosures {
 		field := fmt.Sprintf("disclosures[%d]", i)
-		text(field+".provider", d.Provider)
+		line(field+".provider", d.Provider)
 		text(field+".recipient", d.Recipient)
 		if d.How != DisclosureEmail && d.How != DisclosureForm {
 			fail("%s.how: %q, want %s or %s", field, d.How, DisclosureEmail, DisclosureForm)
@@ -346,17 +357,27 @@ func (p *Publication) Check(s PublicationState) error {
 // ToldBefore lists each disclosure as the page names it: the provider,
 // how and the date, in date order.
 func (p *Publication) ToldBefore() []string {
-	ds := slices.Clone(p.Disclosures)
-	slices.SortStableFunc(ds, func(a, b Disclosure) int {
+	ds := p.toldBefore()
+	out := make([]string, len(ds))
+	for i, d := range ds {
+		out[i] = d.String()
+	}
+	return out
+}
+
+// toldBefore is each disclosure without its recipient and copy, in date
+// order, then by provider.
+func (p *Publication) toldBefore() []PageDisclosure {
+	out := make([]PageDisclosure, len(p.Disclosures))
+	for i, d := range p.Disclosures {
+		out[i] = PageDisclosure{Provider: d.Provider, How: d.How, Date: d.Date}
+	}
+	slices.SortStableFunc(out, func(a, b PageDisclosure) int {
 		if c := strings.Compare(a.Date, b.Date); c != 0 {
 			return c
 		}
 		return strings.Compare(a.Provider, b.Provider)
 	})
-	out := make([]string, len(ds))
-	for i, d := range ds {
-		out[i] = fmt.Sprintf("%s, by %s, %s", d.Provider, d.How, d.Date)
-	}
 	return out
 }
 
