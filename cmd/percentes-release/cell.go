@@ -35,7 +35,8 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 // runCell runs one cell attempt (SPEC-HOSTED HA3 point 16) and returns its
 // record, also written to the cell's directory. A clock offset above the
 // pinned bound, limits read at the cell's start that no longer admit the
-// route's steps (limitsStop) or a ledger refusal stops the route before
+// route's steps at its newest recorded price (limitsStop) or a ledger
+// refusal stops the route before
 // any request; operator records or limits not refreshed at the cell's
 // start (cellOperator, evidence.ReadRefreshedLimits), a failed balance
 // check, a balance below the cell's reservation, or a

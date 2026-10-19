@@ -16,10 +16,12 @@ import (
 
 // limitsStop applies the ceiling rule again with the limits the refresh
 // command read at a cell's start in place of the recorded ones, an
-// unavailable limit keeping its recorded value, and returns the route
-// stop when it no longer admits a step the route runs: the route keeps
-// its steps (SPEC-HOSTED §4) and stops instead. The stop names the
-// lowest such step and its binding limit.
+// unavailable limit keeping its recorded value, and at the route's
+// newest price in the ledger as the cell starts (routePrice), and
+// returns the route stop when it no longer admits a step the route runs:
+// the route keeps its steps (SPEC-HOSTED §4) and stops instead. The stop
+// names the lowest such step, the price's retrieval date and the binding
+// limit.
 func (r *route) limitsStop(read []evidence.RefreshedLimit) (*routeStop, error) {
 	c := *r.rule.cfg
 	c.Target.Limits = slices.Clone(c.Target.Limits)
@@ -28,7 +30,15 @@ func (r *route) limitsStop(read []evidence.RefreshedLimit) (*routeStop, error) {
 			c.Target.Limits[i].Value = l.Value
 		}
 	}
-	v, err := admission.CeilingRule(&c, r.rule.price, r.rule.plan)
+	entries, err := ledgerEntries(r.ledgerPath)
+	if err != nil {
+		return nil, err
+	}
+	price, err := routePrice(entries, c.Target.Name)
+	if err != nil {
+		return nil, err
+	}
+	v, err := admission.CeilingRule(&c, price, r.rule.plan)
 	if err != nil {
 		return nil, err
 	}
@@ -36,8 +46,8 @@ func (r *route) limitsStop(read []evidence.RefreshedLimit) (*routeStop, error) {
 		if !s.Admitted || v.Steps[k].Admitted {
 			continue
 		}
-		return &routeStop{fmt.Sprintf("the limits read at the cell's start no longer admit step %d (%g rps) of the %d the route runs: %s; the route keeps its steps (SPEC-HOSTED §4)",
-			k+1, s.RPS, r.steps, bindingText(r.rule.cfg.Target.Limits, v.Steps[k].Binding, read))}, nil
+		return &routeStop{fmt.Sprintf("the limits read at the cell's start, at the price retrieved %s, no longer admit step %d (%g rps) of the %d the route runs: %s; the route keeps its steps (SPEC-HOSTED §4)",
+			price.Retrieved, k+1, s.RPS, r.steps, bindingText(r.rule.cfg.Target.Limits, v.Steps[k].Binding, read))}, nil
 	}
 	return nil, nil
 }

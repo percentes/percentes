@@ -98,8 +98,8 @@ type route struct {
 	preWindow      int
 	shape          *pilot.ShapeS
 	openFiles      uint64
-	// rule is the ceiling rule's input behind verdict, which limitsStop
-	// applies again at each cell's start.
+	// rule is the ceiling rule's input behind verdict other than the
+	// price, which limitsStop applies again at each cell's start.
 	rule ceilingInput
 
 	ledger     *admission.Ledger
@@ -175,13 +175,12 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	return r.loop(ctx)
 }
 
-// ceilingInput is the ceiling rule's input: the configuration as the
-// route started, before a test or the rehearsal scales its ladder, the
-// route's price and the plan at the schedule's exact counts.
+// ceilingInput is the ceiling rule's input other than the price: the
+// configuration as the route started, before a test or the rehearsal
+// scales its ladder, and the plan at the schedule's exact counts.
 type ceilingInput struct {
-	cfg   *config.Config
-	price admission.Price
-	plan  admission.Plan
+	cfg  *config.Config
+	plan admission.Plan
 }
 
 // routeInput is a run command after its flags are read.
@@ -281,7 +280,7 @@ func newRoute(in routeInput) (*route, error) {
 	}
 	rc, rel := *cfg, *cfg.Release
 	rc.Release = &rel
-	r.rule = ceilingInput{cfg: &rc, price: price, plan: plan}
+	r.rule = ceilingInput{cfg: &rc, plan: plan}
 	if st, err = r.ledger.State(); err != nil {
 		return nil, err
 	}

@@ -4,7 +4,8 @@
 // endpoint status, runs the route's refresh command and reads the
 // operator file, its records and the limits the command prints again,
 // records the account balance or quota, stops the route where those
-// limits no longer admit its steps, blocks the cell where the limits and
+// limits no longer admit its steps at its newest recorded price, blocks
+// the cell where the limits and
 // model documentation were not refreshed or the balance check does not
 // let it start, admits the
 // cell in the ledger, sends a one-request probe and runs the ladder up
@@ -75,7 +76,8 @@
 // on which run refuses the route;
 // 3 = the route stopped (a ledger refusal, a documented billing refusal,
 // a clock offset above the pinned bound, limits read at a cell's start
-// that no longer admit the route's steps, a probe 401 or 403 the route's
+// that no longer admit the route's steps at its newest recorded price, a
+// probe 401 or 403 the route's
 // previous probed cell also saw, or an operator abort); 1 = execution
 // error or refusal to start. rehearse exits 0 when the rehearsal is
 // green and 2 when it is not; publish-check exits 0 when the publication

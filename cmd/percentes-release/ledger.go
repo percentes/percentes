@@ -7,16 +7,27 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 )
 
-// ledgerEntries reads and checks the ledger at path and returns its lines.
+// ledgerEntries reads the ledger at path under a shared lock, as other
+// routes' processes append to it, checks it and returns its lines.
 func ledgerEntries(path string) ([]admission.Entry, error) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: %w", err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		return nil, fmt.Errorf("ledger: lock: %w", err)
+	}
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("ledger: %w", err)
 	}

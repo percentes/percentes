@@ -52,7 +52,7 @@ func TestCellLimitsStop(t *testing.T) {
 		tpm          string
 		stop         string
 	}{
-		{"lowered", false, `"value":200000`, "route stop: the limits read at the cell's start no longer admit step 3 (1 rps) of the 3 the route runs: " +
+		{"lowered", false, `"value":200000`, "route stop: the limits read at the cell's start, at the price retrieved 2026-10-06, no longer admit step 3 (1 rps) of the 3 the route runs: " +
 			"tokens_per_minute recorded 250000, read 200000: nominal demand 102720 above half of it; the route keeps its steps (SPEC-HOSTED §4)"},
 		{"raised", false, `"value":300000`, ""},
 		{"unavailable", false, `"unavailable":"console only"`, ""},
@@ -78,7 +78,7 @@ func TestCellLimitsStop(t *testing.T) {
 			want := tc.stop
 			if tc.confidential {
 				l := cfg.Target.Limits[1]
-				want = "route stop: the limits read at the cell's start no longer admit step 3 (1 rps) of the 3 the route runs: " +
+				want = "route stop: the limits read at the cell's start, at the price retrieved 2026-10-06, no longer admit step 3 (1 rps) of the 3 the route runs: " +
 					"tokens_per_minute confidential (" + l.Source + ", sha256 " + l.SHA256 + "): nominal demand 102720 above half of it; the route keeps its steps (SPEC-HOSTED §4)"
 			}
 			before, err := ledgerEntries(f.ledger)
@@ -162,6 +162,65 @@ func TestCellLimitsStop(t *testing.T) {
 				return nil
 			}); err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// SPEC-HOSTED §4: limitsStop tests the limits at the route's newest
+// recorded price, so a price recorded during the window that its
+// spend_per_month_usd limit no longer covers stops the route at the next
+// cell's start, naming the price's date, with no ledger line and no
+// request; a price that the limit still covers lets the cell go on.
+func TestCellPriceStop(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, out, stop string
+	}{
+		{"raised", "0.30", "1.20", "route stop: the limits read at the cell's start, at the price retrieved 2026-10-08, no longer admit step 3 (1 rps) of the 3 the route runs: " +
+			"spend_per_month_usd recorded 10, read 10: nominal demand 13.3093824 above it; the route keeps its steps (SPEC-HOSTED §4)"},
+		{"covered", "0.20", "0.80", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+			enoughOpenFiles(t)
+			f := newFixture(t, rulingConfig(t, e.url()), "+0.005")
+			r, err := newRoute(f.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := r.verdict.Admitted(); len(got) != 3 {
+				t.Fatalf("admitted %v", got)
+			}
+			shortLadder(r)
+			l, err := admission.Open(f.ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := recordPrice(l, r.rule.cfg, tc.in, tc.out, "https://example.test/pricing", "2026-10-08"); err != nil {
+				t.Fatal(err)
+			}
+			before, err := ledgerEntries(f.ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, err := r.runCell(context.Background(), r.runs[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.stop == "" {
+				if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], "probe request returned 401") || e.hits.Load() != 1 {
+					t.Fatalf("outcome %s, reasons %q, %d requests; want blocked at the probe", rec.Outcome, rec.Reasons, e.hits.Load())
+				}
+				return
+			}
+			if rec.Outcome != outcomeStopped || len(rec.Reasons) != 1 || rec.Reasons[0] != tc.stop {
+				t.Fatalf("outcome %s, reasons %q; want stopped, %q", rec.Outcome, rec.Reasons, tc.stop)
+			}
+			if n := e.hits.Load(); n != 0 || rec.Sent != (admission.Counts{}) {
+				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
+			}
+			if after, err := ledgerEntries(f.ledger); err != nil || len(after) != len(before) {
+				t.Fatalf("ledger lines %d, were %d: %v", len(after), len(before), err)
 			}
 		})
 	}
