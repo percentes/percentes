@@ -555,6 +555,14 @@ func HeaderAllowed(allow []string, name string) bool {
 	return false
 }
 
+// RequestIDHeader reports whether name identifies a request: without
+// regard to case, "-" or "_", it ends in "requestid" (X-Request-Id,
+// x-amzn-RequestId) and contains no "ratelimit".
+func RequestIDHeader(name string) bool {
+	n := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(name))
+	return strings.HasSuffix(n, "requestid") && !strings.Contains(n, "ratelimit")
+}
+
 // RetainedHeaderValue stands in the attempts file and the probe records
 // for each value of a header target.retained_headers names.
 const RetainedHeaderValue = "[retained]"

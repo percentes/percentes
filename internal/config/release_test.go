@@ -430,8 +430,9 @@ func TestReleaseRetainedHeaders(t *testing.T) {
 	}
 }
 
-// A target with a confidential limit retains each recorded header that
-// can carry a rate limit, and the limits body where it reads one.
+// A target with a confidential limit retains each recorded header other
+// than Retry-After and a request identifier named in full, and the limits
+// body where it reads one.
 func TestReleaseConfidentialRetention(t *testing.T) {
 	read := &TargetProbe{LimitsURL: "https://api.groq.com/openai/v1/models", LimitsAuthScheme: "Bearer"}
 	kept := &TargetProbe{LimitsURL: read.LimitsURL, LimitsAuthScheme: read.LimitsAuthScheme, LimitsRetained: true}
@@ -446,10 +447,15 @@ func TestReleaseConfidentialRetention(t *testing.T) {
 		{"prefix retained", true, []string{"Retry-After", "x-ratelimit-*"}, []string{"x-ratelimit-*"}, nil, ""},
 		{"name retained in another case", true, []string{"Retry-After", "x-ratelimit-limit-tokens", "x-request-id"}, []string{"X-RateLimit-Limit-Tokens"}, nil, ""},
 		{"limits body retained", true, []string{"Retry-After"}, nil, kept, ""},
-		{"prefix not retained", true, []string{"Retry-After", "x-ratelimit-*"}, nil, nil, `target.response_headers[1]: "x-ratelimit-*" can match a name containing "ratelimit"`},
-		{"prefix retained in part", true, []string{"Retry-After", "x-ratelimit-*"}, []string{"x-ratelimit-limit-*"}, nil, `target.response_headers[1]: "x-ratelimit-*" can match`},
-		{"name not retained", true, []string{"Retry-After", "anthropic-RateLimit-tokens-limit"}, nil, nil, `target.response_headers[1]: "anthropic-RateLimit-tokens-limit" can match`},
-		{"another prefix", true, []string{"Retry-After", "x-request-*"}, nil, nil, `target.response_headers[1]: "x-request-*" can match`},
+		{"request identifiers in any case", true, []string{"RETRY-AFTER", "request-id", "x-amzn-RequestId"}, nil, nil, ""},
+		{"quota name retained", true, []string{"Retry-After", "x-quota-remaining-tokens"}, []string{"X-Quota-Remaining-Tokens"}, nil, ""},
+		{"prefix not retained", true, []string{"Retry-After", "x-ratelimit-*"}, nil, nil, `target.response_headers[1]: "x-ratelimit-*" is neither Retry-After nor a request identifier and no retained_headers entry covers it`},
+		{"prefix retained in part", true, []string{"Retry-After", "x-ratelimit-*"}, []string{"x-ratelimit-limit-*"}, nil, `target.response_headers[1]: "x-ratelimit-*" is neither`},
+		{"name not retained", true, []string{"Retry-After", "anthropic-RateLimit-tokens-limit"}, nil, nil, `target.response_headers[1]: "anthropic-RateLimit-tokens-limit" is neither`},
+		{"another prefix", true, []string{"Retry-After", "x-request-*"}, nil, nil, `target.response_headers[1]: "x-request-*" is neither`},
+		{"quota name not retained", true, []string{"Retry-After", "x-quota-remaining-tokens"}, nil, nil, `target.response_headers[1]: "x-quota-remaining-tokens" is neither`},
+		{"request identifier prefix", true, []string{"Retry-After", "x-request-id*"}, nil, nil, `target.response_headers[1]: "x-request-id*" is neither`},
+		{"Retry-After prefix", true, []string{"Retry-After", "Retry-*"}, nil, nil, `target.response_headers[1]: "Retry-*" is neither`},
 		{"limits body published", true, []string{"Retry-After"}, nil, read, "target.probe.limits_retained: required with limits_url on a target with a confidential limit"},
 	} {
 		c := loadRef(t, releaseRef)
@@ -463,6 +469,23 @@ func TestReleaseConfidentialRetention(t *testing.T) {
 			t.Errorf("%s: must load, got: %v", tc.name, err)
 		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
 			t.Errorf("%s: must fail naming %q, got: %v", tc.name, tc.want, err)
+		}
+	}
+}
+
+func TestRequestIDHeader(t *testing.T) {
+	for name, want := range map[string]bool{
+		"X-Request-Id":          true,
+		"request-id":            true,
+		"x-amzn-RequestId":      true,
+		"X_REQUEST_ID":          true,
+		"x-request-id-tokens":   false,
+		"x-ratelimit-requestid": false,
+		"x-quota-remaining":     false,
+		"Retry-After":           false,
+	} {
+		if got := RequestIDHeader(name); got != want {
+			t.Errorf("RequestIDHeader(%q) = %v, want %v", name, got, want)
 		}
 	}
 }

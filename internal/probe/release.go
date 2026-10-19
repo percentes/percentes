@@ -560,18 +560,21 @@ func exposed(t *config.Target, rec *ReleaseRecord, confidential bool) []string {
 
 // ExposedByMarking is Exposed for a probe of a route whose configuration
 // is not at hand, from the markings its snapshots record: under a
-// snapshot marked config.MarkingConfidential, every header whose name
-// contains "ratelimit", the limits body, each non-200 body and each
-// in-band error text are withheld; the configuration check requires the
-// first two of that route (SPEC-HOSTED HA3 point 15).
+// snapshot marked config.MarkingConfidential, every header other than
+// Retry-After and a request identifier (config.RequestIDHeader), the
+// limits body, each non-200 body and each in-band error text are
+// withheld; the configuration check requires the first two of that route
+// (SPEC-HOSTED HA3 point 15).
 func ExposedByMarking(rec *ReleaseRecord) []string {
 	t := &config.Target{}
 	marked := slices.ContainsFunc(rec.Snapshots, func(s Snapshot) bool { return s.Marking == config.MarkingConfidential })
 	if marked {
 		t.Probe = &config.TargetProbe{LimitsRetained: true}
 		names := func(h map[string][]string) {
-			for name := range rateLimitHeaders(h) {
-				t.RetainedHeaders = append(t.RetainedHeaders, name)
+			for name := range h {
+				if !strings.EqualFold(name, "Retry-After") && !config.RequestIDHeader(name) {
+					t.RetainedHeaders = append(t.RetainedHeaders, name)
+				}
 			}
 		}
 		for _, r := range rec.Requests {
