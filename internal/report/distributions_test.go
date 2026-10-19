@@ -195,6 +195,48 @@ func TestStepTablesDistributions(t *testing.T) {
 	}
 }
 
+// Pooled latency intervals carry the independence label under the
+// distributions; a cell's latency, a pooled step with no interval and
+// every rate line do not. Steps 2 and 3 pool too few completions for
+// an interval.
+func TestPooledLatencyIndependenceLabel(t *testing.T) {
+	cfg, v := stepsConfig(t)
+	var cells []CellRecords
+	for i := 0; i < 12; i++ {
+		cells = append(cells, distCell(fmt.Sprintf("cell-%02d", i)))
+	}
+	st, err := NewStepTables(cfg, v, cells)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const label = "    intervals assume independent requests\n"
+	text := st.Text()
+	at := strings.Index(text, "-- Pooled per step")
+	if at < 0 {
+		t.Fatalf("no pooled section:\n%s", text)
+	}
+	if strings.Contains(text[:at], label) {
+		t.Errorf("cell text carries the pooled label:\n%s", text[:at])
+	}
+	pooledPart := text[at:]
+	golden := "  completions, client-observed from intended dispatch, conditional on completion:\n" +
+		"    TTFT          n 1200, median 50.0 ms, 90th percentile 90.0 ms; 95th percentile 95.0 ms, 95% order-statistic interval [94.0 ms, 97.0 ms]; 99th percentile 99.0 ms, 95% order-statistic interval [99.0 ms, 100.0 ms]\n" +
+		"    whole answer  n 1200, median 500.0 ms, 90th percentile 900.0 ms; 95th percentile 950.0 ms, 95% order-statistic interval [940.0 ms, 970.0 ms]; 99th percentile 990.0 ms, 95% order-statistic interval [990.0 ms, 1000.0 ms]\n" +
+		label +
+		"  completions by connection, client-observed from intended dispatch, conditional on completion:\n"
+	if !strings.Contains(pooledPart, golden) {
+		t.Errorf("pooled text lacks %q:\n%s", golden, pooledPart)
+	}
+	if n := strings.Count(pooledPart, label); n != 1 {
+		t.Errorf("pooled text carries the label %d times, want 1:\n%s", n, pooledPart)
+	}
+	for _, line := range strings.SplitAfter(pooledPart, "\n") {
+		if strings.Contains(line, "Wilson") && strings.Contains(line, "intervals assume") {
+			t.Errorf("rate line carries the latency label: %q", line)
+		}
+	}
+}
+
 // A cell's gap histograms must agree with themselves and with its
 // completions' content events.
 func TestStepTablesGapRefusals(t *testing.T) {

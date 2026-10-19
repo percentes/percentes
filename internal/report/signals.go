@@ -348,8 +348,9 @@ func maxHalfFraction(s admission.Step) (f float64, ok, confidential bool) {
 
 // signalsText renders a step's failure timing, completion latency,
 // completion length, the content events of requests that did not
-// complete, prompt length and inter-chunk gaps.
-func signalsText(w func(string, ...any), s *Signals) {
+// complete, prompt length and inter-chunk gaps. Pooled latency
+// intervals carry the label that they assume independent requests.
+func signalsText(w func(string, ...any), s *Signals, pooled bool) {
 	q := func(x Quantiles) string {
 		if x.N == 0 {
 			return "n 0"
@@ -362,6 +363,9 @@ func signalsText(w func(string, ...any), s *Signals) {
 	w("  completions, client-observed from intended dispatch, conditional on completion:")
 	w("    TTFT          %s", distributionText(s.TTFT))
 	w("    whole answer  %s", distributionText(s.WholeAnswer))
+	if pooled && (s.TTFT.intervals() || s.WholeAnswer.intervals()) {
+		w("    intervals assume independent requests")
+	}
 	w("  completions by connection, client-observed from intended dispatch, conditional on completion:")
 	for _, l := range s.Latency {
 		w("    %-8s TTFT %s; whole answer %s", l.Conn, q(l.TTFT), q(l.WholeAnswer))

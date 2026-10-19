@@ -844,7 +844,7 @@ func (t *StepTables) text(frame bool) string {
 			throughputText(w, *s.Throughput)
 			curveText(w, s.Curve, s.Scheduled, t.DeadlineS)
 			incidenceQuantilesText(w, s.Incidence)
-			signalsText(w, s.Signals)
+			signalsText(w, s.Signals, false)
 		}
 		w("")
 	}
@@ -924,7 +924,7 @@ func (t *StepTables) text(frame bool) string {
 			pooledThroughputText(w, *s.Throughput, s.Cells, t.StepS)
 			pooledCurveText(w, s.Curve, s.Scheduled, s.Cells, t.DeadlineS)
 			incidenceQuantilesText(w, s.Incidence)
-			signalsText(w, s.Signals)
+			signalsText(w, s.Signals, true)
 		}
 	}
 	if t.DriftParts == nil {

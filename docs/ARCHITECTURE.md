@@ -1440,7 +1440,10 @@ that attempted it. A pooled line carries the count over the pooled
 denominator, the range of the cell rates, the cells with events, and a
 Wilson interval on the effective sample size N / DEFF, where DEFF is the
 larger of 1 and the cluster-robust variance over the independent one
-(HA3 point 13). The drift rule (SPEC-HOSTED §4) then applies. Each
+(HA3 point 13). Pooled latency takes the cells' completions as one
+sample, and where it prints an order-statistic interval the line
+"intervals assume independent requests" follows the distributions
+(`signalsText`). The drift rule (SPEC-HOSTED §4) then applies. Each
 counted cell's manifest records a documentation state as read at the
 cell's start, after its refresh command rewrote the limits and
 eligibility records: the account tier, and those records by URL and

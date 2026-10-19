@@ -88,6 +88,9 @@ func distribution(xs []int64) Distribution {
 	return Distribution{Quantiles: quantiles(s), P95: tail(95), P99: tail(99)}
 }
 
+// intervals reports whether d prints an order-statistic interval.
+func (d Distribution) intervals() bool { return d.P95 != nil || d.P99 != nil }
+
 // Counts is a per-request count over Of requests of a step, of which N
 // carry it: the minimum, the median and 90th percentile by nearest rank,
 // and the maximum, zero where N is 0.
