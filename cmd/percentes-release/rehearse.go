@@ -430,11 +430,25 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		names[i] = f.name
 	}
 
+	ledgerPath := filepath.Join(inputs, "ledger.jsonl")
+	caps, err := admission.ReleaseCaps(cfgs...)
+	if err != nil {
+		return exitError, err
+	}
+	l, err := admission.Create(ledgerPath, caps)
+	if err != nil {
+		return exitError, err
+	}
+	st, err := l.State()
+	if err != nil {
+		return exitError, err
+	}
 	frozen := make([]schedule.RouteConfig, n)
 	for i, cfg := range cfgs {
 		frozen[i] = frozenConfig(cfg)
 	}
-	sched, err := schedule.New(schedule.Input{MasterSeed: in.masterSeed, First: today, Last: now.AddDate(0, 0, 9).Format(time.DateOnly), Routes: names, Configs: frozen})
+	sched, err := schedule.New(schedule.Input{MasterSeed: in.masterSeed, First: today, Last: now.AddDate(0, 0, 9).Format(time.DateOnly), Routes: names, Configs: frozen,
+		LedgerSHA256: st.OpenSHA256})
 	if err != nil {
 		return exitError, err
 	}
@@ -444,15 +458,6 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	}
 	schedulePath := filepath.Join(inputs, "schedule.json")
 	if err := os.WriteFile(schedulePath, sb, 0o644); err != nil {
-		return exitError, err
-	}
-	ledgerPath := filepath.Join(inputs, "ledger.jsonl")
-	caps, err := admission.ReleaseCaps(cfgs...)
-	if err != nil {
-		return exitError, err
-	}
-	l, err := admission.Create(ledgerPath, caps)
-	if err != nil {
 		return exitError, err
 	}
 

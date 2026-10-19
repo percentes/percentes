@@ -39,6 +39,18 @@ func TestNewRouteRefusals(t *testing.T) {
 		edit(&r)
 		return r
 	}
+	// fresh replaces the route's ledger with a new one with its caps and
+	// no line after the open line, and its schedule with one freezing it.
+	fresh := func(t *testing.T, f *fixture) *admission.Ledger {
+		t.Helper()
+		f.in.ledgerPath = filepath.Join(t.TempDir(), "ledger.jsonl")
+		l, err := admission.Create(f.in.ledgerPath, mustCaps(t, f.in.cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", ledgerSchedule(t, f.in.ledgerPath, []*config.Config{f.in.cfg}, "groq", "other"))
+		return l
+	}
 	for _, tc := range []struct {
 		name   string
 		mutate func(t *testing.T, f *fixture)
@@ -61,18 +73,30 @@ func TestNewRouteRefusals(t *testing.T) {
 		{"host group changed", func(t *testing.T, f *fixture) {
 			f.in.cfg.Release.OtherHosts = append(f.in.cfg.Release.OtherHosts, config.ModelHost{Route: "azure", Model: "openai/gpt-oss-120b"})
 		}, "run: route groq: host group [azure baseten groq]; the schedule froze [baseten groq]"},
-		{"no price", func(t *testing.T, f *fixture) {
-			f.in.ledgerPath = filepath.Join(t.TempDir(), "ledger.jsonl")
-			if _, err := admission.Create(f.in.ledgerPath, mustCaps(t, f.in.cfg)); err != nil {
+		{"ledger not frozen", func(t *testing.T, f *fixture) {
+			sb, err := testSchedule(t, []*config.Config{f.in.cfg}, "groq", "other").JSON()
+			if err != nil {
 				t.Fatal(err)
 			}
-		}, "ledger: no price recorded for route groq"},
-		{"priced at the ceiling only", func(t *testing.T, f *fixture) {
+			f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", sb)
+		}, "run: the schedule freezes no ledger"},
+		{"another ledger", func(t *testing.T, f *fixture) {
+			frozen := f.in.ledgerPath
 			f.in.ledgerPath = filepath.Join(t.TempDir(), "ledger.jsonl")
 			l, err := admission.Create(f.in.ledgerPath, mustCaps(t, f.in.cfg))
 			if err != nil {
 				t.Fatal(err)
 			}
+			if _, err := recordPrice(l, f.in.cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
+				t.Fatal(err)
+			}
+			if a, b := ledgerOpenSHA256(t, frozen), ledgerOpenSHA256(t, f.in.ledgerPath); a == b {
+				t.Fatalf("two ledgers open with sha256 %s", a)
+			}
+		}, "run: ledger open line sha256 "},
+		{"no price", func(t *testing.T, f *fixture) { fresh(t, f) }, "ledger: no price recorded for route groq"},
+		{"priced at the ceiling only", func(t *testing.T, f *fixture) {
+			l := fresh(t, f)
 			if err := l.RecordPrice("groq", admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.60", InputTokens: 1200, OutputTokens: 512,
 				Source: "https://example.test/pricing", Retrieved: "2026-10-06"}); err != nil {
 				t.Fatal(err)
@@ -80,11 +104,7 @@ func TestNewRouteRefusals(t *testing.T) {
 		}, "no price recorded for groq at 1200 input and 1024 output tokens"},
 		{"fallback priced at 512 only", func(t *testing.T, f *fixture) {
 			fallback(t, f.in.cfg)
-			f.in.ledgerPath = filepath.Join(t.TempDir(), "ledger.jsonl")
-			l, err := admission.Create(f.in.ledgerPath, mustCaps(t, f.in.cfg))
-			if err != nil {
-				t.Fatal(err)
-			}
+			l := fresh(t, f)
 			if err := l.RecordPrice("groq", admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.60", InputTokens: 1200, OutputTokens: 512,
 				Source: "https://example.test/pricing", Retrieved: "2026-10-06"}); err != nil {
 				t.Fatal(err)

@@ -149,19 +149,45 @@ func testSchedule(t *testing.T, cfgs []*config.Config, routes ...string) *schedu
 	return s
 }
 
-// newFixture writes every input of cfg's route: its schedule beside
-// "other", freezing cfg, a ledger with the route's caps and price, an
-// operator file, a ceiling probe of each host of its model that passed at
-// 512, a clock reading of offset, a counting balance command and a
-// refresh command that touches the record file and prints cfg's recorded
-// limits.
-func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
+// ledgerOpenSHA256 is the open-line SHA-256 of the ledger at path.
+func ledgerOpenSHA256(t *testing.T, path string) string {
 	t.Helper()
-	dir := t.TempDir()
-	sb, err := testSchedule(t, []*config.Config{cfg}, cfg.Target.Name, "other").JSON()
+	l, err := admission.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	st, err := l.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.OpenSHA256
+}
+
+// ledgerSchedule is testSchedule freezing also the ledger at path.
+func ledgerSchedule(t *testing.T, path string, cfgs []*config.Config, routes ...string) []byte {
+	t.Helper()
+	in := testSchedule(t, cfgs, routes...).Input
+	in.LedgerSHA256 = ledgerOpenSHA256(t, path)
+	s, err := schedule.New(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// newFixture writes every input of cfg's route: a ledger with the
+// route's caps and price, its schedule beside "other", freezing cfg and
+// the ledger, an operator file, a ceiling probe of each host of its model
+// that passed at 512, a clock reading of offset, a counting balance
+// command and a refresh command that touches the record file and prints
+// cfg's recorded limits.
+func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
+	t.Helper()
+	dir := t.TempDir()
 	ledger := filepath.Join(dir, "ledger.jsonl")
 	caps, err := admission.ReleaseCaps(cfg)
 	if err != nil {
@@ -174,6 +200,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	if _, err := recordPrice(l, cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
 		t.Fatal(err)
 	}
+	sb := ledgerSchedule(t, ledger, []*config.Config{cfg}, cfg.Target.Name, "other")
 	writeFile(t, dir, "r.txt", []byte("record"))
 	refresh := filepath.Join(dir, "refresh")
 	if err := writeMockRefresh(refresh, cfg); err != nil {

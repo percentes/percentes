@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 
+	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/schedule"
 )
@@ -16,7 +17,9 @@ import (
 // scheduleCmd writes the committed schedule (SPEC-HOSTED HA3 point 9) of
 // the routes whose configurations are given, named by their targets,
 // whose host groups agree, with each configuration's SHA-256 and host
-// group, which run requires. It never replaces an existing file.
+// group and the open-line SHA-256 of the release ledger, which must cap
+// each route as its configuration does; run requires them. It never
+// replaces an existing file.
 func scheduleCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("schedule", flag.ContinueOnError)
 	seed := fs.String("master-seed", "", "the release's master seed (required)")
@@ -24,18 +27,32 @@ func scheduleCmd(args []string) (int, error) {
 	last := fs.String("last", "", "the window's last UTC date, 2006-01-02 (required)")
 	var cfgPaths listFlag
 	fs.Var(&cfgPaths, "config", "a route's release configuration (repeatable, required)")
+	ledgerPath := fs.String("ledger", "", "the release admission ledger the routes' runs admit in (required)")
 	path := fs.String("schedule", "", "the schedule file to write; it must not exist (required)")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
-	if *path == "" {
-		return exitError, errors.New("schedule: --schedule is required")
+	if *path == "" || *ledgerPath == "" {
+		return exitError, errors.New("schedule: --ledger and --schedule are required")
 	}
 	cfgs, err := loadReleases(cfgPaths)
 	if err != nil {
 		return exitError, err
 	}
-	in := schedule.Input{MasterSeed: *seed, First: *first, Last: *last}
+	l, err := admission.Open(*ledgerPath)
+	if err != nil {
+		return exitError, err
+	}
+	st, err := l.State()
+	if err != nil {
+		return exitError, err
+	}
+	for _, cfg := range cfgs {
+		if err := st.CheckRelease(cfg); err != nil {
+			return exitError, err
+		}
+	}
+	in := schedule.Input{MasterSeed: *seed, First: *first, Last: *last, LedgerSHA256: st.OpenSHA256}
 	for _, cfg := range cfgs {
 		in.Routes = append(in.Routes, cfg.Target.Name)
 		in.Configs = append(in.Configs, frozenConfig(cfg))
@@ -60,7 +77,7 @@ func scheduleCmd(args []string) (int, error) {
 		os.Remove(*path)
 		return exitError, fmt.Errorf("schedule: %w", err)
 	}
-	fmt.Printf("schedule written: %s; window %s to %s; counter %d\n", *path, s.Input.First, s.Input.Last, s.Counter)
+	fmt.Printf("schedule written: %s; window %s to %s; counter %d; ledger %s\n", *path, s.Input.First, s.Input.Last, s.Counter, s.Input.LedgerSHA256)
 	for _, o := range s.Offsets {
 		runs, err := s.Runs(o.Route)
 		if err != nil {
@@ -103,6 +120,18 @@ func checkFrozen(cfg *config.Config, sched *schedule.Schedule) error {
 	}
 	if got.ConfigSHA256 != want.ConfigSHA256 {
 		return fmt.Errorf("run: route %s: configuration sha256 %s; the schedule froze %s", name, got.ConfigSHA256, want.ConfigSHA256)
+	}
+	return nil
+}
+
+// checkLedger refuses the ledger st unless the schedule froze it.
+func checkLedger(st *admission.State, sched *schedule.Schedule) error {
+	want := sched.Input.LedgerSHA256
+	if want == "" {
+		return errors.New("run: the schedule freezes no ledger")
+	}
+	if st.OpenSHA256 != want {
+		return fmt.Errorf("run: ledger open line sha256 %s; the schedule froze %s", st.OpenSHA256, want)
 	}
 	return nil
 }

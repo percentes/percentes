@@ -114,11 +114,6 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		cfgs[i] = e2eConfig(t, f, "http://"+mocks[i].Addr()+f.path)
 		names[i] = f.name
 	}
-	sb, err := testSchedule(t, cfgs, names...).JSON()
-	if err != nil {
-		t.Fatal(err)
-	}
-	schedulePath := writeFile(t, dir, "schedule.json", sb)
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	caps, err := admission.ReleaseCaps(cfgs...)
 	if err != nil {
@@ -128,6 +123,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	schedulePath := writeFile(t, dir, "schedule.json", ledgerSchedule(t, ledgerPath, cfgs, names...))
 
 	routes := make([]*route, n)
 	var offsets []int

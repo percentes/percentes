@@ -467,6 +467,37 @@ func TestNewConfigs(t *testing.T) {
 	}
 }
 
+// New keeps the frozen ledger's hash in the committed form without
+// changing the draws, and refuses one that is not a lowercase hex
+// SHA-256.
+func TestNewLedger(t *testing.T) {
+	sum := strings.Repeat("cd", 32)
+	in := target()
+	in.LedgerSHA256 = sum
+	s := derived(t, in)
+	bare := derived(t, target())
+	if !reflect.DeepEqual(s.Cells, bare.Cells) || !reflect.DeepEqual(s.Offsets, bare.Offsets) {
+		t.Error("the frozen ledger changed the draws")
+	}
+	b, err := s.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := Load(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Input.LedgerSHA256 != sum || !bytes.Contains(b, []byte(`"ledger_sha256": "`+sum+`"`)) {
+		t.Fatalf("committed ledger %q in\n%s", l.Input.LedgerSHA256, b)
+	}
+	for _, bad := range []string{"abcd", strings.ToUpper(sum), sum + "00"} {
+		in.LedgerSHA256 = bad
+		if _, err := New(in); err == nil || !strings.Contains(err.Error(), `ledger_sha256 "`+bad+`" is not a lowercase hex SHA-256`) {
+			t.Errorf("%s: %v", bad, err)
+		}
+	}
+}
+
 // TestEdition ties the frame to the ceiling rule's edition and the ladder.
 func TestEdition(t *testing.T) {
 	if n := 2 * len(SlotHoursUTC); n != admission.ReleaseCells {

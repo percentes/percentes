@@ -262,6 +262,9 @@ func (u *Usage) Charged() int {
 // State is the ledger read and checked.
 type State struct {
 	Lines int
+	// OpenSHA256 is the hex SHA-256 of the open line with its newline,
+	// which carries the ledger's creation time.
+	OpenSHA256 string
 	// Caps are the caps the ledger was created with.
 	Caps       Caps
 	Routes     map[string]*Usage
@@ -794,6 +797,9 @@ func Parse(b []byte) (*State, error) {
 		}
 		h.Write(line)
 		h.Write([]byte{'\n'})
+		if seq == 1 {
+			st.OpenSHA256 = hex.EncodeToString(h.Sum(nil))
+		}
 		st.Lines = seq
 	}
 	return st, nil

@@ -2,6 +2,8 @@ package admission
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"math/rand"
@@ -126,6 +128,14 @@ func TestCreateAndOpen(t *testing.T) {
 	}
 	if st := state(t, l); st.Lines != 1 || st.Total() != 0 {
 		t.Errorf("new ledger: %d lines, total %d", st.Lines, st.Total())
+	}
+	open := sha256.Sum256(b)
+	if err := l.RecordPrice(groq, groqPrice); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(path)
+	if st := state(t, l); st.OpenSHA256 != hex.EncodeToString(open[:]) || !bytes.Contains(b, []byte(`"seq":2,"prev":"`+st.OpenSHA256+`"`)) {
+		t.Errorf("open line sha256 %q, want %x, the second line's prev", st.OpenSHA256, open)
 	}
 }
 

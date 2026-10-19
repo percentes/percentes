@@ -24,10 +24,11 @@
 // named with --env, never from the inherited environment, and is never
 // printed.
 //
-// Before the window, schedule writes the committed schedule of the routes
+// Before the window, ledger create starts the release ledger with the
+// routes' caps, schedule writes the committed schedule of the routes
 // whose configurations it is given, with each configuration's SHA-256
-// and host group, which a route's run must match, ledger create starts
-// the release ledger with their caps, ledger price records a route's
+// and host group and the ledger's open-line SHA-256, which a route's run
+// must match, ledger price records a route's
 // prices at the token bounds of its cells and of its ceiling check,
 // ceiling-check sends a route's ceiling check, admitted in the ledger,
 // and writes the record run reads with --ceiling-probe, and
@@ -47,9 +48,9 @@
 // pinned offsets up the whole ladder, and writes the cells' evidence and
 // a summary that says whether the rehearsal is green.
 //
-//	percentes-release schedule --master-seed SEED --first DATE --last DATE
-//	    --config FILE ... --schedule FILE
 //	percentes-release ledger create --ledger FILE --config FILE ...
+//	percentes-release schedule --master-seed SEED --first DATE --last DATE
+//	    --config FILE ... --ledger FILE --schedule FILE
 //	percentes-release ledger price --ledger FILE --config FILE --input USD
 //	    --output USD --source URL --retrieved DATE
 //	percentes-release ceiling-check --config FILE --env FILE --ledger FILE
@@ -110,8 +111,8 @@ const (
 const usage = `usage: percentes-release <command> [flags]
 
 commands:
-  schedule        write the committed schedule of the routes
   ledger create   start the release ledger with the routes' caps
+  schedule        write the committed schedule of the routes
   ledger price    record a route's prices for its cells and ceiling check
   ceiling-check   send a route's ceiling check and write its record
   public-config   write a route's configuration as published

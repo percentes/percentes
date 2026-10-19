@@ -133,7 +133,7 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "the route's release configuration (required)")
 	envFile := fs.String("env", "", "env file holding the target's api_key_env (required)")
-	ledgerPath := fs.String("ledger", "", "the release admission ledger, holding the route's price (required)")
+	ledgerPath := fs.String("ledger", "", "the release admission ledger the schedule froze, holding the route's price (required)")
 	schedulePath := fs.String("schedule", "", "the committed schedule file (required)")
 	out := fs.String("out", "", "release output directory; the route writes <route>/<cell>-a<attempt>/ under it (required)")
 	framesRoot := fs.String("frames", "", "raw-frame store directory outside the source tree (required)")
@@ -258,6 +258,9 @@ func newRoute(in routeInput) (*route, error) {
 	}
 	st, err := r.ledger.State()
 	if err != nil {
+		return nil, err
+	}
+	if err := checkLedger(st, sched); err != nil {
 		return nil, err
 	}
 	if err := st.CheckRelease(cfg); err != nil {

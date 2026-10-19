@@ -68,6 +68,9 @@ type Input struct {
 	// Configs are the frozen configurations of routes, at most one per
 	// route; New stores them in route order.
 	Configs []RouteConfig `json:"configs,omitempty"`
+	// LedgerSHA256 is the frozen admission ledger's: the hex SHA-256 of
+	// its open line.
+	LedgerSHA256 string `json:"ledger_sha256,omitempty"`
 }
 
 // RouteConfig is a route's configuration as frozen with the schedule:
@@ -257,6 +260,9 @@ func New(in Input) (*Schedule, error) {
 	if in.Configs, err = routeConfigs(routes, in.Configs); err != nil {
 		return nil, err
 	}
+	if in.LedgerSHA256 != "" && !isSHA256(in.LedgerSHA256) {
+		return nil, fmt.Errorf("schedule: ledger_sha256 %q is not a lowercase hex SHA-256", in.LedgerSHA256)
+	}
 
 	for counter := 0; counter <= maxCounter; counter++ {
 		seed := in.MasterSeed
@@ -296,7 +302,7 @@ func routeConfigs(routes []string, cs []RouteConfig) ([]RouteConfig, error) {
 		if !slices.Contains(routes, c.Route) {
 			return nil, fmt.Errorf("schedule: configuration of route %q, which is not scheduled", c.Route)
 		}
-		if b, err := hex.DecodeString(c.ConfigSHA256); err != nil || len(b) != sha256.Size || hex.EncodeToString(b) != c.ConfigSHA256 {
+		if !isSHA256(c.ConfigSHA256) {
 			return nil, fmt.Errorf("schedule: route %q: config_sha256 %q is not a lowercase hex SHA-256", c.Route, c.ConfigSHA256)
 		}
 		c.HostGroup = slices.Clone(c.HostGroup)
@@ -313,6 +319,12 @@ func routeConfigs(routes []string, cs []RouteConfig) ([]RouteConfig, error) {
 		}
 	}
 	return out, nil
+}
+
+// isSHA256 reports whether s is a SHA-256 in lowercase hex.
+func isSHA256(s string) bool {
+	b, err := hex.DecodeString(s)
+	return err == nil && len(b) == sha256.Size && hex.EncodeToString(b) == s
 }
 
 // Config returns route's frozen configuration, false when the schedule
