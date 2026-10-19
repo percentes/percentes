@@ -309,7 +309,10 @@ line in the published tables.
    at its newest recorded price, no longer admit one of its steps stops
    here. The ledger then reserves one probe request plus every scheduled
    request of the cell against the route's and the release's liability
-   caps; a refusal stops the route before any request is sent. The
+   caps; a refusal stops the route before any request is sent. Where a
+   price was recorded for the route after the limits and the balance
+   were checked, the ledger reserves nothing and the cell repeats both
+   checks at the new price; a second such price blocks the cell. The
    request's step was admitted by the ceiling rule when the route
    started.
 3. **Body.** The request's user text is the prefix `cs-<seed>-<index>`

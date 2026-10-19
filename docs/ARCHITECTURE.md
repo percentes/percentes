@@ -433,7 +433,7 @@ The diagram predates the hosted packages, which the table lists.
 | Output | `internal/report` | the report pairs for a run and a campaign; the hosted report without SLO fields; a hosted run's pair from its manifest and attempts file; the paired pilot report; the release cell report with G2 per step; the per-step tables with their intervals, finish-reason sub-lines, throughput, curves and quantile refusals, latency and token distributions, gap histograms and signals, the drift split of a frame, the window-close comparison, a route page's `model_mismatch` lines, and the index table | §2 to §5, §7; SPEC-HOSTED §4, §7 to §9, HA2 §8, HA3 points 8, 12, 13 and 16 | `Generate`, `GenerateCampaign`, `FromRun`, `WriteHostedPair`, `GeneratePilot`, `NewStepTables`, `NewIndex`, `DocsOf`, `CompareWindowClose` | renderer units; AC6 field assertions; byte-for-byte replay; hand-computed interval oracles; the forbidden-string test |
 | | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
 | Hosted | `internal/probe` | the pre-run probe: Domain Name System (DNS) resolution, the Transport Layer Security (TLS) handshake, one request, the response shape, the start gate; the release ceiling check, a record's results re-derived from its requests, the ceiling choice across a model's hosts with a host left out on its records' reported-model fault, the values a probe record withholds, and the reported-model fault of a route's own records | SPEC-HOSTED §2, §5; HA3 points 7 and 15 | `Run`, `RunRelease`, `ReleaseRecord.Verify`, `ChooseCeiling`, `ModelFault`, `ReleaseRecord.Expected`, `LengthValue`, `Gate`, `Write`, `Retains`, `Exposed`, `ExposedByMarking`, `WriteRetained` | an httptest server per shape and failure |
-| | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound, bound to one open line once `Bind` is called; the release ceiling rule, and the check of a published verdict against the configuration's limits | SPEC-HOSTED HA2 §3; HA3 points 6 and 15 | `Create`, `Open`, `Ledger.Bind`, `Ledger.Admit`, `Ledger.Settle`, `CeilingRule`, `CheckPublished`, `State.Covers`, `State.ReservationUSD` | chain, cap and settlement units |
+| | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound, bound to one open line once `Bind` is called; the release ceiling rule, and the check of a published verdict against the configuration's limits | SPEC-HOSTED HA2 §3; HA3 points 6 and 15 | `Create`, `Open`, `Ledger.Bind`, `Ledger.Admit`, `Ledger.AdmitAt`, `Ledger.Settle`, `CeilingRule`, `CheckPublished`, `State.Covers`, `State.ReservationUSD`, `State.PriceRevision` | chain, cap and settlement units |
 | | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadWindowClose`, `LoadOperator`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
@@ -521,7 +521,7 @@ hosted-G6 ([The release runner](#the-release-runner)):
 | Refresh | the refresh command exits 0 within 30 s, the operator file loads, holds no confidential limit's value and covers the build, and every limits and eligibility record's file was rewritten after the command started | cell start | the cell is blocked before admission: no ledger line, no request | `cellOperator`, `Operator.CheckConfidential`, `Operator.Refreshed` |
 | Limits read | the refresh command prints one entry per recorded limit, its value or why it is unavailable; the ceiling rule with those values, at the route's newest recorded price, still admits every step the route runs | cell start | output that does not parse blocks the cell as a refresh fault does; limits that no longer admit a step stop the route before admission | `evidence.ReadRefreshedLimits`, `limitsStop` |
 | Balance check | the balance command prints `{"amount_usd": "<decimal>"}` at or above the cell's reservation, or `{"unavailable": "<reason>"}` under a `target.balance_unavailable` ruling | cell start | the cell is blocked before admission | `evidence.CheckBalance`, `BalanceCheck.Blocks` |
-| Ledger admission | the route and global liability caps of the configuration | cell start | the route stops | `Ledger.Admit` |
+| Ledger admission | the route and global liability caps of the configuration, at the route's price revision in the cell's ledger read | cell start | a cap refusal stops the route; a later price line for the route repeats the limits and balance checks once, and a second blocks the cell | `Ledger.AdmitAt` |
 | Probe gate | a 400, 401, 403 or 404, or an operator-set limit status | cell start | the cell is blocked before its ladder | `probe.Gate` |
 | Credential or account fault | a probe 401 or 403 that the route's previous cell to send a probe also saw, on its probe or inside its ladder | cell start | the route stops; the cell is retained and labelled | `authFault` |
 | Documented billing refusal | the status and body string `target.billing_refusals` records; at the probe of a route with a confidential limit, the string is looked for in the withheld body | the probe, or any request | the route stops | `billingRefusal`, `Hooks.OnDone` |
@@ -1123,8 +1123,9 @@ their outputs and refuses to start on any of these.
   the same value. A release ledger caps liability only. The schedule
   freezes the SHA-256 of its open line, and `run` refuses any other
   ledger. `run` then binds the ledger to that hash (`Ledger.Bind`). Each
-  later read at a cell (the limits check through `ledgerEntries`, the
-  reservation for the balance check, the admission and the settlement)
+  later read at a cell (the read through `readLedger` that prices the
+  limits check and the balance check's reservation, the admission and
+  the settlement)
   refuses a file at the path whose open line has another SHA-256; the
   cell is labelled interrupted and `run` exits 1. `ledger price
   --ledger FILE --config FILE --input USD --output USD --source URL
@@ -1269,18 +1270,18 @@ running and starts the cell's live dispatch series, then writes the
 clock record and the start status, runs the refresh command
 (`--refresh-cmd`, run like the status command with no shell) and writes
 its record, reads the operator file and its records again and the limits
-the command printed, and runs the balance command (`--balance-cmd`) and
-writes its record with the check of the printed amount against the
-cell's reservation, the probe request plus every scheduled request at
-the ledger's price. The refresh command prints one JSON object,
+the command printed, reads the ledger once, and runs the balance command
+(`--balance-cmd`) and writes its record with the check of the printed
+amount against the cell's reservation, the probe request plus every
+scheduled request at the price in that read. The refresh command prints one JSON object,
 `{"limits": [...]}`, with one entry per `target.limits` entry in its
 order: the dimension, and a positive `value` or an `unavailable` reason
 (`evidence.ReadRefreshedLimits`). A clock offset above 60 s stops the
 route. `limitsStop` (`close.go`) applies the ceiling rule again with the
 values read in place of the recorded ones, a limit read as unavailable
-keeping its recorded value, to the ladder as the route started. It reads
-the ledger again, bound to the open line the schedule froze, for the
-route's newest recorded price, the price line
+keeping its recorded value, to the ladder as the route started. It takes
+from the same ledger read, bound to the open line the schedule froze,
+the route's newest recorded price, the price line
 with the latest retrieval date (`routePrice`), so a price recorded during
 the window is tested against the spend limits. Where the rule no longer
 admits a step the route runs at the price the schedule froze, the route
@@ -1299,7 +1300,16 @@ no `target.balance_unavailable` ruling. The manifest of a cell blocked
 for its records carries the records read when the route started. The
 ladder is cut at the top admitted step and the cell's seed set, and one
 user text per scheduled request comes from Shape S. The ledger admits
-one plus the scheduled count; a refusal stops the route. One probe
+one plus the scheduled count; a refusal stops the route. The admission
+(`Ledger.AdmitAt`) names the route's price revision in the cell's ledger
+read, the line number of the route's last price line
+(`State.PriceRevision`). Where the route has a later price line, the
+ledger writes nothing and returns `PriceChanged`; the cell then reads the
+ledger again and repeats the limits test and the balance command, whose
+second record replaces the first, and asks for admission once more. The
+ledger is not locked while the balance command runs. A second
+`PriceChanged` blocks the cell. Other routes' price and admission lines
+leave the revision unchanged. One probe
 request is sent: a documented billing refusal stops the route, matched
 on a route with a confidential limit against the withheld body, and a
 start-gate status blocks the cell, unless it is a 401 or 403 that the
@@ -1319,7 +1329,7 @@ retained.
 | `counted` | the ladder ran to the top admitted step's drain, or the backoff rule ended it; G2 passed at every attempted step, no tripwire fired, no `EMFILE`, the clock unflagged; the cell enters the route's frame | the full set, with a manifest whose cell record carries the label |
 | `client_invalid` | `EMFILE`, a failed G2 at a step, a fired tripwire, a response over another protocol, a flagged clock, or a canary that did not start; re-run within the bound | the full set, labelled |
 | `model_mismatch` | a response reported a model other than the expected one; re-run within the bound. A route stop labels the cell `stopped` instead; a cell that is also client-invalid keeps this label, with both reasons | the full set, labelled, with the expected and every reported identifier in the manifest; a line on the route's page |
-| `blocked` | the refresh fault, the balance check or the probe's status blocked the start | the files reached, an empty attempts file and frame store, and a labelled manifest and report pair |
+| `blocked` | the refresh fault, the balance check, a route price recorded during the repeated start checks or the probe's status blocked the start | the files reached, an empty attempts file and frame store, and a labelled manifest and report pair |
 | `stopped` | a route stop before or during the ladder; the process exits 3 | as blocked, with whatever the ladder sent |
 | `interrupted` | the process ended or failed during the cell | `cell.json` and the files reached at the time; when the process next reads the route's records, `labelCell` writes the empty attempts file, reads any start record the cell did not write, and adds the labelled manifest and report pair |
 | `missed` | the start was more than 15 minutes past when the process reached it | `cell.json`, then the labelled manifest and report pair from `labelCell`, with no end records and no concurrent runs |

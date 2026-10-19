@@ -249,6 +249,9 @@ type Usage struct {
 	// Prices holds the highest per-request price recorded for the route at
 	// each pair of token bounds.
 	Prices map[Tokens]*big.Rat
+	// PriceSeq is the line number of the route's last price line (0 =
+	// none), its price revision.
+	PriceSeq int
 	// charged counts the requests sent and reserved at each pair of token
 	// bounds.
 	charged map[Tokens]int
@@ -353,6 +356,15 @@ func (s *State) price(route string, tok Tokens) *big.Rat {
 	return nil
 }
 
+// PriceRevision is route's price revision: the line number of its last
+// price line, 0 when it has none.
+func (s *State) PriceRevision(route string) int {
+	if u := s.Routes[route]; u != nil {
+		return u.PriceSeq
+	}
+	return 0
+}
+
 // ReservationUSD is n requests to route at tok, each at the highest
 // per-request price recorded for the route at tok: the liability their
 // admission adds, as a decimal number of US dollars.
@@ -403,6 +415,18 @@ type Refusal struct {
 
 func (r *Refusal) Error() string {
 	return fmt.Sprintf("admission: %s for %s refused: %s", r.Purpose, r.Route, r.Reason)
+}
+
+// PriceChanged is an admission whose route's price revision, read under
+// the ledger's lock, differs from the one its caller checked; the ledger
+// records nothing.
+type PriceChanged struct {
+	Route           string
+	Checked, Ledger int
+}
+
+func (p *PriceChanged) Error() string {
+	return fmt.Sprintf("admission: %s's last price line is line %d; the admission checked line %d", p.Route, p.Ledger, p.Checked)
 }
 
 // Ledger is the ledger file at a path. Every operation reads and checks
@@ -648,10 +672,24 @@ func (l *Ledger) RecordHosting(usd, note string) error {
 // global liability cap. The admit line carries the price its requests
 // count at.
 func (l *Ledger) Admit(route, purpose string, n int, tok Tokens) (Admission, error) {
+	return l.admit(route, purpose, n, tok, nil)
+}
+
+// AdmitAt is Admit for a caller that checked the route's price at
+// revision rev (State.PriceRevision): where the ledger's revision differs
+// it returns a *PriceChanged and writes no line.
+func (l *Ledger) AdmitAt(route, purpose string, n int, tok Tokens, rev int) (Admission, error) {
+	return l.admit(route, purpose, n, tok, &rev)
+}
+
+func (l *Ledger) admit(route, purpose string, n int, tok Tokens, rev *int) (Admission, error) {
 	var a Admission
 	_, err := l.update(func(st *State) (*Entry, error) {
 		if route == "" {
 			return nil, errors.New("admission: empty route")
+		}
+		if have := st.PriceRevision(route); rev != nil && have != *rev {
+			return nil, &PriceChanged{Route: route, Checked: *rev, Ledger: have}
 		}
 		if tok.Input < 1 || tok.Output < 1 {
 			return nil, fmt.Errorf("admission: token bounds %d and %d: both must be positive", tok.Input, tok.Output)
@@ -859,6 +897,7 @@ func (st *State) apply(e *Entry) error {
 		if p := u.Prices[tok]; p == nil || r.Cmp(p) > 0 {
 			u.Prices[tok] = r
 		}
+		u.PriceSeq = e.Seq
 	case KindHosting:
 		r, err := decimal(e.USD)
 		if err != nil {

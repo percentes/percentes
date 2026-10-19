@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -965,6 +966,191 @@ func TestCellBalanceGate(t *testing.T) {
 	}
 }
 
+// heldBalance is a balance command printing amount that, on each read k
+// in during, waits while during[k] runs. It returns the command, its read
+// count and a channel that carries the first error of the during steps.
+func heldBalance(t *testing.T, amount string, during map[int]func() error) ([]string, func() int, <-chan error) {
+	t.Helper()
+	dir := t.TempDir()
+	for k := range during {
+		writeFile(t, dir, fmt.Sprintf("hold%d", k), nil)
+	}
+	script := "#!/bin/sh\nd='" + dir + "'\nn=$(($(cat \"$d/count\" 2>/dev/null || echo 0) + 1))\necho $n > \"$d/count\"\n" +
+		"if [ -f \"$d/hold$n\" ]; then touch \"$d/started$n\"; while [ ! -f \"$d/go$n\" ]; do sleep 0.02; done; fi\n" +
+		"echo '{\"amount_usd\": \"" + amount + "\"}'\n"
+	cmd := writeFile(t, dir, "balance", []byte(script))
+	if err := os.Chmod(cmd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		var first error
+		for k := 1; k <= len(during); k++ {
+			deadline := time.Now().Add(20 * time.Second)
+			for !fileExists(filepath.Join(dir, fmt.Sprintf("started%d", k))) && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
+			if err := during[k](); err != nil && first == nil {
+				first = err
+			}
+			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("go%d", k)), nil, 0o644); err != nil && first == nil {
+				first = err
+			}
+		}
+		done <- first
+	}()
+	count := func() int {
+		b, _ := os.ReadFile(filepath.Join(dir, "count"))
+		n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+		return n
+	}
+	return []string{cmd}, count, done
+}
+
+// A price recorded for the route while the balance command runs, after
+// the limits and the reservation were checked at the ledger's price,
+// makes the admission repeat both checks at the new price before any
+// ledger line is written: a raised price the spend limit no longer covers
+// stops the route, and one the balance no longer covers blocks the cell
+// as insufficient against the new reservation, each with no admit line
+// and no request. A second such price blocks the cell with
+// priceChangedReason. Another route's price line and admission in the
+// same window repeat nothing, and the cell is admitted at its price.
+func TestCellPriceChangedAtAdmission(t *testing.T) {
+	raise := func(f *fixture, cfg *config.Config, in, out, retrieved string) func() error {
+		return func() error {
+			l, err := admission.Open(f.ledger)
+			if err == nil {
+				_, err = recordPrice(l, cfg, in, out, "https://example.test/pricing", retrieved)
+			}
+			return err
+		}
+	}
+	other := func(f *fixture, cfg *config.Config) func() error {
+		return func() error {
+			l, err := admission.Open(f.ledger)
+			if err != nil {
+				return err
+			}
+			host := hostConfigs(t, cfg)[0]
+			if _, err := recordPrice(l, host, "0.75", "3.75", "https://example.test/pricing", "2026-10-08"); err != nil {
+				return err
+			}
+			_, err = l.Admit(host.Target.Name, admission.PurposeCell, 1, admission.ReleaseTokens(host))
+			if !errors.As(err, new(*admission.Refusal)) {
+				return fmt.Errorf("%s's admission: %v", host.Target.Name, err)
+			}
+			return nil
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		during  func(f *fixture, cfg *config.Config) map[int]func() error
+		reads   int // start reads plus the end read
+		outcome string
+		reason  string
+		admit   string
+		// required is the start balance check's reservation where the
+		// price changed again after it (empty: at the ledger's price).
+		required string
+	}{
+		{"spend limit no longer covers", func(f *fixture, cfg *config.Config) map[int]func() error {
+			return map[int]func() error{1: raise(f, cfg, "0.30", "1.20", "2026-10-08")}
+		}, 3, outcomeStopped, "route stop: the limits read at the cell's start, at the price retrieved 2026-10-08, no longer admit step 3 (1 rps) of the 3 the route runs: " +
+			"spend_per_month_usd recorded 10, read 10: nominal demand 13.3093824 above it; the route keeps its steps (SPEC-HOSTED §4)", "", ""},
+		{"balance no longer covers", func(f *fixture, cfg *config.Config) map[int]func() error {
+			return map[int]func() error{1: raise(f, cfg, "0.20", "0.80", "2026-10-08")}
+		}, 3, outcomeBlocked, "is below the cell's reservation of US$", "", ""},
+		{"changed twice", func(f *fixture, cfg *config.Config) map[int]func() error {
+			return map[int]func() error{1: raise(f, cfg, "0.16", "0.64", "2026-10-08"), 2: raise(f, cfg, "0.17", "0.68", "2026-10-09")}
+		}, 3, outcomeBlocked, priceChangedReason + ": admission: groq's last price line is line 7; the admission checked line 5", "", "0.0155904"},
+		{"another route", func(f *fixture, cfg *config.Config) map[int]func() error {
+			return map[int]func() error{1: other(f, cfg)}
+		}, 2, outcomeBlocked, "probe request returned 401", "0.0004872", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+			r, f := newTestRoute(t, rulingConfig(t, e.url()), "+0.005")
+			shortLadder(r)
+			run := r.runs[0]
+			n := 1 + len(loadgen.BuildSchedule(cellConfig(r.cfg, run.Seed, r.steps)))
+			tok := admission.ReleaseTokens(r.cfg)
+			need, err := ledgerState(t, f.ledger).ReservationUSD("groq", n, tok)
+			if err != nil {
+				t.Fatal(err)
+			}
+			amount, _ := new(big.Rat).SetString(need)
+			amount.Mul(amount, big.NewRat(6, 5))
+			var reads func() int
+			var done <-chan error
+			r.balance, reads, done = heldBalance(t, amount.FloatString(7), tc.during(f, r.rule.cfg))
+			before, err := ledgerEntries(f.ledger, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, err := r.runCell(context.Background(), run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if rec.Outcome != tc.outcome || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], tc.reason) {
+				t.Fatalf("outcome %s, reasons %q; want %s, %q", rec.Outcome, rec.Reasons, tc.outcome, tc.reason)
+			}
+			if got := reads(); got != tc.reads {
+				t.Fatalf("balance read %d times, want %d", got, tc.reads)
+			}
+			after, err := ledgerEntries(f.ledger, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var admits []admission.Entry
+			for _, en := range after[len(before):] {
+				if en.Route == "groq" && (en.Kind == admission.KindAdmit || en.Kind == admission.KindRefused) {
+					admits = append(admits, en)
+				}
+			}
+			probes := 0
+			if tc.admit == "" {
+				if len(admits) != 0 {
+					t.Fatalf("ledger lines for groq's admission %+v", admits)
+				}
+			} else {
+				probes = 1
+				if len(admits) != 1 || admits[0].Kind != admission.KindAdmit || admits[0].PerRequestUSD != tc.admit {
+					t.Fatalf("ledger lines for groq's admission %+v, want one admit at US$%s", admits, tc.admit)
+				}
+			}
+			if hits := e.hits.Load(); hits != int64(probes) || rec.Sent != (admission.Counts{Probe: probes}) {
+				t.Fatalf("server saw %d requests; sent %+v", hits, rec.Sent)
+			}
+			raw, err := os.ReadFile(filepath.Join(r.cellDir(run), evidence.BalanceStartFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got evidence.StatusRecord
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			want, err := ledgerState(t, f.ledger).ReservationUSD("groq", n, tok)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.required != "" {
+				want = tc.required
+			}
+			if c := got.Check; c == nil || c.RequiredUSD != want {
+				t.Fatalf("start balance check %+v, want against US$%s", c, want)
+			}
+			if tc.name == "balance no longer covers" && (got.Check.Status != evidence.BalanceInsufficient || !strings.HasSuffix(rec.Reasons[0], want)) {
+				t.Fatalf("start balance check %+v, reason %q; want insufficient against US$%s", got.Check, rec.Reasons[0], want)
+			}
+			checkRetained(t, r, run)
+		})
+	}
+}
+
 // Each cell reads the account balance at its start and at its end, also
 // a cell stopped before its ladder, and its manifest names both records.
 // The start record carries the check against the cell's probe and
@@ -1460,14 +1646,14 @@ func TestOperatorConfidentialValue(t *testing.T) {
 
 // A cell whose ledger path holds another ledger than the one the route
 // started on ends in an error before any request, appending nothing to
-// that file: at the limits re-check, and at the reservation's read where
-// the refresh failed and the re-check does not run.
+// that file, at the cell's ledger read: also where the refresh failed and
+// the limits re-check does not run.
 func TestCellLedgerSwapped(t *testing.T) {
 	for _, tc := range []struct {
 		name, script, want string
 	}{
 		{"refreshed", "", "ledger: open line sha256 %s; the route is bound to %s"},
-		{"not refreshed", "exit 4", "admission: ledger open line sha256 %s; bound to %s"},
+		{"not refreshed", "exit 4", "ledger: open line sha256 %s; the route is bound to %s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })

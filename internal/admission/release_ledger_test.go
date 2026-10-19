@@ -249,6 +249,51 @@ func TestReservationUSD(t *testing.T) {
 	}
 }
 
+// A route's price revision is the line of its last price line. AdmitAt
+// admits at the revision its caller checked, which another route's price
+// line or admission leaves unchanged, and refuses a revision that differs
+// with a *PriceChanged and no ledger line.
+func TestAdmitAtPriceRevision(t *testing.T) {
+	l, path := releaseLedger(t, routeConfig(t, "groq", "10", "1300"), routeConfig(t, "google", "80", "1300"))
+	if rev := state(t, l).PriceRevision("groq"); rev != 0 {
+		t.Fatalf("revision with no price: %d", rev)
+	}
+	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 512)))
+	rev := state(t, l).PriceRevision("groq")
+	if rev != 2 {
+		t.Fatalf("revision %d, want line 2", rev)
+	}
+	must(t, l.RecordPrice("google", shapePrice(price("0.75", "3.75"), 512)))
+	admitAt(t, l, "google", PurposeCell, 10, at512)
+	if got := state(t, l).PriceRevision("groq"); got != rev {
+		t.Fatalf("revision %d after google's lines, want %d", got, rev)
+	}
+	a, err := l.AdmitAt("groq", PurposeCell, 10, at512, rev)
+	if err != nil || a.Seq != 5 {
+		t.Fatalf("admit at the checked revision: %+v %v", a, err)
+	}
+	// A lower price is a new revision too.
+	must(t, l.RecordPrice("groq", shapePrice(price("0.10", "0.40"), 512)))
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = l.AdmitAt("groq", PurposeCell, 10, at512, rev)
+	var changed *PriceChanged
+	if !errors.As(err, &changed) || *changed != (PriceChanged{Route: "groq", Checked: 2, Ledger: 6}) || errors.As(err, new(*Refusal)) {
+		t.Fatalf("admit at a stale revision: %v", err)
+	}
+	if want := "admission: groq's last price line is line 6; the admission checked line 2"; err.Error() != want {
+		t.Errorf("error %q, want %q", err, want)
+	}
+	if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
+		t.Fatalf("ledger changed: %v", err)
+	}
+	if _, err := l.AdmitAt("groq", PurposeCell, 10, at512, 6); err != nil {
+		t.Fatalf("admit at the new revision: %v", err)
+	}
+}
+
 // The ledger covers a ceiling rule verdict only with prices at both the
 // cells' and the ceiling check's token bounds, each at least the
 // verdict's.

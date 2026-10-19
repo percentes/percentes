@@ -17,22 +17,18 @@ import (
 // limitsStop applies the ceiling rule again with the limits the refresh
 // command read at a cell's start in place of the recorded ones, an
 // unavailable limit keeping its recorded value, and at the route's
-// newest price in the ledger as the cell starts (routePrice), and
-// returns the route stop when it no longer admits a step the route runs:
-// the route keeps its steps (SPEC-HOSTED §4) and stops instead. The stop
-// names the lowest such step, the price's retrieval date and the binding
-// limit.
-func (r *route) limitsStop(read []evidence.RefreshedLimit) (*routeStop, error) {
+// newest price in entries, the ledger as the cell starts (routePrice),
+// and returns the route stop when it no longer admits a step the route
+// runs: the route keeps its steps (SPEC-HOSTED §4) and stops instead. The
+// stop names the lowest such step, the price's retrieval date and the
+// binding limit.
+func (r *route) limitsStop(read []evidence.RefreshedLimit, entries []admission.Entry) (*routeStop, error) {
 	c := *r.rule.cfg
 	c.Target.Limits = slices.Clone(c.Target.Limits)
 	for i, l := range read {
 		if l.Unavailable == "" {
 			c.Target.Limits[i].Value = l.Value
 		}
-	}
-	entries, err := ledgerEntries(r.ledgerPath, r.ledger.Bound())
-	if err != nil {
-		return nil, err
 	}
 	price, err := routePrice(entries, c.Target.Name)
 	if err != nil {

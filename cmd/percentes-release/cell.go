@@ -20,6 +20,10 @@ import (
 	"github.com/percentes/percentes/internal/schedule"
 )
 
+// priceChangedReason blocks a cell whose route's price changed again
+// while its start checks were repeated.
+const priceChangedReason = "the route's price was recorded again during the cell's repeated start checks"
+
 // cellConfig is the route's configuration for one cell attempt: the
 // attempt's seed, and the ladder cut at the top admitted step. The cut
 // ladder's schedule is a prefix of the whole ladder's.
@@ -41,7 +45,11 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 // start (cellOperator, evidence.ReadRefreshedLimits), a failed balance
 // check, a balance below the cell's reservation, or a
 // balance unavailable where the route records no balance_unavailable
-// ruling blocks the start before admission; a probe status that blocks
+// ruling blocks the start before admission; the limits and the balance
+// are checked at one ledger snapshot's price, a price recorded for the
+// route between that snapshot and the admission repeats both checks
+// once, and a second blocks the start (priceChangedReason); a probe
+// status that blocks
 // the start ends the cell before the ladder, unless it is a 401 or 403
 // the route's previous probed cell also saw, which stops the route; a
 // documented billing refusal on the probe or inside the ladder stops the
@@ -96,64 +104,81 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if t.Confidential() {
 		ev.refreshHeld = refresh
 	}
-	var (
-		opFault   string
-		limitStop *routeStop
-	)
+	var opFault string
 	if oerr == nil {
 		oerr = lerr
 	}
 	if oerr != nil {
 		op = r.op
 		opFault = fmt.Sprintf("operator records not refreshed at the cell's start (SPEC-HOSTED §4): %v; the manifest carries the records read when the route started", oerr)
-	} else if limitStop, err = r.limitsStop(read); err != nil {
-		return rec, err
 	}
 	ev.op = op
 	offsets := loadgen.BuildSchedule(cfg)
 	tok := admission.ReleaseTokens(cfg)
-	st, err := r.ledger.State()
-	if err != nil {
-		return rec, err
-	}
-	need, err := st.ReservationUSD(t.Name, 1+len(offsets), tok)
-	if err != nil {
-		return rec, err
-	}
-	balance := evidence.ReadBalance(ctx, r.balance)
-	balance.Check = evidence.CheckBalance(balance, need, t.BalanceUnavailable)
-	if ev.balanceStart, err = evidence.WriteStatus(dir, evidence.BalanceStartFile, balance); err != nil {
-		return rec, err
-	}
-	if c := ev.clock; c.AbsOffsetS != nil && *c.AbsOffsetS > config.PinnedClockOffsetMaxS {
-		finish(outcomeStopped, (&routeStop{c.Flag}).Error())
-		return rec, r.retain(ctx, ev, rec, nil)
-	}
-	if limitStop != nil {
-		finish(outcomeStopped, limitStop.Error())
-		return rec, r.retain(ctx, ev, rec, nil)
-	}
-	if opFault != "" {
-		finish(outcomeBlocked, opFault)
-		return rec, r.retain(ctx, ev, rec, nil)
-	}
-	if reason := balance.Check.Blocks(); reason != "" {
-		finish(outcomeBlocked, reason)
-		return rec, r.retain(ctx, ev, rec, nil)
-	}
-
 	cases := make([]string, len(offsets))
 	for i := range cases {
 		cases[i] = r.shape.UserText(run.Seed, i)
 	}
-	a, err := r.ledger.Admit(t.Name, admission.PurposeCell, 1+len(offsets), tok)
-	var refused *admission.Refusal
-	if errors.As(err, &refused) {
-		finish(outcomeStopped, (&routeStop{refused.Error()}).Error())
-		return rec, r.retain(ctx, ev, rec, nil)
-	}
-	if err != nil {
-		return rec, err
+	var a admission.Admission
+	for check := 1; ; check++ {
+		var (
+			entries   []admission.Entry
+			st        *admission.State
+			limitStop *routeStop
+			need      string
+		)
+		if entries, st, err = readLedger(r.ledgerPath, r.ledger.Bound()); err != nil {
+			return rec, err
+		}
+		if opFault == "" {
+			if limitStop, err = r.limitsStop(read, entries); err != nil {
+				return rec, err
+			}
+		}
+		if need, err = st.ReservationUSD(t.Name, 1+len(offsets), tok); err != nil {
+			return rec, err
+		}
+		// The ledger is not locked while the balance command runs.
+		balance := evidence.ReadBalance(ctx, r.balance)
+		balance.Check = evidence.CheckBalance(balance, need, t.BalanceUnavailable)
+		if ev.balanceStart, err = evidence.WriteStatus(dir, evidence.BalanceStartFile, balance); err != nil {
+			return rec, err
+		}
+		if c := ev.clock; c.AbsOffsetS != nil && *c.AbsOffsetS > config.PinnedClockOffsetMaxS {
+			finish(outcomeStopped, (&routeStop{c.Flag}).Error())
+			return rec, r.retain(ctx, ev, rec, nil)
+		}
+		if limitStop != nil {
+			finish(outcomeStopped, limitStop.Error())
+			return rec, r.retain(ctx, ev, rec, nil)
+		}
+		if opFault != "" {
+			finish(outcomeBlocked, opFault)
+			return rec, r.retain(ctx, ev, rec, nil)
+		}
+		if reason := balance.Check.Blocks(); reason != "" {
+			finish(outcomeBlocked, reason)
+			return rec, r.retain(ctx, ev, rec, nil)
+		}
+
+		a, err = r.ledger.AdmitAt(t.Name, admission.PurposeCell, 1+len(offsets), tok, st.PriceRevision(t.Name))
+		var (
+			changed *admission.PriceChanged
+			refused *admission.Refusal
+		)
+		switch {
+		case errors.As(err, &changed) && check == 1:
+			continue
+		case errors.As(err, &changed):
+			finish(outcomeBlocked, fmt.Sprintf("%s: %v", priceChangedReason, changed))
+			return rec, r.retain(ctx, ev, rec, nil)
+		case errors.As(err, &refused):
+			finish(outcomeStopped, (&routeStop{refused.Error()}).Error())
+			return rec, r.retain(ctx, ev, rec, nil)
+		case err != nil:
+			return rec, err
+		}
+		break
 	}
 	var (
 		pr  *probe.Record
