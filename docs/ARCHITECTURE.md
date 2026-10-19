@@ -1525,7 +1525,11 @@ frame store and the release key, which it requires where a route has a
 confidential limit (`checkingKey`). A window-close record must verify
 (`evidence.WindowClose.Verify`): the record and its refresh began after
 the latest end of any of the route's attempts (each `cell.json`'s
-`end_utc`, or its `start_utc` where it has none); the refresh exited 0
+`end_utc`; for an interrupted cell with none, the latest time its
+records carry: `start_utc`, the dispatch series to the end of each second
+it counts a request in, the clock, status, balance and refresh records
+and each attempt's times from `epoch_utc`; for any other cell with none,
+its `start_utc`); the refresh exited 0
 and its published limits are the ones its output gives, read on a route
 with a confidential limit from the refresh record as run kept beside the
 copies; the copies in `window-close/<route>/<UTC time>/` under

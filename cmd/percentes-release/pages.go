@@ -268,9 +268,9 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 		case rec.ScheduleSHA256 != rr.schedule:
 			return nil, fmt.Errorf("pages: %s: the cell ran under schedule sha256 %q, the route's other cells under %q", dir, rec.ScheduleSHA256, rr.schedule)
 		}
-		end := rec.StartUTC
-		if rec.EndUTC != nil {
-			end = *rec.EndUTC
+		end, err := cellEnd(dir, &rec)
+		if err != nil {
+			return nil, err
 		}
 		if end.After(lastEnd) {
 			lastEnd = end
@@ -334,6 +334,86 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 		}
 	}
 	return rr, nil
+}
+
+// cellEnd is when the cell in dir, with run record rec, last ran: its
+// end_utc, or for an interrupted cell with none the latest time its
+// records carry: start_utc, the dispatch series (to the end of each
+// second it counts a request in), the clock, status, balance and refresh
+// records, and each attempt's times from epoch_utc. Any other cell with
+// no end_utc ends at its start_utc.
+func cellEnd(dir string, rec *cellRecord) (time.Time, error) {
+	if rec.EndUTC != nil {
+		return *rec.EndUTC, nil
+	}
+	end := rec.StartUTC
+	if rec.Outcome != outcomeInterrupted {
+		return end, nil
+	}
+	later := func(t time.Time) {
+		if t.After(end) {
+			end = t
+		}
+	}
+	read := func(name string) ([]byte, error) {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return b, err
+	}
+	fail := func(name string, err error) (time.Time, error) {
+		return time.Time{}, fmt.Errorf("pages: %s: %s: %w", dir, name, err)
+	}
+	if b, err := read(dispatchFile); err != nil {
+		return fail(dispatchFile, err)
+	} else if b != nil {
+		var s dispatchSeries
+		if err := json.Unmarshal(b, &s); err != nil {
+			return fail(dispatchFile, err)
+		}
+		later(s.StartUTC)
+		if s.ThroughUTC != nil {
+			later(*s.ThroughUTC)
+		}
+		for k, n := range s.Counts {
+			if n > 0 {
+				later(s.StartUTC.Add(time.Duration(k+1) * time.Second))
+			}
+		}
+	}
+	for _, name := range []string{evidence.ClockFile, evidence.StatusStartFile, evidence.StatusEndFile, evidence.BalanceStartFile, evidence.BalanceEndFile, evidence.RefreshFile} {
+		b, err := read(name)
+		if err != nil {
+			return fail(name, err)
+		}
+		if b == nil {
+			continue
+		}
+		var r struct {
+			StartUTC time.Time `json:"start_utc"`
+			EndUTC   time.Time `json:"end_utc"`
+		}
+		if err := json.Unmarshal(b, &r); err != nil {
+			return fail(name, err)
+		}
+		later(r.StartUTC)
+		later(r.EndUTC)
+	}
+	b, err := read(evidence.AttemptsFile)
+	if err != nil {
+		return fail(evidence.AttemptsFile, err)
+	}
+	if b != nil && rec.EpochUTC != nil {
+		recs, err := evidence.ReadRecords(bytes.NewReader(b))
+		if err != nil {
+			return fail(evidence.AttemptsFile, err)
+		}
+		for _, a := range recs {
+			later(rec.EpochUTC.Add(time.Duration(max(a.DispatchNs, a.FirstTokNs, a.DoneNs))))
+		}
+	}
+	return end, nil
 }
 
 // scheduleSHA256 is the SHA-256 of the schedule file at path, which must
