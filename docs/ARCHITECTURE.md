@@ -414,7 +414,7 @@ The diagram predates the hosted packages, which the table lists.
 
 | Group | Package | Role | SPEC | Entry points | Tests |
 |---|---|---|---|---|---|
-| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode of a file holding one YAML document and only whitespace after its end marker, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot; the release target's limits, unpublished-limit rulings, retained headers, not-applied parameters, naming record, documented statuses, errors and billing refusals, balance ruling and retention of model output, the other hosts of its model and the identifier its responses carry; each limit's marking, the retained headers and limits body a confidential limit requires, and the configuration as published with each confidential value withheld, and the forms of a value searched for in a text; the stand-in for a withheld in-band error object; the request-identifier header names a confidential route may publish; the body with its ceiling key set to another ceiling | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Decode`, `Config.Validate`, `Config.Published`, `ValueForms`, `Carries`, `RetainedError`, `RequestIDHeader`, `Target.ExpectedModel`, `ReleaseBodyAt`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
+| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode of a file holding one YAML document and only whitespace after its end marker, with no directive and no tag beyond the core types, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot; the release target's limits, unpublished-limit rulings, retained headers, not-applied parameters, naming record, documented statuses, errors and billing refusals, balance ruling and retention of model output, the other hosts of its model and the identifier its responses carry; each limit's marking, the retained headers and limits body a confidential limit requires, and the configuration as published with each confidential value withheld, and the forms of a value searched for in a text; the stand-in for a withheld in-band error object; the request-identifier header names a confidential route may publish; the body with its ceiling key set to another ceiling | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Decode`, `Config.Validate`, `Config.Published`, `ValueForms`, `Carries`, `RetainedError`, `RequestIDHeader`, `Target.ExpectedModel`, `ReleaseBodyAt`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
 | Load | `internal/loadgen` | schedule, pacer, SSE client with the Hypertext Transfer Protocol (HTTP) version 1.1 pin, outcome classification, per-request status, header, peer and protocol records, the credential header and literal body per target, the Messages stream adapter, retained header values kept apart from the record, the pilot and release tripwires, the release ladder with its drains and per-step verdicts, the dispatch and completion hooks, client gate, loopback canary | §2, §3; SPEC-HOSTED §3, §5, §9; HA3 points 2, 5, 15 and 16 | `BuildSchedule`, `BuildLadder`, `Run`, `NewTransport`, `StartCanary`, `SummarizeCanary`, `CPUMeasured` | request-body, stream-hardening, capture, ladder, hook and gate units; canary oracle; AC1 to AC2d |
 | | `internal/sse` | SSE framing for the client, the recovery probes and naivesweep | §3 | `SplitLines`, `Events` | a unit per grammar case |
 | | `internal/histo` | the pinned HdrHistogram wrapper; `RecordValue` only, and a test fails the suite if a correction API appears | §3 | `New`, `H.Record`, `H.Summarize` | the correction-API ban; AC1 oracles |
@@ -999,7 +999,14 @@ such as a SHA-256 hash or a commit identifier, and `YYYY-MM-DD` dates
 are skipped (`valueForms`, `carries`). A file holding a second YAML
 document, or anything but whitespace after a document-end marker (`...`
 at the start of a line), is refused by `config.Decode` and by
-`Config.Published`.
+`Config.Published`. Both also refuse a YAML directive (a line starting
+with `%`, such as `%TAG`) and a tag other than the core types yaml.v3
+gives an untagged node (`!!str`, `!!int`, `!!float`, `!!bool`, `!!null`,
+`!!timestamp`, `!!merge`, `!!seq` and `!!map`), such as
+`!<tag:example.com,2000:x>` or `!x`. yaml.v3 keeps neither a directive
+nor a tag in a comment or a string, where the scans above look. The
+file must be UTF-8 (8-bit Unicode Transformation Format), the encoding
+the directive check reads.
 The freeze commits that file; every command reads the file
 as loaded. `configs/release.reference.yaml` is one route with
 placeholders for the system text, the limit snapshots and the caps; its

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -51,9 +54,13 @@ func Decode(raw []byte) (*Config, error) {
 // or with text after its document-end marker.
 var errOneDocument = errors.New("one YAML document required")
 
+// coreTags are the tags yaml.v3 gives a node written without one.
+var coreTags = []string{"!!null", "!!bool", "!!int", "!!float", "!!str", "!!timestamp", "!!merge", "!!seq", "!!map"}
+
 // decodeOne decodes raw into v and refuses a YAML document after the
-// first and any text but whitespace after a document-end marker; with
-// known set, a field v does not declare is an error.
+// first, any text but whitespace after a document-end marker, a file not
+// in UTF-8, a YAML directive and a tag outside coreTags; with known set,
+// a field v does not declare is an error.
 func decodeOne(raw []byte, v any, known bool) error {
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(known)
@@ -67,10 +74,40 @@ func decodeOne(raw []byte, v any, known bool) error {
 	case !errors.Is(err, io.EOF):
 		return fmt.Errorf("%w: %w", errOneDocument, err)
 	}
+	if !utf8.Valid(raw) {
+		return errors.New("the file is not UTF-8")
+	}
 	if tail, ok := afterEnd(raw); ok && !blank(tail) {
 		return fmt.Errorf("%w: text after the document-end marker", errOneDocument)
 	}
+	if directive(raw) {
+		return errors.New("a YAML directive (a line starting with %) is not accepted")
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	var tagged *yaml.Node
+	walk(&doc, func(n *yaml.Node) {
+		if tagged == nil && n.Kind != yaml.DocumentNode && n.Kind != yaml.AliasNode && !slices.Contains(coreTags, n.Tag) {
+			tagged = n
+		}
+	})
+	if tagged != nil {
+		return fmt.Errorf("line %d, column %d: a YAML tag outside the core types (%s) is not accepted", tagged.Line, tagged.Column, strings.Join(coreTags, ", "))
+	}
 	return nil
+}
+
+// directive reports whether a line of raw starts with "%".
+func directive(raw []byte) bool {
+	raw = bytes.TrimPrefix(raw, []byte("\ufeff"))
+	for more := true; more; raw, more = nextLine(raw) {
+		if bytes.HasPrefix(raw, []byte("%")) {
+			return true
+		}
+	}
+	return false
 }
 
 // afterEnd returns the bytes after raw's first document-end marker: "..."
@@ -78,20 +115,23 @@ func decodeOne(raw []byte, v any, known bool) error {
 // end of raw.
 func afterEnd(raw []byte) ([]byte, bool) {
 	raw = bytes.TrimPrefix(raw, []byte("\ufeff"))
-	for {
+	for more := true; more; raw, more = nextLine(raw) {
 		if rest, ok := bytes.CutPrefix(raw, []byte("...")); ok &&
 			(len(rest) == 0 || rest[0] == ' ' || rest[0] == '\t' || lineBreak(rest) > 0) {
 			return rest, true
 		}
-		i := 0
-		for i < len(raw) && lineBreak(raw[i:]) == 0 {
-			i++
-		}
-		if i == len(raw) {
-			return nil, false
-		}
-		raw = raw[i+lineBreak(raw[i:]):]
 	}
+	return nil, false
+}
+
+// nextLine is raw after its first line break, or false without one.
+func nextLine(raw []byte) ([]byte, bool) {
+	for i := range raw {
+		if n := lineBreak(raw[i:]); n > 0 {
+			return raw[i+n:], true
+		}
+	}
+	return nil, false
 }
 
 // blank reports whether b holds only spaces, tabs and line breaks.

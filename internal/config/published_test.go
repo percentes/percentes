@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 // secretValue is a confidential limit's value in these tests; its text
@@ -173,6 +174,62 @@ func TestOneDocument(t *testing.T) {
 			t.Fatalf("%q then %q: published %v\n%s", tc[0], tc[1], err, b)
 		}
 	}
+}
+
+// A YAML directive or a tag outside the core types is refused by Parse,
+// Decode and Published, as is a file not in UTF-8; the reference and a
+// core tag written out still load.
+func TestPlainYAML(t *testing.T) {
+	ref := confidentialRef(t, confidentialTPM)
+	const naming = "      - Groq is a trademark"
+	for _, tc := range []struct{ name, raw, want string }{
+		{"a %TAG directive", "%TAG !x! tag:example.com,2000:" + secretValue + "\n---\n" + string(ref), "a YAML directive"},
+		{"a %YAML directive", "%YAML 1.1\n---\n" + string(ref), "a YAML directive"},
+		{"a directive after a byte order mark", "\ufeff%YAML 1.1\n---\n" + string(ref), "a YAML directive"},
+		{"a verbatim tag", strings.Replace(string(ref), naming, "      - !<tag:x,2000:"+secretValue+"> Groq is a trademark", 1), "a YAML tag outside the core types"},
+		{"a local tag", strings.Replace(string(ref), naming, "      - !t"+secretValue+" Groq is a trademark", 1), "a YAML tag outside the core types"},
+		{"a binary tag", strings.Replace(string(ref), naming, "      - !!binary OTg3NjU0My4yNQ==\n"+naming, 1), "a YAML tag outside the core types"},
+		{"UTF-16", "\xff\xfe" + string(utf16LE(string(ref)+"... # tpm "+secretValue+"\n")), "not UTF-8"},
+	} {
+		raw := []byte(tc.raw)
+		if bytes.Equal(raw, ref) {
+			t.Fatalf("%s: the edit did not apply", tc.name)
+		}
+		if _, err := Parse(raw); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: Parse: %v", tc.name, err)
+		}
+		if _, err := Decode(raw); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: Decode: %v", tc.name, err)
+		}
+		c, err := Parse(ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Raw = raw
+		if b, err := c.Published(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: published %v\n%s", tc.name, err, b)
+		}
+	}
+
+	loadRef(t, releaseRef)
+	for _, raw := range [][]byte{ref, bytes.Replace(ref, []byte(naming), []byte("      - !!str Groq is a trademark"), 1)} {
+		c, err := Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b, err := c.Published(); err != nil || bytes.Contains(b, []byte(secretValue)) {
+			t.Fatalf("published %v\n%s", err, b)
+		}
+	}
+}
+
+// utf16LE is s in UTF-16 little-endian.
+func utf16LE(s string) []byte {
+	var b []byte
+	for _, u := range utf16.Encode([]rune(s)) {
+		b = append(b, byte(u), byte(u>>8))
+	}
+	return b
 }
 
 // An in-band error's stand-in keeps the object's "type" string and

@@ -52,7 +52,8 @@ func RetainedError(text string) string {
 // comment or string scalar anywhere in the file that carries one of the
 // value's forms (valueForms) outside a hex run or a date. It refuses a
 // file of more than one YAML document or with text after its
-// document-end marker.
+// document-end marker, and a file with a YAML directive or a tag outside
+// coreTags.
 func (c *Config) Published() ([]byte, error) {
 	if !c.Target.Confidential() {
 		return c.Raw, nil
