@@ -485,6 +485,7 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 		v.errf("%s.response_headers: must record Retry-After under the release profile (SPEC-HOSTED §5)", field)
 	}
 	validateRetainedHeaders(v, field, t)
+	validateConfidentialRetention(v, field, t)
 	validateResponseShape(v, field, t)
 	if t.Adapter == AdapterMessages && t.ResponseShape != nil {
 		v.errf("%s.response_shape: must be absent for the %q adapter, which reads the Messages event fields", field, AdapterMessages)
@@ -851,6 +852,28 @@ func validateRetainedHeaders(v *validator, field string, t *Target) {
 		if headerMatch(e, "Retry-After") {
 			v.errf("%s.retained_headers[%d]: %q matches Retry-After, whose values the per-step tables print", field, i, e)
 		}
+	}
+}
+
+// validateConfidentialRetention requires, on a target with a limit marked
+// MarkingConfidential, a retained_headers entry covering each
+// response_headers entry that can match a name containing "ratelimit",
+// and probe.limits_retained with probe.limits_url: the provider may echo
+// the value in either (SPEC-HOSTED HA3 point 15).
+func validateConfidentialRetention(v *validator, field string, t *Target) {
+	if !t.Confidential() {
+		return
+	}
+	for i, e := range t.ResponseHeaders {
+		if !strings.HasSuffix(e, "*") && !strings.Contains(strings.ToLower(e), "ratelimit") {
+			continue
+		}
+		if !slices.ContainsFunc(t.RetainedHeaders, func(r string) bool { return headerCovers(r, e) }) {
+			v.errf("%s.response_headers[%d]: %q can match a name containing \"ratelimit\" and no retained_headers entry covers it, on a target with a confidential limit (SPEC-HOSTED HA3 point 15)", field, i, e)
+		}
+	}
+	if p := t.Probe; p != nil && p.LimitsURL != "" && !p.LimitsRetained {
+		v.errf("%s.probe.limits_retained: required with limits_url on a target with a confidential limit (SPEC-HOSTED HA3 point 15)", field)
 	}
 }
 

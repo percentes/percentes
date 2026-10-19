@@ -27,7 +27,8 @@ func (t *Target) Confidential() bool {
 // RetainedLimitValue, every other byte as written. Without such a limit
 // it is Raw. It refuses a confidential value that is not a plain scalar
 // written in target.limits itself, a comment inside that limit, and a
-// comment anywhere in the file that carries the value's text.
+// comment or string scalar anywhere in the file that carries the value's
+// text.
 func (c *Config) Published() ([]byte, error) {
 	if !c.Target.Confidential() {
 		return c.Raw, nil
@@ -52,8 +53,13 @@ func (c *Config) Published() ([]byte, error) {
 	for i := 1; i < len(lines); i++ {
 		starts[i] = starts[i-1] + len(lines[i-1])
 	}
-	var comments []string
-	walk(&doc, func(n *yaml.Node) { comments = append(comments, n.HeadComment, n.LineComment, n.FootComment) })
+	var comments, strs []string
+	walk(&doc, func(n *yaml.Node) {
+		comments = append(comments, n.HeadComment, n.LineComment, n.FootComment)
+		if n.Kind == yaml.ScalarNode && n.ShortTag() == "!!str" {
+			strs = append(strs, n.Value)
+		}
+	})
 
 	type span struct{ from, to int }
 	var edits []span
@@ -89,6 +95,11 @@ func (c *Config) Published() ([]byte, error) {
 		for _, cm := range comments {
 			if word.MatchString(cm) {
 				return fail("%s.value: a comment in the file carries %s", field, v.Value)
+			}
+		}
+		for _, s := range strs {
+			if word.MatchString(s) {
+				return fail("%s.value: a string in the file carries %s", field, v.Value)
 			}
 		}
 		edits = append(edits, span{at, at + len(v.Value)})

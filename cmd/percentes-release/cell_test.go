@@ -606,14 +606,16 @@ func TestCellProbeWithholds(t *testing.T) {
 }
 
 // confidentialConfig is releaseConfig with its tokens_per_minute limit
-// at 250,013.5, marked confidential in the file as loaded.
+// at 250,013.5, marked confidential in the file as loaded, and its
+// rate-limit headers retained.
 func confidentialConfig(t *testing.T, endpoint string) *config.Config {
 	t.Helper()
 	raw := releaseConfig(t, endpoint).Raw
 	const public = "      value: 250000\n      marking: public\n"
-	if !bytes.Contains(raw, []byte(public)) {
-		t.Fatal("reference no longer carries the tokens_per_minute lines this test edits")
+	if !bytes.Contains(raw, []byte(public)) || !bytes.Contains(raw, []byte(rateLimitHeaders)) {
+		t.Fatal("reference no longer carries the lines this test edits")
 	}
+	raw = bytes.Replace(raw, []byte(rateLimitHeaders), []byte(rateLimitHeaders+"  retained_headers: [x-ratelimit-*]\n"), 1)
 	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n"), 1))
 	if err != nil {
 		t.Fatal(err)
@@ -623,13 +625,15 @@ func confidentialConfig(t *testing.T, endpoint string) *config.Config {
 }
 
 // A cell of a route with a confidential limit publishes no file that
-// carries the value: its manifest names the file as published, its
-// verdict and report pair name the limit by source and hash, and the
-// run's frame directory keeps the file as loaded, from which the
-// completeness check and the replay work.
+// carries the value, which the endpoint echoes in a rate-limit header:
+// its manifest names the file as published, its verdict and report pair
+// name the limit by source and hash, its attempts carry the header's
+// stand-in, and the run's frame directory keeps the file as loaded, from
+// which the completeness check and the replay work.
 func TestCellConfidentialLimit(t *testing.T) {
 	e := newEndpoint(t, always200)
-	cfg := confidentialConfig(t, e.url())
+	endpoint, _ := withHeaders(t, e.url(), map[string]string{"X-Ratelimit-Limit-Tokens": "250013.5"})
+	cfg := confidentialConfig(t, endpoint)
 	r, f := newTestRoute(t, cfg, "+0.005032")
 	if got := r.verdict.Admitted(); len(got) != 3 {
 		t.Fatalf("admitted %v", got)
@@ -658,7 +662,7 @@ func TestCellConfidentialLimit(t *testing.T) {
 	if b := m.Release.Admission.Steps[3].Binding; b == nil || !b.Confidential || b.Value != 0 || b.SHA256 != l.SHA256 {
 		t.Errorf("binding limit %+v", b)
 	}
-	files := 0
+	files, withheld := 0, 0
 	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -671,9 +675,12 @@ func TestCellConfidentialLimit(t *testing.T) {
 		if bytes.Contains(b, []byte("250013.5")) || bytes.Contains(b, []byte("2.500135e+05")) {
 			t.Errorf("%s carries the confidential value", p)
 		}
+		if d.Name() == evidence.AttemptsFile && bytes.Contains(b, []byte(`"X-Ratelimit-Limit-Tokens":["[retained]"]`)) {
+			withheld++
+		}
 		return nil
-	}); err != nil || files == 0 {
-		t.Fatalf("walk: %d files, %v", files, err)
+	}); err != nil || files == 0 || withheld == 0 {
+		t.Fatalf("walk: %d files, %d attempts files with the header withheld, %v", files, withheld, err)
 	}
 	held := filepath.Join(r.framesRoot, filepath.Dir(m.Frames.Name), evidence.ConfigCopyFile)
 	if b, err := os.ReadFile(held); err != nil || !bytes.Equal(b, cfg.Raw) {

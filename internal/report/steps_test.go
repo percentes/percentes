@@ -653,6 +653,7 @@ func TestStepTablesConfidential(t *testing.T) {
 	cfg, _ := stepsConfig(t)
 	tpm := &cfg.Target.Limits[1]
 	tpm.Value, tpm.Marking, tpm.Source, tpm.SHA256 = 300001, config.MarkingConfidential, "console.png", strings.Repeat("ab", 32)
+	cfg.Target.RetainedHeaders = []string{"x-ratelimit-*"}
 	v, err := admission.CeilingRule(cfg, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test/pricing", Retrieved: "2026-10-07"}, admission.ExpectedPlan(cfg))
 	if err != nil {
 		t.Fatal(err)

@@ -266,7 +266,8 @@ func TestCeilingCheckWithholds(t *testing.T) {
 }
 
 // markConfidential rewrites the configuration at path with its
-// tokens_per_minute limit at 250,013.5, marked confidential.
+// tokens_per_minute limit at 250,013.5, marked confidential, and its
+// rate-limit headers retained.
 func markConfidential(t *testing.T, path string) {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -274,9 +275,10 @@ func markConfidential(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	const public = "      value: 250000\n      marking: public\n"
-	if !bytes.Contains(b, []byte(public)) {
-		t.Fatal("configuration: the tokens_per_minute lines this test edits not found")
+	if !bytes.Contains(b, []byte(public)) || !bytes.Contains(b, []byte(rateLimitHeaders)) {
+		t.Fatal("configuration: the lines this test edits not found")
 	}
+	b = bytes.Replace(b, []byte(rateLimitHeaders), []byte(rateLimitHeaders+"  retained_headers: [x-ratelimit-*]\n"), 1)
 	if err := os.WriteFile(path, bytes.Replace(b, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n"), 1), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +289,7 @@ func markConfidential(t *testing.T, path string) {
 func TestCeilingCheckConfidential(t *testing.T) {
 	f := newCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), testKey)
 	markConfidential(t, f.cfg)
-	if code, err := ceilingCheckCmd(context.Background(), f.args()); err != nil || code != exitOK {
+	if code, err := ceilingCheckCmd(context.Background(), append(f.args(), "--frames", t.TempDir())); err != nil || code != exitOK {
 		t.Fatalf("ceiling-check: %d, %v", code, err)
 	}
 	path, rec := f.record(t)

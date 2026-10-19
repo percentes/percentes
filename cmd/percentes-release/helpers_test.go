@@ -85,6 +85,9 @@ func fakeBalance(t *testing.T) string {
 // fakeBalanceOut is fakeBalance's standard output, less its newline.
 const fakeBalanceOut = `{"amount_usd": "30.00"}`
 
+// rateLimitHeaders is the release reference's response_headers line.
+const rateLimitHeaders = "  response_headers: [Retry-After, x-ratelimit-*]\n"
+
 // releaseConfig is the release reference at endpoint, with the test key
 // set in its variable.
 func releaseConfig(t *testing.T, endpoint string) *config.Config {

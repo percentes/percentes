@@ -860,7 +860,8 @@ func mustRead(t *testing.T, path string) []byte {
 }
 
 // confidentialCfg is the reference configuration with its
-// tokens_per_minute limit at 300,001 marked confidential.
+// tokens_per_minute limit at 300,001 marked confidential, and its
+// rate-limit headers retained.
 func confidentialCfg(t *testing.T) *config.Config {
 	t.Helper()
 	raw, err := os.ReadFile("../../configs/release.reference.yaml")
@@ -868,9 +869,11 @@ func confidentialCfg(t *testing.T) *config.Config {
 		t.Fatal(err)
 	}
 	const public = "      value: 250000\n      marking: public\n"
-	if !bytes.Contains(raw, []byte(public)) {
-		t.Fatal("reference no longer carries the tokens_per_minute lines this test edits")
+	const headers = "  response_headers: [Retry-After, x-ratelimit-*]\n"
+	if !bytes.Contains(raw, []byte(public)) || !bytes.Contains(raw, []byte(headers)) {
+		t.Fatal("reference no longer carries the lines this test edits")
 	}
+	raw = bytes.Replace(raw, []byte(headers), []byte(headers+"  retained_headers: [x-ratelimit-*]\n"), 1)
 	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: 300001\n      marking: confidential\n"), 1))
 	if err != nil {
 		t.Fatal(err)

@@ -12,7 +12,8 @@ import (
 const secretValue = "9876543.25"
 
 // confidentialRef is the release reference with its tokens_per_minute
-// limit written as tpm and marked confidential.
+// limit written as tpm and marked confidential, and its rate-limit
+// headers retained.
 func confidentialRef(t *testing.T, tpm string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(releaseRef)
@@ -27,9 +28,11 @@ func confidentialRef(t *testing.T, tpm string) []byte {
       retrieved: 2026-10-07
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
 `
-	if !bytes.Contains(raw, []byte(block)) {
-		t.Fatal("reference no longer carries the tokens_per_minute block this test edits")
+	const headers = "  response_headers: [Retry-After, x-ratelimit-*]\n"
+	if !bytes.Contains(raw, []byte(block)) || !bytes.Contains(raw, []byte(headers)) {
+		t.Fatal("reference no longer carries the lines this test edits")
 	}
+	raw = bytes.Replace(raw, []byte(headers), []byte(headers+"  retained_headers: [x-ratelimit-*]\n"), 1)
 	return bytes.Replace(raw, []byte(block), []byte(tpm), 1)
 }
 
@@ -86,7 +89,7 @@ func TestPublished(t *testing.T) {
 }
 
 // A confidential value written other than as a plain number in its limit,
-// and a comment that could carry it, are refused.
+// and a comment or string that could carry it, are refused.
 func TestPublishedRefusals(t *testing.T) {
 	plain := "      value: " + secretValue + "\n"
 	for _, tc := range []struct {
@@ -97,6 +100,8 @@ func TestPublishedRefusals(t *testing.T) {
 		{"line comment", plain, "      value: " + secretValue + "  # from the console\n", "target.limits[1]: a confidential limit carries no comment"},
 		{"head comment", "    - dimension: tokens_per_minute\n", "    # from the console\n    - dimension: tokens_per_minute\n", "target.limits[1]: a confidential limit carries no comment"},
 		{"comment elsewhere", "schema_version: 1\n", "schema_version: 1  # the console showed " + secretValue + " tokens\n", "target.limits[1].value: a comment in the file carries " + secretValue},
+		{"naming line", "      - Groq is a trademark", "      - The console showed " + secretValue + " tokens.\n      - Groq is a trademark", "target.limits[1].value: a string in the file carries " + secretValue},
+		{"body text", "System text: placeholder", "System text: at most " + secretValue + " tokens a minute", "target.limits[1].value: a string in the file carries " + secretValue},
 	} {
 		raw := bytes.Replace(confidentialRef(t, confidentialTPM), []byte(tc.from), []byte(tc.to), 1)
 		if !bytes.Contains(raw, []byte(tc.to)) {

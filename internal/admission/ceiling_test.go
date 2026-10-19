@@ -37,8 +37,9 @@ func price(in, out string) Price {
 }
 
 // releaseConfig is the release reference as route name at ceiling with
-// the given limits and route cap. The reference's other host, baseten,
-// becomes groq when name is baseten.
+// the given limits and route cap, its rate-limit headers retained where a
+// limit is confidential. The reference's other host, baseten, becomes
+// groq when name is baseten.
 func releaseConfig(t *testing.T, name string, ceiling int, routeUSD string, limits ...config.Limit) *config.Config {
 	t.Helper()
 	cfg, err := config.LoadFile(releaseRef)
@@ -53,6 +54,9 @@ func releaseConfig(t *testing.T, name string, ceiling int, routeUSD string, limi
 	cfg.Target.Body = strings.Replace(cfg.Target.Body, `"max_completion_tokens": 512`, `"max_completion_tokens": `+strconv.Itoa(ceiling), 1)
 	cfg.Release.Caps.RouteUSD = routeUSD
 	cfg.Target.Limits = limits
+	if cfg.Target.Confidential() {
+		cfg.Target.RetainedHeaders = []string{"x-ratelimit-*"}
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}

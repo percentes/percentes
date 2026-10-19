@@ -252,6 +252,7 @@ func TestReleaseLimitAndNamingForms(t *testing.T) {
 		Limit{Dimension: LimitTPD, Value: 7e8, Marking: MarkingPublic, Counting: CountingOutputBurndown, OutputBurndown: 15, Source: "quotas.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
 		Limit{Dimension: LimitTPM, Value: 1e6, Marking: MarkingConfidential, Counting: CountingInput, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
 	)
+	c.Target.RetainedHeaders = []string{"x-ratelimit-*"}
 	c.Target.Naming.PermissionRequired, c.Target.Naming.PermissionRecord = true, "manifest: written permission"
 	c.Target.StatusDocs = []StatusDoc{
 		{Status: 529, Meaning: "overloaded", Source: "https://example.test/errors", Retrieved: "2026-10-07"},
@@ -371,6 +372,43 @@ func TestReleaseRetainedHeaders(t *testing.T) {
 	} {
 		if got := c.Target.HeaderRetained(name); got != want {
 			t.Errorf("HeaderRetained(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// A target with a confidential limit retains each recorded header that
+// can carry a rate limit, and the limits body where it reads one.
+func TestReleaseConfidentialRetention(t *testing.T) {
+	read := &TargetProbe{LimitsURL: "https://api.groq.com/openai/v1/models", LimitsAuthScheme: "Bearer"}
+	kept := &TargetProbe{LimitsURL: read.LimitsURL, LimitsAuthScheme: read.LimitsAuthScheme, LimitsRetained: true}
+	for _, tc := range []struct {
+		name               string
+		confidential       bool
+		recorded, retained []string
+		probe              *TargetProbe
+		want               string
+	}{
+		{"public limits", false, []string{"Retry-After", "x-ratelimit-*"}, nil, read, ""},
+		{"prefix retained", true, []string{"Retry-After", "x-ratelimit-*"}, []string{"x-ratelimit-*"}, nil, ""},
+		{"name retained in another case", true, []string{"Retry-After", "x-ratelimit-limit-tokens", "x-request-id"}, []string{"X-RateLimit-Limit-Tokens"}, nil, ""},
+		{"limits body retained", true, []string{"Retry-After"}, nil, kept, ""},
+		{"prefix not retained", true, []string{"Retry-After", "x-ratelimit-*"}, nil, nil, `target.response_headers[1]: "x-ratelimit-*" can match a name containing "ratelimit"`},
+		{"prefix retained in part", true, []string{"Retry-After", "x-ratelimit-*"}, []string{"x-ratelimit-limit-*"}, nil, `target.response_headers[1]: "x-ratelimit-*" can match`},
+		{"name not retained", true, []string{"Retry-After", "anthropic-RateLimit-tokens-limit"}, nil, nil, `target.response_headers[1]: "anthropic-RateLimit-tokens-limit" can match`},
+		{"another prefix", true, []string{"Retry-After", "x-request-*"}, nil, nil, `target.response_headers[1]: "x-request-*" can match`},
+		{"limits body published", true, []string{"Retry-After"}, nil, read, "target.probe.limits_retained: required with limits_url on a target with a confidential limit"},
+	} {
+		c := loadRef(t, releaseRef)
+		if tc.confidential {
+			c.Target.Limits[1].Marking = MarkingConfidential
+		}
+		c.Target.ResponseHeaders, c.Target.RetainedHeaders, c.Target.Probe = tc.recorded, tc.retained, tc.probe
+		err := c.Validate()
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: must load, got: %v", tc.name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: must fail naming %q, got: %v", tc.name, tc.want, err)
 		}
 	}
 }
