@@ -18,8 +18,9 @@ import (
 
 // RefreshedLimit is one target.limits entry as a release route's refresh
 // command printed it: its value, or why the command could not read it.
-// A published record carries neither the value nor the unavailable
-// reason of a limit marked config.MarkingConfidential.
+// A published record carries no value of a limit marked
+// config.MarkingConfidential and, on a target with such a limit, no
+// unavailable reason.
 type RefreshedLimit struct {
 	Dimension    string  `json:"dimension"`
 	Value        float64 `json:"value,omitempty"`
@@ -85,24 +86,25 @@ func ReadRefreshedLimits(rec *StatusRecord, t *config.Target) ([]RefreshedLimit,
 }
 
 // PublishedRefresh is rec, a release route's refresh record, as it
-// publishes, carrying limits without the value of a confidential one and
-// with config.RetainedHeaderValue in place of its unavailable reason. For
-// a route with a confidential limit (config.Target.Confidential) the
-// command's output streams are replaced by config.RetainedHeaderValue,
-// and rec as run is kept in the retained store (WriteRetainedRefresh).
+// publishes, carrying limits without the value of a confidential one. For
+// a route with a confidential limit (config.Target.Confidential) every
+// limit's unavailable reason and the command's output streams are
+// replaced by config.RetainedHeaderValue, and rec as run is kept in the
+// retained store (WriteRetainedRefresh).
 func PublishedRefresh(rec *StatusRecord, t *config.Target, limits []RefreshedLimit) *StatusRecord {
 	pub := *rec
 	pub.Limits = nil
+	held := t.Confidential()
 	for _, l := range limits {
 		if l.Confidential {
 			l.Value = 0
-			if l.Unavailable != "" {
-				l.Unavailable = config.RetainedHeaderValue
-			}
+		}
+		if held && l.Unavailable != "" {
+			l.Unavailable = config.RetainedHeaderValue
 		}
 		pub.Limits = append(pub.Limits, l)
 	}
-	if t.Confidential() {
+	if held {
 		pub.Stdout, pub.Stderr = Bytes{Text: config.RetainedHeaderValue}, Bytes{Text: config.RetainedHeaderValue}
 	}
 	return &pub
