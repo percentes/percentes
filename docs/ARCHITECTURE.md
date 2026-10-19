@@ -786,6 +786,7 @@ before any setup.
 | `probe-retained.json` | what a probe or ceiling-check record withholds: the retained headers' values in each request and the limits read, the limits body, and on a target with a confidential limit each non-200 body and in-band error object (`stream_error`); beside a cell's frames, or under `ceiling-check --frames` | `probe.WriteRetained` |
 | `manifest.json` | the build revision and whether the tree was modified; the capture limits; the configuration file by hash, the file as published under the release profile; the endpoint as configured and as observed (requested, expected and reported models, mismatches, protocols, the parameters recorded as not applied); the client host; the clock and status records, and under the release profile the balance records; the operator file and its records by hash; the ledger's hash and line count; every artifact and the frame store by hash; each hash a SHA-256 with the size in bytes (`sha256`, `bytes`), except that on a target with a confidential limit the frame store, the operator file and its records carry only their HMAC-SHA256 under the release key (`hmac_sha256`); validity and its reasons; the G2 and G6 gates, per ladder step under the release profile; the release cell record ([The cell's files and report](#the-cells-files-and-report)); and the replay record the report pair needs, absent for a release cell, whose pair reads its cell record | `evidence.NewManifest` |
 | `operator.json`, `records/` | copies of the operator file and its records as read at the cell's start, beside the frame store | `Operator.WriteCopies` |
+| `operator-error.txt` | release cells of a route with a confidential limit whose operator file did not load at the cell's start or when the cell was labelled: the load error, beside the cell's frames, readable by its owner only | `evidence.WriteOperatorError` |
 | `config.yaml` | release cells of a route with a confidential limit: the configuration as loaded, beside the cell's frames, readable by its owner only | `evidence.WriteConfigCopy` |
 | `window-close.json` | per release route, in `<route>/` under `--out`, after its last cell: the refresh record as it publishes, the account tier, and the operator file and its records as read after it, keyed as in the manifest; their copies under `--frames` in `window-close/<route>/<UTC time>/` | `windowClose`, `evidence.NewWindowClose` |
 
@@ -1328,7 +1329,12 @@ it start: the command failed or printed anything but one JSON object
 holding `amount_usd` or `unavailable`, the amount is below the
 reservation, or the balance is unavailable and the configuration carries
 no `target.balance_unavailable` ruling. The manifest of a cell blocked
-for its records carries the records read when the route started. The
+for its records carries the records read when the route started. On a
+route with a confidential limit, the reason of a cell whose operator
+file does not load states only that, and the load error, which can
+quote the file, is kept beside the cell's frames; a missed or
+interrupted cell labelled while the file does not load is treated the
+same way (`operatorFault`). The
 ladder is cut at the top admitted step and the cell's seed set, and one
 user text per scheduled request comes from Shape S. The ledger admits
 one plus the scheduled count; a refusal stops the route. The admission

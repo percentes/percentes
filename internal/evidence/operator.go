@@ -55,6 +55,8 @@ var (
 const (
 	OperatorCopyFile = "operator.json"
 	RecordsCopyDir   = "records"
+	// OperatorErrorFile is the error of an operator file that did not load.
+	OperatorErrorFile = "operator-error.txt"
 )
 
 // Operator is a run's operator file as read and checked at one time, with
@@ -185,6 +187,12 @@ func LoadOperator(path string) (*Operator, error) {
 		return fail("%d %s records, want at most 1", n, RecordSourceDiff)
 	}
 	return op, nil
+}
+
+// WriteOperatorError writes err's text and a newline to OperatorErrorFile
+// in dir, readable by the owner only. It refuses an existing file.
+func WriteOperatorError(dir string, err error) error {
+	return writeNew(filepath.Join(dir, OperatorErrorFile), []byte(err.Error()+"\n"))
 }
 
 // readRecord reads a record file and its modification time.

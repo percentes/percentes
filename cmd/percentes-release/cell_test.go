@@ -1747,6 +1747,100 @@ func TestOperatorRefreshedValue(t *testing.T) {
 	}
 }
 
+// On a route with a confidential limit, a cell blocked because its
+// refresh left an operator file that does not load, and a cell labelled
+// while the file does not load, give operatorNotLoaded as the load
+// error's reason; each keeps the error, which quotes the file, beside its
+// frames, and no file under the release output directory carries the
+// limit's value. A route with the limit public gives the error itself.
+func TestOperatorLoadErrorHeld(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+	enoughOpenFiles(t)
+	const limits = `{"kind": "limits", "path": "r.txt", "url": "https://example.test/limits", "retrieved": "2026-10-07"}`
+	if strings.Count(operatorJSON, limits) != 1 {
+		t.Fatalf("fixture lacks %q", limits)
+	}
+	broken := []byte(strings.Replace(operatorJSON, limits, `{"kind": "limits", "path": "r.txt", "url": "https://example.test/limits", "retrieved": "2026-10-07 TPM 250013.5"}`, 1))
+	const loadErr = `records[0].retrieved: "2026-10-07 TPM 250013.5" is not a date`
+	values := []string{"250013.5", "250,013.5", "2.500135e+05"}
+	start := func(cfg *config.Config) (*fixture, *route) {
+		t.Helper()
+		f := newFixture(t, cfg, "+0.005")
+		bad := writeFile(t, t.TempDir(), "operator.json", broken)
+		f.in.refreshCmd = filepath.Join(t.TempDir(), "refresh")
+		script := "#!/bin/sh\ncp '" + bad + "' '" + f.in.opPath + "' && echo '" + tpmRefresh(`"unavailable":"console only"`) + "'\n"
+		if err := os.WriteFile(f.in.refreshCmd, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r, err := newRoute(f.in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f, r
+	}
+	held := func(r *route, run schedule.Run) {
+		t.Helper()
+		m, _ := checkRetained(t, r, run)
+		p := filepath.Join(r.framesRoot, filepath.Dir(filepath.FromSlash(m.Frames.Name)), evidence.OperatorErrorFile)
+		b, err := os.ReadFile(p)
+		if err != nil || !strings.Contains(string(b), loadErr) {
+			t.Fatalf("%s: %q, %v; want %q", run.Label, b, err, loadErr)
+		}
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("%s: %v %v", run.Label, fi, err)
+		}
+	}
+
+	f, r := start(confidentialConfig(t, e.url()))
+	run := r.runs[0]
+	rec, err := r.runCell(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "operator records not refreshed at the cell's start (SPEC-HOSTED §4): " + operatorNotLoaded + "; the manifest carries the records read when the route started"
+	if rec.Outcome != outcomeBlocked || !slices.Equal(rec.Reasons, []string{want}) {
+		t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, want)
+	}
+	if n := e.hits.Load(); n != 0 {
+		t.Fatalf("server saw %d requests", n)
+	}
+	held(r, run)
+
+	missed := r.runs[1]
+	rec = r.newRecord(missed)
+	rec.Outcome = outcomeMissed
+	if err := r.writeNew(missed, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.labelCell(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if want := "operator records not read when the cell was labelled: " + operatorNotLoaded + "; the manifest carries the records read when the route started"; !slices.Contains(rec.Reasons, want) {
+		t.Fatalf("labelled reasons %q; want %q", rec.Reasons, want)
+	}
+	held(r, missed)
+	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err == nil && slices.ContainsFunc(values, func(v string) bool { return bytes.Contains(b, []byte(v)) }) {
+			t.Errorf("%s carries the confidential value", p)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, r = start(releaseConfig(t, e.url()))
+	if rec, err = r.runCell(context.Background(), r.runs[0]); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], loadErr) {
+		t.Fatalf("public route: outcome %s, reasons %q; want the load error", rec.Outcome, rec.Reasons)
+	}
+}
+
 // A cell whose ledger path holds another ledger than the one the route
 // started on ends in an error before any request, appending nothing to
 // that file, at the cell's ledger read: also where the refresh failed and
