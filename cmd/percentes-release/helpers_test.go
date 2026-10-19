@@ -18,6 +18,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/redact"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
@@ -25,6 +26,33 @@ import (
 var testBuild = &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "0123456789abcdef0123456789abcdef01234567"}, {Key: "vcs.modified", Value: "false"}}}
 
 const testKey = "test-key-release-0123456789abcdef"
+
+// testReleaseKeyPath is the release key file key create wrote for the
+// package's tests, and testReleaseKey the key it holds.
+var (
+	testReleaseKeyPath string
+	testReleaseKey     *releasekey.Key
+)
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "percentes-release-key")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	testReleaseKeyPath = filepath.Join(dir, "release.key")
+	if err = releasekey.Create(testReleaseKeyPath); err == nil {
+		testReleaseKey, err = releasekey.Read(testReleaseKeyPath)
+	}
+	code := 1
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	} else {
+		code = m.Run()
+	}
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // operatorJSON is an operator file naming every required record kind.
 const operatorJSON = `{
@@ -136,12 +164,12 @@ func routeConfigFile(t *testing.T, name, endpoint, routeUSD string) string {
 }
 
 // testSchedule is a schedule over 17 to 26 October 2026 for routes,
-// freezing the configurations cfgs of some of them.
+// freezing the configurations cfgs of some of them under testReleaseKey.
 func testSchedule(t *testing.T, cfgs []*config.Config, routes ...string) *schedule.Schedule {
 	t.Helper()
 	in := schedule.Input{MasterSeed: "percentes-release-test", First: "2026-10-17", Last: "2026-10-26", Routes: routes}
 	for _, cfg := range cfgs {
-		frozen, err := frozenConfig(cfg)
+		frozen, err := frozenConfig(cfg, testReleaseKey)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,7 +246,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	}
 	return &fixture{
 		in: routeInput{
-			cfg: cfg, configName: "groq.yaml", schedulePath: writeFile(t, dir, "schedule.json", sb), out: t.TempDir(), ledgerPath: ledger,
+			cfg: cfg, configName: "groq.yaml", schedulePath: writeFile(t, dir, "schedule.json", sb), out: t.TempDir(), ledgerPath: ledger, key: testReleaseKey,
 			framesRoot: t.TempDir(), clockSync: fakeSNTP(t, offset), statusCmd: "true", balanceCmd: fakeBalance(t), opPath: writeFile(t, dir, "operator.json", []byte(operatorJSON)),
 			refreshCmd: refresh + " " + filepath.Join(dir, "r.txt"), probeFiles: probeFiles, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
 		},
@@ -332,3 +360,36 @@ func readCell(t *testing.T, r *route, run schedule.Run) *cellRecord {
 
 // noWait returns at once.
 func noWait(context.Context, time.Time) error { return nil }
+
+// noReleaseKey fails t when a file under dirs carries the test release
+// key in hex, in either case.
+func noReleaseKey(t *testing.T, dirs ...string) {
+	t.Helper()
+	b, err := os.ReadFile(testReleaseKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hexKey := strings.TrimSpace(string(b))
+	files := 0
+	for _, dir := range dirs {
+		if err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			files++
+			if strings.Contains(strings.ToLower(string(b)), hexKey) {
+				t.Errorf("%s carries the release key", p)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if files == 0 {
+		t.Fatal("no file to check for the release key")
+	}
+}

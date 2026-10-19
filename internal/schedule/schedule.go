@@ -74,12 +74,14 @@ type Input struct {
 }
 
 // RouteConfig is a route's configuration as frozen with the schedule:
-// the SHA-256 of the file as published and the routes of its model, its
-// own among them, sorted.
+// the SHA-256 of the file as published, the HMAC-SHA256 of the file as
+// loaded under the release key, and the routes of its model, its own
+// among them, sorted.
 type RouteConfig struct {
-	Route        string   `json:"route"`
-	ConfigSHA256 string   `json:"config_sha256"`
-	HostGroup    []string `json:"host_group"`
+	Route            string   `json:"route"`
+	ConfigSHA256     string   `json:"config_sha256"`
+	ConfigHMACSHA256 string   `json:"config_hmac_sha256,omitempty"`
+	HostGroup        []string `json:"host_group"`
 }
 
 // Offset is a route's pinned start offset inside every slot.
@@ -304,6 +306,9 @@ func routeConfigs(routes []string, cs []RouteConfig) ([]RouteConfig, error) {
 		}
 		if !isSHA256(c.ConfigSHA256) {
 			return nil, fmt.Errorf("schedule: route %q: config_sha256 %q is not a lowercase hex SHA-256", c.Route, c.ConfigSHA256)
+		}
+		if c.ConfigHMACSHA256 != "" && !isSHA256(c.ConfigHMACSHA256) {
+			return nil, fmt.Errorf("schedule: route %q: config_hmac_sha256 %q is not a lowercase hex HMAC-SHA256", c.Route, c.ConfigHMACSHA256)
 		}
 		c.HostGroup = slices.Clone(c.HostGroup)
 		slices.Sort(c.HostGroup)

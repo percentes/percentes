@@ -21,6 +21,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/mock"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 const (
@@ -636,5 +637,49 @@ func TestProbeReleaseTarget(t *testing.T) {
 		if _, err := Run(context.Background(), in); err == nil {
 			t.Errorf("%+v: probe ran", in)
 		}
+	}
+}
+
+// A release route's probe with a confidential limit refuses to start
+// without the release key, and with it publishes a non-200 body as a
+// stand-in with the body's HMAC-SHA256 under the key, neither its
+// SHA-256 nor its length; the retained file holds the body.
+func TestProbeReleaseConfidential(t *testing.T) {
+	const errBody = `{"error":{"message":"Limit qz250013 tokens per minute reached"}}`
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, errBody) //nolint:errcheck
+	}))
+	defer srv.Close()
+	c := releaseConfig(t, srv.URL+"/openai/v1/chat/completions")
+	l := &c.Target.Limits[1]
+	l.Marking, l.SHA256, l.HMACSHA256 = config.MarkingConfidential, "", l.SHA256
+	if rec, err := Run(context.Background(), Input{Target: &c.Target, CaseText: caseText}); err == nil || rec != nil || !strings.Contains(err.Error(), "needs the release key") || n.Load() != 0 {
+		t.Fatalf("no release key: %v, %v, %d requests", rec, err, n.Load())
+	}
+	key, err := releasekey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := probe(t, Input{Target: &c.Target, CaseText: caseText, Key: key})
+	if b := rec.Request.Body; rec.Request.Status != http.StatusTooManyRequests || b == nil || b.Text != nil || !b.Retained || b.SHA256 != "" || b.HMACSHA256 != key.Sum([]byte(errBody)) {
+		t.Fatalf("status %d, body %+v", rec.Request.Status, rec.Request.Body)
+	}
+	path, err := Write(t.TempDir(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(errBody))
+	if b, err := os.ReadFile(path); err != nil || bytes.Contains(b, []byte("qz250013")) || bytes.Contains(b, []byte(hex.EncodeToString(sum[:]))) || bytes.Contains(b, []byte(`"bytes"`)) {
+		t.Fatalf("%s carries the body, its SHA-256 or its length (%v):\n%s", File, err, b)
+	}
+	held, err := WriteRetained(t.TempDir(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(held); err != nil || !bytes.Contains(b, []byte("qz250013")) {
+		t.Fatalf("retained file (%v):\n%s", err, b)
 	}
 }

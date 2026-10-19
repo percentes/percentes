@@ -419,7 +419,7 @@ func releaseGates(cfg *config.Config, res *loadgen.Result) []validity.Gate {
 	}
 	recs := make([]Record, len(res.Requests))
 	for i := range res.Requests {
-		recs[i] = record(&res.Requests[i], cfg)
+		recs[i] = record(&res.Requests[i], cfg, nil)
 	}
 	return append(out, ReleaseG6(recs, cfg.Release.Shape.DeadlineS)...)
 }

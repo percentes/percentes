@@ -29,6 +29,7 @@ import (
 	"github.com/percentes/percentes/internal/mock"
 	"github.com/percentes/percentes/internal/pilot"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
 	"gopkg.in/yaml.v3"
@@ -444,9 +445,14 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		return exitError, err
 	}
 	l.Bind(st.OpenSHA256)
+	// The rehearsal's release key is never written.
+	key, err := releasekey.New()
+	if err != nil {
+		return exitError, err
+	}
 	frozen := make([]schedule.RouteConfig, n)
 	for i, cfg := range cfgs {
-		if frozen[i], err = frozenConfig(cfg); err != nil {
+		if frozen[i], err = frozenConfig(cfg, key); err != nil {
 			return exitError, err
 		}
 	}
@@ -483,7 +489,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		cwg.Add(1)
 		go func(i int, cfg *config.Config) {
 			defer cwg.Done()
-			checks[i], checkErrs[i] = sendCeiling(ctx, l, cfg, shape, "", in.byteCap)
+			checks[i], checkErrs[i] = sendCeiling(ctx, l, cfg, shape, "", in.byteCap, key)
 		}(i, cfg)
 	}
 	cwg.Wait()
@@ -505,7 +511,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 			return exitError, err
 		}
 		r, err := newRoute(routeInput{
-			cfg: cfg, configName: name + ".yaml", schedulePath: schedulePath, out: in.out, ledgerPath: ledgerPath,
+			cfg: cfg, configName: name + ".yaml", schedulePath: schedulePath, out: in.out, ledgerPath: ledgerPath, key: key,
 			framesRoot: in.frames, clockSync: in.clockSync, statusCmd: "true", balanceCmd: mockBalanceCmd(cfg), refreshCmd: refreshPath + " " + note, opPath: opPath,
 			probeFiles: []string{probePath}, byteCap: in.byteCap, accountCreated: today, build: in.build,
 		})

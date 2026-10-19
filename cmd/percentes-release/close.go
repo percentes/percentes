@@ -66,7 +66,7 @@ func bindingText(limits []config.Limit, b *admission.Demand, read []evidence.Ref
 	}
 	l := &limits[b.Limit]
 	if l.Marking == config.MarkingConfidential {
-		return fmt.Sprintf("%s confidential (%s, sha256 %s): nominal demand %s above %s", l.Dimension, l.Source, l.SHA256, demand, bound)
+		return fmt.Sprintf("%s confidential (%s, hmac-sha256 %s): nominal demand %s above %s", l.Dimension, l.Source, l.HMACSHA256, demand, bound)
 	}
 	return fmt.Sprintf("%s recorded %s, read %s: nominal demand %s above %s", l.Dimension,
 		strconv.FormatFloat(l.Value, 'f', -1, 64), strconv.FormatFloat(read[b.Limit].Value, 'f', -1, 64), demand, bound)

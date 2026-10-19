@@ -412,19 +412,19 @@ func TestNewRefuses(t *testing.T) {
 }
 
 // New stores the frozen configurations in route order with each host
-// group sorted, the committed form loads, and the draws are the ones of
-// the bare input.
+// group sorted, the committed form loads with each keyed hash, and the
+// draws are the ones of the bare input.
 func TestNewConfigs(t *testing.T) {
-	sum := strings.Repeat("ab", 32)
+	sum, keyed := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	in := target()
 	in.Configs = []RouteConfig{
-		{Route: "groq", ConfigSHA256: sum, HostGroup: []string{"groq", "baseten"}},
+		{Route: "groq", ConfigSHA256: sum, ConfigHMACSHA256: keyed, HostGroup: []string{"groq", "baseten"}},
 		{Route: "baseten", ConfigSHA256: sum, HostGroup: []string{"groq", "baseten"}},
 	}
 	s := derived(t, in)
 	want := []RouteConfig{
 		{Route: "baseten", ConfigSHA256: sum, HostGroup: []string{"baseten", "groq"}},
-		{Route: "groq", ConfigSHA256: sum, HostGroup: []string{"baseten", "groq"}},
+		{Route: "groq", ConfigSHA256: sum, ConfigHMACSHA256: keyed, HostGroup: []string{"baseten", "groq"}},
 	}
 	if !reflect.DeepEqual(s.Input.Configs, want) {
 		t.Fatalf("configs %+v, want %+v", s.Input.Configs, want)
@@ -455,6 +455,7 @@ func TestNewConfigs(t *testing.T) {
 		{"not scheduled", RouteConfig{Route: "mistral", ConfigSHA256: sum, HostGroup: []string{"mistral"}}, `configuration of route "mistral", which is not scheduled`},
 		{"short hash", RouteConfig{Route: "azure", ConfigSHA256: "abcd", HostGroup: []string{"azure"}}, `route "azure": config_sha256 "abcd"`},
 		{"upper-case hash", RouteConfig{Route: "azure", ConfigSHA256: strings.ToUpper(sum), HostGroup: []string{"azure"}}, "is not a lowercase hex SHA-256"},
+		{"short keyed hash", RouteConfig{Route: "azure", ConfigSHA256: sum, ConfigHMACSHA256: "abcd", HostGroup: []string{"azure"}}, `route "azure": config_hmac_sha256 "abcd" is not a lowercase hex HMAC-SHA256`},
 		{"group without the route", RouteConfig{Route: "azure", ConfigSHA256: sum, HostGroup: []string{"bedrock"}}, `route "azure": host group [bedrock] must name the route`},
 		{"host twice", RouteConfig{Route: "azure", ConfigSHA256: sum, HostGroup: []string{"azure", "bedrock", "azure"}}, "host group [azure azure bedrock]"},
 		{"route twice", RouteConfig{Route: "groq", ConfigSHA256: sum, HostGroup: []string{"groq"}}, `route "groq" has two configurations`},

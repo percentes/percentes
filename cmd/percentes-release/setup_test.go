@@ -18,6 +18,7 @@ import (
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
@@ -70,6 +71,13 @@ func TestNewRouteRefusals(t *testing.T) {
 		{"configuration changed", func(t *testing.T, f *fixture) {
 			f.in.cfg.Raw = append(slices.Clone(f.in.cfg.Raw), "# changed\n"...)
 		}, "run: route groq: configuration sha256 "},
+		{"another release key", func(t *testing.T, f *fixture) {
+			k, err := releasekey.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.in.key = k
+		}, "run: route groq: the configuration as loaded, or the release key, is not the one the schedule froze"},
 		{"host group changed", func(t *testing.T, f *fixture) {
 			f.in.cfg.Release.OtherHosts = append(f.in.cfg.Release.OtherHosts, config.ModelHost{Route: "azure", Model: "openai/gpt-oss-120b"})
 		}, "run: route groq: host group [azure baseten groq]; the schedule froze [baseten groq]"},

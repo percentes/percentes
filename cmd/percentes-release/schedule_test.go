@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
@@ -36,7 +37,7 @@ func TestScheduleCmd(t *testing.T) {
 	ledger := releaseLedger(t, groq, baseten)
 	path := filepath.Join(t.TempDir(), "schedule.json")
 	args := []string{"--master-seed", "percentes-release-test", "--first", "2026-10-17", "--last", "2026-10-26",
-		"--config", groq, "--config", baseten, "--ledger", ledger, "--schedule", path}
+		"--config", groq, "--config", baseten, "--ledger", ledger, "--release-key", testReleaseKeyPath, "--schedule", path}
 	if code, err := scheduleCmd(args); err != nil || code != exitOK {
 		t.Fatalf("schedule: %d, %v", code, err)
 	}
@@ -59,7 +60,7 @@ func TestScheduleCmd(t *testing.T) {
 	for _, cfg := range cfgs {
 		sum := sha256.Sum256(cfg.Raw)
 		got, ok := s.Config(cfg.Target.Name)
-		if !ok || got.ConfigSHA256 != hex.EncodeToString(sum[:]) || !slices.Equal(got.HostGroup, []string{"baseten", "groq"}) {
+		if !ok || got.ConfigSHA256 != hex.EncodeToString(sum[:]) || got.ConfigHMACSHA256 != testReleaseKey.Sum(cfg.Raw) || !slices.Equal(got.HostGroup, []string{"baseten", "groq"}) {
 			t.Errorf("%s: frozen %+v, %t", cfg.Target.Name, got, ok)
 		}
 	}
@@ -82,16 +83,22 @@ func TestScheduleCmd(t *testing.T) {
 }
 
 // The schedule of a route with a confidential limit freezes the file as
-// published, which run accepts, and carries no hash of the file as
-// loaded.
+// published and the file as loaded by its HMAC-SHA256 under the release
+// key, which run accepts, and carries no SHA-256 of the file as loaded
+// and no byte of the key. Run refuses the configuration with its
+// confidential value changed, whose file as published is the same, and
+// the frozen configuration under another key.
 func TestScheduleCmdConfidential(t *testing.T) {
 	groq := routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "10")
 	markConfidential(t, groq)
 	baseten := routeConfigFile(t, "baseten", "https://api.example.test/v1/chat/completions", "10")
 	path := filepath.Join(t.TempDir(), "schedule.json")
 	args := []string{"--master-seed", "percentes-release-test", "--first", "2026-10-17", "--last", "2026-10-26",
-		"--config", groq, "--config", baseten, "--ledger", releaseLedger(t, groq, baseten), "--schedule", path}
-	if code, err := scheduleCmd(args); err != nil || code != exitOK {
+		"--config", groq, "--config", baseten, "--ledger", releaseLedger(t, groq, baseten), "--release-key", testReleaseKeyPath, "--schedule", path}
+	var code int
+	var err error
+	printed := stdoutOf(t, func() { code, err = scheduleCmd(args) })
+	if err != nil || code != exitOK {
 		t.Fatalf("schedule: %d, %v", code, err)
 	}
 	b, err := os.ReadFile(path)
@@ -121,8 +128,58 @@ func TestScheduleCmdConfidential(t *testing.T) {
 	if bytes.Contains(b, []byte(hex.EncodeToString(loaded[:]))) {
 		t.Errorf("the schedule carries the hash of the file as loaded:\n%s", b)
 	}
-	if err := checkFrozen(cfg, s); err != nil {
+	if got, _ := s.Config("groq"); got.ConfigHMACSHA256 != testReleaseKey.Sum(cfg.Raw) {
+		t.Errorf("frozen keyed hash %q, want the file as loaded's", got.ConfigHMACSHA256)
+	}
+	key, err := os.ReadFile(testReleaseKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hexKey := strings.TrimSpace(string(key))
+	if bytes.Contains(b, []byte(hexKey)) || strings.Contains(printed, hexKey) {
+		t.Errorf("the schedule or its output carries the release key:\n%s\n%s", b, printed)
+	}
+	if err := checkFrozen(cfg, s, testReleaseKey); err != nil {
 		t.Errorf("run refuses the frozen configuration: %v", err)
+	}
+
+	raw, err := os.ReadFile(groq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const frozen = "      value: 250013.5\n"
+	if !bytes.Contains(raw, []byte(frozen)) {
+		t.Fatal("configuration: the confidential value this test edits not found")
+	}
+	changed := writeFile(t, t.TempDir(), "groq.yaml", bytes.Replace(raw, []byte(frozen), []byte("      value: 500027\n"), 1))
+	cfgs, err = loadReleases([]string{changed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited, err := cfgs[0].Published()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(edited, published) {
+		t.Fatal("the confidential value's change reached the file as published")
+	}
+	if err := checkFrozen(cfgs[0], s, testReleaseKey); err == nil || !strings.Contains(err.Error(), "the configuration as loaded, or the release key, is not the one the schedule froze") {
+		t.Errorf("a confidential value changed after the freeze: %v", err)
+	}
+	other, err := releasekey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFrozen(cfg, s, other); err == nil || !strings.Contains(err.Error(), "the configuration as loaded, or the release key, is not the one the schedule froze") {
+		t.Errorf("another release key: %v", err)
+	}
+	unkeyed := *s
+	unkeyed.Input.Configs = slices.Clone(s.Input.Configs)
+	for i := range unkeyed.Input.Configs {
+		unkeyed.Input.Configs[i].ConfigHMACSHA256 = ""
+	}
+	if err := checkFrozen(cfg, &unkeyed, testReleaseKey); err == nil || !strings.Contains(err.Error(), "the schedule freezes no hmac_sha256") {
+		t.Errorf("a schedule with no keyed hash: %v", err)
 	}
 }
 
@@ -135,12 +192,15 @@ func TestScheduleCmdRefusals(t *testing.T) {
 	baseten := routeConfigFile(t, "baseten", "https://api.example.test/v1/chat/completions", "10")
 	ledger := releaseLedger(t, groq, baseten)
 	other := releaseLedger(t, routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "20"), baseten)
+	key := []string{"--release-key", testReleaseKeyPath}
 	for name, args := range map[string][]string{
-		"no weekend":    {"--master-seed", "s", "--first", "2026-10-19", "--last", "2026-10-23", "--config", groq, "--ledger", ledger},
-		"window length": {"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-31", "--config", groq, "--ledger", ledger},
-		"no seed":       {"--first", "2026-10-17", "--last", "2026-10-26", "--config", groq, "--ledger", ledger},
-		"pilot profile": {"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--config", "../../configs/pilot.reference.yaml", "--ledger", ledger},
-		"no config":     {"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--ledger", ledger},
+		"no weekend":       append([]string{"--master-seed", "s", "--first", "2026-10-19", "--last", "2026-10-23", "--config", groq, "--ledger", ledger}, key...),
+		"window length":    append([]string{"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-31", "--config", groq, "--ledger", ledger}, key...),
+		"no seed":          append([]string{"--first", "2026-10-17", "--last", "2026-10-26", "--config", groq, "--ledger", ledger}, key...),
+		"pilot profile":    append([]string{"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--config", "../../configs/pilot.reference.yaml", "--ledger", ledger}, key...),
+		"no config":        append([]string{"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--ledger", ledger}, key...),
+		"no release key":   {"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--config", groq, "--config", baseten, "--ledger", ledger},
+		"release key mode": {"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--config", groq, "--config", baseten, "--ledger", ledger, "--release-key", readableKey(t)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "schedule.json")
@@ -152,7 +212,7 @@ func TestScheduleCmdRefusals(t *testing.T) {
 			}
 		})
 	}
-	both := []string{"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--config", groq, "--config", baseten}
+	both := []string{"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--config", groq, "--config", baseten, "--release-key", testReleaseKeyPath}
 	for name, tc := range map[string]struct {
 		ledger []string
 		want   string
@@ -172,7 +232,7 @@ func TestScheduleCmdRefusals(t *testing.T) {
 			}
 		})
 	}
-	if code, err := scheduleCmd([]string{"--master-seed", "s", "--config", groq, "--ledger", ledger}); err == nil || code != exitError {
+	if code, err := scheduleCmd([]string{"--master-seed", "s", "--config", groq, "--ledger", ledger, "--release-key", testReleaseKeyPath}); err == nil || code != exitError {
 		t.Fatalf("no --schedule: %d, %v", code, err)
 	}
 	path := filepath.Join(t.TempDir(), "schedule.json")
@@ -209,7 +269,7 @@ func TestScheduleCmdHostGroups(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "schedule.json")
-			args := []string{"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--ledger", releaseLedger(t, tc.configs...), "--schedule", path}
+			args := []string{"--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--ledger", releaseLedger(t, tc.configs...), "--release-key", testReleaseKeyPath, "--schedule", path}
 			for _, c := range tc.configs {
 				args = append(args, "--config", c)
 			}
@@ -221,4 +281,19 @@ func TestScheduleCmdHostGroups(t *testing.T) {
 			}
 		})
 	}
+}
+
+// readableKey is a copy of the test release key in a file other users can
+// read.
+func readableKey(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(testReleaseKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := writeFile(t, t.TempDir(), "release.key", b)
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

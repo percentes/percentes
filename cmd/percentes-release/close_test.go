@@ -79,7 +79,7 @@ func TestCellLimitsStop(t *testing.T) {
 			if tc.confidential {
 				l := cfg.Target.Limits[1]
 				want = "route stop: the limits read at the cell's start, at the price retrieved 2026-10-06, no longer admit step 3 (1 rps) of the 3 the route runs: " +
-					"tokens_per_minute confidential (" + l.Source + ", sha256 " + l.SHA256 + "): nominal demand 102720 above half of it; the route keeps its steps (SPEC-HOSTED §4)"
+					"tokens_per_minute confidential (" + l.Source + ", hmac-sha256 " + l.HMACSHA256 + "): nominal demand 102720 above half of it; the route keeps its steps (SPEC-HOSTED §4)"
 			}
 			before, err := ledgerEntries(f.ledger, "")
 			if err != nil {

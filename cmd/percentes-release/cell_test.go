@@ -611,12 +611,12 @@ func TestCellProbeWithholds(t *testing.T) {
 func confidentialConfig(t *testing.T, endpoint string) *config.Config {
 	t.Helper()
 	raw := releaseConfig(t, endpoint).Raw
-	const public = "      value: 250000\n      marking: public\n"
+	const public = "      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256:"
 	if !bytes.Contains(raw, []byte(public)) || !bytes.Contains(raw, []byte(rateLimitHeaders)) {
 		t.Fatal("reference no longer carries the lines this test edits")
 	}
 	raw = bytes.Replace(raw, []byte(rateLimitHeaders), []byte(rateLimitHeaders+"  retained_headers: [x-ratelimit-*]\n"), 1)
-	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n"), 1))
+	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      hmac_sha256:"), 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,9 +649,10 @@ func rulingConfig(t *testing.T, endpoint string) *config.Config {
 // A cell of a route with a confidential limit publishes no file that
 // carries the value, which the endpoint echoes in a rate-limit header:
 // its manifest names the file as published, its verdict and report pair
-// name the limit by source and hash, its attempts carry the header's
-// stand-in, and the run's frame directory keeps the file as loaded, from
-// which the completeness check and the replay work.
+// name the limit by source and keyed hash, its attempts carry the
+// header's stand-in, and the run's frame directory keeps the file as
+// loaded, from which the completeness check and the replay work. No file
+// under the output directory or the frame store carries the release key.
 func TestCellConfidentialLimit(t *testing.T) {
 	e := newEndpoint(t, always200)
 	endpoint, _ := withHeaders(t, e.url(), map[string]string{"X-Ratelimit-Limit-Tokens": "250013.5"})
@@ -678,12 +679,13 @@ func TestCellConfidentialLimit(t *testing.T) {
 		t.Errorf("manifest config %+v, not the file as published", m.Config)
 	}
 	l := cfg.Target.Limits[1]
-	if want := "tokens_per_minute confidential (" + l.Source + ", sha256 " + l.SHA256 + "): nominal demand at most half of it (half test: pass)"; !strings.Contains(text, want) {
+	if want := "tokens_per_minute confidential (" + l.Source + ", hmac-sha256 " + l.HMACSHA256 + "): nominal demand at most half of it (half test: pass)"; !strings.Contains(text, want) {
 		t.Errorf("report lacks %q:\n%s", want, text)
 	}
-	if b := m.Release.Admission.Steps[3].Binding; b == nil || !b.Confidential || b.Value != 0 || b.SHA256 != l.SHA256 {
+	if b := m.Release.Admission.Steps[3].Binding; b == nil || !b.Confidential || b.Value != 0 || b.HMACSHA256 != l.HMACSHA256 {
 		t.Errorf("binding limit %+v", b)
 	}
+	noReleaseKey(t, f.in.out, r.framesRoot)
 	files, withheld := 0, 0
 	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {

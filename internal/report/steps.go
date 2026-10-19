@@ -806,7 +806,7 @@ func (t *StepTables) text(frame bool) string {
 		if !s.Admitted {
 			state = "excluded, binding limit " + s.Binding.Dimension
 			if s.Binding.Confidential {
-				state += fmt.Sprintf(", confidential (%s, sha256 %s)", s.Binding.Source, s.Binding.SHA256)
+				state += fmt.Sprintf(", confidential (%s, hmac-sha256 %s)", s.Binding.Source, s.Binding.HMACSHA256)
 			}
 		}
 		w("step %d, %g rps: %s; %s", k+1, s.RPS, state, strings.Join(parts, "; "))
@@ -965,7 +965,7 @@ func confidentialText(d admission.Demand) string {
 	if !d.Pass {
 		within = "above"
 	}
-	return fmt.Sprintf("confidential (%s, sha256 %s): nominal demand %s %s", d.Source, d.SHA256, within, bound)
+	return fmt.Sprintf("confidential (%s, hmac-sha256 %s): nominal demand %s %s", d.Source, d.HMACSHA256, within, bound)
 }
 
 func passText(pass bool) string {

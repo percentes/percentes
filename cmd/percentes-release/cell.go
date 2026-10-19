@@ -169,7 +169,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if ev.ledger, err = evidence.ReadLedger(r.ledgerPath); err != nil {
 		return rec, err
 	}
-	if pr, err = probe.Run(ctx, probe.Input{Target: t, CaseText: r.shape.UserText(run.Seed, len(offsets)), Timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second}); err != nil {
+	if pr, err = probe.Run(ctx, probe.Input{Target: t, CaseText: r.shape.UserText(run.Seed, len(offsets)), Timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second, Key: r.key}); err != nil {
 		return rec, err
 	}
 	probePath, err := probe.Write(dir, pr)
@@ -338,7 +338,7 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	if rec.Outcome == outcomeCounted {
 		invalid = nil
 	}
-	attempts, err := evidence.WriteRun(ev.dir, ev.cfg, res, evidence.Options{RunFailures: invalid})
+	attempts, err := evidence.WriteRun(ev.dir, ev.cfg, res, evidence.Options{RunFailures: invalid, Key: r.key})
 	if err != nil {
 		return errors.Join(ferr, err)
 	}
@@ -435,7 +435,7 @@ func (r *route) labelCell(ctx context.Context, rec *cellRecord) error {
 	run := rec.Run
 	dir := r.cellDir(run)
 	cfg := cellConfig(r.cfg, run.Seed, r.steps)
-	if _, err := evidence.WriteRun(dir, cfg, &loadgen.Result{}, evidence.Options{}); err != nil {
+	if _, err := evidence.WriteRun(dir, cfg, &loadgen.Result{}, evidence.Options{Key: r.key}); err != nil {
 		return err
 	}
 	if rec.Error != "" {

@@ -408,17 +408,17 @@ func TestCeilingRuleRefuses(t *testing.T) {
 	}
 }
 
-// confidential is l marked confidential, its retained snapshot hashed as
-// sha.
+// confidential is l marked confidential, its retained snapshot's
+// HMAC-SHA256 under the release key recorded as sha.
 func confidential(l config.Limit, sha string) config.Limit {
-	l.Marking, l.Source, l.SHA256 = config.MarkingConfidential, "console-limits.png", sha
+	l.Marking, l.Source, l.SHA256, l.HMACSHA256 = config.MarkingConfidential, "console-limits.png", "", sha
 	return l
 }
 
 // A demand against a confidential limit carries the limit's dimension,
-// source and hash and the test's result, and no value or fraction; the
-// binding limit is named the same way, and public limits keep their
-// values.
+// source and keyed hash and the test's result, and no value, fraction or
+// SHA-256; the binding limit is named the same way, and public limits
+// keep their values.
 func TestCeilingRuleConfidential(t *testing.T) {
 	sha := strings.Repeat("ab", 32)
 	cfg := releaseConfig(t, "groq", 512, "10", lim(config.LimitRPM, 1000),
@@ -433,7 +433,7 @@ func TestCeilingRuleConfidential(t *testing.T) {
 		}
 		for _, dim := range []string{config.LimitTPM, config.LimitSpendMonth} {
 			d := demandOf(t, &s, dim)
-			if !d.Confidential || d.Value != 0 || d.Fraction != 0 || d.Source != "console-limits.png" || d.SHA256 != sha || d.Demand == 0 {
+			if !d.Confidential || d.Value != 0 || d.Fraction != 0 || d.Source != "console-limits.png" || d.HMACSHA256 != sha || d.Demand == 0 {
 				t.Errorf("step %g: confidential demand %+v", s.RPS, d)
 			}
 		}
@@ -444,7 +444,7 @@ func TestCeilingRuleConfidential(t *testing.T) {
 			t.Errorf("step %g: monthly cap pass %t, half %t", s.RPS, month.Pass, month.Half)
 		}
 	}
-	if b := stepAt(t, v, 2).Binding; b == nil || b.Dimension != config.LimitTPM || !b.Confidential || b.Source != "console-limits.png" || b.SHA256 != sha || b.Value != 0 {
+	if b := stepAt(t, v, 2).Binding; b == nil || b.Dimension != config.LimitTPM || !b.Confidential || b.Source != "console-limits.png" || b.HMACSHA256 != sha || b.Value != 0 {
 		t.Errorf("binding limit at 2 rps %+v", b)
 	}
 	raw, err := json.Marshal(v)
@@ -468,7 +468,8 @@ func TestCeilingRuleConfidential(t *testing.T) {
 		for _, d := range s.Demands {
 			_, value := d["value"]
 			_, fraction := d["fraction"]
-			if d["confidential"] == true && (value || fraction) || d["confidential"] != true && (!value || !fraction) {
+			_, plain := d["sha256"]
+			if d["confidential"] == true && (value || fraction || plain || d["hmac_sha256"] != sha) || d["confidential"] != true && (!value || !fraction) {
 				t.Errorf("step %d: demand as published %v", k+1, d)
 			}
 		}
@@ -496,7 +497,8 @@ func TestCheckPublished(t *testing.T) {
 		{"fraction", func(v *Verdict) { tpm(v).Fraction = 0.34 }, "step 3, tokens_per_minute: a confidential limit published with its value or fraction"},
 		{"pass", func(v *Verdict) { tpm(v).Pass = false }, "step 3, tokens_per_minute: pass true against the recorded value, published false"},
 		{"source", func(v *Verdict) { tpm(v).Source = "other.png" }, `step 3, tokens_per_minute: source "other.png"`},
-		{"hash", func(v *Verdict) { tpm(v).SHA256 = strings.Repeat("0", 64) }, "step 3, tokens_per_minute: source"},
+		{"hash", func(v *Verdict) { tpm(v).HMACSHA256 = strings.Repeat("0", 64) }, "step 3, tokens_per_minute: source"},
+		{"public hash", func(v *Verdict) { stepAt(t, v, 1).Demands[0].HMACSHA256 = sha }, "step 3, requests_per_minute: value 1000"},
 		{"unmarked", func(v *Verdict) { tpm(v).Confidential = false }, "step 3, tokens_per_minute: confidential false, target.limits[1] is marked confidential"},
 		{"public value", func(v *Verdict) { stepAt(t, v, 1).Demands[0].Value = 999 }, "step 3, requests_per_minute: value 999"},
 		{"marked public", func(v *Verdict) { stepAt(t, v, 1).Demands[0].Confidential = true }, "step 3, requests_per_minute: confidential true, target.limits[0] is marked public"},

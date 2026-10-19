@@ -20,6 +20,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 const (
@@ -292,26 +293,35 @@ func TestRetainedHeadersInTheFrameStoreOnly(t *testing.T) {
 
 // On a target with a confidential limit, an in-band error's text is in
 // the frame store and not in the attempts file, which carries its
-// stand-in with the text's SHA-256 and length; without one the attempts
-// file carries the text and the frame store does not.
+// stand-in with the text's HMAC-SHA256 under the release key and neither
+// its SHA-256 nor its length, and the attempts file is refused without
+// the key; without such a limit the attempts file carries the text and
+// the frame store does not.
 func TestStreamErrorInTheFrameStoreOnly(t *testing.T) {
 	const inBand = `{"type":"rate_limit_error","message":"300001 tokens per minute"}`
 	res := &loadgen.Result{EpochWall: time.Date(2026, 10, 17, 8, 20, 0, 0, time.UTC), Requests: []loadgen.Request{
 		{Index: 0, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrMalformedStream, Status: 200, StreamError: inBand},
 		{Index: 1, Outcome: loadgen.OutcomeCompleted, Status: 200},
 	}}
+	key, err := releasekey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
 	sum := sha256.Sum256([]byte(inBand))
+	confidential := confidentialCfg(t)
+	if path, err := WriteRun(t.TempDir(), confidential, res, Options{}); path != "" || err == nil || !strings.Contains(err.Error(), "needs the release key") {
+		t.Fatalf("no release key: %q, %v", path, err)
+	}
 	for _, tc := range []struct {
 		name            string
 		cfg             *config.Config
 		published, kept string
-		sha256          string
-		bytes           int
+		keyed           string
 	}{
-		{"confidential", confidentialCfg(t), `{"type":"rate_limit_error"}`, inBand, hex.EncodeToString(sum[:]), len(inBand)},
-		{"public", releaseCfg(t), inBand, "", "", 0},
+		{"confidential", confidential, `{"type":"rate_limit_error"}`, inBand, key.Sum([]byte(inBand))},
+		{"public", releaseCfg(t), inBand, "", ""},
 	} {
-		attemptsPath, err := WriteRun(t.TempDir(), tc.cfg, res, Options{})
+		attemptsPath, err := WriteRun(t.TempDir(), tc.cfg, res, Options{Key: key})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -331,14 +341,14 @@ func TestStreamErrorInTheFrameStoreOnly(t *testing.T) {
 		if len(recs) != 2 || len(frames) != 2 {
 			t.Fatalf("%s: %d attempts, %d frame records", tc.name, len(recs), len(frames))
 		}
-		if r := recs[0]; r.StreamError != tc.published || r.StreamErrorSHA256 != tc.sha256 || r.StreamErrorBytes != tc.bytes || frames[0].StreamError != tc.kept {
-			t.Errorf("%s: attempts %q %q %d, frame store %q", tc.name, r.StreamError, r.StreamErrorSHA256, r.StreamErrorBytes, frames[0].StreamError)
+		if r := recs[0]; r.StreamError != tc.published || r.StreamErrorHMACSHA256 != tc.keyed || frames[0].StreamError != tc.kept {
+			t.Errorf("%s: attempts %q %q, frame store %q", tc.name, r.StreamError, r.StreamErrorHMACSHA256, frames[0].StreamError)
 		}
-		if r := recs[1]; r.StreamError != "" || r.StreamErrorSHA256 != "" || r.StreamErrorBytes != 0 || frames[1].StreamError != "" {
+		if r := recs[1]; r.StreamError != "" || r.StreamErrorHMACSHA256 != "" || frames[1].StreamError != "" {
 			t.Errorf("%s: no in-band error: attempts %+v, frame store %+v", tc.name, r, frames[1])
 		}
-		if tc.kept != "" && bytes.Contains(attempts, []byte("300001")) {
-			t.Errorf("%s: attempts file carries the withheld text:\n%s", tc.name, attempts)
+		if tc.kept != "" && (bytes.Contains(attempts, []byte("300001")) || bytes.Contains(attempts, []byte(hex.EncodeToString(sum[:]))) || bytes.Contains(attempts, []byte("stream_error_bytes"))) {
+			t.Errorf("%s: attempts file carries the withheld text, its SHA-256 or its length:\n%s", tc.name, attempts)
 		}
 	}
 }

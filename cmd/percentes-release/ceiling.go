@@ -13,6 +13,7 @@ import (
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/pilot"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 // ceilingCheckCmd sends the route's ceiling check (SPEC-HOSTED HA3 point
@@ -21,10 +22,12 @@ import (
 // settled with the requests sent, both in the file whose open line the
 // command read first. It writes the record run reads with --ceiling-probe,
 // also when the check fails or is blocked, and what the record withholds
-// under --frames. The record names the ledger by its open-line SHA-256;
-// run refuses it unless the schedule froze that ledger. A record
-// reporting a model id on which run refuses the route (probe.ModelFault)
-// is refused here too.
+// under --frames. On a route with a confidential limit the record's
+// fingerprints of what it withholds, and the limits' retained copies'
+// check, are keyed by the release key. The record names the ledger by
+// its open-line SHA-256; run refuses it unless the schedule froze that
+// ledger. A record reporting a model id on which run refuses the route
+// (probe.ModelFault) is refused here too.
 func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	fs := flag.NewFlagSet("ceiling-check", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "the route's release configuration at the ceiling checked (required)")
@@ -33,6 +36,7 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	out := fs.String("out", "", "output directory; the check writes ceiling-<UTC time>/<route>-<ceiling>/"+probe.File+" under it (required)")
 	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
 	snapshots := fs.String("snapshots", "", "directory of the retained limit copies the configuration names by file name")
+	keyPath := fs.String("release-key", "", "the release key file key create wrote (required when the configuration records a confidential limit)")
 	framesRoot := fs.String("frames", "", "raw-frame store directory outside the source tree; the check writes ceiling-<UTC time>/<route>-<ceiling>/"+probe.RetainedFile+
 		" under it (required when the configuration sets target.retained_headers or target.probe.limits_retained, or records a confidential limit)")
 	if err := fs.Parse(args); err != nil {
@@ -58,6 +62,12 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 			return exitError, err
 		}
 	}
+	var key *releasekey.Key
+	if cfg.Target.Confidential() {
+		if key, err = readReleaseKey(*keyPath); err != nil {
+			return exitError, fmt.Errorf("ceiling-check: %w", err)
+		}
+	}
 	shape, err := pilot.GenerateShapeS(pilot.ShapeSSeed, *byteCap)
 	if err != nil {
 		return exitError, err
@@ -78,7 +88,7 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 		return exitError, err
 	}
 
-	rec, err := sendCeiling(ctx, ledger, cfg, shape, *snapshots, *byteCap)
+	rec, err := sendCeiling(ctx, ledger, cfg, shape, *snapshots, *byteCap, key)
 	if err != nil {
 		return exitError, err
 	}
@@ -118,11 +128,11 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 }
 
 // sendCeiling admits cfg's ceiling check in ledger, sends it with
-// shape's texts cut at byteCap, settles the requests sent, and records
-// the open line ledger is bound to (admission.Ledger.Bind). The
-// ceiling is the texts' request-reference seed, so the checks at the two
-// ceilings send different texts.
-func sendCeiling(ctx context.Context, ledger *admission.Ledger, cfg *config.Config, shape *pilot.ShapeS, snapshots string, byteCap int) (*probe.ReleaseRecord, error) {
+// shape's texts cut at byteCap and the release key, settles the requests
+// sent, and records the open line ledger is bound to
+// (admission.Ledger.Bind). The ceiling is the texts' request-reference
+// seed, so the checks at the two ceilings send different texts.
+func sendCeiling(ctx context.Context, ledger *admission.Ledger, cfg *config.Config, shape *pilot.ShapeS, snapshots string, byteCap int, key *releasekey.Key) (*probe.ReleaseRecord, error) {
 	texts := make([]string, probe.CeilingRequests)
 	for i := range texts {
 		texts[i] = shape.UserText(int64(cfg.Release.Shape.CeilingTokens), i)
@@ -131,7 +141,7 @@ func sendCeiling(ctx context.Context, ledger *admission.Ledger, cfg *config.Conf
 	if err != nil {
 		return nil, err
 	}
-	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: snapshots, ByteCap: byteCap})
+	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: snapshots, ByteCap: byteCap, Key: key})
 	sent := 0
 	if rec != nil {
 		sent, rec.LedgerSHA256 = rec.Sent(), ledger.Bound()

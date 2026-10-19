@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -323,12 +325,12 @@ func markConfidential(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const public = "      value: 250000\n      marking: public\n"
+	const public = "      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256:"
 	if !bytes.Contains(b, []byte(public)) || !bytes.Contains(b, []byte(rateLimitHeaders)) {
 		t.Fatal("configuration: the lines this test edits not found")
 	}
 	b = bytes.Replace(b, []byte(rateLimitHeaders), []byte(rateLimitHeaders+"  retained_headers: [x-ratelimit-*]\n"), 1)
-	if err := os.WriteFile(path, bytes.Replace(b, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n"), 1), 0o600); err != nil {
+	if err := os.WriteFile(path, bytes.Replace(b, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      hmac_sha256:"), 1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -338,7 +340,7 @@ func markConfidential(t *testing.T, path string) {
 func TestCeilingCheckConfidential(t *testing.T) {
 	f := newCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), testKey)
 	markConfidential(t, f.cfg)
-	if code, err := ceilingCheckCmd(context.Background(), append(f.args(), "--frames", t.TempDir())); err != nil || code != exitOK {
+	if code, err := ceilingCheckCmd(context.Background(), append(f.args(), "--frames", t.TempDir(), "--release-key", testReleaseKeyPath)); err != nil || code != exitOK {
 		t.Fatalf("ceiling-check: %d, %v", code, err)
 	}
 	path, rec := f.record(t)
@@ -512,4 +514,92 @@ func TestCeilingCheckCmdRefusals(t *testing.T) {
 	if n := hits.Load(); n != 0 {
 		t.Fatalf("%d requests reached the endpoint", n)
 	}
+}
+
+// On a route with a confidential limit, ceiling-check refuses to start
+// without the release key. With it, the 401 body that blocks the check
+// publishes as a stand-in with its HMAC-SHA256 under the key and neither
+// its SHA-256 nor its length, the confidential limit's retained copy is
+// checked against the hmac_sha256 key sum prints for it, and nothing the
+// command prints or writes carries the key.
+func TestCeilingCheckKeyedHashes(t *testing.T) {
+	endpoint, hits := withHeaders(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), nil)
+	f := newCeilingFixture(t, endpoint, "wrong-"+testKey)
+	markConfidential(t, f.cfg)
+	snapshots := t.TempDir()
+	shot := []byte("console: tokens per minute 250013.5")
+	shotPath := writeFile(t, snapshots, "groq-rate-limits-page.png", shot)
+	var code int
+	var err error
+	sum := stdoutOf(t, func() { code, err = keyCmd([]string{"sum", "--key", testReleaseKeyPath, shotPath}) })
+	if err != nil || code != exitOK || sum != testReleaseKey.Sum(shot)+"  "+shotPath+"\n" {
+		t.Fatalf("key sum: %d, %v, %q", code, err, sum)
+	}
+	b, err := os.ReadFile(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := `hmac_sha256: "` + strings.Repeat("0", 64) + `"`
+	if strings.Count(string(b), recorded) != 1 {
+		t.Fatalf("configuration: %q not found once", recorded)
+	}
+	f.cfg = writeFile(t, t.TempDir(), "groq.yaml", []byte(strings.Replace(string(b), recorded, `hmac_sha256: "`+testReleaseKey.Sum(shot)+`"`, 1)))
+	frames := t.TempDir()
+	args := append(f.args(), "--frames", frames, "--snapshots", snapshots)
+
+	if code, err := ceilingCheckCmd(context.Background(), args); err == nil || code != exitError || !strings.Contains(err.Error(), "--release-key is required") {
+		t.Fatalf("without --release-key: %d, %v", code, err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("%d requests sent without --release-key", n)
+	}
+	printed := stdoutOf(t, func() {
+		code, err = ceilingCheckCmd(context.Background(), append(args, "--release-key", testReleaseKeyPath))
+	})
+	if err != nil || code != exitAdverse {
+		t.Fatalf("ceiling-check: %d, %v\n%s", code, err, printed)
+	}
+	path, rec := f.record(t)
+	rel, err := filepath.Rel(f.out, filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	heldRaw, err := os.ReadFile(filepath.Join(frames, rel, probe.RetainedFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var held probe.RetainedRecord
+	if err := json.Unmarshal(heldRaw, &held); err != nil {
+		t.Fatal(err)
+	}
+	kept := held.Exchanges["requests.0"]
+	if kept == nil || kept.Body == nil || kept.Body.Text == nil || *kept.Body.Text == "" {
+		t.Fatalf("retained file:\n%s", heldRaw)
+	}
+	body := []byte(*kept.Body.Text)
+	if len(rec.Requests) != 1 || rec.Requests[0].Exchange.Status != http.StatusUnauthorized {
+		t.Fatalf("requests %+v", rec.Requests)
+	}
+	if s := rec.Requests[0].Exchange.Body; s == nil || s.Text != nil || !s.Retained || s.SHA256 != "" || s.HMACSHA256 != testReleaseKey.Sum(body) {
+		t.Fatalf("body stand-in %+v", s)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := sha256.Sum256(body)
+	if bytes.Contains(raw, body) || bytes.Contains(raw, []byte(hex.EncodeToString(plain[:]))) || bytes.Contains(raw, []byte(`"bytes"`)) {
+		t.Fatalf("%s carries the body, its SHA-256 or its length:\n%s", path, raw)
+	}
+	if s := rec.Snapshots[1]; s.Marking != config.MarkingConfidential || s.HMACSHA256 != testReleaseKey.Sum(shot) || s.SHA256 != "" || s.Retained == nil || !*s.Retained {
+		t.Fatalf("confidential snapshot %+v", s)
+	}
+	key, err := os.ReadFile(testReleaseKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(printed+sum), strings.TrimSpace(string(key))) {
+		t.Fatalf("the output carries the release key:\n%s%s", printed, sum)
+	}
+	noReleaseKey(t, f.out, frames)
 }

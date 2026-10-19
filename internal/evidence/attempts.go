@@ -9,9 +9,8 @@ package evidence
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/score"
 )
 
@@ -77,11 +77,11 @@ type Record struct {
 	SystemFingerprint string          `json:"system_fingerprint,omitempty"`
 	// StreamError is the first in-band error object. On a target with a
 	// confidential limit it is config.RetainedError's stand-in, with the
-	// SHA-256 and length of the text, which the frame store keeps.
-	StreamError       string `json:"stream_error,omitempty"`
-	StreamErrorSHA256 string `json:"stream_error_sha256,omitempty"`
-	StreamErrorBytes  int    `json:"stream_error_bytes,omitempty"`
-	UnknownEvents     int    `json:"unknown_events,omitempty"`
+	// text's HMAC-SHA256 under the release key; the frame store keeps the
+	// text.
+	StreamError           string `json:"stream_error,omitempty"`
+	StreamErrorHMACSHA256 string `json:"stream_error_hmac_sha256,omitempty"`
+	UnknownEvents         int    `json:"unknown_events,omitempty"`
 	// Answer is the visible content, present for hosted targets outside
 	// the release profile; a release keeps it in the frame store only.
 	// Reasoning text is never recorded here.
@@ -121,10 +121,13 @@ type Scoring struct {
 	Expected []string
 }
 
-// Options carries what a run's records hold beyond its requests.
+// Options carries what a run's records hold beyond its requests. Key is
+// the release key, under which a target with a confidential limit hashes
+// each in-band error text it withholds; WriteRun requires it there.
 type Options struct {
 	Scoring     *Scoring
 	RunFailures []string
+	Key         *releasekey.Key
 }
 
 // Records returns one record per request of res, in index order.
@@ -132,7 +135,7 @@ func Records(cfg *config.Config, res *loadgen.Result, opt Options) []Record {
 	out := make([]Record, len(res.Requests))
 	for i := range res.Requests {
 		r := &res.Requests[i]
-		out[i] = record(r, cfg)
+		out[i] = record(r, cfg, opt.Key)
 		rec := &out[i]
 		if len(opt.RunFailures) > 0 {
 			rec.RunFailures = opt.RunFailures
@@ -146,7 +149,7 @@ func Records(cfg *config.Config, res *loadgen.Result, opt Options) []Record {
 	return out
 }
 
-func record(r *loadgen.Request, cfg *config.Config) Record {
+func record(r *loadgen.Request, cfg *config.Config, key *releasekey.Key) Record {
 	rec := Record{
 		Index:             r.Index,
 		IntendedNs:        r.IntendedNs,
@@ -178,9 +181,10 @@ func record(r *loadgen.Request, cfg *config.Config) Record {
 		FirstReasoningNs:  r.FirstReasoningNs,
 	}
 	if r.StreamError != "" && cfg.Target.Confidential() {
-		sum := sha256.Sum256([]byte(r.StreamError))
 		rec.StreamError = config.RetainedError(r.StreamError)
-		rec.StreamErrorSHA256, rec.StreamErrorBytes = hex.EncodeToString(sum[:]), len(r.StreamError)
+		if key != nil {
+			rec.StreamErrorHMACSHA256 = key.Sum([]byte(r.StreamError))
+		}
 	}
 	if len(cfg.Target.Shape().Refusal) > 0 {
 		refused := r.RefusalBytes > 0
@@ -359,10 +363,14 @@ func Write(w io.Writer, recs []Record) error {
 
 // WriteRun writes the records of res to AttemptsFile in dir and returns
 // the file's path. A nil res, a run that never reached load generation,
-// writes nothing and returns "".
+// writes nothing and returns "". It refuses a target with a confidential
+// limit without opt.Key.
 func WriteRun(dir string, cfg *config.Config, res *loadgen.Result, opt Options) (string, error) {
 	if res == nil {
 		return "", nil
+	}
+	if cfg.Target.Confidential() && opt.Key == nil {
+		return "", errors.New("evidence: a target with a confidential limit needs the release key")
 	}
 	var b bytes.Buffer
 	if err := Write(&b, Records(cfg, res, opt)); err != nil {

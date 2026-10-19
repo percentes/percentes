@@ -141,7 +141,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 			t.Fatal(err)
 		}
 		r, err := newRoute(routeInput{
-			cfg: cfg, configName: name + ".yaml", schedulePath: schedulePath, out: out, ledgerPath: ledgerPath,
+			cfg: cfg, configName: name + ".yaml", schedulePath: schedulePath, out: out, ledgerPath: ledgerPath, key: testReleaseKey,
 			framesRoot: frames, clockSync: clockSync, statusCmd: "true", balanceCmd: mockBalanceCmd(cfg), refreshCmd: refresh + " " + filepath.Join(dir, "r.txt"), opPath: opPath,
 			probeFiles: []string{writeFile(t, dir, "ceiling-"+name+".json", cp)}, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
 		})

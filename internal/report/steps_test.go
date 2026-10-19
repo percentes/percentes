@@ -645,14 +645,14 @@ func TestStepTablesRefusals(t *testing.T) {
 	}
 }
 
-// A confidential limit prints with its source and hash and whether each
+// A confidential limit prints with its source and keyed hash and whether each
 // step's nominal demand was within the test's bound, never with its value
 // or the fraction; the binding limit and the status_429 context say the
 // same, and a verdict that disagrees with the recorded value is refused.
 func TestStepTablesConfidential(t *testing.T) {
 	cfg, _ := stepsConfig(t)
 	tpm := &cfg.Target.Limits[1]
-	tpm.Value, tpm.Marking, tpm.Source, tpm.SHA256 = 300001, config.MarkingConfidential, "console.png", strings.Repeat("ab", 32)
+	tpm.Value, tpm.Marking, tpm.Source, tpm.SHA256, tpm.HMACSHA256 = 300001, config.MarkingConfidential, "console.png", "", strings.Repeat("ab", 32)
 	cfg.Target.RetainedHeaders = []string{"x-ratelimit-*"}
 	v, err := admission.CeilingRule(cfg, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test/pricing", Retrieved: "2026-10-07"}, admission.ExpectedPlan(cfg))
 	if err != nil {
@@ -666,10 +666,10 @@ func TestStepTablesConfidential(t *testing.T) {
 	hash := strings.Repeat("ab", 32)
 	text := st.Text()
 	for _, frag := range []string{
-		"step 1, 0.25 rps: admitted; requests_per_minute 1.5% of 1000 (half test: pass); tokens_per_minute confidential (console.png, sha256 " + hash +
+		"step 1, 0.25 rps: admitted; requests_per_minute 1.5% of 1000 (half test: pass); tokens_per_minute confidential (console.png, hmac-sha256 " + hash +
 			"): nominal demand at most half of it (half test: pass); route_cap_usd ",
-		"step 4, 2 rps: excluded, binding limit tokens_per_minute, confidential (console.png, sha256 " + hash + "); requests_per_minute 12.0% of 1000 (half test: pass); " +
-			"tokens_per_minute confidential (console.png, sha256 " + hash + "): nominal demand above half of it (half test: FAIL)",
+		"step 4, 2 rps: excluded, binding limit tokens_per_minute, confidential (console.png, hmac-sha256 " + hash + "); requests_per_minute 12.0% of 1000 (half test: pass); " +
+			"tokens_per_minute confidential (console.png, hmac-sha256 " + hash + "): nominal demand above half of it (half test: FAIL)",
 		"    nominal demand at most 1.5% of each public half-tested recorded limit and at most half of each confidential one; no cause inferred",
 	} {
 		if !strings.Contains(text, frag) {

@@ -99,8 +99,12 @@ type Limit struct {
 	Source string `yaml:"source" json:"source"`
 	// Retrieved is the retrieval date, YYYY-MM-DD in UTC.
 	Retrieved string `yaml:"retrieved" json:"retrieved"`
-	// SHA256 is the hash of the retained copy, in lowercase hex.
-	SHA256 string `yaml:"sha256" json:"sha256"`
+	// SHA256 is the hash of the retained copy, in lowercase hex, and
+	// HMACSHA256 in its place for a limit marked MarkingConfidential: the
+	// copy's HMAC-SHA256 under the release key (percentes-release key
+	// sum).
+	SHA256     string `yaml:"sha256,omitempty" json:"sha256,omitempty"`
+	HMACSHA256 string `yaml:"hmac_sha256,omitempty" json:"hmac_sha256,omitempty"`
 }
 
 // Values of a limit's marking.
@@ -111,7 +115,7 @@ const (
 	// MarkingConfidential is a value shown only in the account console,
 	// where the provider's terms make it confidential. The value is kept
 	// in the retained store; a published record names the limit by its
-	// dimension, source and SHA-256 (SPEC-HOSTED HA3 point 15).
+	// dimension, source and keyed hash (SPEC-HOSTED HA3 point 15).
 	MarkingConfidential = "confidential"
 )
 
@@ -699,8 +703,15 @@ func validateLimit(v *validator, field string, l *Limit) {
 	if _, err := time.Parse(time.DateOnly, l.Retrieved); err != nil {
 		v.errf("%s.retrieved: a date as YYYY-MM-DD required, got %q", field, l.Retrieved)
 	}
-	if !sha256Hex(l.SHA256) {
+	switch {
+	case l.Marking != MarkingConfidential && !sha256Hex(l.SHA256):
 		v.errf("%s.sha256: 64 lowercase hex characters required, got %q", field, l.SHA256)
+	case l.Marking != MarkingConfidential && l.HMACSHA256 != "":
+		v.errf("%s.hmac_sha256: set for a %s limit only", field, MarkingConfidential)
+	case l.Marking == MarkingConfidential && l.SHA256 != "":
+		v.errf("%s.sha256: a %s limit records hmac_sha256, the retained copy's HMAC-SHA256 under the release key", field, MarkingConfidential)
+	case l.Marking == MarkingConfidential && !sha256Hex(l.HMACSHA256):
+		v.errf("%s.hmac_sha256: 64 lowercase hex characters required, got %q", field, l.HMACSHA256)
 	}
 }
 

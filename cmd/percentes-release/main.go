@@ -24,13 +24,16 @@
 // named with --env, never from the inherited environment, and is never
 // printed.
 //
-// Before the window, ledger create starts the release ledger with the
-// routes' caps, schedule writes the committed schedule of the routes
-// whose configurations it is given, with each configuration's SHA-256
-// and host group and the ledger's open-line SHA-256, which a route's run
-// must match, ledger price records a route's
-// prices at the token bounds of its cells and of its ceiling check,
-// ceiling-check sends a route's ceiling check, admitted in the ledger,
+// Before the window, key create writes the release key, under which
+// every published fingerprint of a value a confidential route withholds
+// is an HMAC-SHA256, and key sum prints a retained copy's; ledger create
+// starts the release ledger with the routes' caps, schedule writes the
+// committed schedule of the routes whose configurations it is given,
+// with each configuration's SHA-256 as published, its HMAC-SHA256 as
+// loaded under the release key and its host group, and the ledger's
+// open-line SHA-256, which a route's run must match, ledger price
+// records a route's prices at the token bounds of its cells and of its
+// ceiling check, ceiling-check sends a route's ceiling check, admitted in the ledger,
 // and writes the record run reads with --ceiling-probe, and
 // public-config writes a route's configuration as published, the file
 // the freeze commits, with
@@ -48,16 +51,20 @@
 // pinned offsets up the whole ladder, and writes the cells' evidence and
 // a summary that says whether the rehearsal is green.
 //
+//	percentes-release key create --key FILE
+//	percentes-release key sum --key FILE FILE ...
 //	percentes-release ledger create --ledger FILE --config FILE ...
 //	percentes-release schedule --master-seed SEED --first DATE --last DATE
-//	    --config FILE ... --ledger FILE --schedule FILE
+//	    --config FILE ... --ledger FILE --release-key FILE --schedule FILE
 //	percentes-release ledger price --ledger FILE --config FILE --input USD
 //	    --output USD --source URL --retrieved DATE
 //	percentes-release ceiling-check --config FILE --env FILE --ledger FILE
 //	    --out DIR --byte-cap N [--frames DIR] [--snapshots DIR]
+//	    [--release-key FILE]
 //	percentes-release public-config --config FILE --out FILE
 //	percentes-release run --config FILE --env FILE --ledger FILE
-//	    --schedule FILE --out DIR --frames DIR --clock-sync CMD
+//	    --release-key FILE --schedule FILE --out DIR --frames DIR
+//	    --clock-sync CMD
 //	    --status-cmd CMD --balance-cmd CMD --refresh-cmd CMD
 //	    --operator FILE --ceiling-probe FILE ...
 //	    --byte-cap N --account-created DATE
@@ -111,6 +118,8 @@ const (
 const usage = `usage: percentes-release <command> [flags]
 
 commands:
+  key create      write the release key
+  key sum         print each file's HMAC-SHA256 under the release key
   ledger create   start the release ledger with the routes' caps
   schedule        write the committed schedule of the routes
   ledger price    record a route's prices for its cells and ceiling check
@@ -144,6 +153,8 @@ func dispatch(args []string) int {
 	switch args[0] {
 	case "schedule":
 		code, err = scheduleCmd(args[1:])
+	case "key":
+		code, err = keyCmd(args[1:])
 	case "ledger":
 		code, err = ledgerCmd(args[1:])
 	case "ceiling-check":

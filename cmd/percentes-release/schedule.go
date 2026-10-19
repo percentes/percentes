@@ -11,15 +11,17 @@ import (
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
 // scheduleCmd writes the committed schedule (SPEC-HOSTED HA3 point 9) of
 // the routes whose configurations are given, named by their targets,
 // whose host groups agree, with the SHA-256 of each configuration as
-// published and its host group, and the open-line SHA-256 of the release
-// ledger, which must cap each route as its configuration does; run
-// requires them. It never replaces an existing file.
+// published, its HMAC-SHA256 as loaded under the release key and its
+// host group, and the open-line SHA-256 of the release ledger, which
+// must cap each route as its configuration does; run requires them. It
+// never replaces an existing file.
 func scheduleCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("schedule", flag.ContinueOnError)
 	seed := fs.String("master-seed", "", "the release's master seed (required)")
@@ -28,6 +30,7 @@ func scheduleCmd(args []string) (int, error) {
 	var cfgPaths listFlag
 	fs.Var(&cfgPaths, "config", "a route's release configuration (repeatable, required)")
 	ledgerPath := fs.String("ledger", "", "the release admission ledger the routes' runs admit in (required)")
+	keyPath := fs.String("release-key", "", "the release key file key create wrote (required)")
 	path := fs.String("schedule", "", "the schedule file to write; it must not exist (required)")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
@@ -36,6 +39,10 @@ func scheduleCmd(args []string) (int, error) {
 		return exitError, errors.New("schedule: --ledger and --schedule are required")
 	}
 	cfgs, err := loadReleases(cfgPaths)
+	if err != nil {
+		return exitError, err
+	}
+	key, err := readReleaseKey(*keyPath)
 	if err != nil {
 		return exitError, err
 	}
@@ -54,7 +61,7 @@ func scheduleCmd(args []string) (int, error) {
 	}
 	in := schedule.Input{MasterSeed: *seed, First: *first, Last: *last, LedgerSHA256: st.OpenSHA256}
 	for _, cfg := range cfgs {
-		frozen, err := frozenConfig(cfg)
+		frozen, err := frozenConfig(cfg, key)
 		if err != nil {
 			return exitError, err
 		}
@@ -104,25 +111,27 @@ func hostGroup(cfg *config.Config) []string {
 }
 
 // frozenConfig is cfg's record in the schedule: the SHA-256 of its file
-// as published (config.Config.Published) and its host group.
-func frozenConfig(cfg *config.Config) (schedule.RouteConfig, error) {
+// as published (config.Config.Published), the HMAC-SHA256 of its file as
+// loaded under key and its host group.
+func frozenConfig(cfg *config.Config, key *releasekey.Key) (schedule.RouteConfig, error) {
 	published, err := cfg.Published()
 	if err != nil {
 		return schedule.RouteConfig{}, err
 	}
 	sum := sha256.Sum256(published)
-	return schedule.RouteConfig{Route: cfg.Target.Name, ConfigSHA256: hex.EncodeToString(sum[:]), HostGroup: hostGroup(cfg)}, nil
+	return schedule.RouteConfig{Route: cfg.Target.Name, ConfigSHA256: hex.EncodeToString(sum[:]), ConfigHMACSHA256: key.Sum(cfg.Raw), HostGroup: hostGroup(cfg)}, nil
 }
 
 // checkFrozen refuses cfg unless the schedule froze its route's
-// configuration as cfg's file as published and cfg's host group.
-func checkFrozen(cfg *config.Config, sched *schedule.Schedule) error {
+// configuration as cfg's file as published, cfg's file as loaded under
+// key and cfg's host group.
+func checkFrozen(cfg *config.Config, sched *schedule.Schedule, key *releasekey.Key) error {
 	name := cfg.Target.Name
 	want, ok := sched.Config(name)
 	if !ok {
 		return fmt.Errorf("run: the schedule freezes no configuration of route %s", name)
 	}
-	got, err := frozenConfig(cfg)
+	got, err := frozenConfig(cfg, key)
 	if err != nil {
 		return err
 	}
@@ -131,6 +140,12 @@ func checkFrozen(cfg *config.Config, sched *schedule.Schedule) error {
 	}
 	if got.ConfigSHA256 != want.ConfigSHA256 {
 		return fmt.Errorf("run: route %s: configuration sha256 %s; the schedule froze %s", name, got.ConfigSHA256, want.ConfigSHA256)
+	}
+	switch {
+	case want.ConfigHMACSHA256 == "":
+		return fmt.Errorf("run: route %s: the schedule freezes no hmac_sha256 of the configuration as loaded", name)
+	case got.ConfigHMACSHA256 != want.ConfigHMACSHA256:
+		return fmt.Errorf("run: route %s: the configuration as loaded, or the release key, is not the one the schedule froze: hmac_sha256 %s; the schedule froze %s", name, got.ConfigHMACSHA256, want.ConfigHMACSHA256)
 	}
 	return nil
 }

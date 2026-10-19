@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/mock"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 const ticket = "My invoice was charged twice this month."
@@ -79,6 +81,16 @@ func texts(words int) []string {
 		}
 	}
 	return out
+}
+
+// newKey is a release key for the test.
+func newKey(t *testing.T) *releasekey.Key {
+	t.Helper()
+	k, err := releasekey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }
 
 func releaseProbe(t *testing.T, in ReleaseInput) *ReleaseRecord {
@@ -611,10 +623,11 @@ func TestReleaseProbeLimits(t *testing.T) {
 // The values a route withholds stay out of the record: each value of a
 // header target.retained_headers names is replaced by the stand-in in
 // every request, the rate-limit headers and the limits read, and under
-// target.probe.limits_retained the limits body is replaced by its hash.
-// The retained file holds the values, readable by the owner only. A
-// record carrying them is exposed; a route withholding nothing writes no
-// retained file.
+// target.probe.limits_retained the limits body is replaced by its hash:
+// its SHA-256, or on a route with a confidential limit its HMAC-SHA256
+// under the release key alone. The retained file holds the values,
+// readable by the owner only. A record carrying them is exposed; a route
+// withholding nothing writes no retained file.
 func TestReleaseProbeRetains(t *testing.T) {
 	noSpacing(t)
 	const limitsBody = `{"rate_limits":{"rpm":"qz104729"}}`
@@ -699,6 +712,31 @@ func TestReleaseProbeRetains(t *testing.T) {
 		t.Fatalf("exposed %q", e)
 	}
 
+	l := &cfg.Target.Limits[1]
+	l.Marking, l.SHA256, l.HMACSHA256 = config.MarkingConfidential, "", l.SHA256
+	key := newKey(t)
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, Key: key})
+	if b := rec.Limits.Body; b == nil || b.Text != nil || !b.Retained || b.SHA256 != "" || b.HMACSHA256 != key.Sum([]byte(limitsBody)) {
+		t.Fatalf("confidential: limits body %+v", b)
+	}
+	if e := Exposed(&cfg.Target, rec); e != nil {
+		t.Fatalf("confidential: exposed %q", e)
+	}
+	if path, err = Write(t.TempDir(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(path); err != nil || bytes.Contains(b, []byte(hex.EncodeToString(sum[:]))) || bytes.Contains(b, []byte("qz104729")) {
+		t.Fatalf("confidential: %s carries the limits body or its SHA-256 (%v):\n%s", File, err, b)
+	}
+	limits = *rec.Limits
+	limits.Body = &Body{Retained: true, SHA256: hex.EncodeToString(sum[:])}
+	exposed = *rec
+	exposed.Limits = &limits
+	if e := Exposed(&cfg.Target, &exposed); fmt.Sprint(e) != "[limits body sha256]" {
+		t.Fatalf("confidential: exposed %q", e)
+	}
+	l.Marking, l.SHA256, l.HMACSHA256 = config.MarkingPublic, l.HMACSHA256, ""
+
 	cfg.Target.RetainedHeaders, cfg.Target.Probe.LimitsRetained = nil, false
 	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	if fmt.Sprint(rec.RateLimitHeaders) != "map[X-Ratelimit-Limit-Requests:[120] X-Ratelimit-Remaining-Requests:[qz7919]]" || *rec.Limits.Body.Text != limitsBody {
@@ -710,9 +748,11 @@ func TestReleaseProbeRetains(t *testing.T) {
 }
 
 // On a route with a confidential limit, each non-200 body and each
-// in-band error text are replaced by stand-ins with their SHA-256 and
-// length, the requests still fail the check on them, and the retained
-// file holds them. A record carrying them is exposed. A route without a
+// in-band error text are replaced by stand-ins with their HMAC-SHA256
+// under the release key and neither their SHA-256 nor their length, the
+// requests still fail the check on them, and the retained file holds
+// them. Without the key the probe refuses to start. A record carrying
+// them, or a stand-in with a SHA-256, is exposed. A route without a
 // confidential limit keeps them in the record.
 func TestReleaseProbeConfidentialErrors(t *testing.T) {
 	noSpacing(t)
@@ -729,27 +769,31 @@ func TestReleaseProbeConfidentialErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
-	cfg.Target.Limits[1].Marking = config.MarkingConfidential
+	l := &cfg.Target.Limits[1]
+	l.Marking, l.SHA256, l.HMACSHA256 = config.MarkingConfidential, "", l.SHA256
 	if !Retains(&cfg.Target) {
 		t.Fatal("a route with a confidential limit withholds nothing")
 	}
 
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if rec, err := RunRelease(context.Background(), ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap}); err == nil || rec != nil ||
+		!strings.Contains(err.Error(), "needs the release key") || n.Load() != 0 {
+		t.Fatalf("no release key: %v, %v, %d requests", rec, err, n.Load())
+	}
+	key := newKey(t)
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, Key: key})
 	if len(rec.Requests) != CeilingRequests {
 		t.Fatalf("%d requests", len(rec.Requests))
 	}
-	bodySum, errSum := sha256.Sum256([]byte(errBody)), sha256.Sum256([]byte(inBand))
 	for i, r := range rec.Requests {
 		b, s := r.Exchange.Body, r.Shape
 		if i%2 == 0 {
 			if r.Exchange.Status != http.StatusTooManyRequests || b == nil || b.Text != nil || b.Base64 != "" || !b.Retained ||
-				b.SHA256 != hex.EncodeToString(bodySum[:]) || b.Bytes != len(errBody) || r.Fail != "status 429" {
+				b.HMACSHA256 != key.Sum([]byte(errBody)) || b.SHA256 != "" || r.Fail != "status 429" {
 				t.Fatalf("request %d: status %d body %+v fail %q", i, r.Exchange.Status, b, r.Fail)
 			}
 			continue
 		}
-		if b != nil || s == nil || s.Error != `{"type":"rate_limit_error"}` || s.ErrorSHA256 != hex.EncodeToString(errSum[:]) ||
-			s.ErrorBytes != len(inBand) || r.Fail != "in-band error" {
+		if b != nil || s == nil || s.Error != `{"type":"rate_limit_error"}` || s.ErrorHMACSHA256 != key.Sum([]byte(inBand)) || r.Fail != "in-band error" {
 			t.Fatalf("request %d: body %+v shape %+v fail %q", i, b, s, r.Fail)
 		}
 	}
@@ -763,8 +807,15 @@ func TestReleaseProbeConfidentialErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, err := os.ReadFile(path); err != nil || bytes.Contains(b, []byte("qz250013")) {
+	b, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(b, []byte("qz250013")) {
 		t.Fatalf("%s carries a withheld text (%v):\n%s", File, err, b)
+	}
+	bodySum, errSum := sha256.Sum256([]byte(errBody)), sha256.Sum256([]byte(inBand))
+	for _, leak := range []string{hex.EncodeToString(bodySum[:]), hex.EncodeToString(errSum[:]), `"bytes"`, "error_bytes", "error_sha256"} {
+		if bytes.Contains(b, []byte(leak)) {
+			t.Fatalf("%s carries %s:\n%s", File, leak, b)
+		}
 	}
 	held, err := WriteRetained(filepath.Join(t.TempDir(), "frames"), rec)
 	if err != nil {
@@ -798,10 +849,21 @@ func TestReleaseProbeConfidentialErrors(t *testing.T) {
 	if e := ExposedByMarking(&exposed); fmt.Sprint(e) != "[request 0 body request 1 in-band error]" {
 		t.Fatalf("exposed by marking %q", e)
 	}
+	hashed := *rec
+	hashed.Requests = append([]CheckRequest(nil), rec.Requests...)
+	stand := *rec.Requests[2].Exchange.Body
+	stand.SHA256 = hex.EncodeToString(bodySum[:])
+	hashed.Requests[2].Exchange.Body = &stand
+	if e := Exposed(&cfg.Target, &hashed); fmt.Sprint(e) != "[request 2 body sha256]" {
+		t.Fatalf("exposed %q", e)
+	}
+	if e := ExposedByMarking(&hashed); fmt.Sprint(e) != "[request 2 body sha256]" {
+		t.Fatalf("exposed by marking %q", e)
+	}
 
-	cfg.Target.Limits[1].Marking = config.MarkingPublic
+	l.Marking, l.SHA256, l.HMACSHA256 = config.MarkingPublic, l.HMACSHA256, ""
 	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
-	if b, s := rec.Requests[0].Exchange.Body, rec.Requests[1].Shape; b == nil || b.Text == nil || *b.Text != errBody || s == nil || s.Error != inBand || s.ErrorSHA256 != "" {
+	if b, s := rec.Requests[0].Exchange.Body, rec.Requests[1].Shape; b == nil || b.Text == nil || *b.Text != errBody || s == nil || s.Error != inBand || s.ErrorHMACSHA256 != "" {
 		t.Fatalf("public route: body %+v shape %+v", b, s)
 	}
 	if Retains(&cfg.Target) {
@@ -862,9 +924,10 @@ func TestReleaseProbeSnapshots(t *testing.T) {
 	}
 }
 
-// A confidential limit's snapshot carries its dimension, source and hash
-// and the retained copy's hash check, and no value; a snapshot that
-// carries one is exposed.
+// A confidential limit's snapshot carries its dimension, source and
+// HMAC-SHA256 under the release key and the retained copy's check against
+// it, and no value and no SHA-256; a snapshot that carries either is
+// exposed, and a recorded plain SHA-256 does not match.
 func TestReleaseProbeConfidentialSnapshot(t *testing.T) {
 	noSpacing(t)
 	srv := httptest.NewServer(sseHandler(answerFrame, stopFrame, doneFrame))
@@ -875,12 +938,13 @@ func TestReleaseProbeConfidentialSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(shot)
+	key := newKey(t)
 	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
 	tpm := config.Limit{Dimension: config.LimitTPM, Value: 9876543.25, Marking: config.MarkingConfidential, Counting: config.CountingInputOutput,
-		Source: "console.png", Retrieved: "2026-10-07", SHA256: hex.EncodeToString(sum[:])}
+		Source: "console.png", Retrieved: "2026-10-07", HMACSHA256: key.Sum(shot)}
 	cfg.Target.Limits = []config.Limit{cfg.Target.Limits[0], tpm}
 
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, SnapshotDir: dir})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, SnapshotDir: dir, Key: key})
 	want := tpm
 	want.Value = 0
 	if s := rec.Snapshots[1]; s.Limit != want || s.Retained == nil || !*s.Retained {
@@ -897,12 +961,28 @@ func TestReleaseProbeConfidentialSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "9876543") || strings.Count(string(b), `"value": `) != 1 || !strings.Contains(string(b), `"marking": "confidential"`) {
-		t.Errorf("%s carries the value or no marking:\n%s", File, b)
+	if strings.Contains(string(b), "9876543") || strings.Count(string(b), `"value": `) != 1 || !strings.Contains(string(b), `"marking": "confidential"`) ||
+		strings.Contains(string(b), hex.EncodeToString(sum[:])) {
+		t.Errorf("%s carries the value, the copy's SHA-256 or no marking:\n%s", File, b)
 	}
 	if e := Exposed(&cfg.Target, rec); e != nil {
 		t.Errorf("exposed %q", e)
 	}
+	hashed := *rec
+	hashed.Snapshots = append([]Snapshot(nil), rec.Snapshots...)
+	hashed.Snapshots[1].SHA256 = hex.EncodeToString(sum[:])
+	if e := Exposed(&cfg.Target, &hashed); fmt.Sprint(e) != "[snapshot 1 sha256]" {
+		t.Errorf("sha256 recorded: exposed %q", e)
+	}
+	if e := ExposedByMarking(&hashed); fmt.Sprint(e) != "[snapshot 1 sha256]" {
+		t.Errorf("sha256 recorded: exposed by marking %q", e)
+	}
+	cfg.Target.Limits[1].HMACSHA256 = hex.EncodeToString(sum[:])
+	if rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, SnapshotDir: dir, Key: key}); rec.Snapshots[1].Retained == nil || *rec.Snapshots[1].Retained ||
+		!slices.Contains(rec.Findings, `retained copy "console.png" does not match its recorded hmac_sha256`) {
+		t.Errorf("plain sha256 as hmac_sha256: snapshot %+v, findings %q", rec.Snapshots[1], rec.Findings)
+	}
+	cfg.Target.Limits[1].HMACSHA256 = key.Sum(shot)
 
 	exposed := *rec
 	exposed.Snapshots = append([]Snapshot(nil), rec.Snapshots...)
@@ -942,6 +1022,10 @@ func TestExposedByMarking(t *testing.T) {
 	rec.RateLimitHeaders = map[string][]string{"X-Ratelimit-Remaining-Tokens": stand}
 	rec.Limits = &Exchange{Headers: map[string][]string{"X-Ratelimit-Reset": stand}, Body: &Body{Retained: true, SHA256: strings.Repeat("0", 64)}}
 	rec.Snapshots[0].Value = 0
+	if e := ExposedByMarking(&rec); fmt.Sprint(e) != "[limits body sha256]" {
+		t.Errorf("limits body's SHA-256: exposed %q", e)
+	}
+	rec.Limits.Body = &Body{Retained: true, HMACSHA256: strings.Repeat("0", 64)}
 	if e := ExposedByMarking(&rec); e != nil {
 		t.Errorf("withheld: exposed %q", e)
 	}

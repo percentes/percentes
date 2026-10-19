@@ -34,6 +34,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/redact"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 // File is the probe record's file name in a window's output directory.
@@ -78,6 +79,10 @@ type Input struct {
 	// Timeout bounds each exchange from its dispatch; zero is the pilot's
 	// requestTimeout.
 	Timeout time.Duration
+	// Key is the release key, required for a target with a confidential
+	// limit: the fingerprints of what its record withholds are keyed
+	// hashes under it.
+	Key *releasekey.Key
 }
 
 // Record is one probe. Fields ending in Ns are nanoseconds on the
@@ -187,15 +192,16 @@ type Certificate struct {
 
 // Body is response bytes: text when valid UTF-8, base64 otherwise.
 // Truncated says the body ran past the limit and the rest was not read.
-// A retained body carries only the SHA-256 of the bytes kept, and a
-// withheld non-200 body also their length.
+// A retained body carries only a hash of the bytes kept: on a target
+// with a confidential limit their HMAC-SHA256 under the release key,
+// otherwise their SHA-256.
 type Body struct {
-	Text      *string `json:"text,omitempty"`
-	Base64    string  `json:"base64,omitempty"`
-	Truncated bool    `json:"truncated,omitempty"`
-	Retained  bool    `json:"retained,omitempty"`
-	SHA256    string  `json:"sha256,omitempty"`
-	Bytes     int     `json:"bytes,omitempty"`
+	Text       *string `json:"text,omitempty"`
+	Base64     string  `json:"base64,omitempty"`
+	Truncated  bool    `json:"truncated,omitempty"`
+	Retained   bool    `json:"retained,omitempty"`
+	SHA256     string  `json:"sha256,omitempty"`
+	HMACSHA256 string  `json:"hmac_sha256,omitempty"`
 }
 
 func bodyOf(b []byte, truncated bool) *Body {
@@ -230,11 +236,14 @@ func Gate(t *config.Target, status int) Start {
 // configured, then the wrong-model request when in.WrongModel is set. A
 // release target's request is its literal body with the case text in
 // place. It returns an error, before any request, when the key's variable
-// is empty.
+// is empty or a target with a confidential limit has no release key.
 func Run(ctx context.Context, in Input) (*Record, error) {
 	t := in.Target
 	if in.Pilot == nil && (t.Body == "" || in.WrongModel != "") {
 		return nil, fmt.Errorf("probe: %s: without a pilot body, a target body is required and no wrong-model request is sent", t.Name)
+	}
+	if t.Confidential() && in.Key == nil {
+		return nil, fmt.Errorf("probe: %s: a target with a confidential limit needs the release key", t.Name)
 	}
 	key := os.Getenv(t.APIKeyEnv)
 	if key == "" {
@@ -263,7 +272,7 @@ func Run(ctx context.Context, in Input) (*Record, error) {
 	}
 	transport := newTransport(1)
 	defer transport.CloseIdleConnections()
-	p := &prober{rt: transport, target: t, mask: m, timeout: timeout}
+	p := &prober{rt: transport, target: t, mask: m, timeout: timeout, key: in.Key}
 
 	dispatched := time.Now()
 	req := p.post(ctx, t.EndpointURL, t.ModelName, body, key)
@@ -392,6 +401,9 @@ type prober struct {
 	mask   masker
 	// timeout bounds each exchange from its dispatch.
 	timeout time.Duration
+	// key hashes what the record withholds on a target with a
+	// confidential limit.
+	key *releasekey.Key
 }
 
 type posted struct {
@@ -413,14 +425,14 @@ func (p *prober) post(ctx context.Context, url, model string, body []byte, key s
 	})
 	out.ex.Model = p.mask.str(model)
 	if p.target.Confidential() {
-		withhold(&out.ex, out.shape)
+		withhold(&out.ex, out.shape, p.key)
 	}
 	return out
 }
 
 // withhold moves ex's non-200 body and s's in-band error text into
-// ex.Retained, leaving a stand-in with the SHA-256 and length of each.
-func withhold(ex *Exchange, s *Shape) {
+// ex.Retained, leaving a stand-in with the HMAC-SHA256 of each under key.
+func withhold(ex *Exchange, s *Shape, key *releasekey.Key) {
 	held := func() *Retained {
 		if ex.Retained == nil {
 			ex.Retained = &Retained{}
@@ -429,14 +441,11 @@ func withhold(ex *Exchange, s *Shape) {
 	}
 	if b := ex.Body; b != nil {
 		held().Body = b
-		raw := b.raw()
-		sum := sha256.Sum256(raw)
-		ex.Body = &Body{Truncated: b.Truncated, Retained: true, SHA256: hex.EncodeToString(sum[:]), Bytes: len(raw)}
+		ex.Body = &Body{Truncated: b.Truncated, Retained: true, HMACSHA256: key.Sum(b.raw())}
 	}
 	if s != nil && s.Error != "" {
 		held().StreamError = s.Error
-		sum := sha256.Sum256([]byte(s.Error))
-		s.Error, s.ErrorSHA256, s.ErrorBytes = config.RetainedError(s.Error), hex.EncodeToString(sum[:]), len(s.Error)
+		s.Error, s.ErrorHMACSHA256 = config.RetainedError(s.Error), key.Sum([]byte(s.Error))
 	}
 }
 
@@ -632,7 +641,9 @@ func (p *prober) headers(h http.Header) (map[string][]string, []string, map[stri
 }
 
 // limits reads target.probe.limits_url with the key after the configured
-// Authorization scheme.
+// Authorization scheme. A retained body leaves its HMAC-SHA256 under the
+// release key on a target with a confidential limit, otherwise its
+// SHA-256.
 func (p *prober) limits(ctx context.Context, key string) Exchange {
 	t := p.target
 	ex := p.exchange(ctx, http.MethodGet, t.Probe.LimitsURL, nil, [][2]string{{"Authorization", t.Probe.LimitsAuthScheme + " " + key}}, limitsBodyLimit, nil)
@@ -641,8 +652,14 @@ func (p *prober) limits(ctx context.Context, key string) Exchange {
 			ex.Retained = &Retained{}
 		}
 		ex.Retained.Body = ex.Body
-		sum := sha256.Sum256(ex.Body.raw())
-		ex.Body = &Body{Truncated: ex.Body.Truncated, Retained: true, SHA256: hex.EncodeToString(sum[:])}
+		stand := &Body{Truncated: ex.Body.Truncated, Retained: true}
+		if t.Confidential() {
+			stand.HMACSHA256 = p.key.Sum(ex.Body.raw())
+		} else {
+			sum := sha256.Sum256(ex.Body.raw())
+			stand.SHA256 = hex.EncodeToString(sum[:])
+		}
+		ex.Body = stand
 	}
 	return ex
 }

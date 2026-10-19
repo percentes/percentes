@@ -159,6 +159,10 @@ func TestReleaseRefusals(t *testing.T) {
 		{"limit no date", func(c *Config) { limit(c).Retrieved = "" }, "target.limits[0].retrieved"},
 		{"limit hash", func(c *Config) { limit(c).SHA256 = strings.Repeat("A", 64) }, "target.limits[0].sha256: 64 lowercase hex"},
 		{"limit short hash", func(c *Config) { limit(c).SHA256 = "abc" }, "target.limits[0].sha256"},
+		{"public limit keyed hash", func(c *Config) { limit(c).HMACSHA256 = strings.Repeat("0", 64) }, "target.limits[0].hmac_sha256: set for a confidential limit only"},
+		{"confidential limit sha256", func(c *Config) { tpm(c).Marking = MarkingConfidential }, "target.limits[1].sha256: a confidential limit records hmac_sha256, the retained copy's HMAC-SHA256 under the release key"},
+		{"confidential limit no keyed hash", func(c *Config) { tpm(c).Marking, tpm(c).SHA256 = MarkingConfidential, "" }, "target.limits[1].hmac_sha256: 64 lowercase hex characters required, got \"\""},
+		{"confidential limit short keyed hash", func(c *Config) { tpm(c).Marking, tpm(c).SHA256, tpm(c).HMACSHA256 = MarkingConfidential, "", "abc" }, "target.limits[1].hmac_sha256: 64 lowercase hex"},
 		{"unpublished dimension unset", func(c *Config) { unpub(c).Dimension = "" }, "target.unpublished_limits[0].dimension: one or more of a-z, 0-9 and _, starting with a letter, required, got \"\""},
 		{"unpublished dimension spaced", func(c *Config) { unpub(c).Dimension = "acceleration limit" }, "target.unpublished_limits[0].dimension: one or more"},
 		{"unpublished dimension upper case", func(c *Config) { unpub(c).Dimension = "Acceleration" }, "target.unpublished_limits[0].dimension: one or more"},
@@ -258,7 +262,7 @@ func TestReleaseLimitAndNamingForms(t *testing.T) {
 		Limit{Dimension: LimitSpendWindow, Value: 10, WindowS: 600, Marking: MarkingPublic, Source: "https://ai.google.dev/gemini-api/docs/rate-limits", Retrieved: "2026-10-07", SHA256: strings.Repeat("ab", 32)},
 		Limit{Dimension: LimitSpendMonth, Value: 10, OperatorSet: true, Marking: MarkingPublic, Source: "spend-limit.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
 		Limit{Dimension: LimitTPD, Value: 7e8, Marking: MarkingPublic, Counting: CountingOutputBurndown, OutputBurndown: 15, Source: "quotas.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
-		Limit{Dimension: LimitTPM, Value: 1e6, Marking: MarkingConfidential, Counting: CountingInput, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
+		Limit{Dimension: LimitTPM, Value: 1e6, Marking: MarkingConfidential, Counting: CountingInput, Source: "limits.png", Retrieved: "2026-10-07", HMACSHA256: strings.Repeat("0", 64)},
 	)
 	c.Target.RetainedHeaders = []string{"x-ratelimit-*"}
 	c.Target.Naming.PermissionRequired, c.Target.Naming.PermissionRecord = true, "manifest: written permission"
@@ -460,7 +464,8 @@ func TestReleaseConfidentialRetention(t *testing.T) {
 	} {
 		c := loadRef(t, releaseRef)
 		if tc.confidential {
-			c.Target.Limits[1].Marking = MarkingConfidential
+			l := &c.Target.Limits[1]
+			l.Marking, l.SHA256, l.HMACSHA256 = MarkingConfidential, "", l.SHA256
 		}
 		c.Target.ResponseHeaders, c.Target.RetainedHeaders, c.Target.Probe = tc.recorded, tc.retained, tc.probe
 		err := c.Validate()

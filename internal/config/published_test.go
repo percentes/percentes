@@ -42,7 +42,7 @@ const confidentialTPM = `    - dimension: tokens_per_minute
       counting: input_and_output
       source: groq-console-limits.png
       retrieved: 2026-10-07
-      sha256: "abababababababababababababababababababababababababababababababab"
+      hmac_sha256: "abababababababababababababababababababababababababababababababab"
 `
 
 // The file as published is the file itself without a confidential
@@ -58,7 +58,7 @@ func TestPublished(t *testing.T) {
 		t.Fatalf("public limits only: the file as published differs from the file (%v)", err)
 	}
 
-	flow := `    - {dimension: tokens_per_minute, source: "é-console.png", value: ` + secretValue + `, marking: confidential, counting: input, retrieved: 2026-10-07, sha256: "abababababababababababababababababababababababababababababababab"}
+	flow := `    - {dimension: tokens_per_minute, source: "é-console.png", value: ` + secretValue + `, marking: confidential, counting: input, retrieved: 2026-10-07, hmac_sha256: "abababababababababababababababababababababababababababababababab"}
 `
 	for name, tpm := range map[string]string{"block": confidentialTPM, "flow, after a two-byte rune": flow} {
 		raw := confidentialRef(t, tpm)
@@ -182,7 +182,7 @@ func TestPublishedSkips(t *testing.T) {
 		to   string
 	}{
 		{"none", naming, naming},
-		{"the limit's sha256", limitHash, `"ab12abababababababababababababababababababababababababababababab"`},
+		{"the limit's hmac_sha256", limitHash, `"ab12abababababababababababababababababababababababababababababab"`},
 		{"a quoted date", "      source: groq-console-limits.png\n      retrieved: 2026-10-07\n", "      source: groq-console-limits.png\n      retrieved: \"2026-10-12\"\n"},
 		{"a date in a comment", "schema_version: 1\n", "schema_version: 1  # retrieved 2026-10-12\n"},
 		{"a commit hash in a naming line", naming, "      - Build 12d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f.\n" + naming},

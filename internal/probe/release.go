@@ -16,6 +16,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/redact"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 // CeilingRequests is the number of requests in a route's ceiling check
@@ -54,6 +55,11 @@ type ReleaseInput struct {
 	SnapshotDir string
 	// ByteCap is the Shape S ticket byte cap the texts were cut at.
 	ByteCap int
+	// Key is the release key, required for a route with a confidential
+	// limit: the fingerprints of what its record withholds are keyed
+	// hashes under it, and its confidential limits' retained copies are
+	// checked against their recorded HMAC-SHA256.
+	Key *releasekey.Key
 }
 
 // ReleaseRecord is one release probe: the ceiling and input-bound checks
@@ -136,9 +142,10 @@ type InputCheck struct {
 }
 
 // Snapshot is one target.limits record, without the value of a limit
-// marked config.MarkingConfidential. Retained is the hash check of the
-// retained copy in ReleaseInput.SnapshotDir: absent when the source is a
-// URL or no directory was given.
+// marked config.MarkingConfidential. Retained is the check of the
+// retained copy in ReleaseInput.SnapshotDir against the recorded hash, its
+// HMAC-SHA256 under the release key for a confidential limit: absent when
+// the source is a URL or no directory was given.
 type Snapshot struct {
 	config.Limit
 	Retained      *bool  `json:"retained_sha256_match,omitempty"`
@@ -154,8 +161,9 @@ const (
 // RunRelease probes in.Config's route: CeilingRequests requests one after
 // another at the configured ceiling, then the limits read when
 // configured. A status the start gate blocks on ends the requests. It
-// returns an error, before any request, when the key's variable is empty
-// or the input is not a release probe with its byte cap.
+// returns an error, before any request, when the key's variable is empty,
+// a route with a confidential limit has no release key, or the input is
+// not a release probe with its byte cap.
 func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 	cfg := in.Config
 	if cfg == nil || cfg.Profile != config.ProfileRelease || cfg.Release == nil {
@@ -168,6 +176,9 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 		return nil, fmt.Errorf("probe: byte cap %d: the texts' ticket byte cap is required", in.ByteCap)
 	}
 	t := &cfg.Target
+	if t.Confidential() && in.Key == nil {
+		return nil, fmt.Errorf("probe: %s: a route with a confidential limit needs the release key", t.Name)
+	}
 	key := os.Getenv(t.APIKeyEnv)
 	if key == "" {
 		return nil, fmt.Errorf("probe: %s: environment variable %s is empty", t.Name, t.APIKeyEnv)
@@ -190,7 +201,7 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 	}
 	transport := newTransport(1)
 	defer transport.CloseIdleConnections()
-	p := &prober{rt: transport, target: t, mask: m, timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second}
+	p := &prober{rt: transport, target: t, mask: m, timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second, key: in.Key}
 	length := LengthValue(t.Adapter)
 
 	for i, text := range in.Texts {
@@ -240,9 +251,9 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 	rec.Ceiling = ceilingCheck(rec.Requests, cfg.Release.Shape.CeilingTokens, length)
 	rec.InputBound = inputCheck(rec.Requests, cfg.Release.Shape.InputBoundTokens)
 	for _, l := range t.Limits {
-		s := snapshot(l, in.SnapshotDir)
+		s := snapshot(l, in.SnapshotDir, in.Key)
 		if s.Retained != nil && !*s.Retained {
-			rec.Findings = append(rec.Findings, fmt.Sprintf("retained copy %q does not match its recorded sha256", l.Source))
+			rec.Findings = append(rec.Findings, fmt.Sprintf("retained copy %q does not match its recorded %s", l.Source, recordedHash(l)))
 		}
 		if s.RetainedError != "" {
 			rec.Findings = append(rec.Findings, fmt.Sprintf("retained copy %q not read: %s", l.Source, s.RetainedError))
@@ -507,12 +518,14 @@ func Retains(t *config.Target) bool {
 // each header target.retained_headers names with a value other than
 // config.RetainedHeaderValue, then "limits body" when
 // target.probe.limits_retained is set and the limits body is kept, then,
-// on a target with a confidential limit, "request <i> body" for each
-// request whose body is kept and "request <i> in-band error" for each
-// whose in-band error text is not its stand-in (config.RetainedError),
-// then "snapshot <i> value" for each snapshot with a value of a limit
-// marked config.MarkingConfidential in rec or at index i of
-// target.limits.
+// on a target with a confidential limit, "limits body sha256" when the
+// limits body's stand-in carries a SHA-256, "request <i> body" for each
+// request whose body is kept or "request <i> body sha256" whose stand-in
+// carries a SHA-256, and "request <i> in-band error" for each whose
+// in-band error text is not its stand-in (config.RetainedError), then
+// "snapshot <i> value" and "snapshot <i> sha256" for each snapshot with a
+// value or a SHA-256 of a limit marked config.MarkingConfidential in rec
+// or at index i of target.limits.
 func Exposed(t *config.Target, rec *ReleaseRecord) []string {
 	return exposed(t, rec, t.Confidential())
 }
@@ -544,9 +557,16 @@ func exposed(t *config.Target, rec *ReleaseRecord, confidential bool) []string {
 	if b := rec.Limits; t.Probe != nil && t.Probe.LimitsRetained && b != nil && b.Body != nil && (b.Body.Text != nil || b.Body.Base64 != "") {
 		out = append(out, "limits body")
 	}
+	if b := rec.Limits; confidential && b != nil && b.Body != nil && b.Body.SHA256 != "" {
+		out = append(out, "limits body sha256")
+	}
 	for _, r := range rec.Requests {
-		if b := r.Exchange.Body; confidential && b != nil && (b.Text != nil || b.Base64 != "") {
+		switch b := r.Exchange.Body; {
+		case !confidential || b == nil:
+		case b.Text != nil || b.Base64 != "":
 			out = append(out, fmt.Sprintf("request %d body", r.Index))
+		case b.SHA256 != "":
+			out = append(out, fmt.Sprintf("request %d body sha256", r.Index))
 		}
 		if s := r.Shape; confidential && s != nil && s.Error != "" && s.Error != config.RetainedError(s.Error) {
 			out = append(out, fmt.Sprintf("request %d in-band error", r.Index))
@@ -556,6 +576,9 @@ func exposed(t *config.Target, rec *ReleaseRecord, confidential bool) []string {
 		marked := sn.Marking == config.MarkingConfidential || i < len(t.Limits) && t.Limits[i].Marking == config.MarkingConfidential
 		if marked && sn.Value != 0 {
 			out = append(out, fmt.Sprintf("snapshot %d value", i))
+		}
+		if marked && sn.SHA256 != "" {
+			out = append(out, fmt.Sprintf("snapshot %d sha256", i))
 		}
 	}
 	return out
@@ -591,9 +614,18 @@ func ExposedByMarking(rec *ReleaseRecord) []string {
 	return exposed(t, rec, marked)
 }
 
+// recordedHash names the field holding l's retained copy's hash.
+func recordedHash(l config.Limit) string {
+	if l.Marking == config.MarkingConfidential {
+		return "hmac_sha256"
+	}
+	return "sha256"
+}
+
 // snapshot is l as published, with a file source's retained copy in dir
-// checked against its recorded hash.
-func snapshot(l config.Limit, dir string) Snapshot {
+// checked against its recorded hash: the HMAC-SHA256 under key of a
+// confidential limit's, the SHA-256 of a public one's.
+func snapshot(l config.Limit, dir string, key *releasekey.Key) Snapshot {
 	if l.Marking == config.MarkingConfidential {
 		l.Value = 0
 	}
@@ -614,8 +646,13 @@ func snapshot(l config.Limit, dir string) Snapshot {
 		s.RetainedError = redact.ErrorText(err, 0)
 		return s
 	}
-	sum := sha256.Sum256(b)
-	match := hex.EncodeToString(sum[:]) == l.SHA256
+	var match bool
+	if l.Marking == config.MarkingConfidential {
+		match = key.Sum(b) == l.HMACSHA256
+	} else {
+		sum := sha256.Sum256(b)
+		match = hex.EncodeToString(sum[:]) == l.SHA256
+	}
 	s.Retained = &match
 	return s
 }

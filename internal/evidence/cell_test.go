@@ -868,13 +868,13 @@ func confidentialCfg(t *testing.T) *config.Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const public = "      value: 250000\n      marking: public\n"
+	const public = "      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256:"
 	const headers = "  response_headers: [Retry-After, x-ratelimit-*]\n"
 	if !bytes.Contains(raw, []byte(public)) || !bytes.Contains(raw, []byte(headers)) {
 		t.Fatal("reference no longer carries the lines this test edits")
 	}
 	raw = bytes.Replace(raw, []byte(headers), []byte(headers+"  retained_headers: [x-ratelimit-*]\n"), 1)
-	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: 300001\n      marking: confidential\n"), 1))
+	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: 300001\n      marking: confidential\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      hmac_sha256:"), 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -887,7 +887,7 @@ func confidentialCell(cfg *config.Config) *Cell {
 	c := releaseCell(cfg)
 	l := cfg.Target.Limits[1]
 	hide := func(d *admission.Demand) {
-		d.Value, d.Fraction, d.Confidential, d.Source, d.SHA256 = 0, 0, true, l.Source, l.SHA256
+		d.Value, d.Fraction, d.Confidential, d.Source, d.HMACSHA256 = 0, 0, true, l.Source, l.HMACSHA256
 	}
 	for k := range c.Admission.Steps {
 		s := &c.Admission.Steps[k]

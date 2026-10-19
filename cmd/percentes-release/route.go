@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,6 +23,7 @@ import (
 	"github.com/percentes/percentes/internal/pilot"
 	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/redact"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
@@ -104,6 +106,8 @@ type route struct {
 
 	ledger     *admission.Ledger
 	ledgerPath string
+	// key is the release key the schedule froze the configuration under.
+	key        *releasekey.Key
 	framesRoot string
 	clock      evidence.ClockCommand
 	status     []string
@@ -134,6 +138,7 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	cfgPath := fs.String("config", "", "the route's release configuration (required)")
 	envFile := fs.String("env", "", "env file holding the target's api_key_env (required)")
 	ledgerPath := fs.String("ledger", "", "the release admission ledger the schedule froze, holding the route's price (required)")
+	keyPath := fs.String("release-key", "", "the release key file the schedule froze the configuration under (required)")
 	schedulePath := fs.String("schedule", "", "the committed schedule file (required)")
 	out := fs.String("out", "", "release output directory; the route writes <route>/<cell>-a<attempt>/ under it (required)")
 	framesRoot := fs.String("frames", "", "raw-frame store directory outside the source tree (required)")
@@ -159,9 +164,13 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	key, err := readReleaseKey(*keyPath)
+	if err != nil {
+		return exitError, err
+	}
 	build, _ := debug.ReadBuildInfo()
 	r, err := newRoute(routeInput{
-		cfg: cfg, configName: filepath.Base(*cfgPath), schedulePath: *schedulePath, out: *out, ledgerPath: *ledgerPath,
+		cfg: cfg, configName: filepath.Base(*cfgPath), schedulePath: *schedulePath, out: *out, ledgerPath: *ledgerPath, key: key,
 		framesRoot: *framesRoot, clockSync: *clockSync, statusCmd: *statusCmd, balanceCmd: *balanceCmd, refreshCmd: *refreshCmd, opPath: *opPath, probeFiles: probeFiles,
 		byteCap: *byteCap, accountCreated: *accountCreated, build: build,
 	})
@@ -187,6 +196,7 @@ type ceilingInput struct {
 type routeInput struct {
 	cfg                                       *config.Config
 	configName, schedulePath, out, ledgerPath string
+	key                                       *releasekey.Key
 	framesRoot, clockSync, statusCmd, opPath  string
 	balanceCmd, refreshCmd                    string
 	probeFiles                                []string
@@ -216,11 +226,11 @@ func newRoute(in routeInput) (*route, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkFrozen(cfg, sched); err != nil {
+	if err := checkFrozen(cfg, sched, in.key); err != nil {
 		return nil, err
 	}
 	r := &route{cfg: cfg, configName: in.configName, sched: sched, runs: runs, out: in.out, dir: filepath.Join(in.out, name),
-		ledgerPath: in.ledgerPath, framesRoot: in.framesRoot, opPath: in.opPath, build: in.build, now: time.Now, wait: waitUntil}
+		ledgerPath: in.ledgerPath, key: in.key, framesRoot: in.framesRoot, opPath: in.opPath, build: in.build, now: time.Now, wait: waitUntil}
 	r.cell, r.label, r.close = r.runCell, r.labelCell, r.windowClose
 	for _, o := range sched.Offsets {
 		if o.Route == name {
@@ -339,7 +349,8 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 
 // readCeilingProbes reads the ceiling check's records of the route's
 // model, whose hosts are the target and release.other_hosts, and requires
-// their choice to run the model at the configured ceiling. Every host's
+// their choice to run the model at the configured ceiling. Every record
+// holds no field probe.ReleaseRecord does not define. Every host's
 // record carries the host's model and byteCap, was admitted in the ledger
 // whose open-line SHA-256 is ledger, and carries the results its
 // requests give at the pinned input bound (probe.ReleaseRecord.Verify,
@@ -378,7 +389,9 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int, ledger s
 			return none, nil, fmt.Errorf("ceiling probe: %w", err)
 		}
 		var rec probe.ReleaseRecord
-		if err := json.Unmarshal(b, &rec); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&rec); err != nil {
 			return none, nil, fmt.Errorf("ceiling probe %s: %w", f, err)
 		}
 		var fault string

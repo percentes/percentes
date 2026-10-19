@@ -69,11 +69,11 @@ type Demand struct {
 	Unpublished bool `json:"unpublished,omitempty"`
 	// Confidential is set against a limit marked
 	// config.MarkingConfidential: Value and Fraction are absent, and
-	// Source and SHA256 are the limit's source and the SHA-256 of its
-	// retained snapshot.
+	// Source and HMACSHA256 are the limit's source and the HMAC-SHA256 of
+	// its retained snapshot under the release key.
 	Confidential bool    `json:"confidential,omitempty"`
 	Source       string  `json:"source,omitempty"`
-	SHA256       string  `json:"sha256,omitempty"`
+	HMACSHA256   string  `json:"hmac_sha256,omitempty"`
 	Value        float64 `json:"value,omitempty"`
 	Demand       float64 `json:"demand"`
 	Fraction     float64 `json:"fraction,omitempty"`
@@ -213,7 +213,7 @@ func CeilingRule(cfg *config.Config, p Price, plan Plan) (*Verdict, error) {
 			dm := demand(l.Dimension, i, rat(l.Value), d, half)
 			if l.Marking == config.MarkingConfidential {
 				dm.Value, dm.Fraction = 0, 0
-				dm.Confidential, dm.Source, dm.SHA256 = true, l.Source, l.SHA256
+				dm.Confidential, dm.Source, dm.HMACSHA256 = true, l.Source, l.HMACSHA256
 			}
 			s.Demands = append(s.Demands, dm)
 		}
@@ -240,8 +240,8 @@ func CeilingRule(cfg *config.Config, p Price, plan Plan) (*Verdict, error) {
 // published, disagrees with cfg's recorded limits. Each demand against
 // target.limits, binding limits included, names the limit's dimension
 // and its test; one against a confidential limit carries the limit's
-// source and hash, no value and no fraction, and a pass that its demand
-// against the value cfg records gives; one against a public limit
+// source and keyed hash, no value and no fraction, and a pass that its
+// demand against the value cfg records gives; one against a public limit
 // carries the value cfg records.
 func CheckPublished(cfg *config.Config, v *Verdict) error {
 	var problems []string
@@ -269,9 +269,9 @@ func CheckPublished(cfg *config.Config, v *Verdict) error {
 			fail("confidential %t, target.limits[%d] is marked %s", d.Confidential, d.Limit, l.Marking)
 		case confidential && (d.Value != 0 || d.Fraction != 0):
 			fail("a confidential limit published with its value or fraction")
-		case confidential && (d.Source != l.Source || d.SHA256 != l.SHA256):
-			fail("source %q and sha256 %s, target.limits[%d] has %q and %s", d.Source, d.SHA256, d.Limit, l.Source, l.SHA256)
-		case !confidential && (d.Value != l.Value || d.Source != "" || d.SHA256 != ""):
+		case confidential && (d.Source != l.Source || d.HMACSHA256 != l.HMACSHA256):
+			fail("source %q and hmac_sha256 %s, target.limits[%d] has %q and %s", d.Source, d.HMACSHA256, d.Limit, l.Source, l.HMACSHA256)
+		case !confidential && (d.Value != l.Value || d.Source != "" || d.HMACSHA256 != ""):
 			fail("value %g with source %q, target.limits[%d] records %g and is public", d.Value, d.Source, d.Limit, l.Value)
 		case confidential:
 			bound := rat(l.Value)
