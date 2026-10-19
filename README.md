@@ -242,7 +242,9 @@ key: 32 random bytes that `percentes-release key create` writes once,
 at the freeze, to a file only its owner can read. Nobody without the
 key can check a guess against a keyed hash. Keep the key file
 private, as the API keys are: copy it to the client host, and leave it
-out of the repository.
+out of the repository. Never write a confidential limit's value, in any
+format, into a configuration comment, the operator file, a note, a URL
+or a file name.
 A provider can echo a limit in its rate-limit headers or in the body of
 its limits page, so a route with a confidential limit must withhold
 both: `target.retained_headers` must cover every recorded response
