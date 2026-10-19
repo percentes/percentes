@@ -252,7 +252,8 @@ func TestRetainedError(t *testing.T) {
 }
 
 // The value is found with its whole part grouped in threes, in its
-// decimal form, with trailing zeros and in its 'E' form.
+// decimal form, with trailing zeros, with a decimal comma and in its 'E'
+// form.
 func TestPublishedForms(t *testing.T) {
 	plain := "      value: " + secretValue + "\n"
 	naming := "      - Groq is a trademark"
@@ -268,6 +269,7 @@ func TestPublishedForms(t *testing.T) {
 		{"a trailing zero in the limit", [][2]string{{plain, "      value: " + secretValue + "0\n"}, {naming, "      - The console showed " + secretValue + " tokens\n" + naming}}, "a string in the file carries " + secretValue},
 		{"trailing zeros in a comment", [][2]string{{"schema_version: 1\n", "schema_version: 1  # the console showed 9,876,543.2500\n"}}, "a comment in the file carries 9,876,543.2500"},
 		{"an E form in a naming line", [][2]string{{naming, "      - The console showed 9.87654325E+06 tokens\n" + naming}}, "a string in the file carries 9.87654325E+06"},
+		{"a decimal comma in a comment", [][2]string{{"schema_version: 1\n", "schema_version: 1  # the console showed 9.876.543,25\n"}}, "a comment in the file carries 9.876.543,25"},
 	} {
 		raw := confidentialRef(t, confidentialTPM)
 		for _, e := range tc.edits {
@@ -287,9 +289,11 @@ func TestPublishedForms(t *testing.T) {
 }
 
 // ValueForms adds zeros after the decimal's last digit up to 17 digits
-// in all, groups those forms too, and adds the 'e' and 'E' forms; Carries
+// in all, groups those forms too, writes each with a fractional part
+// with a decimal comma too, and adds the 'e' and 'E' forms; Carries
 // finds each such form as a number of its own, and none inside another
-// number.
+// number. A comma before three digits after at most three is left out,
+// so "12,500" is not a form of 12.5.
 func TestValueForms(t *testing.T) {
 	for _, tc := range []struct {
 		value     float64
@@ -298,9 +302,10 @@ func TestValueForms(t *testing.T) {
 		carried   []string
 		uncarried []string
 	}{
-		{300001, []string{"300001", "300001.0", "300001.00000000000", "300,001.00", "300\u202f001.0", "3.00001e+05", "3.00001E+05"}, "300001.000000000000",
-			[]string{"TPM 300001.0", "300,001.00/min", "TPM 3.00001E+05.", "about 300001.000 tokens"}, []string{"300001.01", "300001.0001", "1300001.0", "3.00001E+056"}},
-		{250013.5, []string{"250013.5", "250013.50", "250,013.500", "2.500135e+05", "2.500135E+05"}, "250013.500000000000", []string{"TPM 250013.50", "250 013.5000"}, []string{"250013.55", "250013.505"}},
+		{300001, []string{"300001", "300001.0", "300001.00000000000", "300,001.00", "300\u202f001.0", "3.00001e+05", "3.00001E+05", "300001,0", "300.001,00", "300\u00a0001,0"}, "300001.000000000000",
+			[]string{"TPM 300001.0", "300,001.00/min", "TPM 3.00001E+05.", "about 300001.000 tokens", "TPM 300.001,0"}, []string{"300001.01", "300001.0001", "1300001.0", "3.00001E+056", "300001,01", "1.300.001,0"}},
+		{250013.5, []string{"250013.5", "250013.50", "250,013.500", "2.500135e+05", "2.500135E+05", "250013,5", "250.013,5", "250 013,50", "250\u2009013,5"}, "250013.500000000000",
+			[]string{"TPM 250013.50", "250 013.5000", "limit 250013,5 tpm", "250.013,5/min"}, []string{"250013.55", "250013.505", "250013,55", "1.250.013,5", "250.013,55"}},
 	} {
 		forms := ValueForms(tc.value)
 		for _, w := range tc.want {
@@ -321,6 +326,13 @@ func TestValueForms(t *testing.T) {
 				t.Errorf("%v: %q carries %q", tc.value, s, f)
 			}
 		}
+	}
+	forms := ValueForms(12.5)
+	if !slices.Contains(forms, "12,5") || !slices.Contains(forms, "12,50") || slices.Contains(forms, "12,500") {
+		t.Errorf("12.5: forms %q, want 12,5 and 12,50 and not 12,500", forms)
+	}
+	if f, ok := Carries("12,500 requests", forms); ok {
+		t.Errorf("12.5: a number grouped in threes carries %q", f)
 	}
 }
 

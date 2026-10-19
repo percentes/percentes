@@ -168,8 +168,11 @@ func ValueForms(value float64) []string {
 // valueForms are the texts that write a value: lit as written, the value
 // in decimal and that decimal with zeros added after its last digit up to
 // paddedDigits digits in all, each also with its whole part grouped by
-// each of thousandsSeparators; and the value as strconv.FormatFloat
-// prints it in format 'e' and in format 'E'.
+// each of thousandsSeparators; each of those with a fractional part also
+// with a decimal comma, ungrouped unless that reads as a whole number
+// grouped in threes, or grouped by a full stop or by a thousands
+// separator other than the comma; and the value as
+// strconv.FormatFloat prints it in format 'e' and in format 'E'.
 func valueForms(lit string, value float64) []string {
 	dec := strconv.FormatFloat(value, 'f', -1, 64)
 	bases := []string{lit, dec}
@@ -181,22 +184,46 @@ func valueForms(lit string, value float64) []string {
 	for _, s := range bases {
 		forms = append(forms, s)
 		whole, frac, dot := strings.Cut(s, ".")
-		if len(whole) <= 3 || strings.Trim(whole, "0123456789") != "" {
+		if strings.Trim(whole, digits) != "" {
+			continue
+		}
+		comma := whole != "" && frac != "" && strings.Trim(frac, digits) == ""
+		// A comma before three digits after at most three groups thousands.
+		if comma && (len(frac) != 3 || len(whole) > 3) {
+			forms = append(forms, whole+","+frac)
+		}
+		if len(whole) <= 3 {
 			continue
 		}
 		for _, sep := range thousandsSeparators {
-			g := whole[:(len(whole)-1)%3+1]
-			for i := len(g); i < len(whole); i += 3 {
-				g += sep + whole[i:i+3]
+			g := grouped(whole, sep)
+			if !dot {
+				forms = append(forms, g)
+				continue
 			}
-			if dot {
-				g += "." + frac
+			forms = append(forms, g+"."+frac)
+			if comma && sep != "," {
+				forms = append(forms, g+","+frac)
 			}
-			forms = append(forms, g)
+		}
+		if comma {
+			forms = append(forms, grouped(whole, ".")+","+frac)
 		}
 	}
 	slices.Sort(forms)
 	return slices.Compact(forms)
+}
+
+// digits are the decimal digits.
+const digits = "0123456789"
+
+// grouped is the digits whole grouped in threes from the right by sep.
+func grouped(whole, sep string) string {
+	g := whole[:(len(whole)-1)%3+1]
+	for i := len(g); i < len(whole); i += 3 {
+		g += sep + whole[i:i+3]
+	}
+	return g
 }
 
 var (
