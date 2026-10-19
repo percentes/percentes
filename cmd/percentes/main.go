@@ -1,19 +1,17 @@
 // percentes runs one full experiment from one config file and writes the
 // JavaScript Object Notation (JSON) and human-readable report pair, and
 // the per-attempt JSON Lines file of every run that dispatched, failed
-// runs included. A hosted run also writes its raw-frame store under
-// --frames, a directory outside the instrument's source tree, the client
-// clock offset that --clock-sync reads at run start, the endpoint status
-// that --status-cmd reads at run start and end, and the run manifest,
-// which hashes those files, the config, the --operator records and the
-// --ledger position. A hosted run's report pair is rendered from its
-// manifest, its per-attempt file and the config file alone; --replay DIR
-// renders it again from those three, writes it to --out and compares it
-// with the pair DIR's manifest names. --check-release DIR refuses a
-// hosted run's release unless the commit record, the config, the
-// per-attempt file, the report pair, the manifest, the scorer output and
-// the frame store under --frames all exist with the hashes DIR's manifest
-// records, and prints the label of a release cell that does not count.
+// runs included. It refuses a hosted target (target.hosted): hosted
+// traffic runs under percentes-release or percentes-pilot, which count
+// each request in the admission ledger before it is sent. --replay DIR
+// renders a finished hosted run's report pair again from its manifest,
+// its per-attempt file and the config file alone, writes it to --out and
+// compares it with the pair DIR's manifest names. --check-release DIR
+// refuses a hosted run's release unless the commit record, the config,
+// the per-attempt file, the report pair, the manifest, the scorer output
+// and the frame store under --frames all exist with the hashes DIR's
+// manifest records, and prints the label of a release cell that does not
+// count.
 // Exit codes: 0 = run valid, the replayed pair matches byte for byte, or
 // the release check passed; 2 = run completed but a run-failing gate
 // marked it invalid; 1 = execution error, a replayed pair that differs,
@@ -32,7 +30,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -54,11 +51,7 @@ func main() {
 	victim := flag.String("victim", "", "victim replica identity (pod name) for in-flight attribution")
 	probeDirect := flag.String("probe-direct", "", "victim-direct inference URL for the replica-ready probe")
 	probeService := flag.String("probe-service", "", "service inference URL for the traffic-restored probe")
-	framesRoot := flag.String("frames", "", "raw-frame store directory outside the source tree (hosted targets, required); each run writes <UTC epoch>/"+evidence.FramesFile)
-	clockSync := flag.String("clock-sync", "", "host clock-sync command run at run start, split on spaces with no shell: sntp [options] server, or chronyc [options] tracking (hosted targets, required); writes "+evidence.ClockFile+" to --out")
-	statusCmd := flag.String("status-cmd", "", "endpoint-status command run at run start and at run end, split on spaces with no shell (hosted targets, required); writes "+evidence.StatusStartFile+" and "+evidence.StatusEndFile+" to --out")
-	operatorPath := flag.String("operator", "", "operator file naming the provider, account tier, client host and the record files the run relies on, hashed at start and copied beside the frames (hosted targets, required)")
-	ledgerPath := flag.String("ledger", "", "admission ledger whose position at run start "+evidence.ManifestFile+" records (hosted targets)")
+	framesRoot := flag.String("frames", "", "raw-frame store directory, outside the source tree, holding the frames of the run --check-release reads")
 	replayDir := flag.String("replay", "", "output directory of a finished hosted run: render its report pair again from "+evidence.ManifestFile+", "+evidence.AttemptsFile+" and --config into --out, and compare it with the pair the manifest names")
 	checkDir := flag.String("check-release", "", "output directory of a finished hosted run: refuse its release unless the commit record, --config, "+evidence.AttemptsFile+", the report pair, "+evidence.ManifestFile+", the scorer output and the frame store under --frames exist with the hashes the manifest records")
 	flag.Parse()
@@ -113,33 +106,11 @@ func main() {
 	if err := run.CheckConfig(cfg); err != nil {
 		log.Fatalf("percentes: %v", err)
 	}
-	var (
-		clockCmd   evidence.ClockCommand
-		statusArgs []string
-		op         *evidence.Operator
-	)
-	build, _ := debug.ReadBuildInfo()
 	if cfg.Target.Hosted {
-		if err := evidence.CheckFramesRoot(*framesRoot); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		if clockCmd, err = evidence.ParseClockCommand(*clockSync); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		if statusArgs, err = evidence.ParseStatusCommand(*statusCmd); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		if op, err = evidence.LoadOperator(*operatorPath); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		if err := evidence.CheckSource(build, op); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		if *adminURL != "" || *victim != "" || *probeDirect != "" || *probeService != "" {
-			log.Fatal("percentes: --admin-url, --victim, --probe-direct and --probe-service apply to self-hosted targets only")
-		}
-	} else if *framesRoot != "" || *clockSync != "" || *statusCmd != "" || *operatorPath != "" || *ledgerPath != "" {
-		log.Fatal("percentes: --frames, --clock-sync, --status-cmd, --operator and --ledger apply to hosted targets only")
+		log.Fatal("percentes: a hosted target runs under percentes-release or percentes-pilot only, whose ledger admits each request before it is sent")
+	}
+	if *framesRoot != "" {
+		log.Fatal("percentes: --frames applies to --check-release only")
 	}
 
 	// Wire an interrupt-aware context so Ctrl-C / SIGTERM cancels the in-flight
@@ -158,39 +129,6 @@ func main() {
 	// §10 G7: sample each replica's waiting-queue gauge from the run
 	// epoch when target.metrics_urls is configured.
 	sampler := serverstats.ForRun(cfg.Target.MetricsURLs, cfg.Target.QueueGauge, cfg.Target.MetricsFamilies, time.Duration(config.PinnedQueueSampleIntervalS)*time.Second)
-	// A flagged clock reading invalidates the run without stopping it.
-	var (
-		clock           *evidence.ClockRecord
-		clockPath       string
-		ledger          *evidence.LedgerRef
-		statusStartPath string
-	)
-	if cfg.Target.Hosted {
-		if *ledgerPath != "" {
-			if ledger, err = evidence.ReadLedger(*ledgerPath); err != nil {
-				log.Fatalf("percentes: %v", err)
-			}
-		}
-		if statusStartPath, err = evidence.WriteStatus(*outDir, evidence.StatusStartFile, evidence.ReadStatus(ctx, statusArgs)); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		log.Printf("percentes: endpoint status written: %s", statusStartPath)
-		clock = evidence.ReadClock(ctx, clockCmd)
-		var cerr error
-		if clockPath, cerr = evidence.WriteClock(*outDir, clock); cerr != nil {
-			log.Fatalf("percentes: %v", cerr)
-		}
-		log.Printf("percentes: clock offset written: %s", clockPath)
-		if clock.Flag != "" {
-			log.Printf("percentes: %s", clock.Flag)
-		}
-	}
-	flagClock := func(a *run.Artifacts) {
-		if clock != nil && clock.Flag != "" {
-			a.RunValid = false
-			a.InvalidReasons = append(a.InvalidReasons, clock.Flag)
-		}
-	}
 	// The §2 loopback canary runs through the same read path from the epoch.
 	var canary *loadgen.Canary
 	var canaryErr error
@@ -213,77 +151,16 @@ func main() {
 	if canary != nil {
 		streams = canary.Stop()
 	}
-	var statusEndPath, framesPath string
-	if art != nil && cfg.Target.Hosted {
-		// A failed write leaves status_end out of the manifest.
-		if path, serr := evidence.WriteStatus(*outDir, evidence.StatusEndFile, evidence.ReadStatus(ctx, statusArgs)); serr != nil {
-			log.Printf("percentes: %v", serr)
-		} else {
-			statusEndPath = path
-			log.Printf("percentes: endpoint status written: %s", path)
-		}
-		var ferr error
-		if framesPath, ferr = evidence.WriteRunFrames(*framesRoot, &cfg.Target, art.Loadgen); ferr == nil && framesPath != "" {
-			ferr = op.WriteCopies(filepath.Dir(framesPath))
-		}
-		if ferr != nil {
-			if err == nil {
-				log.Fatalf("percentes: %v", ferr)
-			}
-			log.Printf("percentes: %v", ferr)
-		} else if framesPath != "" {
-			log.Printf("percentes: frames and operator records written: %s", filepath.Dir(framesPath))
-		}
-	}
-	newManifest := func(gates *validity.Report, rec *run.Record, artifacts ...string) (*evidence.Manifest, error) {
-		return evidence.NewManifest(evidence.ManifestInput{
-			Config:          cfg,
-			ConfigName:      filepath.Base(*configPath),
-			Target:          &cfg.Target,
-			Result:          art.Loadgen,
-			Build:           build,
-			Operator:        op,
-			Ledger:          ledger,
-			Clock:           clock,
-			ClockPath:       clockPath,
-			StatusStartPath: statusStartPath,
-			StatusEndPath:   statusEndPath,
-			ArtifactPaths:   artifacts,
-			FramesRoot:      *framesRoot,
-			FramesPath:      framesPath,
-			Gates:           gates,
-			RunValid:        art.RunValid,
-			InvalidReasons:  art.InvalidReasons,
-			Replay:          rec,
-		})
-	}
 	if err != nil {
 		if sampler != nil {
 			sampler.Stop()
 		}
 		if art != nil {
-			flagClock(art)
 			path, werr := evidence.WriteRun(*outDir, cfg, art.Loadgen, evidence.Options{RunFailures: art.InvalidReasons})
 			if werr != nil {
 				log.Printf("percentes: %v", werr)
 			} else if path != "" {
 				log.Printf("percentes: attempts written: %s", path)
-			}
-			if cfg.Target.Hosted && art.Loadgen != nil {
-				var written []string
-				if path != "" {
-					written = append(written, path)
-				}
-				m, merr := newManifest(nil, nil, written...)
-				var mpath string
-				if merr == nil {
-					mpath, merr = evidence.WriteManifest(*outDir, m)
-				}
-				if merr != nil {
-					log.Printf("percentes: %v", merr)
-				} else {
-					log.Printf("percentes: manifest written: %s", mpath)
-				}
 			}
 		}
 		log.Fatalf("percentes: %v", err)
@@ -310,38 +187,25 @@ func main() {
 		art.RunValid = false
 		art.InvalidReasons = append(art.InvalidReasons, reasons...)
 	}
-	flagClock(art)
 
 	attemptsPath, err := evidence.WriteRun(*outDir, cfg, art.Loadgen, evidence.Options{RunFailures: art.InvalidReasons})
 	if err != nil {
 		log.Fatalf("percentes: %v", err)
 	}
 
-	var jsonPath, txtPath, humanText string
-	if cfg.Target.Hosted {
-		m, merr := newManifest(&gates, art.Record(), attemptsPath)
-		if merr != nil {
-			log.Fatalf("percentes: %v", merr)
-		}
-		if jsonPath, txtPath, humanText, err = report.WriteHostedPair(*outDir, cfg.Raw, m); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		log.Printf("percentes: manifest written: %s", filepath.Join(*outDir, evidence.ManifestFile))
-	} else {
-		rawJSON, text, err := report.Generate(art, &gates)
-		if err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		if err := os.MkdirAll(*outDir, 0o755); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		jsonPath, txtPath, humanText = filepath.Join(*outDir, report.JSONFile), filepath.Join(*outDir, report.TextFile), text
-		if err := os.WriteFile(jsonPath, rawJSON, 0o644); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
-		if err := os.WriteFile(txtPath, []byte(humanText), 0o644); err != nil {
-			log.Fatalf("percentes: %v", err)
-		}
+	rawJSON, humanText, err := report.Generate(art, &gates)
+	if err != nil {
+		log.Fatalf("percentes: %v", err)
+	}
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		log.Fatalf("percentes: %v", err)
+	}
+	jsonPath, txtPath := filepath.Join(*outDir, report.JSONFile), filepath.Join(*outDir, report.TextFile)
+	if err := os.WriteFile(jsonPath, rawJSON, 0o644); err != nil {
+		log.Fatalf("percentes: %v", err)
+	}
+	if err := os.WriteFile(txtPath, []byte(humanText), 0o644); err != nil {
+		log.Fatalf("percentes: %v", err)
 	}
 
 	fmt.Println(humanText)
