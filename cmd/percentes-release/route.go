@@ -271,7 +271,7 @@ func newRoute(in routeInput) (*route, error) {
 		return nil, err
 	}
 	if cfg.Target.Confidential() {
-		read, err := r.retainedReads()
+		read, err := retainedReads(r.dir, r.framesRoot, &cfg.Target)
 		if err != nil {
 			return nil, err
 		}
@@ -593,11 +593,11 @@ func (r *route) withhold(read []evidence.RefreshedLimit) {
 	r.op.Withhold(read)
 }
 
-// retainedReads are the limits read by the refresh records as run that
-// the retained store keeps beside the frames of the route's cells with a
-// manifest.
-func (r *route) retainedReads() ([]evidence.RefreshedLimit, error) {
-	paths, err := filepath.Glob(filepath.Join(r.dir, "*", evidence.ManifestFile))
+// retainedReads are the limits of t read by the refresh records as run
+// that the retained store under framesRoot keeps beside the frames of
+// the cells with a manifest under dir, the route's directory.
+func retainedReads(dir, framesRoot string, t *config.Target) ([]evidence.RefreshedLimit, error) {
+	paths, err := filepath.Glob(filepath.Join(dir, "*", evidence.ManifestFile))
 	if err != nil {
 		return nil, err
 	}
@@ -610,14 +610,14 @@ func (r *route) retainedReads() ([]evidence.RefreshedLimit, error) {
 		if m.Frames == nil {
 			continue
 		}
-		rec, err := evidence.ReadRetainedRefresh(filepath.Join(r.framesRoot, filepath.Dir(filepath.FromSlash(m.Frames.Name))))
+		rec, err := evidence.ReadRetainedRefresh(filepath.Join(framesRoot, filepath.Dir(filepath.FromSlash(m.Frames.Name))))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		if read, err := evidence.ReadRefreshedLimits(rec, &r.cfg.Target); err == nil {
+		if read, err := evidence.ReadRefreshedLimits(rec, t); err == nil {
 			out = append(out, read...)
 		}
 	}

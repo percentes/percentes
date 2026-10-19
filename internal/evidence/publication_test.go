@@ -17,7 +17,8 @@ import (
 // groq, the route with a page, its window-close record, with every file
 // the record names written under dir and the pages under the state's
 // PagesDir. Each notice carries its route's pack and bedrock's
-// replication pack carries its pack's files and one more.
+// replication pack carries its pack's files and one more. groq withholds
+// a tokens_per_minute limit of 250,013.5, which no text holds.
 type publicationFixture struct {
 	dir string
 	p   Publication
@@ -53,6 +54,7 @@ func newPublicationFixture(t *testing.T) *publicationFixture {
 		Pages:        map[string][]byte{"index.md": []byte("index"), "routes/groq.txt": []byte("groq page")},
 		PagesDir:     t.TempDir(),
 		Routes:       []RouteDuties{{Name: "groq", WindowClose: true}, {Name: "azure", Permission: true}, {Name: "bedrock", ReplicationPack: true}},
+		Withheld:     []WithheldValue{{Route: "groq", Dimension: "tokens_per_minute", Value: 250013.5}},
 		Now:          time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC),
 	}
 	for name, b := range f.s.Pages {
@@ -339,6 +341,61 @@ func TestPublicationRefuses(t *testing.T) {
 				t.Fatalf("got %v, want %q", err, want)
 			}
 		})
+	}
+}
+
+// The check refuses a text the page prints that holds a notice's account
+// or recipient, in any letter case or spacing, or a withheld value as a
+// number of its own, naming the field and neither the identifier nor the
+// value: a consented reply quoting its account, its recipient and a
+// limit, a correction holding the account, and a disclosure's provider
+// holding another route's account. A longer number holding a value's
+// digits passes.
+func TestPublicationWithheld(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		edit func(*testing.T, *publicationFixture)
+		want []string
+	}{
+		{"consented reply quoting the account and a limit", func(t *testing.T, f *publicationFixture) {
+			f.s.Withheld = append(f.s.Withheld, WithheldValue{Route: "groq", Dimension: "requests_per_minute", Value: 9999})
+			f.p.Routes[0].Responses[0].Text = put(t, f.dir, "responses/groq.txt", "account groq-account (sent to groq support); limit is 9999 rpm, tpm 250,013.5")
+		}, []string{"route groq: responses[0].text: holds route groq's notice.account", "route groq: responses[0].text: holds route groq's notice.recipient",
+			"route groq: responses[0].text: holds the value of route groq's confidential tokens_per_minute limit",
+			"route groq: responses[0].text: holds the value of route groq's confidential requests_per_minute limit"}},
+		{"reply quoting the recipient over a line break", func(t *testing.T, f *publicationFixture) {
+			f.p.Routes[0].Responses[0].Text = put(t, f.dir, "responses/groq.txt", "Write to GROQ\r\n  Support.\r\n")
+		}, []string{"route groq: responses[0].text: holds route groq's notice.recipient"}},
+		{"correction holding the account", func(_ *testing.T, f *publicationFixture) {
+			f.p.Routes[1].Responses[0].Corrections = []string{"tier of account Azure-Account spelt as documented"}
+		}, []string{"route azure: responses[0].corrections[0]: holds route azure's notice.account"}},
+		{"disclosure provider holding another route's account", func(_ *testing.T, f *publicationFixture) {
+			f.p.Disclosures[0].Provider = "AWS (bedrock-account)"
+		}, []string{"disclosures[0].provider: holds route bedrock's notice.account"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newPublicationFixture(t)
+			c.edit(t, f)
+			err := f.check(t)
+			if err == nil {
+				t.Fatal("passed")
+			}
+			if want := "evidence: publication refused: " + strings.Join(c.want, "; "); err.Error() != want {
+				t.Errorf("got %v\nwant %s", err, want)
+			}
+			for _, s := range []string{"groq-account", "support", "Azure-Account", "bedrock-account", "9999", "250,013.5", "250013.5"} {
+				if strings.Contains(err.Error(), s) {
+					t.Errorf("the refusal carries %q", s)
+				}
+			}
+		})
+	}
+	f := newPublicationFixture(t)
+	f.s.Withheld = append(f.s.Withheld, WithheldValue{Route: "groq", Dimension: "requests_per_minute", Value: 9999})
+	f.p.Routes[0].Responses[0].Text = put(t, f.dir, "responses/groq.txt", "batch 99990 and 2502013.5 accepted for the groq route")
+	f.p.Routes[1].Responses[0].Corrections = []string{"9999.5 tokens, version 1.9999"}
+	if err := f.check(t); err != nil {
+		t.Errorf("longer numbers and the route name: %v", err)
 	}
 }
 

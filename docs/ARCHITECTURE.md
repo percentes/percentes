@@ -1609,7 +1609,16 @@ predates the first notice, every pre-release copy withholds every
 replication-pack route, and every named file matches its hash. The
 check also refuses a verbatim response's text that is not UTF-8 (the
 Unicode text encoding), and a correction or a disclosure's provider that
-runs over more than one line.
+runs over more than one line. It refuses each of those texts that holds
+any notice's account identifier or recipient, in any letter case or
+spacing, or a confidential limit's value as a number of its own
+(`config.Carries`) in decimal, also with its whole part grouped in
+threes (`config.ValueForms`). The values are each route's confidential
+limits as its configuration records them and as its refresh command
+read them at its cells and its window close, from the refresh records as
+run in the retained store (`withheldValues`). The refusal names the field,
+the route and the limit's dimension, and neither the identifier nor the
+value.
 
 When the record is complete the command builds the publication page
 from it (`Publication.Page`): `publication.md` and `publication.json`,

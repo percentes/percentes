@@ -146,7 +146,8 @@ func publication(t *testing.T, out, pages string, packs map[string][]byte, edit 
 // pages runs with no record and no window-close record; and the check
 // refuses, exiting 2, a paged route with no window-close record, a
 // record that lacks the naming permission the configuration requires,
-// misses responses, has an open window, misses a later cell's manifest
+// misses responses, holds the notice's account in a correction, has an
+// open window, misses a later cell's manifest
 // or window-close record, carries a notice pack other than the one pack
 // builds (other text, or a pack built before a later cell), a notice
 // dated before the later cell started and its window-close record was
@@ -353,6 +354,9 @@ func TestPublishCheck(t *testing.T) {
 	}{
 		{"no permission", func(p *evidence.Publication) { p.Routes[0].Permission = nil }, "route groq: permission: required"},
 		{"no responses", func(p *evidence.Publication) { p.Routes[0].Responses = nil }, "route groq: responses: required"},
+		{"correction holding the account", func(p *evidence.Publication) {
+			p.Routes[0].Responses = []evidence.Response{{Received: "2099-01-07", Corrections: []string{"tier of account ORG-1 as documented"}}}
+		}, "route groq: responses[0].corrections[0]: holds route groq's notice.account"},
 		{"window open", func(p *evidence.Publication) {
 			p.Routes[0].Notice.Sent, p.Routes[0].Notice.WindowCloses = "2099-02-02", "2099-02-06"
 		}, "route groq: notice: the window is open until the end of 2099-02-06 UTC"},
@@ -486,6 +490,104 @@ func TestPublishCheck(t *testing.T) {
 	} {
 		if code, err := publishCheckCmd(c.args); code != exitError || err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%q: exit %d: %v, want %q", c.args, code, err, c.want)
+		}
+	}
+}
+
+// On a route with a confidential limit, publish-check refuses, exiting 2
+// and printing none of them, a consented verbatim reply quoting the
+// notice's account, its recipient and the limit's value as configured,
+// and one quoting the value the refresh command read at the window
+// close; withheldValues holds the configured value and each value read
+// once, and nothing for a route with no confidential limit.
+func TestPublishCheckWithheld(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
+	b, err := os.ReadFile(routeConfigFile(t, "groq", e.url(), "10"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const public = "      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256:"
+	if strings.Count(string(b), public) != 1 || strings.Count(string(b), rateLimitHeaders) != 1 {
+		t.Fatal("reference config: the limit or the response headers not found once")
+	}
+	s := strings.Replace(string(b), rateLimitHeaders, rateLimitHeaders+"  retained_headers: [x-ratelimit-*]\n", 1)
+	s = strings.Replace(s, public, "      value: 250013.5\n      marking: confidential\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      hmac_sha256:", 1)
+	cfgPath := writeFile(t, t.TempDir(), "groq.yaml", []byte(s))
+	cfg, err := config.LoadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(cfg.Target.APIKeyEnv, testKey)
+	publishAt(t, noticeClosed)
+	f := newFixture(t, cfg, "+0.005032")
+	limitsRefresh(t, f, tpmRefresh(`"value":310007`))
+	groq, err := newRoute(f.in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortLadder(groq)
+	runCellOK(t, groq, groq.runs[0])
+	limitsRefresh(t, f, tpmRefresh(`"value":320011`))
+	if groq.refresh, err = evidence.ParseRefreshCommand(f.in.refreshCmd); err != nil {
+		t.Fatal(err)
+	}
+	st, err := groq.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutOf(t, func() {
+		if err := groq.windowClose(context.Background(), st); err != nil {
+			t.Error(err)
+		}
+	})
+	got, err := withheldValues(groq.out, groq.framesRoot, []*config.Config{cfg, releaseConfig(t, e.url())})
+	want := []evidence.WithheldValue{{Route: "groq", Dimension: "tokens_per_minute", Value: 250013.5}, {Route: "groq", Dimension: "tokens_per_minute", Value: 310007},
+		{Route: "groq", Dimension: "tokens_per_minute", Value: 320011}}
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("withheld values %v: %v, want %v", got, err, want)
+	}
+
+	pages := t.TempDir()
+	base := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--release-key", testReleaseKeyPath, "--pages", pages}
+	if code, err := pagesCmd(base); code != exitOK || err != nil {
+		t.Fatalf("pages: exit %d: %v", code, err)
+	}
+	pack := map[string][]byte{"groq": packOf(t, base[:len(base)-2:len(base)-2], "groq")}
+	for _, c := range []struct{ name, reply, want string }{
+		{"account, recipient and configured value", "Account org-1 (sent to Groq support) checked: the limit is 250,013.5 tpm.\r\n",
+			"route groq: responses[0].text: holds route groq's notice.account; route groq: responses[0].text: holds route groq's notice.recipient; " +
+				"route groq: responses[0].text: holds the value of route groq's confidential tokens_per_minute limit\n"},
+		{"value read at the window close", "Raised to 320011 tokens a minute.\n",
+			"route groq: responses[0].text: holds the value of route groq's confidential tokens_per_minute limit\n"},
+	} {
+		record := publication(t, groq.out, pages, pack, nil)
+		dir := filepath.Dir(record)
+		writeFile(t, dir, "reply.txt", []byte(c.reply))
+		writeFile(t, dir, "consent.eml", []byte("publish it verbatim"))
+		raw, err := os.ReadFile(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var p evidence.Publication
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatal(err)
+		}
+		p.Routes[0].Responses = []evidence.Response{{Received: "2099-01-07", Verbatim: true, Text: published(t, dir, "reply.txt"), Consent: published(t, dir, "consent.eml")}}
+		if raw, err = json.Marshal(p); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, dir, "publication.json", raw)
+		var code int
+		text := stdoutOf(t, func() {
+			code, err = publishCheckCmd(append(base[:len(base):len(base)], "--record", record))
+		})
+		if err != nil || code != exitAdverse || text != "NOT READY to publish: evidence: publication refused: "+c.want {
+			t.Errorf("%s: exit %d: %v:\n%s", c.name, code, err, text)
+		}
+		for _, v := range []string{"org-1", "250,013.5", "250013.5", "320011"} {
+			if strings.Contains(text, v) {
+				t.Errorf("%s: the refusal carries %q", c.name, v)
+			}
 		}
 	}
 }

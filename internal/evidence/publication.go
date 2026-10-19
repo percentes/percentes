@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/percentes/percentes/internal/config"
 )
 
 // NoticeWorkingDays is the least number of working days after a notice's
@@ -120,12 +122,20 @@ type RouteDuties struct {
 	WindowClose     bool
 }
 
+// WithheldValue is a confidential limit's value on a route, as its
+// configuration records it or as a refresh command read it.
+type WithheldValue struct {
+	Route     string
+	Dimension string
+	Value     float64
+}
+
 // PublicationState is the release as it stands: each cell manifest's
 // and each window-close record's bytes by its slash path under the
 // release output directory, each page the cells generate by its slash
 // path under PagesDir, each route's evidence pack as BuildPack builds it
-// from those pages and manifests, by route, the routes, and the time of
-// the check.
+// from those pages and manifests, by route, the routes, the values of
+// its confidential limits, and the time of the check.
 type PublicationState struct {
 	Manifests    map[string][]byte
 	WindowCloses map[string][]byte
@@ -133,6 +143,7 @@ type PublicationState struct {
 	PagesDir     string
 	Packs        map[string][]byte
 	Routes       []RouteDuties
+	Withheld     []WithheldValue
 	Now          time.Time
 }
 
@@ -173,9 +184,13 @@ func LoadPublication(path string) (*Publication, error) {
 // the first notice; every pre-release copy withholds the routes that need
 // a replication pack; and every file the record names has the SHA-256 it
 // records. A verbatim response's text must be UTF-8, and each correction
-// and each disclosure's provider one line, as Page prints them.
+// and each disclosure's provider one line, as Page prints them. No text
+// Page prints from the record (a verbatim response's text, a correction
+// or a disclosure's provider) may hold any notice's account or recipient,
+// in any letter case or spacing, or a value in s.Withheld written in a
+// form config.ValueForms gives as a number of its own (config.Carries).
 // Otherwise it returns an error naming every missing item and every
-// mismatch.
+// mismatch, and neither such an identifier nor such a value.
 func (p *Publication) Check(s PublicationState) error {
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
@@ -196,6 +211,31 @@ func (p *Publication) Check(s PublicationState) error {
 		text(field, v)
 		if strings.ContainsAny(v, "\r\n") {
 			fail("%s: one line required", field)
+		}
+	}
+	type identifier struct{ name, folded string }
+	var ids []identifier
+	for _, r := range p.Routes {
+		if n := r.Notice; n != nil {
+			ids = append(ids, identifier{"route " + r.Route + "'s notice.account", fold(n.Account)}, identifier{"route " + r.Route + "'s notice.recipient", fold(n.Recipient)})
+		}
+	}
+	printed := func(field, v string) {
+		var held []string
+		folded := fold(v)
+		for _, id := range ids {
+			if h := "holds " + id.name; id.folded != "" && strings.Contains(folded, id.folded) && !slices.Contains(held, h) {
+				held = append(held, h)
+			}
+		}
+		for _, w := range s.Withheld {
+			h := fmt.Sprintf("holds the value of route %s's confidential %s limit", w.Route, w.Dimension)
+			if _, ok := config.Carries(v, config.ValueForms(w.Value)); ok && !slices.Contains(held, h) {
+				held = append(held, h)
+			}
+		}
+		for _, h := range held {
+			fail("%s: %s", field, h)
 		}
 	}
 
@@ -289,8 +329,11 @@ func (p *Publication) Check(s PublicationState) error {
 				fail("%s.received: %s, before the notice of %s", rf, resp.Received, r.Notice.Sent)
 			}
 			if resp.Verbatim {
-				if b := p.file(rf+".text", resp.Text, fail); b != nil && !utf8.Valid(b) {
-					fail("%s.text: %s is not UTF-8 text", rf, resp.Text.Path)
+				if b := p.file(rf+".text", resp.Text, fail); b != nil {
+					if !utf8.Valid(b) {
+						fail("%s.text: %s is not UTF-8 text", rf, resp.Text.Path)
+					}
+					printed(rf+".text", string(b))
 				}
 				p.file(rf+".consent", resp.Consent, fail)
 			} else if resp.Corrections == nil {
@@ -298,6 +341,7 @@ func (p *Publication) Check(s PublicationState) error {
 			}
 			for k, c := range resp.Corrections {
 				line(fmt.Sprintf("%s.corrections[%d]", rf, k), c)
+				printed(fmt.Sprintf("%s.corrections[%d]", rf, k), c)
 			}
 		}
 		switch {
@@ -336,6 +380,7 @@ func (p *Publication) Check(s PublicationState) error {
 	for i, d := range p.Disclosures {
 		field := fmt.Sprintf("disclosures[%d]", i)
 		line(field+".provider", d.Provider)
+		printed(field+".provider", d.Provider)
 		text(field+".recipient", d.Recipient)
 		if d.How != DisclosureEmail && d.How != DisclosureForm {
 			fail("%s.how: %q, want %s or %s", field, d.How, DisclosureEmail, DisclosureForm)
@@ -491,6 +536,11 @@ func workingDays(from, to time.Time, nonWorking map[string]bool) int {
 		}
 	}
 	return n
+}
+
+// fold is s in lower case with each run of white space one space.
+func fold(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 
 func sortedKeys(m map[string][]byte) []string {

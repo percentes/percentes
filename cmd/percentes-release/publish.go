@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,7 +33,10 @@ var publishNow = time.Now
 // must be the route's pack as pack builds it from the same cells, and a
 // replication pack must carry that pack's files. A notice may not be
 // dated before the UTC day on which its route's last cell started or its
-// window-close record was taken. When the record is complete it builds
+// window-close record was taken. No text the publication page prints
+// from the record may hold a notice's account or recipient, or the value
+// of a route's confidential limit as its configuration records it or as
+// a refresh command read it. When the record is complete it builds
 // the publication page from it, which must be under --pages byte for
 // byte, or which --write-page writes there, and prints the providers told
 // of the measurement before the notices. pages runs without a record.
@@ -93,7 +97,12 @@ func publishCheckCmd(args []string) (int, error) {
 		routes[i] = evidence.RouteDuties{Name: cfg.Target.Name, Permission: n != nil && n.PermissionRequired, ReplicationPack: replicationRoute(cfg),
 			WindowClose: rp.recs[i].verdict != nil}
 	}
-	state := evidence.PublicationState{Manifests: manifests, WindowCloses: closes, Pages: rp.files, PagesDir: *pages, Packs: packs, Routes: routes, Now: publishNow()}
+	withheld, err := withheldValues(*out, *framesRoot, cfgs)
+	if err != nil {
+		return exitError, err
+	}
+	state := evidence.PublicationState{Manifests: manifests, WindowCloses: closes, Pages: rp.files, PagesDir: *pages, Packs: packs, Routes: routes,
+		Withheld: withheld, Now: publishNow()}
 	if err := pub.Check(state); err != nil {
 		fmt.Printf("NOT READY to publish: %v\n", err)
 		return exitAdverse, nil
@@ -169,6 +178,70 @@ func releaseFiles(out string, elem ...string) (map[string][]byte, error) {
 		m[filepath.ToSlash(rel)] = b
 	}
 	return m, nil
+}
+
+// withheldValues are the values of each route's confidential limits: as
+// its configuration records them, and as the refresh records as run that
+// the retained store under framesRoot keeps for its cells and its window
+// close read them.
+func withheldValues(out, framesRoot string, cfgs []*config.Config) ([]evidence.WithheldValue, error) {
+	var vs []evidence.WithheldValue
+	add := func(route, dimension string, v float64) {
+		if w := (evidence.WithheldValue{Route: route, Dimension: dimension, Value: v}); v > 0 && !slices.Contains(vs, w) {
+			vs = append(vs, w)
+		}
+	}
+	for _, cfg := range cfgs {
+		t := &cfg.Target
+		if !t.Confidential() {
+			continue
+		}
+		for _, l := range t.Limits {
+			if l.Marking == config.MarkingConfidential {
+				add(t.Name, l.Dimension, l.Value)
+			}
+		}
+		dir := filepath.Join(out, t.Name)
+		read, err := retainedReads(dir, framesRoot, t)
+		if err != nil {
+			return nil, err
+		}
+		closed, err := windowCloseReads(dir, framesRoot, t)
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range append(read, closed...) {
+			if l.Confidential {
+				add(t.Name, l.Dimension, l.Value)
+			}
+		}
+	}
+	return vs, nil
+}
+
+// windowCloseReads are the limits of t read by the refresh record as run
+// that the retained store under framesRoot keeps beside the copies of
+// the window-close record in dir, the route's directory, when there is
+// one.
+func windowCloseReads(dir, framesRoot string, t *config.Target) ([]evidence.RefreshedLimit, error) {
+	w, err := evidence.ReadWindowClose(filepath.Join(dir, evidence.WindowCloseFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	rec, err := evidence.ReadRetainedRefresh(filepath.Join(framesRoot, w.Copies))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if read, err := evidence.ReadRefreshedLimits(rec, t); err == nil {
+		return read, nil
+	}
+	return nil, nil
 }
 
 // replicationRoute reports whether cfg's endpoint is an AWS (Amazon Web
