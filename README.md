@@ -291,6 +291,10 @@ that does not count is kept as a record outside the route's frame.
 | `percentes-release rehearse` | before the window, on the client host | the acceptance run: each of six mock routes, which the command serves itself on loopback, gets its ten-request ceiling check and then one cell, run at their offsets up the whole ladder; writes `rehearsal.json`, which says whether the rehearsal is green (among [its checks](docs/ARCHITECTURE.md#the-rehearsal), every cell counted with G2, the check that the client machine was not the bottleneck, passing at every step); at full length, the default, that file is the run's evidence |
 | `percentes --replay`, `percentes --check-release` | any time after a cell | render a cell's report pair again and compare it byte for byte; refuse a cell whose files, the unpublished frame store among them, are missing or differ from their recorded hashes |
 
+Use one live ledger for all release traffic; do not run an independent
+copy or restore an earlier active history. Reconcile any recovery
+against the complete retained admission history before resuming.
+
 ```
 go doc ./cmd/percentes-release
 ```
@@ -356,8 +360,11 @@ outcomes and files, the per-step tables and the index.
 
 `cmd/naivesweep` sweeps one OpenAI-compatible endpoint and reports what came
 back, including responses that returned 200 and carried nothing. It is
-reconnaissance, and nothing it prints is a published measurement. Its
-configuration, its limits and what it redacts are in its own documentation:
+reconnaissance, and nothing it prints is a published measurement. It
+admits nothing to a release's ledger, so a sweep on a paid account
+spends outside every release cap; keep it off release accounts during a
+collection window. Its configuration, its limits and what it redacts are
+in its own documentation:
 
 ```
 go doc ./cmd/naivesweep

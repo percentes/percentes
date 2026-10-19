@@ -27,7 +27,9 @@
 // Standalone reconnaissance. This is not instrument code and its numbers do
 // not publish as a characterization: it applies none of the client-validity
 // gates SPEC.md requires, so it cannot show whether the client was the
-// bottleneck.
+// bottleneck. It sends requests with no ledger admission, so on a paid
+// account their spend is outside every release cap. Do not point it at a
+// release account during a release's collection window.
 //
 // Every request asks "Explain in detail how TCP congestion control works.
 // Request N." with max_tokens 128 and a 45 s client timeout.
