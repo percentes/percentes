@@ -34,7 +34,8 @@ const (
 // ceiling rule's verdict, the ceiling choice and the probe records every
 // manifest carries, the counted cells' records, the attempts outside the
 // frame, the model_mismatch attempts' identifiers and the route's
-// window-close record, nil when it has none.
+// window-close record, nil when it has none. The verdict is nil when
+// every attempt is missed or interrupted with no manifest.
 type routeRecords struct {
 	verdict    *admission.Verdict
 	ceiling    probe.CeilingChoice
@@ -51,7 +52,8 @@ type routeRecords struct {
 // pagesCmd writes the release's index page and each route's page from
 // the cells' records under --out (SPEC-HOSTED HA3 point 12). Every route
 // with a cell under --out must be given; nothing is written unless every
-// route's cells read.
+// route's cells read. A route whose attempts are all missed or
+// interrupted gets no page.
 func pagesCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("pages", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -82,6 +84,10 @@ func pagesCmd(args []string) (int, error) {
 	}
 	fmt.Printf("index written: %s; %d rows\n", filepath.Join(*pages, indexPage), len(rp.index.Rows))
 	for i, r := range rp.routes {
+		if rp.recs[i].verdict == nil {
+			fmt.Printf("%s: no cell with a %s, %d with a run record only; no page\n", r.Config.Target.Name, evidence.ManifestFile, rp.recs[i].unrecorded)
+			continue
+		}
 		fmt.Printf("%s: %d of %d cells counted, %d labelled, %d with a run record only; page %s\n", r.Config.Target.Name,
 			len(r.Cells), admission.ReleaseCells, rp.recs[i].labelled, rp.recs[i].unrecorded, filepath.Join(*pages, filepath.FromSlash(r.Page)))
 	}
@@ -89,7 +95,7 @@ func pagesCmd(args []string) (int, error) {
 }
 
 // releasePages are the pages of a release, by slash path under --pages,
-// with the index and each route's cells they were built from.
+// with the index and each given route's cells, in the order given.
 type releasePages struct {
 	files  map[string][]byte
 	index  *report.Index
@@ -100,17 +106,23 @@ type releasePages struct {
 // buildPages builds the index page and each route's page from the cells
 // of cfgs' routes under out. Every route with a cell under out must be
 // among cfgs, and the routes of one model among them must carry one
-// ceiling choice and one set of probe records.
+// ceiling choice and one set of probe records. A route with no manifest
+// has no page and no index row.
 func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, error) {
 	given := map[string]bool{}
 	rp := &releasePages{routes: make([]report.IndexRoute, len(cfgs)), recs: make([]*routeRecords, len(cfgs))}
+	var paged []report.IndexRoute
 	for i, cfg := range cfgs {
 		given[cfg.Target.Name] = true
 		var err error
 		if rp.recs[i], err = readRouteCells(out, framesRoot, cfg); err != nil {
 			return nil, err
 		}
-		rp.routes[i] = report.IndexRoute{Config: cfg, Verdict: rp.recs[i].verdict, Cells: rp.recs[i].cells, Page: path.Join(routesDir, cfg.Target.Name+".txt")}
+		rp.routes[i] = report.IndexRoute{Config: cfg, Verdict: rp.recs[i].verdict, Cells: rp.recs[i].cells}
+		if rp.recs[i].verdict != nil {
+			rp.routes[i].Page = path.Join(routesDir, cfg.Target.Name+".txt")
+			paged = append(paged, rp.routes[i])
+		}
 	}
 	cells, err := filepath.Glob(filepath.Join(out, "*", "*", cellFile))
 	if err != nil {
@@ -124,7 +136,7 @@ func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, e
 	if err := sameCeiling(cfgs, rp.recs); err != nil {
 		return nil, err
 	}
-	if rp.index, err = report.NewIndex(rp.routes); err != nil {
+	if rp.index, err = report.NewIndex(paged); err != nil {
 		return nil, err
 	}
 	rp.files = map[string][]byte{indexPage: []byte(rp.index.Markdown())}
@@ -132,6 +144,9 @@ func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, e
 		return nil, err
 	}
 	for i, r := range rp.routes {
+		if rp.recs[i].verdict == nil {
+			continue
+		}
 		st, err := report.NewStepTables(r.Config, r.Verdict, r.Cells)
 		if err != nil {
 			return nil, err
@@ -151,13 +166,18 @@ func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, e
 }
 
 // sameCeiling refuses routes of one model, each the other's host, whose
-// manifests carry different ceiling choices or probe records.
+// manifests carry different ceiling choices or probe records. Where
+// either route has no manifest, their ceilings (ranAt) must agree.
 func sameCeiling(cfgs []*config.Config, recs []*routeRecords) error {
 	for i, cfg := range cfgs {
 		for _, h := range cfg.Release.OtherHosts {
 			j := slices.IndexFunc(cfgs, func(c *config.Config) bool { return c.Target.Name == h.Route })
 			switch {
 			case j < 0:
+			case recs[i].verdict == nil || recs[j].verdict == nil:
+				if a, b := ranAt(cfg, recs[i]), ranAt(cfgs[j], recs[j]); a != b {
+					return fmt.Errorf("pages: routes %s and %s, hosts of one model, ran at ceilings %d and %d", cfg.Target.Name, h.Route, a, b)
+				}
 			case !reflect.DeepEqual(recs[i].ceiling, recs[j].ceiling):
 				return fmt.Errorf("pages: routes %s and %s, hosts of one model, ran at different ceiling choices: %+v and %+v",
 					cfg.Target.Name, h.Route, recs[i].ceiling, recs[j].ceiling)
@@ -167,6 +187,15 @@ func sameCeiling(cfgs []*config.Config, recs []*routeRecords) error {
 		}
 	}
 	return nil
+}
+
+// ranAt is the ceiling route cfg ran at: its manifests' choice, or its
+// configuration's release.shape.ceiling_tokens where it has no manifest.
+func ranAt(cfg *config.Config, rr *routeRecords) int {
+	if rr.verdict == nil {
+		return cfg.Release.Shape.CeilingTokens
+	}
+	return rr.ceiling.Ceiling
 }
 
 func marshalPage(v any) ([]byte, error) {
@@ -188,6 +217,7 @@ func marshalPage(v any) ([]byte, error) {
 // manifest records, which the drift rule compares. Each model_mismatch
 // attempt's expected and reported model ids are kept for the route's
 // page, and the route's window-close record is read where it has one.
+// A route with no cell record is refused.
 func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, error) {
 	name := cfg.Target.Name
 	paths, err := filepath.Glob(filepath.Join(out, name, "*", cellFile))
@@ -256,7 +286,7 @@ func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, 
 		rr.cells = append(rr.cells, report.CellRecords{Cell: cellLabel(rec.Run), Outcome: m.Release.Outcome, Gaps: m.Release.Gaps, Records: recs,
 			Start: m.Release.Run.Start, Docs: report.DocsOf(m)})
 	}
-	if rr.verdict == nil {
+	if rr.verdict == nil && rr.unrecorded == 0 {
 		return nil, fmt.Errorf("pages: route %s has no cell with a %s under %s", name, evidence.ManifestFile, out)
 	}
 	if p := filepath.Join(out, name, evidence.WindowCloseFile); fileExists(p) {

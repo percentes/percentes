@@ -518,3 +518,58 @@ func TestPagesHostGroup(t *testing.T) {
 		})
 	}
 }
+
+// A host whose attempts are all missed or interrupted gets no page and
+// leaves its sibling's pages and publication record to pass while its
+// configuration runs at the sibling's ceiling; at another ceiling pages
+// and publish-check refuse it, writing nothing.
+func TestPagesMissedHost(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
+	groq, groqCfg := pagesRoute(t, "groq", e.url(), "", "")
+	baseten, basetenCfg := pagesRoute(t, "baseten", e.url(), groq.out, groq.framesRoot)
+	shortLadder(groq)
+	if rec := runCellOK(t, groq, groq.runs[0]); rec.Outcome != outcomeBlocked {
+		t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
+	}
+	for i, outcome := range []string{outcomeMissed, outcomeInterrupted} {
+		rec := baseten.newRecord(baseten.runs[i])
+		rec.Outcome = outcome
+		if err := baseten.writeNew(baseten.runs[i], rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pages := t.TempDir()
+	args := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--config", basetenCfg, "--pages", pages}
+	var code int
+	var err error
+	text := stdoutOf(t, func() { code, err = pagesCmd(args) })
+	if code != exitOK || err != nil || !strings.Contains(text, "baseten: no cell with a manifest.json, 2 with a run record only; no page\n") {
+		t.Fatalf("exit %d: %v:\n%s", code, err, text)
+	}
+	files := readPages(t, pages)
+	if index := string(files[indexPage]); len(files) != 4 || files["routes/groq.txt"] == nil || !strings.Contains(index, "| Groq | groq |") || strings.Contains(index, "| Groq | baseten |") {
+		t.Fatalf("files %v:\n%s", keys(files), index)
+	}
+	record := publication(t, groq.out, pages, func(p *evidence.Publication) {
+		r := p.Routes[0]
+		r.Route, r.Permission = "baseten", nil
+		p.Routes = append(p.Routes, r)
+	})
+	text = stdoutOf(t, func() { code, err = publishCheckCmd(append(args[:len(args):len(args)], "--record", record)) })
+	if code != exitOK || err != nil || !strings.Contains(text, "publication record complete: 1 manifests, 4 pages, 2 routes\n") {
+		t.Fatalf("publish-check: exit %d: %v:\n%s", code, err, text)
+	}
+
+	other := filepath.Join(t.TempDir(), "pages")
+	args = []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--config", fallbackFile(t, basetenCfg), "--pages", other}
+	const want = "pages: routes groq and baseten, hosts of one model, ran at ceilings 512 and 1024"
+	if code, err := pagesCmd(args); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("exit %d: %v, want %q", code, err, want)
+	}
+	if _, err := os.Stat(other); !os.IsNotExist(err) {
+		t.Errorf("pages written on a refusal: %v", err)
+	}
+	if code, err := publishCheckCmd(append(args, "--record", record)); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("publish-check: exit %d: %v, want %q", code, err, want)
+	}
+}
