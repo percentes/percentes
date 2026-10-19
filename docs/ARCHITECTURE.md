@@ -437,7 +437,7 @@ The diagram predates the hosted packages, which the table lists.
 | | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadWindowClose`, `LoadOperator`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
-| | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file with each route's frozen configuration hashes (as published, and keyed as loaded) and host group and the ledger's open-line hash | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun`, `Schedule.Config` | a pinned derivation; window and refusal cases |
+| | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file with each route's frozen configuration hashes (as published, and keyed as loaded) and host group, the ledger's open-line hash and its position (line count and the hash of its bytes) | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun`, `Schedule.Config` | a pinned derivation; window and refusal cases |
 | | `internal/releasekey` | the release key ([The release key](#the-release-key)): 32 random bytes written once as lowercase hexadecimal to a new file readable by its owner only; the HMAC-SHA256 (a hash-based message authentication code built on SHA-256, the 256-bit Secure Hash Algorithm) under it of each configuration as loaded and, on a route with a confidential limit, of the withheld texts, the limit copies, the frame store and the operator records; a key that prints as `[release key]` under every format verb and that `encoding/json` cannot write | SPEC-HOSTED §9; HA3 points 9 and 15 | `New`, `Create`, `Read`, `Key.Sum` | create and read refusals; every format verb and JSON print no key byte |
 | Test support | `internal/hostqual` | the host qualification probe the timing-coupled tests run first | §2, §8 | `Measure`, `Observation.Qualify`, `Qualified`, `Allocation` | per-limit units |
 | | `internal/ac` | the §8 acceptance suite; the mock runs as a separate process, so it never shares the generator's Go scheduler | §8 | | |
@@ -513,7 +513,7 @@ hosted-G6 ([The release runner](#the-release-runner)):
 | Ceiling rule | each step's nominal demand at most half of every recorded rate, token, concurrency, daily and spend-window limit; the monthly cap and the route's ledger cap cover the twelve cells, re-runs and probes; the auto-reload threshold covers the costliest cell | route start | a step is excluded with its binding limit named; a route with no admitted step refuses to start | `admission.CeilingRule`, `newRoute` |
 | Open-file limit | soft limit at least 65,536 | route start | refusal to start | `checkOpenFiles` |
 | Balance command | one is given and parses | route start | refusal to start; a release manifest without its start balance record is refused | `ParseBalanceCommand`, `evidence.NewManifest` |
-| Frozen inputs | the schedule froze this route's configuration as published and this ledger by their SHA-256 (256-bit Secure Hash Algorithm) hashes, the configuration as loaded by its HMAC-SHA256 under the release key `--release-key` names, and the route's host group; at each cell the ledger still has the frozen open line, its first | route start; each cell's ledger reads | refusal to start; at a cell, the cell is labelled interrupted and `run` exits 1 | `checkFrozen`, `checkLedger`, `Ledger.Bind`, `ledgerEntries` |
+| Frozen inputs | the schedule froze this route's configuration as published and this ledger by their SHA-256 (256-bit Secure Hash Algorithm) hashes, the configuration as loaded by its HMAC-SHA256 under the release key `--release-key` names, the route's host group and the ledger's position; at route start the ledger still holds the frozen lines up to that position, and at each cell it still has the frozen open line, its first | route start; each cell's ledger reads | refusal to start; at a cell, the cell is labelled interrupted and `run` exits 1 | `checkFrozen`, `checkLedger`, `frozenEntries`, `Ledger.Bind`, `ledgerEntries` |
 | Ceiling records | one record per host of the route's model at 512, and at 1,024 when any host failed at 512, each bound to the request it checked and naming in `ledger_sha256` the ledger the schedule froze, with its results re-derived from its requests; another host's records are also judged against that host's configuration as the schedule froze it (`--host-config`); another host whose records carry a reported-model fault is left out of the choice, and its records are then neither required at a ceiling nor checked for the start gate or the input bound | route start | refusal to start | `hostTargets`, `readCeilingProbes`, `ReleaseRecord.Verify`, `probe.ChooseCeiling` |
 | Reported model at the check | the route's own ceiling-check records expect the configuration's expected identifier and report no other, and some response reported a recorded `target.reported_model` | the ceiling check; route start | `ceiling-check` prints a `REFUSED` line and exits 2 where its record reports an identifier with such a fault; `run` refuses to start | `modelRefusal`, `readCeilingProbes`, `probe.ModelFault` |
 | Ledger prices | the ledger's highest price at the cell bounds and at the ceiling-check bounds covers the ceiling rule's verdict | route start | refusal to start | `State.Covers` |
@@ -1071,9 +1071,11 @@ The file also freezes the run's inputs: per route (`configs`), the
 SHA-256 of the configuration as published (`frozenConfig`, through
 `Config.Published`), the HMAC-SHA256 of the configuration as loaded
 under the release key (`config_hmac_sha256`) and the route's host
-group; and the SHA-256 of the ledger's open line, its first
-(`ledger_sha256`). For a route with no confidential limit the file as
-published is the file as loaded.
+group; the SHA-256 of the ledger's open line, its first
+(`ledger_sha256`); and the ledger's position as `schedule` read it, its
+line count (`ledger_lines`) and the SHA-256 of its bytes through that
+line (`ledger_head_sha256`). For a route with no confidential limit the
+file as published is the file as loaded.
 `schedule` refuses routes whose host groups disagree and a ledger that
 does not cap every route as its configuration does (`State.CheckRelease`).
 At the route's start, `run` refuses a route whose configuration as
@@ -1106,7 +1108,8 @@ their outputs and refuses to start on any of these.
 | the frame root is inside the source tree | `evidence.CheckFramesRoot` |
 | the clock-sync, status, balance or refresh command is missing or does not parse | `evidence.ParseClockCommand`, `ParseStatusCommand`, `ParseBalanceCommand`, `ParseRefreshCommand` |
 | the schedule freezes no ledger, or the ledger's open line has another SHA-256 than the one the schedule froze | `checkLedger` |
-| the ledger's caps differ from the configuration's, the ledger holds no price line for the route, or its prices do not cover the ceiling rule's verdict at the cell bounds and at the ceiling-check bounds | `State.CheckRelease`, `routePrice`, `State.Covers` |
+| the schedule freezes no ledger position, the ledger holds fewer lines than the frozen count, or its bytes through that line have another SHA-256 than the one the schedule froze | `frozenEntries` |
+| the ledger's caps differ from the configuration's, the ledger holds no price line for the route up to the frozen position, or its prices do not cover the ceiling rule's verdict at the cell bounds and at the ceiling-check bounds | `State.CheckRelease`, `routePrice`, `State.Covers` |
 | the ceiling rule admits no step | `newRoute`, after `admission.CeilingRule` |
 | no `--ceiling-probe` record is given; a record's bytes differ from the encoding `ceiling-check` writes of the record they decode to, as with a value or text after it or a key written twice; a record is of a route outside the model's host group, or carries another model or byte cap, or names in `ledger_sha256` a ledger other than the one the schedule froze; a record of this route carries another adapter, endpoint or expected model identifier, a body hash other than that of `target.body` at the record's ceiling, or a value the route withholds; another host's record carries a value that host's `--host-config` configuration withholds, or one its own confidential markings withhold; a record's stored results differ from the ones its requests give; a record of a host not left out of the choice was blocked at the start gate or failed its input bound; a host's record at a needed ceiling is missing; the records exclude the model or choose a ceiling other than the configuration's; or the route's own records report a model identifier other than the expected one, or none reports a recorded `target.reported_model` | `readCeilingProbes`, `probe.Encode`, `ReleaseRecord.Verify`, `probe.ChooseCeiling`, `probe.Exposed`, `probe.ExposedByMarking`, `probe.ModelFault` |
 | `--byte-cap` is missing, or `--account-created` is not a date | `newRoute` |
@@ -1131,7 +1134,12 @@ their outputs and refuses to start on any of these.
   admitted at. The ledger admits a request only at a bound it holds a
   price for and charges it at the highest per-request price it holds
   for the route at that bound, and `run` refuses to start unless those
-  prices cover the ceiling rule's verdict (`State.Covers`).
+  prices cover the ceiling rule's verdict (`State.Covers`). `run` takes
+  that verdict at the route's newest price among the lines up to the
+  position the schedule froze (`frozenEntries`, `routePrice`), so every
+  start of the route, a restart included, admits the same steps at the
+  same price. A price recorded after the schedule reaches the route only
+  through the limits check at each cell's start.
 
 - **The ceiling rule** (`admission.CeilingRule`, HA3 point 6) tests
   each step's nominal demand against every recorded limit, at the
@@ -1275,9 +1283,9 @@ the ledger again, bound to the open line the schedule froze, for the
 route's newest recorded price, the price line
 with the latest retrieval date (`routePrice`), so a price recorded during
 the window is tested against the spend limits. Where the rule no longer
-admits a step the route runs, the route stops before admission, the
-reason naming the lowest such step, the price's retrieval date and the
-binding limit.
+admits a step the route runs at the price the schedule froze, the route
+stops before admission, the reason naming the lowest such step, the
+price's retrieval date and the binding limit.
 The cell is blocked before admission, with no ledger line and no
 request, when the refresh command failed, timed out or printed past the
 limit, the operator file no longer loads or covers the build or holds a
@@ -1797,7 +1805,7 @@ A release cell ([The release runner](#the-release-runner)):
 | a ceiling-check record's `expected_model` | `probe.RunRelease`, from `Target.ExpectedModel`; read by `ReleaseRecord.Expected` | SPEC-HOSTED §2 |
 | a ceiling-check record's `ledger_sha256` | `sendCeiling`, from `Ledger.Bound`; compared with the schedule's `ledger_sha256` by `readCeilingProbes` | HA3 point 9 |
 | a ceiling-check record's `ceiling_check` and `input_bound_check` results | `probe.RunRelease`; re-derived from the record's requests by `ReleaseRecord.Verify` when `run` reads it | HA3 point 7 |
-| `schedule.json`: `configs` (`config_sha256`, `config_hmac_sha256`, `host_group`), `ledger_sha256` | `scheduleCmd` through `frozenConfig` (the configuration as published, from `Config.Published`, and the configuration as loaded under `releasekey.Key.Sum`) and the ledger's `State.OpenSHA256`; checked at route start by `checkFrozen` and `checkLedger` | HA3 point 9 |
+| `schedule.json`: `configs` (`config_sha256`, `config_hmac_sha256`, `host_group`), `ledger_sha256`, `ledger_lines`, `ledger_head_sha256` | `scheduleCmd` through `frozenConfig` (the configuration as published, from `Config.Published`, and the configuration as loaded under `releasekey.Key.Sum`) and the ledger's `State.OpenSHA256`, `State.Lines` and `State.HeadSHA256`; checked at route start by `checkFrozen`, `checkLedger` and `frozenEntries` | HA3 point 9 |
 | `routes/<route>.json`: `model_mismatch_cells` | `readRouteCells`, from each `model_mismatch` manifest's endpoint record; the text line by `StepTables.Text` | SPEC-HOSTED §2 |
 | the configuration as published, and the manifest's configuration hash | `Config.Published`, through `publicConfigCmd` and `evidence.NewManifest` | HA3 point 15 |
 | `probe-retained.json` | `probe.Withheld`, `probe.WriteRetained` | HA3 point 15 |
