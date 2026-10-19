@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,7 +28,11 @@ func TestScheduleCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := testSchedule(t, "groq", "baseten").JSON()
+	cfgs, err := loadReleases([]string{groq, baseten})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := testSchedule(t, cfgs, "groq", "baseten").JSON()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,6 +42,13 @@ func TestScheduleCmd(t *testing.T) {
 	s, err := schedule.Load(b)
 	if err != nil || !slices.Equal(s.Input.Routes, []string{"baseten", "groq"}) {
 		t.Fatalf("load: %v, routes %v", err, s.Input.Routes)
+	}
+	for _, cfg := range cfgs {
+		sum := sha256.Sum256(cfg.Raw)
+		got, ok := s.Config(cfg.Target.Name)
+		if !ok || got.ConfigSHA256 != hex.EncodeToString(sum[:]) || !slices.Equal(got.HostGroup, []string{"baseten", "groq"}) {
+			t.Errorf("%s: frozen %+v, %t", cfg.Target.Name, got, ok)
+		}
 	}
 
 	other := append(slices.Clone(args[:len(args)-1]), path)

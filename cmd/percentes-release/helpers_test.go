@@ -134,10 +134,15 @@ func routeConfigFile(t *testing.T, name, endpoint, routeUSD string) string {
 	return writeFile(t, t.TempDir(), name+".yaml", []byte(s))
 }
 
-// testSchedule is a schedule over 17 to 26 October 2026 for routes.
-func testSchedule(t *testing.T, routes ...string) *schedule.Schedule {
+// testSchedule is a schedule over 17 to 26 October 2026 for routes,
+// freezing the configurations cfgs of some of them.
+func testSchedule(t *testing.T, cfgs []*config.Config, routes ...string) *schedule.Schedule {
 	t.Helper()
-	s, err := schedule.New(schedule.Input{MasterSeed: "percentes-release-test", First: "2026-10-17", Last: "2026-10-26", Routes: routes})
+	in := schedule.Input{MasterSeed: "percentes-release-test", First: "2026-10-17", Last: "2026-10-26", Routes: routes}
+	for _, cfg := range cfgs {
+		in.Configs = append(in.Configs, frozenConfig(cfg))
+	}
+	s, err := schedule.New(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,14 +150,15 @@ func testSchedule(t *testing.T, routes ...string) *schedule.Schedule {
 }
 
 // newFixture writes every input of cfg's route: its schedule beside
-// "other", a ledger with the route's caps and price, an operator file, a
-// ceiling probe of each host of its model that passed at 512, a clock
-// reading of offset, a counting balance command and a refresh command
-// that touches the record file and prints cfg's recorded limits.
+// "other", freezing cfg, a ledger with the route's caps and price, an
+// operator file, a ceiling probe of each host of its model that passed at
+// 512, a clock reading of offset, a counting balance command and a
+// refresh command that touches the record file and prints cfg's recorded
+// limits.
 func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	t.Helper()
 	dir := t.TempDir()
-	sb, err := testSchedule(t, cfg.Target.Name, "other").JSON()
+	sb, err := testSchedule(t, []*config.Config{cfg}, cfg.Target.Name, "other").JSON()
 	if err != nil {
 		t.Fatal(err)
 	}

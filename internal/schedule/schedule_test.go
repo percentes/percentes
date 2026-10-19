@@ -411,6 +411,62 @@ func TestNewRefuses(t *testing.T) {
 	}
 }
 
+// New stores the frozen configurations in route order with each host
+// group sorted, the committed form loads, and the draws are the ones of
+// the bare input.
+func TestNewConfigs(t *testing.T) {
+	sum := strings.Repeat("ab", 32)
+	in := target()
+	in.Configs = []RouteConfig{
+		{Route: "groq", ConfigSHA256: sum, HostGroup: []string{"groq", "baseten"}},
+		{Route: "baseten", ConfigSHA256: sum, HostGroup: []string{"groq", "baseten"}},
+	}
+	s := derived(t, in)
+	want := []RouteConfig{
+		{Route: "baseten", ConfigSHA256: sum, HostGroup: []string{"baseten", "groq"}},
+		{Route: "groq", ConfigSHA256: sum, HostGroup: []string{"baseten", "groq"}},
+	}
+	if !reflect.DeepEqual(s.Input.Configs, want) {
+		t.Fatalf("configs %+v, want %+v", s.Input.Configs, want)
+	}
+	if c, ok := s.Config("groq"); !ok || !reflect.DeepEqual(c, want[1]) {
+		t.Errorf("Config(groq): %+v, %t", c, ok)
+	}
+	if _, ok := s.Config("azure"); ok {
+		t.Error("Config(azure) found a configuration none froze")
+	}
+	bare := derived(t, target())
+	if !reflect.DeepEqual(s.Cells, bare.Cells) || !reflect.DeepEqual(s.Offsets, bare.Offsets) {
+		t.Error("the frozen configurations changed the draws")
+	}
+	b, err := s.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l, err := Load(b); err != nil || !reflect.DeepEqual(l.Input.Configs, want) {
+		t.Fatalf("load: %v, configs %+v", err, l.Input.Configs)
+	}
+
+	for _, c := range []struct {
+		name string
+		cfg  RouteConfig
+		err  string
+	}{
+		{"not scheduled", RouteConfig{Route: "mistral", ConfigSHA256: sum, HostGroup: []string{"mistral"}}, `configuration of route "mistral", which is not scheduled`},
+		{"short hash", RouteConfig{Route: "azure", ConfigSHA256: "abcd", HostGroup: []string{"azure"}}, `route "azure": config_sha256 "abcd"`},
+		{"upper-case hash", RouteConfig{Route: "azure", ConfigSHA256: strings.ToUpper(sum), HostGroup: []string{"azure"}}, "is not a lowercase hex SHA-256"},
+		{"group without the route", RouteConfig{Route: "azure", ConfigSHA256: sum, HostGroup: []string{"bedrock"}}, `route "azure": host group [bedrock] must name the route`},
+		{"host twice", RouteConfig{Route: "azure", ConfigSHA256: sum, HostGroup: []string{"azure", "bedrock", "azure"}}, "host group [azure azure bedrock]"},
+		{"route twice", RouteConfig{Route: "groq", ConfigSHA256: sum, HostGroup: []string{"groq"}}, `route "groq" has two configurations`},
+	} {
+		bad := target()
+		bad.Configs = append(slices.Clone(in.Configs), c.cfg)
+		if _, err := New(bad); err == nil || !strings.Contains(err.Error(), c.err) {
+			t.Errorf("%s: %v, want %q", c.name, err, c.err)
+		}
+	}
+}
+
 // TestEdition ties the frame to the ceiling rule's edition and the ladder.
 func TestEdition(t *testing.T) {
 	if n := 2 * len(SlotHoursUTC); n != admission.ReleaseCells {

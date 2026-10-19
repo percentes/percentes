@@ -217,6 +217,9 @@ func newRoute(in routeInput) (*route, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkFrozen(cfg, sched); err != nil {
+		return nil, err
+	}
 	r := &route{cfg: cfg, configName: in.configName, sched: sched, runs: runs, out: in.out, dir: filepath.Join(in.out, name),
 		ledgerPath: in.ledgerPath, framesRoot: in.framesRoot, opPath: in.opPath, build: in.build, now: time.Now, wait: waitUntil}
 	r.cell, r.label, r.close = r.runCell, r.labelCell, r.windowClose

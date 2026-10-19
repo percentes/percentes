@@ -8,12 +8,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
@@ -63,6 +65,18 @@ type Input struct {
 	Last       string `json:"last"`
 	// Routes are the route names; New stores them sorted.
 	Routes []string `json:"routes"`
+	// Configs are the frozen configurations of routes, at most one per
+	// route; New stores them in route order.
+	Configs []RouteConfig `json:"configs,omitempty"`
+}
+
+// RouteConfig is a route's configuration as frozen with the schedule:
+// the file's SHA-256 and the routes of its model, its own among them,
+// sorted.
+type RouteConfig struct {
+	Route        string   `json:"route"`
+	ConfigSHA256 string   `json:"config_sha256"`
+	HostGroup    []string `json:"host_group"`
 }
 
 // Offset is a route's pinned start offset inside every slot.
@@ -240,6 +254,9 @@ func New(in Input) (*Schedule, error) {
 		return nil, err
 	}
 	in.Routes = routes
+	if in.Configs, err = routeConfigs(routes, in.Configs); err != nil {
+		return nil, err
+	}
 
 	for counter := 0; counter <= maxCounter; counter++ {
 		seed := in.MasterSeed
@@ -266,6 +283,47 @@ func New(in Input) (*Schedule, error) {
 		return &Schedule{Input: in, Counter: counter, Offsets: offsets, Cells: cells}, nil
 	}
 	return nil, fmt.Errorf("schedule: no Saturday and Sunday among the weekend dates within counter %d", maxCounter)
+}
+
+// routeConfigs checks cs against the sorted routes and returns them in
+// route order with each host group sorted.
+func routeConfigs(routes []string, cs []RouteConfig) ([]RouteConfig, error) {
+	if len(cs) == 0 {
+		return nil, nil
+	}
+	out := make([]RouteConfig, len(cs))
+	for i, c := range cs {
+		if !slices.Contains(routes, c.Route) {
+			return nil, fmt.Errorf("schedule: configuration of route %q, which is not scheduled", c.Route)
+		}
+		if b, err := hex.DecodeString(c.ConfigSHA256); err != nil || len(b) != sha256.Size || hex.EncodeToString(b) != c.ConfigSHA256 {
+			return nil, fmt.Errorf("schedule: route %q: config_sha256 %q is not a lowercase hex SHA-256", c.Route, c.ConfigSHA256)
+		}
+		c.HostGroup = slices.Clone(c.HostGroup)
+		slices.Sort(c.HostGroup)
+		if !slices.Contains(c.HostGroup, c.Route) || len(slices.Compact(slices.Clone(c.HostGroup))) != len(c.HostGroup) {
+			return nil, fmt.Errorf("schedule: route %q: host group %v must name the route and each host once", c.Route, c.HostGroup)
+		}
+		out[i] = c
+	}
+	slices.SortFunc(out, func(a, b RouteConfig) int { return strings.Compare(a.Route, b.Route) })
+	for i := 1; i < len(out); i++ {
+		if out[i].Route == out[i-1].Route {
+			return nil, fmt.Errorf("schedule: route %q has two configurations", out[i].Route)
+		}
+	}
+	return out, nil
+}
+
+// Config returns route's frozen configuration, false when the schedule
+// records none.
+func (s *Schedule) Config(route string) (RouteConfig, bool) {
+	for _, c := range s.Input.Configs {
+		if c.Route == route {
+			return c, true
+		}
+	}
+	return RouteConfig{}, false
 }
 
 func (s *Schedule) offset(route string) (time.Duration, error) {

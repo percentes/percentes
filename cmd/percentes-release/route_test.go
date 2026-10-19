@@ -22,7 +22,7 @@ import (
 // window close that appends the number of runs ran to closedAfter.
 func clockRoute(t *testing.T, start time.Time, outcomes func(schedule.Run) string, ran *[]schedule.Run) *route {
 	t.Helper()
-	sched := testSchedule(t, "groq", "other")
+	sched := testSchedule(t, nil, "groq", "other")
 	runs, err := sched.Runs("groq")
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestLoopRunsEveryCell(t *testing.T) {
 func TestLoopReruns(t *testing.T) {
 	var ran []schedule.Run
 	var failing []string
-	for _, c := range testSchedule(t, "groq", "other").Cells {
+	for _, c := range testSchedule(t, nil, "groq", "other").Cells {
 		if len(c.Attempts) == 2 && len(failing) < 3 {
 			failing = append(failing, c.Label)
 		}
@@ -139,7 +139,7 @@ func TestLoopReruns(t *testing.T) {
 func TestLoopMissedAndInterrupted(t *testing.T) {
 	var ran []schedule.Run
 	labelled = nil
-	sched := testSchedule(t, "groq", "other")
+	sched := testSchedule(t, nil, "groq", "other")
 	runs, _ := sched.Runs("groq")
 	start := runs[2].Start.Add(schedule.StartTolerance + time.Second)
 	r := clockRoute(t, start, counted, &ran)

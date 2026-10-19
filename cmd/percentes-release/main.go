@@ -24,17 +24,21 @@
 // printed.
 //
 // Before the window, schedule writes the committed schedule of the routes
-// whose configurations it is given, ledger create starts the release
-// ledger with their caps, ledger price records a route's prices at the
-// token bounds of its cells and of its ceiling check, ceiling-check
-// sends a route's ceiling check, admitted in the ledger, and writes the
-// record run reads with --ceiling-probe, and public-config writes a
-// route's configuration as published, the file the freeze commits, with
+// whose configurations it is given, with each configuration's SHA-256
+// and host group, which a route's run must match, ledger create starts
+// the release ledger with their caps, ledger price records a route's
+// prices at the token bounds of its cells and of its ceiling check,
+// ceiling-check sends a route's ceiling check, admitted in the ledger,
+// and writes the record run reads with --ceiling-probe, and
+// public-config writes a route's configuration as published, the file
+// the freeze commits, with
 // each confidential limit's value withheld. Every command reads the
 // configuration as loaded. After
 // the window, pages writes the index page and each route's page from the
-// cells' records, and publish-check checks the release publication
-// record against the cells, the pages and the files it names.
+// cells' records, which must carry one ceiling choice and one set of
+// probe records across the hosts of a model, and publish-check checks
+// the release publication record against the cells, the pages and the
+// files it names.
 //
 // Before the freeze, rehearse runs the acceptance run: one cell of each
 // of six mock routes, served on loopback by this process in the

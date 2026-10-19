@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,7 +15,8 @@ import (
 
 // scheduleCmd writes the committed schedule (SPEC-HOSTED HA3 point 9) of
 // the routes whose configurations are given, named by their targets,
-// whose host groups agree. It never replaces an existing file.
+// whose host groups agree, with each configuration's SHA-256 and host
+// group, which run requires. It never replaces an existing file.
 func scheduleCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("schedule", flag.ContinueOnError)
 	seed := fs.String("master-seed", "", "the release's master seed (required)")
@@ -35,6 +38,7 @@ func scheduleCmd(args []string) (int, error) {
 	in := schedule.Input{MasterSeed: *seed, First: *first, Last: *last}
 	for _, cfg := range cfgs {
 		in.Routes = append(in.Routes, cfg.Target.Name)
+		in.Configs = append(in.Configs, frozenConfig(cfg))
 	}
 	s, err := schedule.New(in)
 	if err != nil {
@@ -67,20 +71,48 @@ func scheduleCmd(args []string) (int, error) {
 	return exitOK, nil
 }
 
+// hostGroup is the routes of cfg's model: its target and its
+// release.other_hosts, sorted.
+func hostGroup(cfg *config.Config) []string {
+	g := []string{cfg.Target.Name}
+	for _, h := range cfg.Release.OtherHosts {
+		g = append(g, h.Route)
+	}
+	slices.Sort(g)
+	return g
+}
+
+// frozenConfig is cfg's record in the schedule: the SHA-256 of its file
+// and its host group.
+func frozenConfig(cfg *config.Config) schedule.RouteConfig {
+	sum := sha256.Sum256(cfg.Raw)
+	return schedule.RouteConfig{Route: cfg.Target.Name, ConfigSHA256: hex.EncodeToString(sum[:]), HostGroup: hostGroup(cfg)}
+}
+
+// checkFrozen refuses cfg unless the schedule froze its route's
+// configuration as cfg's file and host group.
+func checkFrozen(cfg *config.Config, sched *schedule.Schedule) error {
+	name := cfg.Target.Name
+	want, ok := sched.Config(name)
+	if !ok {
+		return fmt.Errorf("run: the schedule freezes no configuration of route %s", name)
+	}
+	got := frozenConfig(cfg)
+	if !slices.Equal(got.HostGroup, want.HostGroup) {
+		return fmt.Errorf("run: route %s: host group %v; the schedule froze %v", name, got.HostGroup, want.HostGroup)
+	}
+	if got.ConfigSHA256 != want.ConfigSHA256 {
+		return fmt.Errorf("run: route %s: configuration sha256 %s; the schedule froze %s", name, got.ConfigSHA256, want.ConfigSHA256)
+	}
+	return nil
+}
+
 // checkHostGroups requires each route's other hosts to be routes given,
 // at the model their configurations send, and to name the same hosts.
 func checkHostGroups(cfgs []*config.Config) error {
 	byName := map[string]*config.Config{}
 	for _, c := range cfgs {
 		byName[c.Target.Name] = c
-	}
-	group := func(c *config.Config) []string {
-		g := []string{c.Target.Name}
-		for _, h := range c.Release.OtherHosts {
-			g = append(g, h.Route)
-		}
-		slices.Sort(g)
-		return g
 	}
 	for _, c := range cfgs {
 		for _, h := range c.Release.OtherHosts {
@@ -90,8 +122,8 @@ func checkHostGroups(cfgs []*config.Config) error {
 				return fmt.Errorf("schedule: route %s: other host %s has no configuration given", c.Target.Name, h.Route)
 			case o.Target.ModelName != h.Model:
 				return fmt.Errorf("schedule: route %s: other host %s at model %q; its configuration sends %q", c.Target.Name, h.Route, h.Model, o.Target.ModelName)
-			case !slices.Equal(group(c), group(o)):
-				return fmt.Errorf("schedule: routes %s and %s name different hosts of their model: %v and %v", c.Target.Name, h.Route, group(c), group(o))
+			case !slices.Equal(hostGroup(c), hostGroup(o)):
+				return fmt.Errorf("schedule: routes %s and %s name different hosts of their model: %v and %v", c.Target.Name, h.Route, hostGroup(c), hostGroup(o))
 			}
 		}
 	}

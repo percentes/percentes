@@ -25,8 +25,8 @@ import (
 
 // pagesRoute is route name at endpoint over a fixture, writing under out
 // and frames when they are given, with the path of its configuration
-// file.
-func pagesRoute(t *testing.T, name, endpoint, out, frames string) (*route, string) {
+// file. Each edit changes the fixture before the route starts.
+func pagesRoute(t *testing.T, name, endpoint, out, frames string, edits ...func(*fixture)) (*route, string) {
 	t.Helper()
 	enoughOpenFiles(t)
 	path := routeConfigFile(t, name, endpoint, "10")
@@ -38,6 +38,9 @@ func pagesRoute(t *testing.T, name, endpoint, out, frames string) (*route, strin
 	f := newFixture(t, cfg, "+0.005032")
 	if out != "" {
 		f.in.out, f.in.framesRoot = out, frames
+	}
+	for _, edit := range edits {
+		edit(f)
 	}
 	r, err := newRoute(f.in)
 	if err != nil {
@@ -363,7 +366,7 @@ func keys(m map[string][]byte) []string {
 // record or with cells and no configuration, a configuration other than
 // the one the cells ran, a running cell, a labelled cell without its
 // manifest, a run record that disagrees with its directory or manifest,
-// and a verdict that differs between cells.
+// and a ceiling choice or a verdict that differs between cells.
 func TestPagesCmdRefusals(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	for _, c := range []struct {
@@ -420,6 +423,12 @@ func TestPagesCmdRefusals(t *testing.T) {
 			editJSON(t, filepath.Join(g.cellDir(g.runs[1]), cellFile), func(c *cellRecord) { c.Outcome = outcomeCounted })
 			return nil
 		}, "counted in the run record, blocked in the manifest"},
+		{"ceiling choice differs", func(t *testing.T, g *route, _, _ string) []string {
+			editJSON(t, filepath.Join(g.cellDir(g.runs[1]), evidence.ManifestFile), func(m *evidence.Manifest) {
+				m.Release.Ceiling.Reason = "groq failed at 512; every host passed at 1024"
+			})
+			return nil
+		}, "the ceiling choice or its probe records differ from the route's other cells'"},
 		{"verdict differs", func(t *testing.T, g *route, _, _ string) []string {
 			editJSON(t, filepath.Join(g.cellDir(g.runs[1]), evidence.ManifestFile), func(m *evidence.Manifest) {
 				m.Release.Admission.Steps[0].Demands[0].Fraction += 0.01
@@ -447,6 +456,59 @@ func TestPagesCmdRefusals(t *testing.T) {
 				args = a
 			}
 			code, err := pagesCmd(args)
+			if code != exitError || err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("exit %d: %v, want %q", code, err, c.want)
+			}
+			if _, err := os.Stat(pages); !os.IsNotExist(err) {
+				t.Errorf("pages written on a refusal: %v", err)
+			}
+		})
+	}
+}
+
+// The hosts of one model page when their manifests carry one ceiling
+// choice and one set of probe records, and are refused, writing nothing,
+// when a host's process read another set of probe records or its
+// manifest records another choice.
+func TestPagesHostGroup(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
+	extra := func(f *fixture) {
+		for _, h := range []string{"baseten", "groq"} {
+			f.in.probeFiles = append(f.in.probeFiles, writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, h, 1024, true)))
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		edit     func(*fixture)
+		manifest func(*evidence.Manifest)
+		want     string
+	}{
+		{"one choice", func(*fixture) {}, nil, ""},
+		{"other probe records", extra, nil, "pages: routes groq and baseten, hosts of one model, carry different ceiling probe records"},
+		{"other choice", func(*fixture) {}, func(m *evidence.Manifest) {
+			m.Release.Ceiling.Reason = "groq failed at 512; every host passed at 1024"
+		}, "pages: routes groq and baseten, hosts of one model, ran at different ceiling choices"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			groq, groqCfg := pagesRoute(t, "groq", e.url(), "", "")
+			baseten, basetenCfg := pagesRoute(t, "baseten", e.url(), groq.out, groq.framesRoot, c.edit)
+			for _, r := range []*route{groq, baseten} {
+				shortLadder(r)
+				if rec := runCellOK(t, r, r.runs[0]); rec.Outcome != outcomeBlocked {
+					t.Fatalf("%s: outcome %s %q", r.cfg.Target.Name, rec.Outcome, rec.Reasons)
+				}
+			}
+			if c.manifest != nil {
+				editJSON(t, filepath.Join(baseten.cellDir(baseten.runs[0]), evidence.ManifestFile), c.manifest)
+			}
+			pages := filepath.Join(t.TempDir(), "pages")
+			code, err := pagesCmd([]string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--config", basetenCfg, "--pages", pages})
+			if c.want == "" {
+				if code != exitOK || err != nil {
+					t.Fatalf("exit %d: %v", code, err)
+				}
+				return
+			}
 			if code != exitError || err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("exit %d: %v, want %q", code, err, c.want)
 			}

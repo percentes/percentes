@@ -114,7 +114,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		cfgs[i] = e2eConfig(t, f, "http://"+mocks[i].Addr()+f.path)
 		names[i] = f.name
 	}
-	sb, err := testSchedule(t, names...).JSON()
+	sb, err := testSchedule(t, cfgs, names...).JSON()
 	if err != nil {
 		t.Fatal(err)
 	}

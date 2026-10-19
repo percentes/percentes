@@ -48,6 +48,19 @@ func TestNewRouteRefusals(t *testing.T) {
 			openFilesLimit = func() (uint64, error) { return 10240, nil }
 		}, "open-file limit 10240 is below 65536"},
 		{"not in the schedule", func(t *testing.T, f *fixture) { f.in.cfg.Target.Name = "absent" }, `no route "absent"`},
+		{"configuration not frozen", func(t *testing.T, f *fixture) {
+			sb, err := testSchedule(t, nil, "groq", "other").JSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", sb)
+		}, "run: the schedule freezes no configuration of route groq"},
+		{"configuration changed", func(t *testing.T, f *fixture) {
+			f.in.cfg.Raw = append(slices.Clone(f.in.cfg.Raw), "# changed\n"...)
+		}, "run: route groq: configuration sha256 "},
+		{"host group changed", func(t *testing.T, f *fixture) {
+			f.in.cfg.Release.OtherHosts = append(f.in.cfg.Release.OtherHosts, config.ModelHost{Route: "azure", Model: "openai/gpt-oss-120b"})
+		}, "run: route groq: host group [azure baseten groq]; the schedule froze [baseten groq]"},
 		{"no price", func(t *testing.T, f *fixture) {
 			f.in.ledgerPath = filepath.Join(t.TempDir(), "ledger.jsonl")
 			if _, err := admission.Create(f.in.ledgerPath, mustCaps(t, f.in.cfg)); err != nil {
@@ -307,7 +320,7 @@ func TestNewRouteCeilingRecords(t *testing.T) {
 // the warm-up's largest over every cell attempt.
 func TestExactPlan(t *testing.T) {
 	cfg := releaseConfig(t, "https://api.example.test/openai/v1/chat/completions")
-	sched := testSchedule(t, "groq")
+	sched := testSchedule(t, nil, "groq")
 	p, err := exactPlan(cfg, sched)
 	if err != nil {
 		t.Fatal(err)

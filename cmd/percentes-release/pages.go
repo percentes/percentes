@@ -12,10 +12,12 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
+	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
 )
@@ -29,11 +31,14 @@ const (
 )
 
 // routeRecords are one route's cells as the pages read them: the
-// ceiling rule's verdict every manifest carries, the counted cells'
-// records, the attempts outside the frame, the model_mismatch attempts'
-// identifiers and the route's window-close record, nil when it has none.
+// ceiling rule's verdict, the ceiling choice and the probe records every
+// manifest carries, the counted cells' records, the attempts outside the
+// frame, the model_mismatch attempts' identifiers and the route's
+// window-close record, nil when it has none.
 type routeRecords struct {
 	verdict    *admission.Verdict
+	ceiling    probe.CeilingChoice
+	probes     []evidence.FileRef
 	cells      []report.CellRecords
 	mismatches []report.ModelMismatch
 	close      *evidence.WindowClose
@@ -94,7 +99,8 @@ type releasePages struct {
 
 // buildPages builds the index page and each route's page from the cells
 // of cfgs' routes under out. Every route with a cell under out must be
-// among cfgs.
+// among cfgs, and the routes of one model among them must carry one
+// ceiling choice and one set of probe records.
 func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, error) {
 	given := map[string]bool{}
 	rp := &releasePages{routes: make([]report.IndexRoute, len(cfgs)), recs: make([]*routeRecords, len(cfgs))}
@@ -114,6 +120,9 @@ func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, e
 		if name := filepath.Base(filepath.Dir(filepath.Dir(p))); !given[name] {
 			return nil, fmt.Errorf("pages: route %s has cells under %s and no --config", name, out)
 		}
+	}
+	if err := sameCeiling(cfgs, rp.recs); err != nil {
+		return nil, err
 	}
 	if rp.index, err = report.NewIndex(rp.routes); err != nil {
 		return nil, err
@@ -141,6 +150,25 @@ func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, e
 	return rp, nil
 }
 
+// sameCeiling refuses routes of one model, each the other's host, whose
+// manifests carry different ceiling choices or probe records.
+func sameCeiling(cfgs []*config.Config, recs []*routeRecords) error {
+	for i, cfg := range cfgs {
+		for _, h := range cfg.Release.OtherHosts {
+			j := slices.IndexFunc(cfgs, func(c *config.Config) bool { return c.Target.Name == h.Route })
+			switch {
+			case j < 0:
+			case !reflect.DeepEqual(recs[i].ceiling, recs[j].ceiling):
+				return fmt.Errorf("pages: routes %s and %s, hosts of one model, ran at different ceiling choices: %+v and %+v",
+					cfg.Target.Name, h.Route, recs[i].ceiling, recs[j].ceiling)
+			case !slices.Equal(recs[i].probes, recs[j].probes):
+				return fmt.Errorf("pages: routes %s and %s, hosts of one model, carry different ceiling probe records", cfg.Target.Name, h.Route)
+			}
+		}
+	}
+	return nil
+}
+
 func marshalPage(v any) ([]byte, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -151,7 +179,8 @@ func marshalPage(v any) ([]byte, error) {
 
 // readRouteCells reads cfg's route's cells under out. Every attempt with
 // a manifest must pass the completeness check against cfg's file and the
-// frame store, and every manifest must carry the same verdict. An
+// frame store, and every manifest must carry the same verdict, ceiling
+// choice and probe records. An
 // attempt enters the route's frame when its run record and its manifest
 // both count it, at most one attempt per scheduled cell; only a missed
 // or interrupted attempt may have its run record alone. Each counted
@@ -199,9 +228,11 @@ func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, 
 		}
 		switch {
 		case rr.verdict == nil:
-			rr.verdict = m.Release.Admission
+			rr.verdict, rr.ceiling, rr.probes = m.Release.Admission, m.Release.Ceiling, m.Release.Probes
 		case !reflect.DeepEqual(rr.verdict, m.Release.Admission):
 			return nil, fmt.Errorf("pages: %s: the ceiling-rule verdict differs from the route's other cells'", dir)
+		case !reflect.DeepEqual(rr.ceiling, m.Release.Ceiling) || !slices.Equal(rr.probes, m.Release.Probes):
+			return nil, fmt.Errorf("pages: %s: the ceiling choice or its probe records differ from the route's other cells'", dir)
 		}
 		switch {
 		case rec.Outcome == outcomeCounted && !m.Counted():
