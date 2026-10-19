@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -114,6 +115,46 @@ func TestPublishedRefusals(t *testing.T) {
 		if b, err := c.Published(); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: must fail naming %q, got %v and\n%s", tc.name, tc.want, err, b)
 		}
+	}
+}
+
+// A file of more than one YAML document is refused by Parse, Decode and
+// Published, whatever the second document holds; one leading "---" is
+// one document.
+func TestOneDocument(t *testing.T) {
+	const one = "one YAML document required"
+	ref := confidentialRef(t, confidentialTPM)
+	for name, tail := range map[string]string{
+		"a mapping":           "---\nleak: " + secretValue + "\n",
+		"a string":            "---\nnote: \"tpm " + secretValue + "\"\n",
+		"not YAML":            "---\n: : [\n",
+		"a comment":           "---\n# tokens_per_minute is " + secretValue + "\n",
+		"an empty document":   "---\n",
+		"after an end marker": "...\n---\nleak: " + secretValue + "\n",
+	} {
+		raw := append(slices.Clone(ref), tail...)
+		if _, err := Parse(raw); err == nil || !strings.Contains(err.Error(), one) {
+			t.Errorf("%s: Parse: %v", name, err)
+		}
+		if _, err := Decode(raw); err == nil || !strings.Contains(err.Error(), one) {
+			t.Errorf("%s: Decode: %v", name, err)
+		}
+		c, err := Parse(ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Raw = raw
+		if b, err := c.Published(); err == nil || !strings.Contains(err.Error(), one) {
+			t.Errorf("%s: published %v\n%s", name, err, b)
+		}
+	}
+
+	c, err := Parse(append([]byte("---\n"), ref...))
+	if err != nil {
+		t.Fatalf("one leading ---: %v", err)
+	}
+	if b, err := c.Published(); err != nil || bytes.Contains(b, []byte(secretValue)) || !bytes.HasPrefix(b, []byte("---\n")) {
+		t.Fatalf("one leading ---: published %v\n%s", err, b)
 	}
 }
 

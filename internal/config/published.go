@@ -50,7 +50,8 @@ func RetainedError(text string) string {
 // it is Raw. It refuses a confidential value that is not a plain scalar
 // written in target.limits itself, a comment inside that limit, and a
 // comment or string scalar anywhere in the file that carries one of the
-// value's forms (valueForms) outside a hex run or a date.
+// value's forms (valueForms) outside a hex run or a date. It refuses a
+// file of more than one YAML document.
 func (c *Config) Published() ([]byte, error) {
 	if !c.Target.Confidential() {
 		return c.Raw, nil
@@ -59,7 +60,7 @@ func (c *Config) Published() ([]byte, error) {
 		return nil, fmt.Errorf("config: published: "+format, a...)
 	}
 	var doc yaml.Node
-	if err := yaml.Unmarshal(c.Raw, &doc); err != nil {
+	if err := decodeOne(c.Raw, &doc, false); err != nil {
 		return fail("%v", err)
 	}
 	var root *yaml.Node
@@ -133,10 +134,10 @@ func (c *Config) Published() ([]byte, error) {
 	}
 
 	var want, got any
-	if err := yaml.Unmarshal(c.Raw, &want); err != nil {
+	if err := decodeOne(c.Raw, &want, false); err != nil {
 		return fail("%v", err)
 	}
-	if err := yaml.Unmarshal(out, &got); err != nil {
+	if err := decodeOne(out, &got, false); err != nil {
 		return fail("%v", err)
 	}
 	items, _ := mapAt(mapAt(want, "target"), "limits").([]any)

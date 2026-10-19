@@ -2,7 +2,9 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -37,12 +39,31 @@ func Parse(raw []byte) (*Config, error) {
 
 // Decode strictly decodes a run configuration without validating it.
 func Decode(raw []byte) (*Config, error) {
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	dec.KnownFields(true)
 	var cfg Config
-	if err := dec.Decode(&cfg); err != nil {
+	if err := decodeOne(raw, &cfg, true); err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 	cfg.Raw = raw
 	return &cfg, nil
+}
+
+// errOneDocument is the refusal of a file of more than one YAML document.
+var errOneDocument = errors.New("one YAML document required")
+
+// decodeOne decodes raw into v and refuses a YAML document after the
+// first; with known set, a field v does not declare is an error.
+func decodeOne(raw []byte, v any, known bool) error {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(known)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	var extra yaml.Node
+	switch err := dec.Decode(&extra); {
+	case err == nil:
+		return errOneDocument
+	case !errors.Is(err, io.EOF):
+		return fmt.Errorf("%w: %w", errOneDocument, err)
+	}
+	return nil
 }
