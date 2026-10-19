@@ -494,18 +494,28 @@ func rateLimitHeaders(h map[string][]string) map[string][]string {
 }
 
 // Retains reports whether t withholds a probe value: the values of the
-// headers target.retained_headers names, or the limits body.
+// headers target.retained_headers names, the limits body, or, on a target
+// with a confidential limit, a non-200 body and the in-band error text.
 func Retains(t *config.Target) bool {
-	return len(t.RetainedHeaders) > 0 || t.Probe != nil && t.Probe.LimitsRetained
+	return len(t.RetainedHeaders) > 0 || t.Probe != nil && t.Probe.LimitsRetained || t.Confidential()
 }
 
 // Exposed lists what rec, a probe of t's route, carries that t withholds:
 // each header target.retained_headers names with a value other than
 // config.RetainedHeaderValue, then "limits body" when
-// target.probe.limits_retained is set and the limits body is kept, then
-// "snapshot <i> value" for each snapshot with a value of a limit marked
-// config.MarkingConfidential in rec or at index i of target.limits.
+// target.probe.limits_retained is set and the limits body is kept, then,
+// on a target with a confidential limit, "request <i> body" for each
+// request whose body is kept and "request <i> in-band error" for each
+// whose in-band error text is not its stand-in (config.RetainedError),
+// then "snapshot <i> value" for each snapshot with a value of a limit
+// marked config.MarkingConfidential in rec or at index i of
+// target.limits.
 func Exposed(t *config.Target, rec *ReleaseRecord) []string {
+	return exposed(t, rec, t.Confidential())
+}
+
+// exposed is Exposed with confidential in place of t.Confidential().
+func exposed(t *config.Target, rec *ReleaseRecord, confidential bool) []string {
 	var out []string
 	note := func(h map[string][]string) {
 		for name, vs := range h {
@@ -531,6 +541,14 @@ func Exposed(t *config.Target, rec *ReleaseRecord) []string {
 	if b := rec.Limits; t.Probe != nil && t.Probe.LimitsRetained && b != nil && b.Body != nil && (b.Body.Text != nil || b.Body.Base64 != "") {
 		out = append(out, "limits body")
 	}
+	for _, r := range rec.Requests {
+		if b := r.Exchange.Body; confidential && b != nil && (b.Text != nil || b.Base64 != "") {
+			out = append(out, fmt.Sprintf("request %d body", r.Index))
+		}
+		if s := r.Shape; confidential && s != nil && s.Error != "" && s.Error != config.RetainedError(s.Error) {
+			out = append(out, fmt.Sprintf("request %d in-band error", r.Index))
+		}
+	}
 	for i, sn := range rec.Snapshots {
 		marked := sn.Marking == config.MarkingConfidential || i < len(t.Limits) && t.Limits[i].Marking == config.MarkingConfidential
 		if marked && sn.Value != 0 {
@@ -543,11 +561,13 @@ func Exposed(t *config.Target, rec *ReleaseRecord) []string {
 // ExposedByMarking is Exposed for a probe of a route whose configuration
 // is not at hand, from the markings its snapshots record: under a
 // snapshot marked config.MarkingConfidential, every header whose name
-// contains "ratelimit" and the limits body are withheld, as the
-// configuration check requires of that route (SPEC-HOSTED HA3 point 15).
+// contains "ratelimit", the limits body, each non-200 body and each
+// in-band error text are withheld; the configuration check requires the
+// first two of that route (SPEC-HOSTED HA3 point 15).
 func ExposedByMarking(rec *ReleaseRecord) []string {
 	t := &config.Target{}
-	if slices.ContainsFunc(rec.Snapshots, func(s Snapshot) bool { return s.Marking == config.MarkingConfidential }) {
+	marked := slices.ContainsFunc(rec.Snapshots, func(s Snapshot) bool { return s.Marking == config.MarkingConfidential })
+	if marked {
 		t.Probe = &config.TargetProbe{LimitsRetained: true}
 		names := func(h map[string][]string) {
 			for name := range rateLimitHeaders(h) {
@@ -562,7 +582,7 @@ func ExposedByMarking(rec *ReleaseRecord) []string {
 			names(rec.Limits.Headers)
 		}
 	}
-	return Exposed(t, rec)
+	return exposed(t, rec, marked)
 }
 
 // snapshot is l as published, with a file source's retained copy in dir

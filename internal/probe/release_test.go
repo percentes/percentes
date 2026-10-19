@@ -709,6 +709,106 @@ func TestReleaseProbeRetains(t *testing.T) {
 	}
 }
 
+// On a route with a confidential limit, each non-200 body and each
+// in-band error text are replaced by stand-ins with their SHA-256 and
+// length, the requests still fail the check on them, and the retained
+// file holds them. A record carrying them is exposed. A route without a
+// confidential limit keeps them in the record.
+func TestReleaseProbeConfidentialErrors(t *testing.T) {
+	noSpacing(t)
+	const errBody = `{"error":{"message":"Limit qz250013 tokens per minute reached"}}`
+	const inBand = `{"type":"rate_limit_error","message":"qz250013 tokens per minute"}`
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1)%2 == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, errBody) //nolint:errcheck
+			return
+		}
+		sseHandler("data: {\"error\":"+inBand+"}\n\n", answerFrame, stopFrame, doneFrame)(w, r)
+	}))
+	defer srv.Close()
+	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
+	cfg.Target.Limits[1].Marking = config.MarkingConfidential
+	if !Retains(&cfg.Target) {
+		t.Fatal("a route with a confidential limit withholds nothing")
+	}
+
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if len(rec.Requests) != CeilingRequests {
+		t.Fatalf("%d requests", len(rec.Requests))
+	}
+	bodySum, errSum := sha256.Sum256([]byte(errBody)), sha256.Sum256([]byte(inBand))
+	for i, r := range rec.Requests {
+		b, s := r.Exchange.Body, r.Shape
+		if i%2 == 0 {
+			if r.Exchange.Status != http.StatusTooManyRequests || b == nil || b.Text != nil || b.Base64 != "" || !b.Retained ||
+				b.SHA256 != hex.EncodeToString(bodySum[:]) || b.Bytes != len(errBody) || r.Fail != "status 429" {
+				t.Fatalf("request %d: status %d body %+v fail %q", i, r.Exchange.Status, b, r.Fail)
+			}
+			continue
+		}
+		if b != nil || s == nil || s.Error != `{"type":"rate_limit_error"}` || s.ErrorSHA256 != hex.EncodeToString(errSum[:]) ||
+			s.ErrorBytes != len(inBand) || r.Fail != "in-band error" {
+			t.Fatalf("request %d: body %+v shape %+v fail %q", i, b, s, r.Fail)
+		}
+	}
+	if e := Exposed(&cfg.Target, rec); e != nil {
+		t.Fatalf("exposed %q", e)
+	}
+	if err := rec.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+		t.Fatal(err)
+	}
+	path, err := Write(t.TempDir(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(path); err != nil || bytes.Contains(b, []byte("qz250013")) {
+		t.Fatalf("%s carries a withheld text (%v):\n%s", File, err, b)
+	}
+	held, err := WriteRetained(filepath.Join(t.TempDir(), "frames"), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back RetainedRecord
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < CeilingRequests; i++ {
+		e := back.Exchanges[fmt.Sprintf("requests.%d", i)]
+		if i%2 == 0 && (e == nil || e.Body == nil || e.Body.Text == nil || *e.Body.Text != errBody || e.StreamError != "") ||
+			i%2 == 1 && (e == nil || e.Body != nil || e.StreamError != inBand) {
+			t.Fatalf("retained request %d: %+v\n%s", i, e, raw)
+		}
+	}
+
+	exposed := *rec
+	exposed.Requests = append([]CheckRequest(nil), rec.Requests...)
+	exposed.Requests[0].Exchange.Body = rec.Requests[0].Exchange.Retained.Body
+	shape := *rec.Requests[1].Shape
+	shape.Error = inBand
+	exposed.Requests[1].Shape = &shape
+	if e := Exposed(&cfg.Target, &exposed); fmt.Sprint(e) != "[request 0 body request 1 in-band error]" {
+		t.Fatalf("exposed %q", e)
+	}
+	if e := ExposedByMarking(&exposed); fmt.Sprint(e) != "[request 0 body request 1 in-band error]" {
+		t.Fatalf("exposed by marking %q", e)
+	}
+
+	cfg.Target.Limits[1].Marking = config.MarkingPublic
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if b, s := rec.Requests[0].Exchange.Body, rec.Requests[1].Shape; b == nil || b.Text == nil || *b.Text != errBody || s == nil || s.Error != inBand || s.ErrorSHA256 != "" {
+		t.Fatalf("public route: body %+v shape %+v", b, s)
+	}
+	if Retains(&cfg.Target) {
+		t.Fatal("a route withholding nothing retains")
+	}
+}
+
 // Each limit record is carried; a file source's retained copy is hashed
 // and a mismatch or a missing copy is a finding.
 func TestReleaseProbeSnapshots(t *testing.T) {

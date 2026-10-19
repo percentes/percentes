@@ -116,3 +116,22 @@ func TestPublishedRefusals(t *testing.T) {
 		}
 	}
 }
+
+// An in-band error's stand-in keeps the object's "type" string and
+// nothing else, and is its own stand-in.
+func TestRetainedError(t *testing.T) {
+	for in, want := range map[string]string{
+		`{"type":"rate_limit_error","message":"` + secretValue + ` tokens per minute"}`: `{"type":"rate_limit_error"}`,
+		`{"message":"` + secretValue + ` tokens per minute"}`:                           `{}`,
+		`{"type":null,"limit":` + secretValue + `}`:                                     `{}`,
+		`{"type":529}`: `{}`,
+		`{"type":"rate_limit_error","message":"` + secretValue: RetainedHeaderValue,
+		`limit ` + secretValue + ` reached`:                    RetainedHeaderValue,
+		`null`:                                                 RetainedHeaderValue,
+	} {
+		got := RetainedError(in)
+		if got != want || RetainedError(got) != got {
+			t.Errorf("%q: stand-in %q (its own %q), want %q", in, got, RetainedError(got), want)
+		}
+	}
+}

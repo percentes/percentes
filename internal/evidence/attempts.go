@@ -9,6 +9,8 @@ package evidence
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -73,8 +75,13 @@ type Record struct {
 	ReportedModel     string          `json:"reported_model,omitempty"`
 	ModelMismatch     []string        `json:"model_mismatch,omitempty"`
 	SystemFingerprint string          `json:"system_fingerprint,omitempty"`
-	StreamError       string          `json:"stream_error,omitempty"`
-	UnknownEvents     int             `json:"unknown_events,omitempty"`
+	// StreamError is the first in-band error object. On a target with a
+	// confidential limit it is config.RetainedError's stand-in, with the
+	// SHA-256 and length of the text, which the frame store keeps.
+	StreamError       string `json:"stream_error,omitempty"`
+	StreamErrorSHA256 string `json:"stream_error_sha256,omitempty"`
+	StreamErrorBytes  int    `json:"stream_error_bytes,omitempty"`
+	UnknownEvents     int    `json:"unknown_events,omitempty"`
 	// Answer is the visible content, present for hosted targets outside
 	// the release profile; a release keeps it in the frame store only.
 	// Reasoning text is never recorded here.
@@ -170,6 +177,11 @@ func record(r *loadgen.Request, cfg *config.Config) Record {
 		ReasoningChunks:   r.ReasoningChunks,
 		FirstReasoningNs:  r.FirstReasoningNs,
 	}
+	if r.StreamError != "" && cfg.Target.Confidential() {
+		sum := sha256.Sum256([]byte(r.StreamError))
+		rec.StreamError = config.RetainedError(r.StreamError)
+		rec.StreamErrorSHA256, rec.StreamErrorBytes = hex.EncodeToString(sum[:]), len(r.StreamError)
+	}
 	if len(cfg.Target.Shape().Refusal) > 0 {
 		refused := r.RefusalBytes > 0
 		rec.Refusal, rec.RefusalBytes = &refused, r.RefusalBytes
@@ -263,7 +275,7 @@ func scoreOf(s *score.Scorer, a score.Attempt) *Score {
 // Request is the request rec records. The fields the per-attempt record
 // does not carry are zero: inter-token gaps, replica, reasoning and
 // refusal text, the non-200 body, the frames, and a release request's
-// answer.
+// answer. A withheld in-band error is its stand-in.
 func (rec *Record) Request() loadgen.Request {
 	r := loadgen.Request{
 		Index:             rec.Index,

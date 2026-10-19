@@ -55,8 +55,12 @@ type Shape struct {
 	// appeared.
 	Refusals []string `json:"refusals,omitempty"`
 	// Error is the first in-band error object at a configured error path,
-	// compacted and cut at errorBodyLimit bytes.
-	Error string `json:"error,omitempty"`
+	// compacted and cut at errorBodyLimit bytes. On a target with a
+	// confidential limit it is config.RetainedError's stand-in, and
+	// ErrorSHA256 and ErrorBytes are the SHA-256 and length of the text.
+	Error       string `json:"error,omitempty"`
+	ErrorSHA256 string `json:"error_sha256,omitempty"`
+	ErrorBytes  int    `json:"error_bytes,omitempty"`
 	// ContentEvents and ReasoningEvents count events whose first choice
 	// carries text in the configured content key, or in a configured
 	// reasoning key; the first such event's arrival is in Ns.

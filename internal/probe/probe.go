@@ -131,7 +131,8 @@ type Exchange struct {
 	HeaderNames []string            `json:"header_names,omitempty"`
 	FirstByteNs int64               `json:"first_byte_ns,omitempty"`
 	DoneNs      int64               `json:"done_ns"`
-	// Body is a non-200 body or the limits body, cut at its limit.
+	// Body is a non-200 body or the limits body, cut at its limit; a
+	// target with a confidential limit withholds a non-200 body (withhold).
 	Body *Body `json:"body,omitempty"`
 	// Error is the redacted Go error of a failure before or during the
 	// response.
@@ -141,11 +142,13 @@ type Exchange struct {
 }
 
 // Retained is what one exchange's record withholds: the values of the
-// headers target.retained_headers names, and the limits body when
-// target.probe.limits_retained is set.
+// headers target.retained_headers names, the limits body when
+// target.probe.limits_retained is set, and on a target with a
+// confidential limit a non-200 body and the in-band error text.
 type Retained struct {
-	Headers map[string][]string `json:"headers,omitempty"`
-	Body    *Body               `json:"body,omitempty"`
+	Headers     map[string][]string `json:"headers,omitempty"`
+	Body        *Body               `json:"body,omitempty"`
+	StreamError string              `json:"stream_error,omitempty"`
 }
 
 // DNS is the resolution of the request's host.
@@ -184,13 +187,15 @@ type Certificate struct {
 
 // Body is response bytes: text when valid UTF-8, base64 otherwise.
 // Truncated says the body ran past the limit and the rest was not read.
-// A retained body carries only the SHA-256 of the bytes kept.
+// A retained body carries only the SHA-256 of the bytes kept, and a
+// withheld non-200 body also their length.
 type Body struct {
 	Text      *string `json:"text,omitempty"`
 	Base64    string  `json:"base64,omitempty"`
 	Truncated bool    `json:"truncated,omitempty"`
 	Retained  bool    `json:"retained,omitempty"`
 	SHA256    string  `json:"sha256,omitempty"`
+	Bytes     int     `json:"bytes,omitempty"`
 }
 
 func bodyOf(b []byte, truncated bool) *Body {
@@ -407,7 +412,32 @@ func (p *prober) post(ctx context.Context, url, model string, body []byte, key s
 		out.shape = readShape(r, p.target.Adapter, p.target.Shape(), p.mask, since, p.timeout)
 	})
 	out.ex.Model = p.mask.str(model)
+	if p.target.Confidential() {
+		withhold(&out.ex, out.shape)
+	}
 	return out
+}
+
+// withhold moves ex's non-200 body and s's in-band error text into
+// ex.Retained, leaving a stand-in with the SHA-256 and length of each.
+func withhold(ex *Exchange, s *Shape) {
+	held := func() *Retained {
+		if ex.Retained == nil {
+			ex.Retained = &Retained{}
+		}
+		return ex.Retained
+	}
+	if b := ex.Body; b != nil {
+		held().Body = b
+		raw := b.raw()
+		sum := sha256.Sum256(raw)
+		ex.Body = &Body{Truncated: b.Truncated, Retained: true, SHA256: hex.EncodeToString(sum[:]), Bytes: len(raw)}
+	}
+	if s != nil && s.Error != "" {
+		held().StreamError = s.Error
+		sum := sha256.Sum256([]byte(s.Error))
+		s.Error, s.ErrorSHA256, s.ErrorBytes = config.RetainedError(s.Error), hex.EncodeToString(sum[:]), len(s.Error)
+	}
 }
 
 // exchange sends one request with the run's transport, never following

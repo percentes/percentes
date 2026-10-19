@@ -31,7 +31,7 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
 	snapshots := fs.String("snapshots", "", "directory of the retained limit copies the configuration names by file name")
 	framesRoot := fs.String("frames", "", "raw-frame store directory outside the source tree; the check writes ceiling-<UTC time>/<route>-<ceiling>/"+probe.RetainedFile+
-		" under it (required when the configuration sets target.retained_headers or target.probe.limits_retained)")
+		" under it (required when the configuration sets target.retained_headers or target.probe.limits_retained, or records a confidential limit)")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}

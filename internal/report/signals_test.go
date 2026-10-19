@@ -28,6 +28,9 @@ func TestInBandLabel(t *testing.T) {
 		if got := inBandLabel(in); got != want {
 			t.Errorf("%q: got %q, want %q", in, got, want)
 		}
+		if got := inBandLabel(config.RetainedError(in)); in != "" && got != want {
+			t.Errorf("%q: stand-in %q labelled %q, want %q", in, config.RetainedError(in), got, want)
+		}
 	}
 }
 

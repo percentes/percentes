@@ -26,7 +26,8 @@ const repoModule = "github.com/percentes/percentes"
 
 // FrameRecord is one scheduled request's retained response bytes: the
 // timed reads of a 200 body, or the kept start of a non-200 body, with
-// credentials masked, and the header values the attempts file withholds.
+// credentials masked, and the header values and in-band error text the
+// attempts file withholds.
 type FrameRecord struct {
 	Index  int64 `json:"index"`
 	Status int   `json:"status,omitempty"`
@@ -37,6 +38,9 @@ type FrameRecord struct {
 	// DroppedBytes counts 200 body bytes read and not kept.
 	DroppedBytes int64  `json:"dropped_bytes,omitempty"`
 	ErrorBody    *Bytes `json:"error_body,omitempty"`
+	// StreamError is the in-band error text the attempts file withholds
+	// on a target with a confidential limit.
+	StreamError string `json:"stream_error,omitempty"`
 }
 
 // Frame is one read of a 200 body; Ns is its return time as a nanosecond
@@ -111,7 +115,8 @@ func FramesDir(root string, epoch time.Time) string {
 }
 
 // WriteRunFrames writes the frame records of res, keeping the 200 bodies
-// where target t keeps model output, to FramesFile in the run's frame
+// where target t keeps model output and the in-band error text where t
+// records a confidential limit, to FramesFile in the run's frame
 // directory under root, readable by the owner only, and returns the
 // file's path. It refuses a root inside the instrument's source tree and
 // an existing file. A nil res writes nothing and returns "".
@@ -123,8 +128,14 @@ func WriteRunFrames(root string, t *config.Target, res *loadgen.Result) (string,
 		return "", err
 	}
 	dir := FramesDir(root, res.EpochWall)
+	recs := FrameRecords(res, t.KeepsModelOutput())
+	if t.Confidential() {
+		for i := range recs {
+			recs[i].StreamError = res.Requests[i].StreamError
+		}
+	}
 	var b bytes.Buffer
-	if err := WriteFrames(&b, FrameRecords(res, t.KeepsModelOutput())); err != nil {
+	if err := WriteFrames(&b, recs); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {

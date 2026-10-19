@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -20,6 +21,24 @@ const RetainedLimitValue = `"` + RetainedHeaderValue + `"`
 // MarkingConfidential.
 func (t *Target) Confidential() bool {
 	return slices.ContainsFunc(t.Limits, func(l Limit) bool { return l.Marking == MarkingConfidential })
+}
+
+// RetainedError stands in the attempts file and the probe records for an
+// in-band error object's text on a target with a confidential limit: the
+// object with its "type" string alone, {} for an object without one, and
+// RetainedHeaderValue for text that is not a JSON object. A stand-in is
+// its own stand-in.
+func RetainedError(text string) string {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(text), &obj) != nil || obj == nil {
+		return RetainedHeaderValue
+	}
+	var typ string
+	if json.Unmarshal(obj["type"], &typ) != nil || typ == "" {
+		return "{}"
+	}
+	b, _ := json.Marshal(map[string]string{"type": typ})
+	return string(b)
 }
 
 // Published returns the configuration file as published: Raw with the
