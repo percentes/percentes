@@ -1113,6 +1113,7 @@ their outputs and refuses to start on any of these.
 | the schedule does not name the route, or does not re-derive from its own input | `schedule.Load`, `Schedule.Runs` |
 | the schedule freezes no configuration of the route, or froze another host group, another SHA-256 of the configuration as published, or no HMAC-SHA256 of the configuration as loaded or another one under the key `--release-key` names | `checkFrozen` |
 | a route in `release.other_hosts` has no `--host-config`; a `--host-config` file is not under the `release` profile, is of a route `release.other_hosts` does not list or of one already given, or is not the configuration the schedule froze for its route, as above | `hostTargets`, `checkFrozen` |
+| the route's directory under `--out` holds a cell record whose `schedule_sha256` is not the SHA-256 of the `--schedule` file | `sameSchedule` |
 | the operator file fails to load or, on a route with a confidential limit, holds that limit's value in a text it publishes; the build has no version-control revision; or the tree was modified and no `source_diff` record is given | `evidence.LoadOperator`, `Operator.CheckConfidential`, `evidence.CheckSource` |
 | the open-file soft limit is below 65,536 | `checkOpenFiles` |
 | the frame root is inside the source tree | `evidence.CheckFramesRoot` |
@@ -1352,9 +1353,15 @@ retained.
 
 A restarted process resumes from the cell records, marking one left
 running as interrupted, and labels each missed or interrupted cell before
-the next run. Each attempt 1 that did not count is re-run on its cell's
-attempt 2 date, in attempt 1 order, while the route has fewer than two
-re-runs and the window holds that date.
+the next run. Every cell record carries the SHA-256 of the schedule file
+the cell ran under (`schedule_sha256`). A schedule written again from the
+same inputs at a later ledger position is another file with another
+hash: `run` refuses to start while the route's directory holds a record
+written under another schedule file, and the running process stops with
+exit 1 when it reads one before its next cell. Each attempt 1 that did
+not count is re-run on its cell's attempt 2 date, in attempt 1 order,
+while the route has fewer than two re-runs and the window holds that
+date.
 
 Once no run is left, the process writes the route's window-close record
 (`windowClose`, `close.go`), unless `<route>/window-close.json` exists
@@ -1393,17 +1400,18 @@ their own timeout.
 ### The cell's files and report
 
 Each cell attempt's directory holds `cell.json` (the run, the offset, the
-outcome and reasons, the admitted steps, the open-file limit, the probe
-status, the ladder's 401 and 403 counts, the ladder record with each
-step's verdict, the tripwires, the canary summary per attempted step, the
-concurrent runs and the requests sent), the clock, status and balance
-records, `probe.json`, `attempts.jsonl` with the release fields (`shape`,
+schedule file's SHA-256, the outcome and reasons, the admitted steps,
+the open-file limit, the probe status, the ladder's 401 and 403 counts,
+the ladder record with each step's verdict, the tripwires, the canary
+summary per attempted step, the concurrent runs and the requests sent),
+the clock, status and balance records, `probe.json`, `attempts.jsonl` with the release fields (`shape`,
 `ceiling_tokens`, `step`, `warmup`, `in_time`, `late` and
 `reasoning_tokens`) and no answer text, `dispatch.json` (the cell's own
 dispatches per UTC second, rewritten every second while the cell runs
 and final when it ends), the ceiling probe copies, and `manifest.json`.
 The manifest's `release` record carries the run, the offset, the
-concurrent runs of other routes, the host's aggregate dispatch series
+schedule file's SHA-256 (`schedule_sha256`), the concurrent runs of
+other routes, the host's aggregate dispatch series
 over the cell (`dispatch_aggregate`: the cell's own series, then each
 concurrent run's, summed per UTC second, with the peak second and how
 far each source was read), the inter-chunk gap histograms per step
@@ -1500,13 +1508,17 @@ model or page string, and a rendered page, that carries `rank`, `winner`,
 its one cell's table through the same code.
 
 `percentes-release pages --out DIR --frames DIR --config FILE ...
---pages DIR [--release-key FILE]` writes the pages after the window. It
-reads every route's cell records under `--out`, with its window-close
-record where present, and runs the completeness check on every manifest
-against the route's configuration file as loaded, the frame store and
-the release key, which it requires where a route has a confidential
-limit (`checkingKey`). Every manifest of a route must carry the same
-ceiling-rule verdict, checked against the configuration's limits
+--schedule FILE --pages DIR [--release-key FILE]` writes the pages after
+the window. It reads every route's cell records under `--out`, with its
+window-close record where present, and runs the completeness check on
+every manifest against the route's configuration file as loaded, the
+frame store and the release key, which it requires where a route has a
+confidential limit (`checkingKey`). `--schedule` is the committed
+schedule file, which must load (`schedule.Load`). Every run record of a
+route must carry the same `schedule_sha256`, every manifest the one in
+its run record, and that value must be the SHA-256 of the `--schedule`
+file (`readRouteCells`, `buildPages`). Every manifest of a route must
+carry the same ceiling-rule verdict, checked against the configuration's limits
 (`admission.CheckPublished`), and the same ceiling choice and
 ceiling-check records. Two routes given to `pages`
 that name each other as hosts of one model must carry the same choice
@@ -1527,8 +1539,9 @@ Nothing is written unless every route reads, and a route with cells
 under `--out` and no `--config` is refused.
 
 `percentes-release publish-check --out DIR --frames DIR --config FILE
-... --pages DIR --record FILE [--release-key FILE]` checks the release
-publication record (`evidence.Publication`, SPEC-HOSTED HA3 point 14):
+... --schedule FILE --pages DIR --record FILE [--release-key FILE]`
+checks the release publication record (`evidence.Publication`,
+SPEC-HOSTED HA3 point 14):
 a strictly decoded JSON file apart from the cell manifests that names,
 by path and SHA-256, every cell manifest and every page, and holds per
 route its
@@ -1538,8 +1551,8 @@ consent files, any other with its corrections), its naming permission
 and its replication pack; every email and form that described the work
 to a provider before the notices; every pre-release copy with the
 routes it withheld; and the weekdays the notice windows do not count.
-The command rebuilds the pages from the cells, with the refusals of
-`pages`, takes each given route's
+The command rebuilds the pages from the cells under the `--schedule`
+file, with the refusals of `pages`, takes each given route's
 duties, a route with no page among them, from its configuration (`naming.permission_required`; a
 replication pack where the endpoint host ends in `.amazonaws.com`) and
 refuses, exiting 2 with every problem named, unless the record matches
@@ -1826,7 +1839,7 @@ A release cell ([The release runner](#the-release-runner)):
 | File or field | Computed in | SPEC |
 |---|---|---|
 | `cell.json` | `cmd/percentes-release` (`runCell`, `cellOutcome`, `labelCell`); `auth_statuses` by `countAuth` | SPEC-HOSTED HA3 point 16 |
-| `manifest.json`: `release` | `evidence.Cell`, filled by `cellEvidence` and `retain`; `admission` by `admission.CeilingRule`; `ceiling_choice`, with `left_out`, by `probe.ChooseCeiling`; `dispatch_aggregate` by `hostDispatch`; `inter_chunk_gaps` by `evidence.StepGaps` | HA3 points 6, 7, 9 and 15 |
+| `manifest.json`: `release` | `evidence.Cell`, filled by `cellEvidence` and `retain`; `schedule_sha256` from the `--schedule` file's bytes in `newRoute`; `admission` by `admission.CeilingRule`; `ceiling_choice`, with `left_out`, by `probe.ChooseCeiling`; `dispatch_aggregate` by `hostDispatch`; `inter_chunk_gaps` by `evidence.StepGaps` | HA3 points 6, 7, 9 and 15 |
 | `manifest.json`: `gates` (per step) | `evidence.releaseGates`: `validity.G2` per attempted step and over the ladder, `validity.ReleaseG6` per step | HA3 points 5 and 13 |
 | `manifest.json`: `balance_start`, `balance_end` | `evidence.ReadBalance`, named by `evidence.NewManifest` | SPEC-HOSTED §9 |
 | `balance-start.json`: `check` | `evidence.CheckBalance`, against `State.ReservationUSD` | SPEC-HOSTED §3 |
