@@ -515,8 +515,9 @@ func Retains(t *config.Target) bool {
 }
 
 // Exposed lists what rec, a probe of t's route, carries that t withholds:
-// each header target.retained_headers names with a value other than
-// config.RetainedHeaderValue, then "limits body" when
+// each recorded header with a value other than config.RetainedHeaderValue
+// that t does not keep in clear, because target.response_headers does not
+// name it or target.retained_headers does, then "limits body" when
 // target.probe.limits_retained is set and the limits body is kept, then,
 // on a target with a confidential limit, "limits body sha256" when the
 // limits body's stand-in carries a SHA-256, "request <i> body" for each
@@ -528,15 +529,19 @@ func Retains(t *config.Target) bool {
 // or in the target.limits entry of its dimension and window, or of a
 // dimension and window no target.limits entry records.
 func Exposed(t *config.Target, rec *ReleaseRecord) []string {
-	return exposed(t, rec, t.Confidential())
+	inClear := func(name string) bool {
+		return config.HeaderAllowed(t.ResponseHeaders, name) && !t.HeaderRetained(name)
+	}
+	return exposed(t, rec, t.Confidential(), inClear)
 }
 
-// exposed is Exposed with confidential in place of t.Confidential().
-func exposed(t *config.Target, rec *ReleaseRecord, confidential bool) []string {
+// exposed is Exposed with confidential in place of t.Confidential() and
+// inClear in place of its test of a header name.
+func exposed(t *config.Target, rec *ReleaseRecord, confidential bool, inClear func(string) bool) []string {
 	var out []string
 	note := func(h map[string][]string) {
 		for name, vs := range h {
-			if !t.HeaderRetained(name) || slices.Contains(out, name) {
+			if inClear(name) || slices.Contains(out, name) {
 				continue
 			}
 			for _, v := range vs {
@@ -617,7 +622,7 @@ func ExposedByMarking(rec *ReleaseRecord) []string {
 			names(rec.Limits.Headers)
 		}
 	}
-	return exposed(t, rec, marked)
+	return exposed(t, rec, marked, func(name string) bool { return !t.HeaderRetained(name) })
 }
 
 // recordedHash names the field holding l's retained copy's hash.

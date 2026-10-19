@@ -1249,7 +1249,12 @@ their outputs and refuses to start on any of these.
   cell's directory. `probe.Exposed` matches each snapshot to the
   `target.limits` entry of the same dimension and window (`window_s`),
   wherever that entry sits in the list, and treats the value and SHA-256
-  of a snapshot whose dimension and window no entry records as withheld. A confidential limit's snapshot in a record carries
+  of a snapshot whose dimension and window no entry records as withheld.
+  It also treats as withheld each header value the record carries, other
+  than the `[retained]` stand-in, in a request's headers, in
+  `rate_limit_headers` or in the limits read, where the configuration
+  does not record that header (`target.response_headers`) or retains it
+  (`target.retained_headers`). A confidential limit's snapshot in a record carries
   no value. The runner also refuses the route where its own records report a
   model identifier other than the expected one, worded
   `identifier-not-documented` where no `target.reported_model` is

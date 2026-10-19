@@ -1026,6 +1026,40 @@ func TestExposedSnapshotByDimension(t *testing.T) {
 	}
 }
 
+// A recorded header value is exposed unless the target keeps the header
+// in clear: target.response_headers names it and target.retained_headers
+// does not. A stand-in value is not exposed.
+func TestExposedHeaders(t *testing.T) {
+	raw := map[string][]string{"X-Ratelimit-Limit-Tokens": {"250000"}, "Retry-After": {"7"}}
+	rec := &ReleaseRecord{
+		Requests:         []CheckRequest{{Exchange: Exchange{Headers: raw}}},
+		RateLimitHeaders: map[string][]string{"X-Ratelimit-Limit-Tokens": {"250000"}},
+		Limits:           &Exchange{Headers: map[string][]string{"X-Quota-Tokens": {"250000"}}},
+	}
+	for _, c := range []struct {
+		name              string
+		allowed, retained []string
+		want              string
+	}{
+		{"every header recorded in clear", []string{"Retry-After", "X-Ratelimit-*", "X-Quota-Tokens"}, nil, "[]"},
+		{"response_headers narrowed", []string{"Retry-After"}, nil, "[X-Quota-Tokens X-Ratelimit-Limit-Tokens]"},
+		{"limits read's header not recorded", []string{"Retry-After", "x-ratelimit-*"}, nil, "[X-Quota-Tokens]"},
+		{"a header retained", []string{"Retry-After", "X-Ratelimit-*", "X-Quota-Tokens"}, []string{"x-ratelimit-limit-*"}, "[X-Ratelimit-Limit-Tokens]"},
+		{"nothing recorded", nil, nil, "[Retry-After X-Quota-Tokens X-Ratelimit-Limit-Tokens]"},
+	} {
+		tg := &config.Target{ResponseHeaders: c.allowed, RetainedHeaders: c.retained}
+		if e := Exposed(tg, rec); fmt.Sprint(e) != c.want {
+			t.Errorf("%s: exposed %q, want %s", c.name, e, c.want)
+		}
+	}
+	stand := []string{config.RetainedHeaderValue}
+	held := &ReleaseRecord{Requests: []CheckRequest{{Exchange: Exchange{Headers: map[string][]string{"X-Ratelimit-Limit-Tokens": stand}}}},
+		RateLimitHeaders: map[string][]string{"X-Ratelimit-Limit-Tokens": stand}}
+	if e := Exposed(&config.Target{ResponseHeaders: []string{"Retry-After"}}, held); e != nil {
+		t.Errorf("stand-ins under narrowed response_headers: exposed %q", e)
+	}
+}
+
 // A record whose snapshots mark a limit confidential exposes each raw
 // header value other than Retry-After and a request identifier, a kept
 // limits body and the confidential value; one with no such marking
