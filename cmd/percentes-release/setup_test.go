@@ -49,7 +49,7 @@ func TestNewRouteRefusals(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", ledgerSchedule(t, f.in.ledgerPath, []*config.Config{f.in.cfg}, "groq", "other"))
+		f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", frozenSchedule(t, f.in.ledgerPath, f.in.cfg, f.in.hostCfgs))
 		return l
 	}
 	for _, tc := range []struct {
@@ -82,7 +82,7 @@ func TestNewRouteRefusals(t *testing.T) {
 			f.in.cfg.Release.OtherHosts = append(f.in.cfg.Release.OtherHosts, config.ModelHost{Route: "azure", Model: "openai/gpt-oss-120b"})
 		}, "run: route groq: host group [azure baseten groq]; the schedule froze [baseten groq]"},
 		{"ledger not frozen", func(t *testing.T, f *fixture) {
-			sb, err := testSchedule(t, []*config.Config{f.in.cfg}, "groq", "other").JSON()
+			sb, err := testSchedule(t, append([]*config.Config{f.in.cfg}, f.in.hostCfgs...), "groq", "other", "baseten").JSON()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -169,12 +169,41 @@ func TestNewRouteRefusals(t *testing.T) {
 				r.Snapshots = []probe.Snapshot{{Limit: config.Limit{Dimension: config.LimitTPM, Marking: config.MarkingConfidential}}}
 				r.Requests[0].Exchange.Headers = map[string][]string{"X-Ratelimit-Limit-Tokens": {"250013.5"}}
 			}))
-		}, "route baseten at 512: carries values its confidential markings withhold: X-Ratelimit-Limit-Tokens"},
+		}, "route baseten at 512: carries values the route withholds: X-Ratelimit-Limit-Tokens"},
 		{"another host's confidential snapshot value", func(t *testing.T, f *fixture) {
 			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
 				r.Snapshots = []probe.Snapshot{{Limit: config.Limit{Dimension: config.LimitTPM, Value: 250013.5, Marking: config.MarkingConfidential}}}
 			}))
-		}, "route baseten at 512: carries values its confidential markings withhold: snapshot 0 value"},
+		}, "route baseten at 512: carries values the route withholds: snapshot 0 value"},
+		{"another host's value its configuration withholds", func(t *testing.T, f *fixture) {
+			f.in.hostCfgs[0].Target.RetainedHeaders = []string{"x-ratelimit-*"}
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
+				r.Requests[0].Exchange.Headers = map[string][]string{"X-Ratelimit-Limit-Tokens": {"250013.5"}}
+			}))
+		}, "route baseten at 512: carries values the route withholds: X-Ratelimit-Limit-Tokens"},
+		{"another host's snapshot value its configuration marks confidential", func(t *testing.T, f *fixture) {
+			path := writeFile(t, t.TempDir(), "baseten.yaml", f.in.hostCfgs[0].Raw)
+			markConfidential(t, path)
+			c, err := config.LoadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.in.hostCfgs[0] = c
+			f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", frozenSchedule(t, f.in.ledgerPath, f.in.cfg, f.in.hostCfgs))
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
+				r.Snapshots = []probe.Snapshot{{Limit: config.Limit{Dimension: config.LimitTPM, Value: 250013.5, Marking: config.MarkingPublic}}}
+			}))
+		}, "route baseten at 512: carries values the route withholds: snapshot 0 value"},
+		{"no host configuration", func(t *testing.T, f *fixture) { f.in.hostCfgs = nil }, "run: --host-config is required for route baseten in release.other_hosts"},
+		{"host configuration not frozen", func(t *testing.T, f *fixture) {
+			f.in.hostCfgs[0].Raw = append(slices.Clone(f.in.hostCfgs[0].Raw), "# changed\n"...)
+		}, "run: route baseten: configuration sha256 "},
+		{"host configuration of no other host", func(t *testing.T, f *fixture) {
+			f.in.hostCfgs = append(f.in.hostCfgs, f.in.cfg)
+		}, "run: --host-config of route groq, which release.other_hosts does not list"},
+		{"host configuration given twice", func(t *testing.T, f *fixture) {
+			f.in.hostCfgs = append(f.in.hostCfgs, f.in.hostCfgs[0])
+		}, "run: --host-config of route baseten given twice"},
 		{"failed request recorded as passed", func(t *testing.T, f *fixture) {
 			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.Requests[4].FinishReason = "length" }), pass(f, "baseten", 512, true))
 		}, `route groq at 512: request 4 records pass true (""); its response gives false ("finish reason \"length\": stopped at the ceiling")`},

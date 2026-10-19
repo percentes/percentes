@@ -997,6 +997,35 @@ func TestReleaseProbeConfidentialSnapshot(t *testing.T) {
 	}
 }
 
+// A snapshot is judged by the target.limits entry of its dimension and
+// window wherever that entry sits, and a snapshot of a dimension and
+// window no entry records is exposed by its value.
+func TestExposedSnapshotByDimension(t *testing.T) {
+	rpm := config.Limit{Dimension: config.LimitRPM, Value: 1000, Marking: config.MarkingPublic}
+	tpm := config.Limit{Dimension: config.LimitTPM, Value: 250013.5, Marking: config.MarkingPublic}
+	spend := config.Limit{Dimension: config.LimitSpendWindow, Value: 5, Marking: config.MarkingPublic, WindowS: 60}
+	rec := &ReleaseRecord{Snapshots: []Snapshot{{Limit: rpm}, {Limit: tpm}, {Limit: spend}}}
+	confidential := tpm
+	confidential.Marking = config.MarkingConfidential
+	hourly := spend
+	hourly.WindowS = 3600
+	for _, c := range []struct {
+		name   string
+		limits []config.Limit
+		want   string
+	}{
+		{"as recorded", []config.Limit{rpm, tpm, spend}, "[]"},
+		{"in another order", []config.Limit{spend, tpm, rpm}, "[]"},
+		{"confidential at another index", []config.Limit{confidential, rpm, spend}, "[snapshot 1 value]"},
+		{"a dimension not recorded", []config.Limit{rpm, spend}, "[snapshot 1 value]"},
+		{"a window not recorded", []config.Limit{rpm, tpm, hourly}, "[snapshot 2 value]"},
+	} {
+		if e := Exposed(&config.Target{Limits: c.limits}, rec); fmt.Sprint(e) != c.want {
+			t.Errorf("%s: exposed %q, want %s", c.name, e, c.want)
+		}
+	}
+}
+
 // A record whose snapshots mark a limit confidential exposes each raw
 // header value other than Retry-After and a request identifier, a kept
 // limits body and the confidential value; one with no such marking

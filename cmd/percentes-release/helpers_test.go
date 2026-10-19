@@ -212,9 +212,42 @@ func ledgerSchedule(t *testing.T, path string, cfgs []*config.Config, routes ...
 	return b
 }
 
+// hostConfigs are the configurations of cfg's release.other_hosts: cfg's
+// file with each host's route in place of cfg's.
+func hostConfigs(t *testing.T, cfg *config.Config) []*config.Config {
+	t.Helper()
+	var out []*config.Config
+	for _, h := range cfg.Release.OtherHosts {
+		s := string(cfg.Raw)
+		for _, r := range [][2]string{
+			{"\n  name: " + cfg.Target.Name + "\n", "\n  name: " + h.Route + "\n"},
+			{"\n    - route: " + h.Route + "\n", "\n    - route: " + cfg.Target.Name + "\n"},
+		} {
+			if strings.Count(s, r[0]) != 1 {
+				t.Fatalf("configuration: %q not found once", r[0])
+			}
+			s = strings.Replace(s, r[0], r[1], 1)
+		}
+		c, err := config.Parse([]byte(s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// frozenSchedule is a schedule of cfg's route, "other" and cfg's other
+// hosts, freezing cfg, hosts and the ledger at path.
+func frozenSchedule(t *testing.T, path string, cfg *config.Config, hosts []*config.Config) []byte {
+	t.Helper()
+	return ledgerSchedule(t, path, append([]*config.Config{cfg}, hosts...), append([]string{cfg.Target.Name, "other"}, otherHosts(cfg)...)...)
+}
+
 // newFixture writes every input of cfg's route: a ledger with the
-// route's caps and price, its schedule beside "other", freezing cfg and
-// the ledger, an operator file, a ceiling probe of each host of its model
+// route's caps and price, its schedule beside "other" and its other
+// hosts, freezing cfg, a configuration of each other host and the
+// ledger, an operator file, a ceiling probe of each host of its model
 // that passed at 512, a clock reading of offset, a counting balance
 // command and a refresh command that touches the record file and prints
 // cfg's recorded limits.
@@ -233,7 +266,8 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	if _, err := recordPrice(l, cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
 		t.Fatal(err)
 	}
-	sb := ledgerSchedule(t, ledger, []*config.Config{cfg}, cfg.Target.Name, "other")
+	hosts := hostConfigs(t, cfg)
+	sb := frozenSchedule(t, ledger, cfg, hosts)
 	open := ledgerOpenSHA256(t, ledger)
 	writeFile(t, dir, "r.txt", []byte("record"))
 	refresh := filepath.Join(dir, "refresh")
@@ -246,7 +280,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	}
 	return &fixture{
 		in: routeInput{
-			cfg: cfg, configName: "groq.yaml", schedulePath: writeFile(t, dir, "schedule.json", sb), out: t.TempDir(), ledgerPath: ledger, key: testReleaseKey,
+			cfg: cfg, hostCfgs: hosts, configName: "groq.yaml", schedulePath: writeFile(t, dir, "schedule.json", sb), out: t.TempDir(), ledgerPath: ledger, key: testReleaseKey,
 			framesRoot: t.TempDir(), clockSync: fakeSNTP(t, offset), statusCmd: "true", balanceCmd: fakeBalance(t), opPath: writeFile(t, dir, "operator.json", []byte(operatorJSON)),
 			refreshCmd: refresh + " " + filepath.Join(dir, "r.txt"), probeFiles: probeFiles, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
 		},

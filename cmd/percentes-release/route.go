@@ -147,7 +147,8 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	balanceCmd := fs.String("balance-cmd", "", "account balance or quota command run at each cell's start and end, split on spaces with no shell, printing {\"amount_usd\": \"<decimal>\"} or {\"unavailable\": \"<reason>\"} (required)")
 	refreshCmd := fs.String("refresh-cmd", "", "operator-records refresh command run at each cell's start and once after the last cell, split on spaces with no shell, rewriting the files of the operator file's limits and eligibility records and printing {\"limits\": [...]}, each target.limits entry's current value or why it is unavailable (required)")
 	opPath := fs.String("operator", "", "the route's operator file, read again at each cell's start (required)")
-	var probeFiles listFlag
+	var hostFiles, probeFiles listFlag
+	fs.Var(&hostFiles, "host-config", "the release configuration of a route in release.other_hosts, as the schedule froze it: one per route (repeatable, required for each)")
 	fs.Var(&probeFiles, "ceiling-probe", "a ceiling check record of a host of the route's model: every host's at 512, and at 1024 when one failed at 512 (repeatable, required)")
 	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
 	accountCreated := fs.String("account-created", "", "the account's creation date, 2006-01-02 (required)")
@@ -164,13 +165,21 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	var hostCfgs []*config.Config
+	for _, p := range hostFiles {
+		c, err := config.LoadFile(p)
+		if err != nil {
+			return exitError, err
+		}
+		hostCfgs = append(hostCfgs, c)
+	}
 	key, err := readReleaseKey(*keyPath)
 	if err != nil {
 		return exitError, err
 	}
 	build, _ := debug.ReadBuildInfo()
 	r, err := newRoute(routeInput{
-		cfg: cfg, configName: filepath.Base(*cfgPath), schedulePath: *schedulePath, out: *out, ledgerPath: *ledgerPath, key: key,
+		cfg: cfg, hostCfgs: hostCfgs, configName: filepath.Base(*cfgPath), schedulePath: *schedulePath, out: *out, ledgerPath: *ledgerPath, key: key,
 		framesRoot: *framesRoot, clockSync: *clockSync, statusCmd: *statusCmd, balanceCmd: *balanceCmd, refreshCmd: *refreshCmd, opPath: *opPath, probeFiles: probeFiles,
 		byteCap: *byteCap, accountCreated: *accountCreated, build: build,
 	})
@@ -195,6 +204,7 @@ type ceilingInput struct {
 // routeInput is a run command after its flags are read.
 type routeInput struct {
 	cfg                                       *config.Config
+	hostCfgs                                  []*config.Config
 	configName, schedulePath, out, ledgerPath string
 	key                                       *releasekey.Key
 	framesRoot, clockSync, statusCmd, opPath  string
@@ -227,6 +237,10 @@ func newRoute(in routeInput) (*route, error) {
 		return nil, err
 	}
 	if err := checkFrozen(cfg, sched, in.key); err != nil {
+		return nil, err
+	}
+	hosts, err := hostTargets(cfg, in.hostCfgs, sched, in.key)
+	if err != nil {
 		return nil, err
 	}
 	r := &route{cfg: cfg, configName: in.configName, sched: sched, runs: runs, out: in.out, dir: filepath.Join(in.out, name),
@@ -310,7 +324,7 @@ func newRoute(in routeInput) (*route, error) {
 	if in.byteCap <= 0 {
 		return nil, fmt.Errorf("run: --byte-cap %d: the Shape S ticket byte cap is required", in.byteCap)
 	}
-	if r.ceiling, r.ceilingProbes, err = readCeilingProbes(cfg, in.probeFiles, in.byteCap, sched.Input.LedgerSHA256); err != nil {
+	if r.ceiling, r.ceilingProbes, err = readCeilingProbes(cfg, hosts, in.probeFiles, in.byteCap, sched.Input.LedgerSHA256); err != nil {
 		return nil, err
 	}
 	if r.shape, err = pilot.GenerateShapeS(pilot.ShapeSSeed, in.byteCap); err != nil {
@@ -347,6 +361,34 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 	return p, nil
 }
 
+// hostTargets are the targets of hostCfgs by route: one configuration of
+// each route in cfg's release.other_hosts and of no other, each frozen by
+// the schedule (checkFrozen).
+func hostTargets(cfg *config.Config, hostCfgs []*config.Config, sched *schedule.Schedule, key *releasekey.Key) (map[string]*config.Target, error) {
+	out := map[string]*config.Target{}
+	for _, h := range hostCfgs {
+		name := h.Target.Name
+		switch {
+		case h.Profile != config.ProfileRelease || h.Release == nil:
+			return nil, fmt.Errorf("run: --host-config of route %s: profile %q, want %q", name, h.Profile, config.ProfileRelease)
+		case !slices.ContainsFunc(cfg.Release.OtherHosts, func(m config.ModelHost) bool { return m.Route == name }):
+			return nil, fmt.Errorf("run: --host-config of route %s, which release.other_hosts does not list", name)
+		case out[name] != nil:
+			return nil, fmt.Errorf("run: --host-config of route %s given twice", name)
+		}
+		if err := checkFrozen(h, sched, key); err != nil {
+			return nil, err
+		}
+		out[name] = &h.Target
+	}
+	for _, m := range cfg.Release.OtherHosts {
+		if out[m.Route] == nil {
+			return nil, fmt.Errorf("run: --host-config is required for route %s in release.other_hosts", m.Route)
+		}
+	}
+	return out, nil
+}
+
 // readCeilingProbes reads the ceiling check's records of the route's
 // model, whose hosts are the target and release.other_hosts, and requires
 // their choice to run the model at the configured ceiling. Every record
@@ -360,10 +402,11 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // record's ceiling (config.ReleaseBodyAt) and none of the values the route
 // withholds (probe.Exposed), and together no reported model id that keeps
 // the provider-model out (probe.ModelFault). Another host's records carry
-// none of the values their snapshots' confidential markings withhold
+// none of the values the host's target in configs withholds
+// (probe.Exposed) or their snapshots' confidential markings withhold
 // (probe.ExposedByMarking), and another host whose records carry a model
 // fault is left out of the choice (probe.ChooseCeiling).
-func readCeilingProbes(cfg *config.Config, files []string, byteCap int, ledger string) (probe.CeilingChoice, map[string][]byte, error) {
+func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, files []string, byteCap int, ledger string) (probe.CeilingChoice, map[string][]byte, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
 		return none, nil, errors.New("run: --ceiling-probe is required: the ceiling check's probe records")
@@ -408,9 +451,17 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int, ledger s
 			fault = fmt.Sprintf("byte cap %d, want --byte-cap %d", rec.ByteCap, byteCap)
 		case rec.LedgerSHA256 != ledger:
 			fault = fmt.Sprintf("ledger open line sha256 %q; the schedule froze %s", rec.LedgerSHA256, ledger)
+		case rec.Route != t.Name && configs[rec.Route] == nil:
+			fault = "no configuration of the route"
 		case rec.Route != t.Name:
-			if exposed := probe.ExposedByMarking(&rec); len(exposed) > 0 {
-				fault = "carries values its confidential markings withhold: " + strings.Join(exposed, ", ")
+			exposed := probe.Exposed(configs[rec.Route], &rec)
+			for _, e := range probe.ExposedByMarking(&rec) {
+				if !slices.Contains(exposed, e) {
+					exposed = append(exposed, e)
+				}
+			}
+			if len(exposed) > 0 {
+				fault = "carries values the route withholds: " + strings.Join(exposed, ", ")
 			}
 		case rec.Expected() != t.ExpectedModel():
 			fault = fmt.Sprintf("expected model %q, want %q", rec.Expected(), t.ExpectedModel())

@@ -525,7 +525,8 @@ func Retains(t *config.Target) bool {
 // in-band error text is not its stand-in (config.RetainedError), then
 // "snapshot <i> value" and "snapshot <i> sha256" for each snapshot with a
 // value or a SHA-256 of a limit marked config.MarkingConfidential in rec
-// or at index i of target.limits.
+// or in the target.limits entry of its dimension and window, or of a
+// dimension and window no target.limits entry records.
 func Exposed(t *config.Target, rec *ReleaseRecord) []string {
 	return exposed(t, rec, t.Confidential())
 }
@@ -573,7 +574,9 @@ func exposed(t *config.Target, rec *ReleaseRecord, confidential bool) []string {
 		}
 	}
 	for i, sn := range rec.Snapshots {
-		marked := sn.Marking == config.MarkingConfidential || i < len(t.Limits) && t.Limits[i].Marking == config.MarkingConfidential
+		same := func(l config.Limit) bool { return l.Dimension == sn.Dimension && l.WindowS == sn.WindowS }
+		marked := sn.Marking == config.MarkingConfidential || !slices.ContainsFunc(t.Limits, same) ||
+			slices.ContainsFunc(t.Limits, func(l config.Limit) bool { return same(l) && l.Marking == config.MarkingConfidential })
 		if marked && sn.Value != 0 {
 			out = append(out, fmt.Sprintf("snapshot %d value", i))
 		}
@@ -593,6 +596,9 @@ func exposed(t *config.Target, rec *ReleaseRecord, confidential bool) []string {
 // (SPEC-HOSTED HA3 point 15).
 func ExposedByMarking(rec *ReleaseRecord) []string {
 	t := &config.Target{}
+	for _, s := range rec.Snapshots {
+		t.Limits = append(t.Limits, s.Limit)
+	}
 	marked := slices.ContainsFunc(rec.Snapshots, func(s Snapshot) bool { return s.Marking == config.MarkingConfidential })
 	if marked {
 		t.Probe = &config.TargetProbe{LimitsRetained: true}

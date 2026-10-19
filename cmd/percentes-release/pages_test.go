@@ -519,7 +519,7 @@ func TestPagesHostGroup(t *testing.T) {
 			share := func(f *fixture) {
 				name := f.in.cfg.Target.Name
 				f.ledger, f.open, f.in.ledgerPath = ledger, open, ledger
-				f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", ledgerSchedule(t, ledger, []*config.Config{f.in.cfg}, name, "other"))
+				f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", frozenSchedule(t, ledger, f.in.cfg, f.in.hostCfgs))
 				f.in.probeFiles = nil
 				for _, h := range append([]string{name}, otherHosts(f.in.cfg)...) {
 					f.in.probeFiles = append(f.in.probeFiles, writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, h, 512, true, open)))
