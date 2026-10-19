@@ -700,10 +700,12 @@ before any setup.
   date, `config.Carries`) in the file's own path, the provider, account
   tier, client host, cell, a role, or a record's path, URL or note. It
   searches for the value as loaded and for each value the route's refresh
-  command read (`Operator.Withhold`), in decimal, also with its whole part
-  grouped in threes by a comma or a space character (`config.ValueForms`,
-  the forms `public-config` searches), and as `strconv.FormatFloat` prints
-  it in format `e` (`%g` prints that or the decimal). The route keeps the
+  command read (`Operator.Withhold`), in each form `public-config`
+  searches (`config.ValueForms`): in decimal, also with trailing zeros
+  and with its whole part grouped in threes by a comma or a space
+  character, and in scientific notation with a lowercase or uppercase
+  exponent mark, as `strconv.FormatFloat` prints it in format `e` or `E`
+  (`%g` and `%G` print that or the decimal). The route keeps the
   values read in memory; a process that starts after earlier cells takes
   them from the refresh records as run beside those cells' frames
   (`retainedReads`, `evidence.ReadRetainedRefresh`). The refusal names
@@ -991,9 +993,12 @@ other byte as written. It refuses a value that is not a plain scalar
 written in `target.limits`, a comment inside that limit, and a comment
 or string anywhere in the file, a key among them, that carries the
 value as a number of its own. The forms looked for are the value as
-written and in decimal, each also with its whole part grouped in threes
-by a comma, a space, a no-break space, a thin space or a narrow no-break
-space (`9,876,543.25`). A form inside a longer number does not count
+written and in decimal, the decimal also with zeros added after its last
+digit up to 17 digits in all (`9876543.2500`), each also with its whole
+part grouped in threes by a comma, a space, a no-break space, a thin
+space or a narrow no-break space (`9,876,543.25`), and the value in
+scientific notation as `strconv.FormatFloat` prints it in format `e` or
+`E` (`9.87654325E+06`). A form inside a longer number does not count
 (`12,000` for a value of 12), and runs of 32 or more hexadecimal digits,
 such as a SHA-256 hash or a commit identifier, and `YYYY-MM-DD` dates
 are skipped (`valueForms`, `carries`). A file holding a second YAML
@@ -1612,8 +1617,9 @@ Unicode text encoding), and a correction or a disclosure's provider that
 runs over more than one line. It refuses each of those texts that holds
 any notice's account identifier or recipient, in any letter case or
 spacing, or a confidential limit's value as a number of its own
-(`config.Carries`) in decimal, also with its whole part grouped in
-threes (`config.ValueForms`). The values are each route's confidential
+(`config.Carries`) in each form `config.ValueForms` gives: in decimal,
+also with trailing zeros and with its whole part grouped in threes, and
+in scientific notation. The values are each route's confidential
 limits as its configuration records them and as its refresh command
 read them at its cells and its window close, from the refresh records as
 run in the retained store (`withheldValues`). The refusal names the field,

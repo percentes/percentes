@@ -157,18 +157,28 @@ func (c *Config) Published() ([]byte, error) {
 // thousandsSeparators group the whole part of a number in threes.
 var thousandsSeparators = []string{",", " ", "\u00a0", "\u2009", "\u202f"}
 
-// ValueForms are the texts that write value in decimal, also with its
-// whole part grouped by each of thousandsSeparators.
+// paddedDigits is the most digits in a decimal form with zeros added.
+const paddedDigits = 17
+
+// ValueForms are the texts valueForms gives for value written in decimal.
 func ValueForms(value float64) []string {
 	return valueForms(strconv.FormatFloat(value, 'f', -1, 64), value)
 }
 
-// valueForms are the texts that write a value: lit as written and the
-// value in decimal, each also with its whole part grouped by each of
-// thousandsSeparators.
+// valueForms are the texts that write a value: lit as written, the value
+// in decimal and that decimal with zeros added after its last digit up to
+// paddedDigits digits in all, each also with its whole part grouped by
+// each of thousandsSeparators; and the value as strconv.FormatFloat
+// prints it in format 'e' and in format 'E'.
 func valueForms(lit string, value float64) []string {
-	var forms []string
-	for _, s := range []string{lit, strconv.FormatFloat(value, 'f', -1, 64)} {
+	dec := strconv.FormatFloat(value, 'f', -1, 64)
+	bases := []string{lit, dec}
+	units, places, _ := strings.Cut(dec, ".")
+	for n := len(places) + 1; len(units)+n <= paddedDigits; n++ {
+		bases = append(bases, units+"."+places+strings.Repeat("0", n-len(places)))
+	}
+	forms := []string{strconv.FormatFloat(value, 'e', -1, 64), strconv.FormatFloat(value, 'E', -1, 64)}
+	for _, s := range bases {
 		forms = append(forms, s)
 		whole, frac, dot := strings.Cut(s, ".")
 		if len(whole) <= 3 || strings.Trim(whole, "0123456789") != "" {

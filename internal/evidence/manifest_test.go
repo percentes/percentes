@@ -197,6 +197,9 @@ func TestOperatorConfidential(t *testing.T) {
 		{"comma", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 300,001 per console"`), "records[3].note", "300,001", 0, ""},
 		{"narrow space", edit(`"note": "T&C of 15 Sep 2026"`, "\"note\": \"TPM 300\u202f001\""), "records[3].note", "300\u202f001", 0, ""},
 		{"grouped decimal", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 3,000,010"`), "records[3].note", "3,000,010", 3000010, ""},
+		{"trailing zero", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 300001.0"`), "records[3].note", "300001", 0, ""},
+		{"grouped trailing zeros", edit(`"url": "https://docs.example/limits"`, `"url": "https://docs.example/limits?tpm=300,001.00"`), "records[0].url", "300,001", 0, ""},
+		{"E form", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 3.00001E+05"`), "records[3].note", "3.00001", 0, ""},
 		{"file name", operatorJSON, "file path", "300001", 0, "operator-tpm-300001.json"},
 	} {
 		path := writeOperator(t, tc.body)

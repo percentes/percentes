@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -239,11 +238,12 @@ func (op *Operator) Withhold(read []RefreshedLimit) {
 // as t records it or as a refresh command read it (Withhold), is a number
 // of its own (config.Carries) in the operator file's path or in a text op
 // publishes: the provider, account tier, client host, cell or a role, or
-// a record's path, URL or note. The value is searched in decimal, with
-// its whole part also grouped in threes by a comma or a space character
-// (config.ValueForms), and as strconv.FormatFloat prints it in format 'e'
-// (%g prints that or the decimal). The refusal names each field and the
-// limit's dimension, and neither the value nor the file's name.
+// a record's path, URL or note. The value is searched in each form
+// config.ValueForms gives: decimal, also with trailing zeros and with its
+// whole part grouped in threes by a comma or a space character, and as
+// strconv.FormatFloat prints it in format 'e' or 'E' (%g and %G print
+// that or the decimal). The refusal names each field and the limit's
+// dimension, and neither the value nor the file's name.
 func (op *Operator) CheckConfidential(t *config.Target) error {
 	type text struct{ field, s string }
 	texts := []text{{"file path", op.path}, {"provider", op.Provider}, {"account_tier", op.AccountTier}, {"client_host", op.ClientHost}, {"cell", op.Cell}}
@@ -263,7 +263,7 @@ func (op *Operator) CheckConfidential(t *config.Target) error {
 	held = append(held, op.withheld...)
 	var found []string
 	for _, l := range held {
-		forms := append(config.ValueForms(l.Value), strconv.FormatFloat(l.Value, 'e', -1, 64))
+		forms := config.ValueForms(l.Value)
 		for _, x := range texts {
 			hit := fmt.Sprintf("%s (%s)", x.field, l.Dimension)
 			if _, ok := config.Carries(x.s, forms); ok && !slices.Contains(found, hit) {
