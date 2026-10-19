@@ -12,6 +12,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 // Operator record kinds. The required kinds are the records SPEC-HOSTED §9
@@ -212,6 +215,22 @@ func (op *Operator) Refreshed(since time.Time) error {
 		}
 	}
 	return nil
+}
+
+// records are op's records as a run on t names them: keyed under key
+// (FileRef) on a target with a confidential limit, which requires key.
+func (op *Operator) records(t *config.Target, key *releasekey.Key) ([]OperatorRecord, error) {
+	if !t.Confidential() {
+		return op.Records, nil
+	}
+	if key == nil {
+		return nil, errors.New("evidence: a target with a confidential limit needs the release key")
+	}
+	out := slices.Clone(op.Records)
+	for i := range out {
+		out[i].FileRef = keyedRefOf(out[i].Name, out[i].data, key)
+	}
+	return out, nil
 }
 
 func (op *Operator) find(kind string) *OperatorRecord {

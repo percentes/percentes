@@ -91,7 +91,7 @@ func newTestRoute(t *testing.T, cfg *config.Config, offset string) (*route, *fix
 func checkRetained(t *testing.T, r *route, run schedule.Run) (*evidence.Manifest, string) {
 	t.Helper()
 	dir := r.cellDir(run)
-	m, err := evidence.CheckRelease(evidence.Release{Dir: dir, Config: r.cfg.Raw, FramesRoot: r.framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}})
+	m, err := evidence.CheckRelease(evidence.Release{Dir: dir, Config: r.cfg.Raw, FramesRoot: r.framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}, Key: r.key})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,9 +650,12 @@ func rulingConfig(t *testing.T, endpoint string) *config.Config {
 // carries the value, which the endpoint echoes in a rate-limit header:
 // its manifest names the file as published, its verdict and report pair
 // name the limit by source and keyed hash, its attempts carry the
-// header's stand-in, and the run's frame directory keeps the file as
-// loaded, from which the completeness check and the replay work. No file
-// under the output directory or the frame store carries the release key.
+// header's stand-in, its manifest names the frame store and the operator
+// records by HMAC-SHA256 under the release key with no size, and the
+// run's frame directory keeps the file as loaded, from which the
+// completeness check and the replay work. No file under the output
+// directory carries the SHA-256 of the frame store or of a record, and
+// none there or under the frame store carries the release key.
 func TestCellConfidentialLimit(t *testing.T) {
 	e := newEndpoint(t, always200)
 	endpoint, _ := withHeaders(t, e.url(), map[string]string{"X-Ratelimit-Limit-Tokens": "250013.5"})
@@ -686,6 +689,26 @@ func TestCellConfidentialLimit(t *testing.T) {
 		t.Errorf("binding limit %+v", b)
 	}
 	noReleaseKey(t, f.in.out, r.framesRoot)
+	read := func(p string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	runDir := filepath.Join(r.framesRoot, filepath.Dir(m.Frames.Name))
+	held := map[string][]byte{m.Frames.Name: read(filepath.Join(r.framesRoot, m.Frames.Name))}
+	if m.Frames.SHA256 != "" || m.Frames.Bytes != "" || m.Frames.HMACSHA256 != r.key.Sum(held[m.Frames.Name]) {
+		t.Errorf("frame store %+v", m.Frames)
+	}
+	for _, rec := range m.Records {
+		b := read(filepath.Join(runDir, evidence.RecordsCopyDir, rec.Name))
+		if rec.SHA256 != "" || rec.Bytes != "" || rec.HMACSHA256 != r.key.Sum(b) {
+			t.Errorf("%s record %+v", rec.Kind, rec.FileRef)
+		}
+		held[rec.Name] = b
+	}
 	files, withheld := 0, 0
 	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -699,6 +722,11 @@ func TestCellConfidentialLimit(t *testing.T) {
 		if bytes.Contains(b, []byte("250013.5")) || bytes.Contains(b, []byte("2.500135e+05")) {
 			t.Errorf("%s carries the confidential value", p)
 		}
+		for name, h := range held {
+			if sum := sha256.Sum256(h); bytes.Contains(b, []byte(hex.EncodeToString(sum[:]))) {
+				t.Errorf("%s carries the SHA-256 of %s", p, name)
+			}
+		}
 		if d.Name() == evidence.AttemptsFile && bytes.Contains(b, []byte(`"X-Ratelimit-Limit-Tokens":["[retained]"]`)) {
 			withheld++
 		}
@@ -706,11 +734,11 @@ func TestCellConfidentialLimit(t *testing.T) {
 	}); err != nil || files == 0 || withheld == 0 {
 		t.Fatalf("walk: %d files, %d attempts files with the header withheld, %v", files, withheld, err)
 	}
-	held := filepath.Join(r.framesRoot, filepath.Dir(m.Frames.Name), evidence.ConfigCopyFile)
-	if b, err := os.ReadFile(held); err != nil || !bytes.Equal(b, cfg.Raw) {
+	copyPath := filepath.Join(runDir, evidence.ConfigCopyFile)
+	if b, err := os.ReadFile(copyPath); err != nil || !bytes.Equal(b, cfg.Raw) {
 		t.Fatalf("config copy: %v", err)
 	}
-	if fi, err := os.Stat(held); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(copyPath); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("config copy mode %v, %v", fi, err)
 	}
 }
@@ -1105,7 +1133,7 @@ func TestLabelMissedAndInterrupted(t *testing.T) {
 		if (m.Artifact(probe.File) != nil) != (tc.run == gone) {
 			t.Fatalf("%s: artifacts %+v", tc.run.Label, m.Artifacts)
 		}
-		if m.Frames == nil || filepath.Dir(filepath.Join(r.framesRoot, m.Frames.Name)) != evidence.FramesDir(r.framesRoot, got.StartUTC) || m.Frames.Bytes != 0 {
+		if m.Frames == nil || filepath.Dir(filepath.Join(r.framesRoot, m.Frames.Name)) != evidence.FramesDir(r.framesRoot, got.StartUTC) || m.Frames.Bytes != "0" {
 			t.Fatalf("%s: frame store %+v", tc.run.Label, m.Frames)
 		}
 		var concurrent []schedule.Run

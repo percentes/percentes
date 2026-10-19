@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func cellManifest(t *testing.T, outcome string, reasons []string, ladder bool) (
 	m := &evidence.Manifest{
 		Profile: config.ProfileRelease,
 		Source:  evidence.Source{Revision: "0123456789abcdef0123456789abcdef01234567"},
-		Config:  evidence.FileRef{Name: "groq.yaml", SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(cfg.Raw))},
+		Config:  evidence.FileRef{Name: "groq.yaml", SHA256: hex.EncodeToString(sum[:]), Bytes: json.Number(strconv.Itoa(len(cfg.Raw)))},
 		Release: &evidence.Cell{
 			Run:       schedule.Run{Route: "groq", Label: "weekend-08", Attempt: 2, Date: "2026-10-18", Start: time.Date(2026, 10, 18, 8, 20, 0, 0, time.UTC), Seed: 7},
 			Admission: v, CeilingTokens: 512, Outcome: outcome, Reasons: reasons, LadderStarted: ladder,

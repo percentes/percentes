@@ -11,7 +11,9 @@
 // the per-attempt file, the report pair, the manifest, the scorer output
 // and the frame store under --frames all exist with the hashes DIR's
 // manifest records, and prints the label of a release cell that does not
-// count.
+// count. --release-key names the release key, which --check-release
+// needs on a route with a confidential limit, whose frame store and
+// operator records the manifest names by HMAC-SHA256 under it.
 // Exit codes: 0 = run valid, the replayed pair matches byte for byte, or
 // the release check passed; 2 = run completed but a run-failing gate
 // marked it invalid; 1 = execution error, a replayed pair that differs,
@@ -36,6 +38,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/run"
 	"github.com/percentes/percentes/internal/serverstats"
@@ -53,6 +56,7 @@ func main() {
 	probeService := flag.String("probe-service", "", "service inference URL for the traffic-restored probe")
 	framesRoot := flag.String("frames", "", "raw-frame store directory, outside the source tree, holding the frames of the run --check-release reads")
 	replayDir := flag.String("replay", "", "output directory of a finished hosted run: render its report pair again from "+evidence.ManifestFile+", "+evidence.AttemptsFile+" and --config into --out, and compare it with the pair the manifest names")
+	keyPath := flag.String("release-key", "", "the release key file, which --check-release needs on a route with a confidential limit")
 	checkDir := flag.String("check-release", "", "output directory of a finished hosted run: refuse its release unless the commit record, --config, "+evidence.AttemptsFile+", the report pair, "+evidence.ManifestFile+", the scorer output and the frame store under --frames exist with the hashes the manifest records")
 	flag.Parse()
 	if *checkDir != "" {
@@ -66,7 +70,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("percentes: %v", err)
 		}
-		m, err := evidence.CheckRelease(evidence.Release{Dir: *checkDir, Config: raw, FramesRoot: *framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}})
+		var key *releasekey.Key
+		if *keyPath != "" {
+			if key, err = releasekey.Read(*keyPath); err != nil {
+				log.Fatalf("percentes: %v", err)
+			}
+		}
+		m, err := evidence.CheckRelease(evidence.Release{Dir: *checkDir, Config: raw, FramesRoot: *framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}, Key: key})
 		if err != nil {
 			log.Fatalf("percentes: %v", err)
 		}
@@ -111,6 +121,9 @@ func main() {
 	}
 	if *framesRoot != "" {
 		log.Fatal("percentes: --frames applies to --check-release only")
+	}
+	if *keyPath != "" {
+		log.Fatal("percentes: --release-key applies to --check-release only")
 	}
 
 	// Wire an interrupt-aware context so Ctrl-C / SIGTERM cancels the in-flight

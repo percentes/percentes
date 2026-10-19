@@ -70,9 +70,9 @@
 //	    --byte-cap N --account-created DATE
 //	percentes-release dispatch --out DIR
 //	percentes-release pages --out DIR --frames DIR --config FILE ...
-//	    --pages DIR
+//	    --pages DIR [--release-key FILE]
 //	percentes-release publish-check --out DIR --frames DIR
-//	    --config FILE ... --pages DIR --record FILE
+//	    --config FILE ... --pages DIR --record FILE [--release-key FILE]
 //	percentes-release rehearse --out DIR --frames DIR --clock-sync CMD
 //	    --byte-cap N [--scale N] [--master-seed SEED] [--source-diff FILE]
 //	percentes-release check-cpu

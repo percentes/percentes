@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/redact"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/run"
 	"github.com/percentes/percentes/internal/validity"
 )
@@ -25,16 +27,29 @@ import (
 // directory.
 const ManifestFile = "manifest.json"
 
-// FileRef names a file and its content's SHA-256.
+// FileRef names a file and its content's SHA-256 and size or, keyed, its
+// content's HMAC-SHA256 under the release key alone: the form of a file
+// that can hold a value a route with a confidential limit withholds.
 type FileRef struct {
-	Name   string `json:"name"`
-	SHA256 string `json:"sha256"`
-	Bytes  int64  `json:"bytes"`
+	Name       string `json:"name"`
+	SHA256     string `json:"sha256,omitempty"`
+	HMACSHA256 string `json:"hmac_sha256,omitempty"`
+	// Bytes is the size in decimal digits; a keyed reference has none.
+	Bytes json.Number `json:"bytes,omitempty"`
+}
+
+// Keyed reports whether ref names its file by HMAC-SHA256.
+func (ref FileRef) Keyed() bool {
+	return ref.HMACSHA256 != ""
 }
 
 func refOf(name string, b []byte) FileRef {
 	sum := sha256.Sum256(b)
-	return FileRef{Name: name, SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(b))}
+	return FileRef{Name: name, SHA256: hex.EncodeToString(sum[:]), Bytes: json.Number(strconv.Itoa(len(b)))}
+}
+
+func keyedRefOf(name string, b []byte, key *releasekey.Key) FileRef {
+	return FileRef{Name: name, HMACSHA256: key.Sum(b)}
 }
 
 // HashFile returns the reference of the file at path under name.
@@ -47,9 +62,10 @@ func HashFile(path, name string) (FileRef, error) {
 }
 
 // Manifest is the SPEC-HOSTED §9 run manifest, with the HA2 §9 hashes and
-// roles. Every file it names is referenced by SHA-256; paths are relative
-// to the output directory, the frame store root, or the operator file's
-// directory.
+// roles. Every file it names is referenced by SHA-256 and size, except
+// that on a target with a confidential limit the frame store and the
+// operator records are keyed (FileRef); paths are relative to the output
+// directory, the frame store root, or the operator file's directory.
 type Manifest struct {
 	SchemaVersion int `json:"schema_version"`
 	// StartUTC is the run epoch; for a release cell whose ladder never
@@ -258,11 +274,20 @@ type ManifestInput struct {
 	// Release is the cell record, required under the release profile and
 	// refused under any other.
 	Release *Cell
+	// Key is the release key, which a target with a confidential limit
+	// requires.
+	Key *releasekey.Key
 }
 
-// NewManifest builds the manifest of one hosted run.
+// NewManifest builds the manifest of one hosted run. On a target with a
+// confidential limit the frame store and the operator records are keyed
+// under in.Key.
 func NewManifest(in ManifestInput) (*Manifest, error) {
 	cfg, t, res, op := in.Config, in.Target, in.Result, in.Operator
+	records, err := op.records(t, in.Key)
+	if err != nil {
+		return nil, err
+	}
 	var gates []validity.Gate
 	switch release := cfg.Profile == config.ProfileRelease && cfg.Release != nil; {
 	case release && in.Release == nil:
@@ -305,7 +330,7 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		Config:         refOf(in.ConfigName, published),
 		Operator:       op.File,
 		Roles:          op.Roles,
-		Records:        op.Records,
+		Records:        records,
 		Ledger:         in.Ledger,
 		Artifacts:      []FileRef{},
 		RunValid:       in.RunValid,
@@ -313,9 +338,12 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		Gates:          gates,
 		Replay:         in.Replay,
 	}
-	if d := op.find(RecordSourceDiff); d != nil {
-		ref := d.FileRef
-		m.Source.Diff = &ref
+	for _, r := range records {
+		if r.Kind == RecordSourceDiff {
+			ref := r.FileRef
+			m.Source.Diff = &ref
+			break
+		}
 	}
 	m.Endpoint = Endpoint{
 		Provider:        op.Provider,
@@ -381,9 +409,13 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		if err != nil {
 			return nil, fmt.Errorf("evidence: %w", err)
 		}
-		ref, err := HashFile(in.FramesPath, filepath.ToSlash(rel))
+		b, err := os.ReadFile(in.FramesPath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("evidence: %w", err)
+		}
+		ref := refOf(filepath.ToSlash(rel), b)
+		if t.Confidential() {
+			ref = keyedRefOf(ref.Name, b, in.Key)
 		}
 		m.Frames = &ref
 	}

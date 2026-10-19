@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 // refreshRun is a refresh command's run that exited 0 and printed out.
@@ -106,12 +107,16 @@ func TestPublishedRefresh(t *testing.T) {
 }
 
 // A window-close record reads back as written; a field it does not
-// define or data after it is refused.
+// define or data after it is refused. On a target with a confidential
+// limit its records are keyed under the release key, which it requires.
 func TestReadWindowClose(t *testing.T) {
-	op := &Operator{AccountTier: "Developer", File: FileRef{Name: "operator.json", SHA256: strings.Repeat("a", 64), Bytes: 9},
-		Records: []OperatorRecord{{Kind: RecordLimits, FileRef: FileRef{Name: "limits.txt", SHA256: strings.Repeat("b", 64), Bytes: 4}, URL: "https://example.test/limits", Retrieved: "2026-10-27T01:00:00Z"}}}
+	op := &Operator{AccountTier: "Developer", File: FileRef{Name: "operator.json", SHA256: strings.Repeat("a", 64), Bytes: "9"},
+		Records: []OperatorRecord{{Kind: RecordLimits, FileRef: FileRef{Name: "limits.txt", SHA256: strings.Repeat("b", 64), Bytes: "4"}, URL: "https://example.test/limits", Retrieved: "2026-10-27T01:00:00Z"}}}
 	at := time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC)
-	w := NewWindowClose("groq", at, refreshRun(`{"limits": []}`), op)
+	w, err := NewWindowClose(&config.Target{Name: "groq"}, at, refreshRun(`{"limits": []}`), op, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	w.Copies = filepath.Join("window-close", "groq", "x")
 	dir := t.TempDir()
 	path, err := writeJSON(dir, WindowCloseFile, w)
@@ -121,6 +126,25 @@ func TestReadWindowClose(t *testing.T) {
 	got, err := ReadWindowClose(path)
 	if err != nil || !reflect.DeepEqual(got, w) {
 		t.Fatalf("read %+v, %v; want %+v", got, err, w)
+	}
+	if w.Records[0].FileRef != op.Records[0].FileRef {
+		t.Fatalf("public target's record %+v", w.Records[0].FileRef)
+	}
+	confidential := &config.Target{Name: "groq", Limits: []config.Limit{{Marking: config.MarkingConfidential}}}
+	if _, err := NewWindowClose(confidential, at, refreshRun(`{"limits": []}`), op, nil); err == nil || !strings.Contains(err.Error(), "needs the release key") {
+		t.Fatalf("confidential target with no key: %v", err)
+	}
+	key, err := releasekey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.Records[0].data = []byte("limits")
+	held, err := NewWindowClose(confidential, at, refreshRun(`{"limits": []}`), op, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (FileRef{Name: "limits.txt", HMACSHA256: key.Sum([]byte("limits"))}); held.Records[0].FileRef != want || held.Operator != op.File {
+		t.Fatalf("confidential target's record %+v, want %+v; operator %+v", held.Records[0].FileRef, want, held.Operator)
 	}
 	if got := WindowCloseDir("/frames", "groq", at.Add(time.Hour)); got != filepath.Join("/frames", "window-close", "groq", "20261027T020000.000000000Z") {
 		t.Fatalf("dir %s", got)

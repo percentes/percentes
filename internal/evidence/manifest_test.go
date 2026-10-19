@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestLoadOperator(t *testing.T) {
 	if op.Provider != "Example Cloud" || op.AccountTier != "Basic" || op.ClientHost != "one Mac, London" || op.Cell != "pilot session 1" || op.Roles == nil || op.Roles.Rubric != "Claude, approved by Varun" {
 		t.Errorf("operator %+v", op)
 	}
-	if op.File != (FileRef{Name: "operator.json", SHA256: sha(operatorJSON), Bytes: int64(len(operatorJSON))}) {
+	if op.File != (FileRef{Name: "operator.json", SHA256: sha(operatorJSON), Bytes: json.Number(strconv.Itoa(len(operatorJSON)))}) {
 		t.Errorf("file %+v", op.File)
 	}
 	if len(op.Records) != 9 {
@@ -109,7 +110,7 @@ func TestLoadOperator(t *testing.T) {
 	}
 	for _, r := range op.Records {
 		want := recordFiles[r.Name]
-		if r.SHA256 != sha(want) || r.Bytes != int64(len(want)) {
+		if r.SHA256 != sha(want) || r.Bytes != json.Number(strconv.Itoa(len(want))) {
 			t.Errorf("%s: %+v", r.Name, r.FileRef)
 		}
 	}
@@ -293,7 +294,7 @@ func TestReadLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (LedgerRef{FileRef: FileRef{Name: "ledger.jsonl", SHA256: sha(body), Bytes: int64(len(body))}, Lines: 3}); *got != want {
+	if want := (LedgerRef{FileRef: FileRef{Name: "ledger.jsonl", SHA256: sha(body), Bytes: json.Number(strconv.Itoa(len(body)))}, Lines: 3}); *got != want {
 		t.Errorf("ledger %+v, want %+v", *got, want)
 	}
 	if _, err := ReadLedger(filepath.Join(t.TempDir(), "none")); err == nil {
@@ -383,7 +384,7 @@ func manifestRun(t *testing.T) (ManifestInput, string) {
 		Result:           res,
 		Build:            buildInfo("CGO_ENABLED", "1", "vcs.revision", "bce0628", "vcs.time", "2026-10-06T12:00:00Z", "vcs.modified", "true"),
 		Operator:         loadOperator(t),
-		Ledger:           &LedgerRef{FileRef: FileRef{Name: "ledger.jsonl", SHA256: sha("x\n"), Bytes: 2}, Lines: 1},
+		Ledger:           &LedgerRef{FileRef: FileRef{Name: "ledger.jsonl", SHA256: sha("x\n"), Bytes: "2"}, Lines: 1},
 		Clock:            clock,
 		ClockPath:        write(out, ClockFile, "clock"),
 		StatusStartPath:  write(out, StatusStartFile, "start"),

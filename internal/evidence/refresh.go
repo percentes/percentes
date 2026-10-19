@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 // RefreshedLimit is one target.limits entry as a release route's refresh
@@ -134,10 +135,16 @@ type WindowClose struct {
 	Copies        string           `json:"copies"`
 }
 
-// NewWindowClose is route's window-close record of refresh, as it
-// publishes, and op, read after it, at recorded.
-func NewWindowClose(route string, recorded time.Time, refresh *StatusRecord, op *Operator) *WindowClose {
-	return &WindowClose{SchemaVersion: 1, Route: route, RecordedUTC: recorded.UTC(), Refresh: refresh, AccountTier: op.AccountTier, Operator: op.File, Records: op.Records}
+// NewWindowClose is t's route's window-close record of refresh, as it
+// publishes, and op, read after it, at recorded, with op's records keyed
+// under key on a target with a confidential limit, as in a cell's
+// manifest.
+func NewWindowClose(t *config.Target, recorded time.Time, refresh *StatusRecord, op *Operator, key *releasekey.Key) (*WindowClose, error) {
+	records, err := op.records(t, key)
+	if err != nil {
+		return nil, err
+	}
+	return &WindowClose{SchemaVersion: 1, Route: t.Name, RecordedUTC: recorded.UTC(), Refresh: refresh, AccountTier: op.AccountTier, Operator: op.File, Records: records}, nil
 }
 
 // WindowCloseDir is the retained store's directory of route's window-close

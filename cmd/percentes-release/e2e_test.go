@@ -277,7 +277,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		if c := m.Release; c == nil || c.Run != runs[i] || c.OffsetMinutes != r.offsetMinutes || m.RunValid != (rec.Outcome == outcomeCounted) {
 			t.Errorf("%s: manifest cell %+v, valid %t", name, m.Release, m.RunValid)
 		}
-		if _, err := evidence.CheckRelease(evidence.Release{Dir: cellDir, Config: r.cfg.Raw, FramesRoot: frames, Pair: [2]string{report.JSONFile, report.TextFile}}); err != nil {
+		if _, err := evidence.CheckRelease(evidence.Release{Dir: cellDir, Config: r.cfg.Raw, FramesRoot: frames, Pair: [2]string{report.JSONFile, report.TextFile}, Key: r.key}); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		var cr report.CellReport

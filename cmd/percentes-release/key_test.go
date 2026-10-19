@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/releasekey"
 )
 
@@ -77,5 +78,35 @@ func TestRunNeedsReleaseKey(t *testing.T) {
 		"--frames", t.TempDir(), "--operator", "o", "--account-created", "2026-09-15"}
 	if code, err := runCmd(context.Background(), args); err == nil || code != exitError || err.Error() != "--release-key is required: the file key create wrote" {
 		t.Fatalf("run: %d, %v", code, err)
+	}
+}
+
+// pages and publish-check refuse a route with a confidential limit
+// without --release-key, before reading any cell; a route with public
+// limits only needs none, and a key file given is read.
+func TestCheckingNeedsReleaseKey(t *testing.T) {
+	cfg := confidentialConfig(t, "https://api.groq.com/openai/v1/chat/completions")
+	cfgPath := writeFile(t, t.TempDir(), "groq.yaml", cfg.Raw)
+	out, frames := t.TempDir(), t.TempDir()
+	want := "--release-key is required: route groq has a confidential limit"
+	if code, err := pagesCmd([]string{"--out", out, "--frames", frames, "--config", cfgPath, "--pages", t.TempDir()}); code != exitError || err == nil || err.Error() != "pages: "+want {
+		t.Errorf("pages: %d, %v", code, err)
+	}
+	if code, err := publishCheckCmd([]string{"--out", out, "--frames", frames, "--config", cfgPath, "--pages", t.TempDir(), "--record", "r"}); code != exitError || err == nil || err.Error() != "publish-check: "+want {
+		t.Errorf("publish-check: %d, %v", code, err)
+	}
+	public, err := loadReleases([]string{"../../configs/release.reference.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k, err := checkingKey("", public); k != nil || err != nil {
+		t.Errorf("public limits only: %v, %v", k, err)
+	}
+	path := filepath.Join(t.TempDir(), "release.key")
+	if err := releasekey.Create(path); err != nil {
+		t.Fatal(err)
+	}
+	if k, err := checkingKey(path, []*config.Config{cfg}); k == nil || err != nil {
+		t.Errorf("key file: %v, %v", k, err)
 	}
 }

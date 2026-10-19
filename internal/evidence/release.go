@@ -12,16 +12,19 @@ import (
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/releasekey"
 )
 
 // Release is a finished hosted run as it is checked before release: its
 // output directory, the configuration file's bytes, the frame store root
-// and the report pair's two file names in Dir.
+// and the report pair's two file names in Dir. Key is the release key,
+// which a target with a confidential limit requires.
 type Release struct {
 	Dir        string
 	Config     []byte
 	FramesRoot string
 	Pair       [2]string
+	Key        *releasekey.Key
 }
 
 // ConfigCopyFile is the configuration file as loaded, kept in a release
@@ -62,7 +65,10 @@ func WriteConfigCopy(dir string, cfg *config.Config) error {
 // with the SHA-256 and size it records: the config, the attempts file,
 // the report pair and the clock, status and balance records in r.Dir, a
 // release run's start balance among them, and the frame store and the
-// operator copies in the run's frame directory. r.Config is the file as
+// operator copies in the run's frame directory. On a target with a
+// confidential limit the frame store and the operator records must be
+// keyed, with the HMAC-SHA256 under r.Key the manifest records, and
+// elsewhere none may be. r.Config is the file as
 // loaded: the manifest names the file as published
 // (config.Config.Published), a release cell's ceiling-rule verdict must
 // be the one published from r.Config's limits
@@ -76,8 +82,27 @@ func CheckRelease(r Release) (*Manifest, error) {
 	}
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
+	// held is whether the frame store and the operator records are keyed.
+	held := false
 	check := func(base string, ref FileRef, what string) []byte {
-		b, err := readRef(base, ref)
+		b, err := readRef(base, ref, nil)
+		if err != nil {
+			fail("%s: %v", what, err)
+		}
+		return b
+	}
+	checkHeld := func(base string, ref FileRef, what string) []byte {
+		switch {
+		case held && !ref.Keyed():
+			fail("%s: %s is named by its SHA-256 on a target with a confidential limit", what, ref.Name)
+			return nil
+		case !held && ref.Keyed():
+			fail("%s: %s is keyed on a target with public limits only", what, ref.Name)
+			return nil
+		case held && r.Key == nil:
+			return nil
+		}
+		b, err := readRef(base, ref, r.Key)
 		if err != nil {
 			fail("%s: %v", what, err)
 		}
@@ -101,6 +126,11 @@ func CheckRelease(r Release) (*Manifest, error) {
 		fail("config: %v", err)
 	case refOf(m.Config.Name, published) != m.Config:
 		fail("config: not %s, the file the manifest names", m.Config.Name)
+	default:
+		held = cfg.Target.Confidential()
+		if held && r.Key == nil {
+			fail("release key: the target has a confidential limit, whose frame store and operator records are keyed, and no release key was given")
+		}
 	}
 
 	var attempts []byte
@@ -226,7 +256,7 @@ func CheckRelease(r Release) (*Manifest, error) {
 	case r.FramesRoot == "":
 		fail("frame store: no frame store root given")
 	default:
-		frames := check(r.FramesRoot, *m.Frames, "frame store")
+		frames := checkHeld(r.FramesRoot, *m.Frames, "frame store")
 		if frames != nil && attempts != nil {
 			if n := bytes.Count(frames, []byte("\n")); n != len(recs) {
 				fail("frame store: %d lines for %d attempts", n, len(recs))
@@ -239,11 +269,11 @@ func CheckRelease(r Release) (*Manifest, error) {
 		copies := filepath.Join(runDir, RecordsCopyDir)
 		diffChecked := false
 		for _, rec := range m.Records {
-			check(copies, rec.FileRef, rec.Kind+" record copy")
+			checkHeld(copies, rec.FileRef, rec.Kind+" record copy")
 			diffChecked = diffChecked || (m.Source.Diff != nil && rec.FileRef == *m.Source.Diff)
 		}
 		if d := m.Source.Diff; d != nil && !diffChecked {
-			check(copies, *d, "commit: source diff copy")
+			checkHeld(copies, *d, "commit: source diff copy")
 		}
 		if cfg != nil && !bytes.Equal(published, r.Config) {
 			switch b, err := os.ReadFile(filepath.Join(runDir, ConfigCopyFile)); {
@@ -296,8 +326,9 @@ func modelProblems(e Endpoint, recs []Record) []string {
 }
 
 // readRef reads the file ref names under base and returns its bytes when
-// their SHA-256 and size are the ones ref records.
-func readRef(base string, ref FileRef) ([]byte, error) {
+// their SHA-256 and size, or for a keyed ref their HMAC-SHA256 under key,
+// are the ones ref records.
+func readRef(base string, ref FileRef, key *releasekey.Key) ([]byte, error) {
 	name := filepath.FromSlash(ref.Name)
 	if !filepath.IsLocal(name) {
 		return nil, fmt.Errorf("%q is not a path inside %s", ref.Name, base)
@@ -309,8 +340,19 @@ func readRef(base string, ref FileRef) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if ref.Keyed() {
+		switch {
+		case ref.SHA256 != "" || ref.Bytes != "":
+			return nil, fmt.Errorf("%s: a keyed reference with a SHA-256 or a size", ref.Name)
+		case key == nil:
+			return nil, fmt.Errorf("%s is keyed and no release key was given", ref.Name)
+		case key.Sum(b) != ref.HMACSHA256:
+			return nil, fmt.Errorf("%s has another HMAC-SHA256 under the release key than the manifest records", ref.Name)
+		}
+		return b, nil
+	}
 	if got := refOf(ref.Name, b); got != ref {
-		return nil, fmt.Errorf("%s has SHA-256 %s and %d bytes, the manifest records %s and %d", ref.Name, got.SHA256, got.Bytes, ref.SHA256, ref.Bytes)
+		return nil, fmt.Errorf("%s has SHA-256 %s and %s bytes, the manifest records %s and %s", ref.Name, got.SHA256, got.Bytes, ref.SHA256, ref.Bytes)
 	}
 	return b, nil
 }

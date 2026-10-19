@@ -75,7 +75,10 @@ target:
   # Each limit's marking: public where a public documentation page gives
   # the value, which publishes; confidential where only the account
   # console shows it under terms that keep it confidential, and the file
-  # as published carries "[retained]" in place of the value.
+  # as published carries "[retained]" in place of the value. sha256 is
+  # the retained copy's SHA-256; a confidential limit records hmac_sha256
+  # in its place, the copy's HMAC-SHA256 under the release key
+  # (percentes-release key sum).
   limits:
     - dimension: requests_per_minute
       value: 1000

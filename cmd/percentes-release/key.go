@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/releasekey"
 )
 
@@ -53,6 +54,21 @@ func keyCmd(args []string) (int, error) {
 		return exitOK, nil
 	}
 	return exitError, fmt.Errorf("key: unknown action %q", args[0])
+}
+
+// checkingKey reads the --release-key file at path, which may be empty
+// unless one of cfgs' targets has a confidential limit, whose cells'
+// manifests are keyed.
+func checkingKey(path string, cfgs []*config.Config) (*releasekey.Key, error) {
+	if path != "" {
+		return releasekey.Read(path)
+	}
+	for _, cfg := range cfgs {
+		if cfg.Target.Confidential() {
+			return nil, fmt.Errorf("--release-key is required: route %s has a confidential limit", cfg.Target.Name)
+		}
+	}
+	return nil, nil
 }
 
 // readReleaseKey reads the --release-key file.

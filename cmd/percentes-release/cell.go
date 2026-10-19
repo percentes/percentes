@@ -393,6 +393,7 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 		RunValid:         rec.Outcome == outcomeCounted,
 		InvalidReasons:   invalid,
 		Release:          cell,
+		Key:              r.key,
 	})
 	if err != nil {
 		return errors.Join(ferr, err)

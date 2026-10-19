@@ -15,6 +15,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/schedule"
 	"github.com/percentes/percentes/internal/validity"
 )
@@ -905,12 +906,19 @@ func confidentialCell(cfg *config.Config) *Cell {
 
 // A configuration with a confidential limit is named in the manifest by
 // the file as published; the run's frame directory keeps the file as
-// loaded; the completeness check reads the file as loaded and refuses a
-// manifest naming another file, a missing or different copy, and a
-// verdict that publishes the value.
+// loaded; the manifest names the frame store and the operator records by
+// HMAC-SHA256 under the release key alone; the completeness check reads
+// the file as loaded and refuses a manifest naming another file, a
+// missing or different copy, a verdict that publishes the value, and a
+// frame store or operator record named by its SHA-256 or not matching
+// under the key it is given.
 func TestConfidentialConfig(t *testing.T) {
 	cfg := confidentialCfg(t)
 	published, err := cfg.Published()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := releasekey.New()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -918,6 +926,10 @@ func TestConfidentialConfig(t *testing.T) {
 	releaseInput(&in, cfg)
 	in.ConfigName = "groq.yaml"
 	in.Release = confidentialCell(cfg)
+	if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "needs the release key") {
+		t.Errorf("no key: %v", err)
+	}
+	in.Key = key
 	m, err := NewManifest(in)
 	if err != nil {
 		t.Fatal(err)
@@ -925,12 +937,36 @@ func TestConfidentialConfig(t *testing.T) {
 	if m.Config != refOf("groq.yaml", published) || m.Config == refOf("groq.yaml", cfg.Raw) {
 		t.Fatalf("manifest config %+v, want the file as published", m.Config)
 	}
+	frames := mustRead(t, in.FramesPath)
+	if want := (FileRef{Name: "20261010T200000.000000000Z/" + FramesFile, HMACSHA256: key.Sum(frames)}); *m.Frames != want {
+		t.Errorf("frame store %+v, want %+v", *m.Frames, want)
+	}
+	if len(m.Records) != len(in.Operator.Records) {
+		t.Fatalf("records %+v", m.Records)
+	}
+	for i, r := range m.Records {
+		if want := (FileRef{Name: in.Operator.Records[i].Name, HMACSHA256: key.Sum(in.Operator.Records[i].data)}); r.FileRef != want {
+			t.Errorf("record %s: %+v, want %+v", r.Kind, r.FileRef, want)
+		}
+	}
+	if m.Source.Diff == nil || !m.Source.Diff.Keyed() || m.Operator != in.Operator.File || m.Operator.Keyed() {
+		t.Errorf("source diff %+v, operator file %+v", m.Source.Diff, m.Operator)
+	}
 	path, err := WriteManifest(out, m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if b := mustRead(t, path); bytes.Contains(b, []byte("300001")) || !bytes.Contains(b, []byte(`"confidential": true`)) {
 		t.Errorf("manifest carries the value or no confidential demand:\n%s", b)
+	}
+	b := mustRead(t, path)
+	for _, r := range append([]OperatorRecord{{FileRef: refOf(m.Frames.Name, frames)}}, in.Operator.Records...) {
+		if bytes.Contains(b, []byte(r.SHA256)) {
+			t.Errorf("manifest carries %s's SHA-256:\n%s", r.Name, b)
+		}
+	}
+	if bytes.Contains(b, []byte(`"bytes": `+fmt.Sprint(len(frames)))) {
+		t.Errorf("manifest carries the frame store's size:\n%s", b)
 	}
 	in.Release.Admission.Steps[3].Demands[0].Value = 300001
 	if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "a confidential limit published with its value") {
@@ -975,6 +1011,13 @@ func TestConfidentialConfig(t *testing.T) {
 		r.cfg, r.m.Config = cfg.Raw, refOf("groq.yaml", published)
 		r.m.Release = confidentialCell(cfg)
 		r.m.Gates = []validity.Gate{validity.G2(0, &loadgen.GateReport{Pass: true})}
+		r.key = key
+		r.m.Frames = keyedAt(t, r.root, *r.m.Frames, key)
+		for i := range r.m.Records {
+			r.m.Records[i].FileRef = *keyedAt(t, filepath.Join(r.runDir, RecordsCopyDir), r.m.Records[i].FileRef, key)
+		}
+		diff := r.m.Records[1].FileRef
+		r.m.Source.Diff = &diff
 		r.write(t)
 		if !noCopy {
 			if err := WriteConfigCopy(r.runDir, cfg); err != nil {
@@ -1006,6 +1049,30 @@ func TestConfidentialConfig(t *testing.T) {
 			"cell record: admission: published verdict: step 4, tokens_per_minute: a confidential limit published with its value or fraction"},
 		{"pass off the value", func(t *testing.T, r *releaseRun) { r.m.Release.Admission.Steps[3].Demands[0].Pass = true; r.write(t) },
 			"step 4, tokens_per_minute: pass false against the recorded value, published true"},
+		{"frame store by SHA-256", func(t *testing.T, r *releaseRun) {
+			ref := refOf(r.m.Frames.Name, mustRead(t, filepath.Join(r.root, filepath.FromSlash(r.m.Frames.Name))))
+			r.m.Frames = &ref
+			r.write(t)
+		}, "frame store: " + releaseRunDir + "/" + FramesFile + " is named by its SHA-256 on a target with a confidential limit"},
+		{"limits record by SHA-256", func(t *testing.T, r *releaseRun) {
+			r.m.Records[0].FileRef = refOf("limits/groq.txt", []byte("limits"))
+			r.write(t)
+		}, "limits record copy: limits/groq.txt is named by its SHA-256 on a target with a confidential limit"},
+		{"keyed with a size", func(t *testing.T, r *releaseRun) { r.m.Records[0].Bytes = "6"; r.write(t) },
+			"limits record copy: limits/groq.txt: a keyed reference with a SHA-256 or a size"},
+		{"no key", func(t *testing.T, r *releaseRun) { r.key = nil },
+			"release key: the target has a confidential limit, whose frame store and operator records are keyed, and no release key was given"},
+		{"another key", func(t *testing.T, r *releaseRun) {
+			var err error
+			if r.key, err = releasekey.New(); err != nil {
+				t.Fatal(err)
+			}
+		}, "frame store: " + releaseRunDir + "/" + FramesFile + " has another HMAC-SHA256 under the release key than the manifest records"},
+		{"limits copy changed", func(t *testing.T, r *releaseRun) {
+			if err := os.WriteFile(filepath.Join(r.runDir, RecordsCopyDir, "limits", "groq.txt"), []byte("limitz"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "limits record copy: limits/groq.txt has another HMAC-SHA256 under the release key than the manifest records"},
 	} {
 		r := run(t, false)
 		tc.edit(t, r)
@@ -1013,4 +1080,23 @@ func TestConfidentialConfig(t *testing.T) {
 			t.Errorf("%s: must fail naming %q, got %v", tc.name, tc.want, err)
 		}
 	}
+
+	// A target with public limits only keeps every plain reference.
+	r := newReleaseRun(t, config.ProfilePilot)
+	r.key = key
+	if _, err := r.check(); err != nil {
+		t.Fatalf("public run given the key: %v", err)
+	}
+	r.m.Frames = keyedAt(t, r.root, *r.m.Frames, key)
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "frame store: "+releaseRunDir+"/"+FramesFile+" is keyed on a target with public limits only") {
+		t.Errorf("keyed frame store on a public target: %v", err)
+	}
+}
+
+// keyedAt is ref keyed under key from its file under base.
+func keyedAt(t *testing.T, base string, ref FileRef, key *releasekey.Key) *FileRef {
+	t.Helper()
+	k := keyedRefOf(ref.Name, mustRead(t, filepath.Join(base, filepath.FromSlash(ref.Name))), key)
+	return &k
 }

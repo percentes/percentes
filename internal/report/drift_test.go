@@ -19,7 +19,7 @@ import (
 // twice counts once.
 func TestDocsOf(t *testing.T) {
 	rec := func(kind, name, url, sum, retrieved string) evidence.OperatorRecord {
-		return evidence.OperatorRecord{Kind: kind, FileRef: evidence.FileRef{Name: name, SHA256: sum, Bytes: 1}, URL: url, Retrieved: retrieved}
+		return evidence.OperatorRecord{Kind: kind, FileRef: evidence.FileRef{Name: name, SHA256: sum, Bytes: "1"}, URL: url, Retrieved: retrieved}
 	}
 	m := &evidence.Manifest{Endpoint: evidence.Endpoint{AccountTier: "Developer"}, Records: []evidence.OperatorRecord{
 		rec(evidence.RecordLimits, "limits-b.html", "https://example.test/limits/b", "bb", "2026-10-07"),
@@ -37,6 +37,27 @@ func TestDocsOf(t *testing.T) {
 	}
 	if got := DocsOf(m); !reflect.DeepEqual(got, want) {
 		t.Errorf("DocsOf:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// On a route with a confidential limit the records are keyed: the state
+// carries each limits record's HMAC-SHA256 under the release key, so a
+// rewritten page is still a change.
+func TestDocsOfKeyed(t *testing.T) {
+	docs := func(sum string) []DocRecord {
+		return DocsOf(&evidence.Manifest{Endpoint: evidence.Endpoint{AccountTier: "Developer"}, Records: []evidence.OperatorRecord{
+			{Kind: evidence.RecordLimits, FileRef: evidence.FileRef{Name: "limits.html", HMACSHA256: sum}, URL: "https://example.test/limits", Retrieved: "2026-10-07"},
+		}})
+	}
+	a, b := docs("aa"), docs("bb")
+	if want := (DocRecord{Kind: evidence.RecordLimits, URL: "https://example.test/limits", HMACSHA256: "aa"}); len(a) != 2 || a[1] != want {
+		t.Fatalf("DocsOf %+v", a)
+	}
+	if removed, added := docsLess(a, b), docsLess(b, a); len(removed) != 1 || len(added) != 1 {
+		t.Fatalf("a keyed change: removed %+v, added %+v", removed, added)
+	}
+	if got := a[1].String(); got != "limits https://example.test/limits hmac-sha256 aa" {
+		t.Errorf("String %q", got)
 	}
 }
 
@@ -258,8 +279,8 @@ func windowCloseOf(route string, recorded time.Time, docs []DocRecord) *evidence
 			w.AccountTier = d.Tier
 			continue
 		}
-		w.Records = append(w.Records, evidence.OperatorRecord{Kind: d.Kind, FileRef: evidence.FileRef{Name: d.Kind + ".txt", SHA256: d.SHA256, Bytes: 1}, URL: d.URL, Retrieved: "2026-10-21T00:00:00Z"},
-			evidence.OperatorRecord{Kind: evidence.RecordPrices, FileRef: evidence.FileRef{Name: "prices.txt", SHA256: "ff", Bytes: 1}, URL: "https://example.test/pricing", Retrieved: "2026-10-07"})
+		w.Records = append(w.Records, evidence.OperatorRecord{Kind: d.Kind, FileRef: evidence.FileRef{Name: d.Kind + ".txt", SHA256: d.SHA256, Bytes: "1"}, URL: d.URL, Retrieved: "2026-10-21T00:00:00Z"},
+			evidence.OperatorRecord{Kind: evidence.RecordPrices, FileRef: evidence.FileRef{Name: "prices.txt", SHA256: "ff", Bytes: "1"}, URL: "https://example.test/pricing", Retrieved: "2026-10-07"})
 	}
 	return w
 }

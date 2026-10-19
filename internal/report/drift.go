@@ -18,12 +18,14 @@ var driftKinds = evidence.RefreshedRecords
 
 // DocRecord is one entry of the documentation state a cell recorded at
 // its start under SPEC-HOSTED §4's drift rule: the account tier, or a
-// limits or model-eligibility record by its URL and content hash.
+// limits or model-eligibility record by its URL and content hash, the
+// HMAC-SHA256 under the release key on a route with a confidential limit.
 type DocRecord struct {
-	Kind   string `json:"kind"`
-	Tier   string `json:"account_tier,omitempty"`
-	URL    string `json:"url,omitempty"`
-	SHA256 string `json:"sha256,omitempty"`
+	Kind       string `json:"kind"`
+	Tier       string `json:"account_tier,omitempty"`
+	URL        string `json:"url,omitempty"`
+	SHA256     string `json:"sha256,omitempty"`
+	HMACSHA256 string `json:"hmac_sha256,omitempty"`
 }
 
 func (d DocRecord) String() string {
@@ -34,11 +36,14 @@ func (d DocRecord) String() string {
 	if d.URL != "" {
 		s += " " + d.URL
 	}
+	if d.HMACSHA256 != "" {
+		return s + " hmac-sha256 " + d.HMACSHA256
+	}
 	return s + " sha256 " + d.SHA256
 }
 
 func compareDocs(a, b DocRecord) int {
-	for _, c := range [][2]string{{a.Kind, b.Kind}, {a.Tier, b.Tier}, {a.URL, b.URL}, {a.SHA256, b.SHA256}} {
+	for _, c := range [][2]string{{a.Kind, b.Kind}, {a.Tier, b.Tier}, {a.URL, b.URL}, {a.SHA256, b.SHA256}, {a.HMACSHA256, b.HMACSHA256}} {
 		if n := strings.Compare(c[0], c[1]); n != 0 {
 			return n
 		}
@@ -63,7 +68,7 @@ func docsOf(tier string, records []evidence.OperatorRecord) []DocRecord {
 	docs := []DocRecord{{Kind: DocTier, Tier: tier}}
 	for _, r := range records {
 		if slices.Contains(driftKinds, r.Kind) {
-			docs = append(docs, DocRecord{Kind: r.Kind, URL: r.URL, SHA256: r.SHA256})
+			docs = append(docs, DocRecord{Kind: r.Kind, URL: r.URL, SHA256: r.SHA256, HMACSHA256: r.HMACSHA256})
 		}
 	}
 	return sortDocs(docs)

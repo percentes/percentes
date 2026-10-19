@@ -10,15 +10,18 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/score"
 )
 
 // releaseRun is a finished run's files on disk: dir holds the published
-// files, root the frame store, cfg the configuration file's bytes.
+// files, root the frame store, cfg the configuration file's bytes and key
+// the release key the check is given.
 type releaseRun struct {
 	dir, root, runDir string
 	cfg               []byte
 	m                 *Manifest
+	key               *releasekey.Key
 }
 
 const releaseRunDir = "20261010T200000.000000000Z"
@@ -106,7 +109,7 @@ func (r *releaseRun) write(t *testing.T) {
 }
 
 func (r *releaseRun) check() (*Manifest, error) {
-	return CheckRelease(Release{Dir: r.dir, Config: r.cfg, FramesRoot: r.root, Pair: releasePair})
+	return CheckRelease(Release{Dir: r.dir, Config: r.cfg, FramesRoot: r.root, Pair: releasePair, Key: r.key})
 }
 
 func TestCheckReleaseComplete(t *testing.T) {

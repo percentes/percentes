@@ -18,6 +18,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
 )
@@ -61,6 +62,7 @@ func pagesCmd(args []string) (int, error) {
 	var cfgPaths listFlag
 	fs.Var(&cfgPaths, "config", "a route's release configuration, the file its cells ran (repeatable, required)")
 	pages := fs.String("pages", "", "directory to write the index page and the route pages in (required)")
+	keyPath := fs.String("release-key", "", "the release key file (required where a route has a confidential limit)")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
@@ -73,7 +75,11 @@ func pagesCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	rp, err := buildPages(*out, *framesRoot, cfgs)
+	key, err := checkingKey(*keyPath, cfgs)
+	if err != nil {
+		return exitError, fmt.Errorf("pages: %w", err)
+	}
+	rp, err := buildPages(*out, *framesRoot, cfgs, key)
 	if err != nil {
 		return exitError, err
 	}
@@ -108,14 +114,14 @@ type releasePages struct {
 // among cfgs, and the routes of one model among them must carry one
 // ceiling choice and one set of probe records. A route with no manifest
 // has no page and no index row.
-func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, error) {
+func buildPages(out, framesRoot string, cfgs []*config.Config, key *releasekey.Key) (*releasePages, error) {
 	given := map[string]bool{}
 	rp := &releasePages{routes: make([]report.IndexRoute, len(cfgs)), recs: make([]*routeRecords, len(cfgs))}
 	var paged []report.IndexRoute
 	for i, cfg := range cfgs {
 		given[cfg.Target.Name] = true
 		var err error
-		if rp.recs[i], err = readRouteCells(out, framesRoot, cfg); err != nil {
+		if rp.recs[i], err = readRouteCells(out, framesRoot, cfg, key); err != nil {
 			return nil, err
 		}
 		rp.routes[i] = report.IndexRoute{Config: cfg, Verdict: rp.recs[i].verdict, Cells: rp.recs[i].cells}
@@ -207,18 +213,18 @@ func marshalPage(v any) ([]byte, error) {
 }
 
 // readRouteCells reads cfg's route's cells under out. Every attempt with
-// a manifest must pass the completeness check against cfg's file and the
-// frame store, and every manifest must carry the same verdict, ceiling
-// choice and probe records. An
-// attempt enters the route's frame when its run record and its manifest
-// both count it, at most one attempt per scheduled cell; only a missed
+// a manifest must pass the completeness check against cfg's file, the
+// frame store and the release key, and every manifest must carry the
+// same verdict, ceiling choice and probe records. An attempt enters the
+// route's frame when its run record and its manifest both count it, at
+// most one attempt per scheduled cell; only a missed
 // or interrupted attempt may have its run record alone. Each counted
 // cell carries its scheduled start and the documentation state its
 // manifest records, which the drift rule compares. Each model_mismatch
 // attempt's expected and reported model ids are kept for the route's
 // page, and the route's window-close record is read where it has one.
 // A route with no cell record is refused.
-func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, error) {
+func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.Key) (*routeRecords, error) {
 	name := cfg.Target.Name
 	paths, err := filepath.Glob(filepath.Join(out, name, "*", cellFile))
 	if err != nil {
@@ -249,7 +255,7 @@ func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, 
 			rr.unrecorded++
 			continue
 		}
-		m, err := evidence.CheckRelease(evidence.Release{Dir: dir, Config: cfg.Raw, FramesRoot: framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}})
+		m, err := evidence.CheckRelease(evidence.Release{Dir: dir, Config: cfg.Raw, FramesRoot: framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}, Key: key})
 		if err != nil {
 			return nil, fmt.Errorf("pages: %s: %w", dir, err)
 		}

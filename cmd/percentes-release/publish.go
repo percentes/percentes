@@ -27,6 +27,7 @@ func publishCheckCmd(args []string) (int, error) {
 	fs.Var(&cfgPaths, "config", "a route's release configuration, the file its cells ran (repeatable, required)")
 	pages := fs.String("pages", "", "the directory pages wrote the index page and the route pages in (required)")
 	record := fs.String("record", "", "the release publication record; the files it names are relative to its directory (required)")
+	keyPath := fs.String("release-key", "", "the release key file (required where a route has a confidential limit)")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
@@ -39,11 +40,15 @@ func publishCheckCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	key, err := checkingKey(*keyPath, cfgs)
+	if err != nil {
+		return exitError, fmt.Errorf("publish-check: %w", err)
+	}
 	pub, err := evidence.LoadPublication(*record)
 	if err != nil {
 		return exitError, err
 	}
-	rp, err := buildPages(*out, *framesRoot, cfgs)
+	rp, err := buildPages(*out, *framesRoot, cfgs, key)
 	if err != nil {
 		return exitError, err
 	}

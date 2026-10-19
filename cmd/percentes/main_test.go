@@ -77,6 +77,7 @@ func TestRefusesBeforeAnyRequest(t *testing.T) {
 	}{
 		{"hosted", []string{"--config", hosted}, "percentes: a hosted target runs under percentes-release or percentes-pilot only"},
 		{"self-hosted with frames", []string{"--config", self, "--frames", t.TempDir()}, "percentes: --frames applies to --check-release only"},
+		{"self-hosted with a release key", []string{"--config", self, "--release-key", filepath.Join(dir, "key")}, "percentes: --release-key applies to --check-release only"},
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cmd := exec.CommandContext(ctx, os.Args[0], append(tc.args, "--out", filepath.Join(dir, "out"))...)

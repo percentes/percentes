@@ -666,7 +666,7 @@ func (r *route) rehearsed(f *mockForm, run schedule.Run, rec *cellRecord, check 
 		problem("the mock finished %v; the ceiling check sent %d and the cell %d", c, check.Sent(), sent)
 	}
 	rr.Completeness = "pass"
-	if _, err := evidence.CheckRelease(evidence.Release{Dir: dir, Config: r.cfg.Raw, FramesRoot: framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}}); err != nil {
+	if _, err := evidence.CheckRelease(evidence.Release{Dir: dir, Config: r.cfg.Raw, FramesRoot: framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}, Key: r.key}); err != nil {
 		rr.Completeness = err.Error()
 		problem("completeness check: %v", err)
 	}
