@@ -163,7 +163,8 @@ func LoadPublication(path string) (*Publication, error) {
 // the WindowClose duty has its record at <route>/WindowCloseFile; every
 // route has one entry, with a notice whose window of at least
 // NoticeWorkingDays working days closed before s.Now and whose pack is
-// the route's pack in s.Packs byte for byte, its responses, its naming
+// the route's pack in s.Packs byte for byte, s.Packs holding one for the
+// route, its responses, its naming
 // permission where required and its replication pack, sent no later than
 // the notice and carrying every file of the route's pack (PackCarries),
 // where required; every disclosure predates
@@ -241,7 +242,11 @@ func (p *Publication) Check(s PublicationState) error {
 		} else {
 			text(field+": notice.recipient", n.Recipient)
 			text(field+": notice.account", n.Account)
-			if b := p.file(field+": notice.pack", n.Pack, fail); b != nil && !bytes.Equal(b, s.Packs[r.Route]) {
+			pack, packed := s.Packs[r.Route]
+			if !packed {
+				fail("%s: notice.pack: the release has no evidence pack for the route", field)
+			}
+			if b := p.file(field+": notice.pack", n.Pack, fail); b != nil && packed && !bytes.Equal(b, pack) {
 				fail("%s: notice.pack: %s is not the evidence pack the route's pages and manifests give (percentes-release pack)", field, n.Pack.Path)
 			}
 			var okSent, okClose bool

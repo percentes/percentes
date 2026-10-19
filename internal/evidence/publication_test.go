@@ -241,6 +241,12 @@ func TestPublicationRefuses(t *testing.T) {
 			f.p.Manifests = append(f.p.Manifests, PublishedFile{Path: "groq/c02-a1/manifest.json", SHA256: shaOf([]byte("m2"))})
 			f.s.Packs["groq"] = packOf(t, "groq", f.s)
 		}, "route groq: notice.pack: packs/groq.tar is not the evidence pack"},
+		{"no pack for the route", func(_ *testing.T, f *publicationFixture) { delete(f.s.Packs, "groq") },
+			"route groq: notice.pack: the release has no evidence pack for the route"},
+		{"empty pack, no pack for the route", func(t *testing.T, f *publicationFixture) {
+			route(f, "groq").Notice.Pack = put(t, f.dir, "packs/groq.tar", "")
+			delete(f.s.Packs, "groq")
+		}, "route groq: notice.pack: the release has no evidence pack for the route"},
 		{"pack hash form", func(_ *testing.T, f *publicationFixture) { route(f, "groq").Notice.Pack.SHA256 = "ABC" }, `notice.pack.sha256: "ABC" is not a lowercase hex SHA-256`},
 		{"bad date", func(_ *testing.T, f *publicationFixture) { route(f, "groq").Notice.Sent = "27/10/2026" }, `route groq: notice.sent: "27/10/2026" is not a date`},
 		{"short window", func(_ *testing.T, f *publicationFixture) { route(f, "groq").Notice.WindowCloses = "2026-10-30" },
