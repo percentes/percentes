@@ -21,17 +21,21 @@ const (
 	publicationJSON = "publication.json"
 )
 
+// publishNow is the clock publish-check judges notice windows by.
+var publishNow = time.Now
+
 // publishCheckCmd checks the release publication record (SPEC-HOSTED HA3
 // point 14) against the cell manifests and the window-close records under
 // --out, the pages the cells generate under the schedule file given,
 // which must be the pages under --pages, and the files the record names.
 // A route with a page needs its window-close record. Each notice's pack
 // must be the route's pack as pack builds it from the same cells, and a
-// replication pack must carry that pack's files. When the record is
-// complete it builds the publication page from it, which must be under
-// --pages byte for byte, or which --write-page writes there, and prints
-// the providers told of the measurement before the notices. pages runs
-// without a record.
+// replication pack must carry that pack's files. A notice may not be
+// dated before the UTC day on which its route's last cell started or its
+// window-close record was taken. When the record is complete it builds
+// the publication page from it, which must be under --pages byte for
+// byte, or which --write-page writes there, and prints the providers told
+// of the measurement before the notices. pages runs without a record.
 func publishCheckCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("publish-check", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -89,7 +93,7 @@ func publishCheckCmd(args []string) (int, error) {
 		routes[i] = evidence.RouteDuties{Name: cfg.Target.Name, Permission: n != nil && n.PermissionRequired, ReplicationPack: replicationRoute(cfg),
 			WindowClose: rp.recs[i].verdict != nil}
 	}
-	state := evidence.PublicationState{Manifests: manifests, WindowCloses: closes, Pages: rp.files, PagesDir: *pages, Packs: packs, Routes: routes, Now: time.Now()}
+	state := evidence.PublicationState{Manifests: manifests, WindowCloses: closes, Pages: rp.files, PagesDir: *pages, Packs: packs, Routes: routes, Now: publishNow()}
 	if err := pub.Check(state); err != nil {
 		fmt.Printf("NOT READY to publish: %v\n", err)
 		return exitAdverse, nil

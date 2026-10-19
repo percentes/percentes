@@ -73,11 +73,22 @@ func packOf(t *testing.T, args []string, route string) []byte {
 	return b
 }
 
+// noticeClosed is a time after the window of publication's notice.
+var noticeClosed = time.Date(2099, 1, 12, 9, 0, 0, 0, time.UTC)
+
+// publishAt sets publish-check's clock to now for the rest of the test.
+func publishAt(t *testing.T, now time.Time) {
+	t.Helper()
+	old := publishNow
+	publishNow = func() time.Time { return now }
+	t.Cleanup(func() { publishNow = old })
+}
+
 // publication writes the record of a release whose one route, groq,
 // needs its naming permission: the manifests and window-close records
 // under out and the pages under pages by hash, the publication page's
-// files left out, a notice of 1 September 2026 whose window closed
-// on 7 September carrying packs["groq"], no response, and one disclosure
+// files left out, a notice of 5 January 2099 whose window closed
+// on 9 January carrying packs["groq"], no response, and one disclosure
 // before it. Each pack in packs is written beside the record as
 // <route>-pack.tar.
 func publication(t *testing.T, out, pages string, packs map[string][]byte, edit func(*evidence.Publication)) string {
@@ -89,7 +100,7 @@ func publication(t *testing.T, out, pages string, packs map[string][]byte, edit 
 	writeFile(t, dir, "permission.eml", []byte("written permission"))
 	p := evidence.Publication{
 		Routes: []evidence.RoutePublication{{Route: "groq",
-			Notice:     &evidence.Notice{Sent: "2026-09-01", Recipient: "groq support", Account: "org-1", Pack: published(t, dir, "groq-pack.tar"), WindowCloses: "2026-09-07"},
+			Notice:     &evidence.Notice{Sent: "2099-01-05", Recipient: "groq support", Account: "org-1", Pack: published(t, dir, "groq-pack.tar"), WindowCloses: "2099-01-09"},
 			Responses:  []evidence.Response{},
 			Permission: published(t, dir, "permission.eml")}},
 		Disclosures:    []evidence.Disclosure{{Provider: "Groq", How: evidence.DisclosureEmail, Date: "2026-08-20", Recipient: "groq support"}},
@@ -137,8 +148,10 @@ func publication(t *testing.T, out, pages string, packs map[string][]byte, edit 
 // record that lacks the naming permission the configuration requires,
 // misses responses, has an open window, misses a later cell's manifest
 // or window-close record, carries a notice pack other than the one pack
-// builds (other text, or a pack built before a later cell), or a page or
-// window-close record edited after the record named it. It exits 1 on a
+// builds (other text, or a pack built before a later cell), a notice
+// dated before the later cell started and its window-close record was
+// taken, or a page or window-close record edited after the record named
+// it. It exits 1 on a
 // window-close record of a refresh that failed, with an edited retained
 // copy, or taken before the route's last cell ended, and with no record,
 // an absent one, no schedule, or a schedule other than the one the cells
@@ -161,6 +174,7 @@ func TestPublishCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(cfg.Target.APIKeyEnv, testKey)
+	publishAt(t, noticeClosed)
 	f := newFixture(t, cfg, "+0.005032")
 	groq, err := newRoute(f.in)
 	if err != nil {
@@ -233,12 +247,12 @@ func TestPublishCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range []string{"| groq | 2026-09-01 | 2026-09-07 | yes |\n", "### groq\n\nNo response.\n", "- Groq, by email, 2026-08-20\n", "No provider funded the measurement.\n"} {
+	for _, s := range []string{"| groq | 2099-01-05 | 2099-01-09 | yes |\n", "### groq\n\nNo response.\n", "- Groq, by email, 2026-08-20\n", "No provider funded the measurement.\n"} {
 		if !strings.Contains(string(md), s) {
 			t.Errorf("publication page lacks %q:\n%s", s, md)
 		}
 	}
-	if !strings.Contains(string(pageJSON), `"notice_sent": "2026-09-01",`) || !strings.Contains(string(pageJSON), `"window_closes": "2026-09-07",`) {
+	if !strings.Contains(string(pageJSON), `"notice_sent": "2099-01-05",`) || !strings.Contains(string(pageJSON), `"window_closes": "2099-01-09",`) {
 		t.Errorf("publication page JSON:\n%s", pageJSON)
 	}
 	for _, s := range []string{"groq support", "org-1", "permission.eml", "pack.tar"} {
@@ -261,7 +275,7 @@ func TestPublishCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	responded := publication(t, groq.out, pages, groqPack(), func(p *evidence.Publication) {
-		p.Routes[0].Responses = []evidence.Response{{Received: "2026-09-03", Corrections: []string{"model name spelt as documented"}}}
+		p.Routes[0].Responses = []evidence.Response{{Received: "2099-01-07", Corrections: []string{"model name spelt as documented"}}}
 	})
 	if code, text := check(responded); code != exitAdverse || !strings.Contains(text, "publication.md under "+pages+" is not the page the record gives; publication.json under ") {
 		t.Errorf("record with a response, page without: exit %d:\n%s", code, text)
@@ -270,8 +284,8 @@ func TestPublishCheck(t *testing.T) {
 		code = dispatch(append([]string{"publish-check", "--write-page", "--record", responded}, base...))
 	})
 	if b, _ := os.ReadFile(filepath.Join(pages, publicationPage)); code != exitOK ||
-		!strings.Contains(string(b), "### groq\n\nReceived 2026-09-03; corrections made: 1, in the corrections log.\n") ||
-		!strings.Contains(string(b), "- groq, response of 2026-09-03: model name spelt as documented\n") {
+		!strings.Contains(string(b), "### groq\n\nReceived 2099-01-07; corrections made: 1, in the corrections log.\n") ||
+		!strings.Contains(string(b), "- groq, response of 2099-01-07: model name spelt as documented\n") {
 		t.Errorf("record with a response, page written: exit %d:\n%s\n%s", code, text, b)
 	}
 	stdoutOf(t, func() {
@@ -340,8 +354,8 @@ func TestPublishCheck(t *testing.T) {
 		{"no permission", func(p *evidence.Publication) { p.Routes[0].Permission = nil }, "route groq: permission: required"},
 		{"no responses", func(p *evidence.Publication) { p.Routes[0].Responses = nil }, "route groq: responses: required"},
 		{"window open", func(p *evidence.Publication) {
-			p.Routes[0].Notice.Sent, p.Routes[0].Notice.WindowCloses = "2099-01-05", "2099-01-09"
-		}, "route groq: notice: the window is open until the end of 2099-01-09 UTC"},
+			p.Routes[0].Notice.Sent, p.Routes[0].Notice.WindowCloses = "2099-02-02", "2099-02-06"
+		}, "route groq: notice: the window is open until the end of 2099-02-06 UTC"},
 	} {
 		if code, text := check(publication(t, groq.out, pages, groqPack(), c.edit)); code != exitAdverse || !strings.Contains(text, "NOT READY to publish: ") || !strings.Contains(text, c.want) {
 			t.Errorf("%s: exit %d, want %q:\n%s", c.name, code, c.want, text)
@@ -435,6 +449,21 @@ func TestPublishCheck(t *testing.T) {
 	}
 	if code, text := check(publication(t, groq.out, pages, groqPack(), nil)); code != exitOK || !strings.Contains(text, "publication record complete: 3 manifests, 4 pages, 1 routes\n") {
 		t.Errorf("pack after the later cell: exit %d:\n%s", code, text)
+	}
+	m, err := evidence.ReadManifest(filepath.Join(groq.out, "groq", cellLabel(groq.runs[2]), evidence.ManifestFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, err = evidence.ReadWindowClose(closePath); err != nil {
+		t.Fatal(err)
+	}
+	early := publication(t, groq.out, pages, groqPack(), func(p *evidence.Publication) {
+		p.Routes[0].Notice.Sent, p.Routes[0].Notice.WindowCloses = "2026-09-01", "2026-09-07"
+	})
+	if code, text := check(early); code != exitAdverse ||
+		!strings.Contains(text, "route groq: notice.sent: 2026-09-01, before the route's last cell in its pack started at "+m.StartUTC.UTC().Format(time.RFC3339Nano)+";") ||
+		!strings.Contains(text, "route groq: notice.sent: 2026-09-01, before the route's window-close record of "+w.RecordedUTC.UTC().Format(time.RFC3339Nano)) {
+		t.Errorf("notice before the later cell and the window close: exit %d:\n%s", code, text)
 	}
 
 	raw, err := os.ReadFile(f.in.schedulePath)

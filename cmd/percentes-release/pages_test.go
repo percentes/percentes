@@ -596,6 +596,7 @@ func TestPagesHostGroup(t *testing.T) {
 // configuration runs at the sibling's ceiling;
 // at another ceiling pages and publish-check refuse it, writing nothing.
 func TestPagesMissedHost(t *testing.T) {
+	publishAt(t, noticeClosed)
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	release, sched := oneRelease(t, e.url(), "groq", "baseten")
 	groq, groqCfg := pagesRoute(t, "groq", e.url(), "", "", release)

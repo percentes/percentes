@@ -1598,9 +1598,11 @@ refuses, exiting 2 with every problem named, unless the record matches
 the cells, the window-close records and the pages on disk, every route
 with a page has its window-close record, every route has its notice
 with at least four working days up to a window close that has passed,
-its responses, and its permission and pack where due, each notice's
-pack equals, byte for byte, the pack `percentes-release pack` builds
-from the cells as they stand, each replication pack holds that pack's
+dated no earlier than the UTC day on which the route's last cell
+started or its window-close record was taken, its responses, and its
+permission and pack where due, each notice's pack equals, byte for byte,
+the pack `percentes-release pack` builds from the cells as they stand,
+each replication pack holds that pack's
 `inventory.json` and every file it names with the same bytes, and may
 hold other files (`evidence.PackCarries`), every disclosure
 predates the first notice, every pre-release copy withholds every

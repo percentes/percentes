@@ -162,9 +162,11 @@ func LoadPublication(path string) (*Publication, error) {
 // its bytes, and each page is on disk with those bytes; every route with
 // the WindowClose duty has its record at <route>/WindowCloseFile; every
 // route has one entry, with a notice whose window of at least
-// NoticeWorkingDays working days closed before s.Now and whose pack is
-// the route's pack in s.Packs byte for byte, s.Packs holding one for the
-// route, its responses, its naming
+// NoticeWorkingDays working days closed before s.Now, sent no earlier
+// than the UTC date of the latest start among the route's cell manifests
+// or of its window-close record, and whose pack is the route's pack in
+// s.Packs byte for byte, s.Packs holding one for the route, its
+// responses, its naming
 // permission where required and its replication pack, sent no later than
 // the notice and carrying every file of the route's pack (PackCarries),
 // where required; every disclosure predates
@@ -255,6 +257,19 @@ func (p *Publication) Check(s PublicationState) error {
 			closes, okClose = date(field+": notice.window_closes", n.WindowCloses)
 			if okSent && (firstNotice.IsZero() || sent.Before(firstNotice)) {
 				firstNotice = sent
+			}
+			if okSent {
+				if started := routeStarted(s.Manifests, r.Route, field, fail); sent.Before(dayOf(started)) {
+					fail("%s: notice.sent: %s, before the route's last cell in its pack started at %s", field, n.Sent, started.UTC().Format(time.RFC3339Nano))
+				}
+				if b, ok := s.WindowCloses[r.Route+"/"+WindowCloseFile]; ok {
+					var w WindowClose
+					if err := json.Unmarshal(b, &w); err != nil {
+						fail("%s: notice.sent: %s/%s: %v", field, r.Route, WindowCloseFile, err)
+					} else if sent.Before(dayOf(w.RecordedUTC)) {
+						fail("%s: notice.sent: %s, before the route's window-close record of %s", field, n.Sent, w.RecordedUTC.UTC().Format(time.RFC3339Nano))
+					}
+				}
 			}
 			if okSent && okClose {
 				if days := workingDays(sent, closes, nonWorking); days < NoticeWorkingDays {
@@ -438,6 +453,32 @@ func (p *Publication) file(field string, f *PublishedFile, fail func(string, ...
 		return b
 	}
 	return nil
+}
+
+// routeStarted returns the latest start among route's cell manifests,
+// the manifests its pack carries, or the zero time when it has none.
+func routeStarted(manifests map[string][]byte, route, field string, fail func(string, ...any)) time.Time {
+	var latest time.Time
+	for _, name := range sortedKeys(manifests) {
+		if !strings.HasPrefix(name, route+"/") {
+			continue
+		}
+		var m Manifest
+		if err := json.Unmarshal(manifests[name], &m); err != nil {
+			fail("%s: notice.sent: %s: %v", field, name, err)
+			continue
+		}
+		if m.StartUTC.After(latest) {
+			latest = m.StartUTC
+		}
+	}
+	return latest
+}
+
+// dayOf is the start of t's UTC date.
+func dayOf(t time.Time) time.Time {
+	y, m, d := t.UTC().Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
 // workingDays counts the weekdays after from up to and including to

@@ -47,8 +47,9 @@ func newPublicationFixture(t *testing.T) *publicationFixture {
 	t.Helper()
 	f := &publicationFixture{dir: t.TempDir()}
 	f.s = PublicationState{
-		Manifests:    map[string][]byte{"azure/c01-a1/manifest.json": []byte("m-azure"), "bedrock/c01-a1/manifest.json": []byte("m-bedrock"), "groq/c01-a1/manifest.json": []byte("m-groq")},
-		WindowCloses: map[string][]byte{"groq/" + WindowCloseFile: []byte("wc-groq")},
+		Manifests: map[string][]byte{"azure/c01-a1/manifest.json": []byte(`{"start_utc": "2026-10-20T09:00:00Z"}`),
+			"bedrock/c01-a1/manifest.json": []byte(`{"start_utc": "2026-10-20T10:00:00Z"}`), "groq/c01-a1/manifest.json": []byte(`{"start_utc": "2026-10-21T09:00:00Z"}`)},
+		WindowCloses: map[string][]byte{"groq/" + WindowCloseFile: []byte(`{"recorded_utc": "2026-10-26T12:00:00Z"}`)},
 		Pages:        map[string][]byte{"index.md": []byte("index"), "routes/groq.txt": []byte("groq page")},
 		PagesDir:     t.TempDir(),
 		Routes:       []RouteDuties{{Name: "groq", WindowClose: true}, {Name: "azure", Permission: true}, {Name: "bedrock", ReplicationPack: true}},
@@ -144,11 +145,16 @@ func (f *publicationFixture) check(t *testing.T) error {
 }
 
 // A complete record passes, and lists the providers told before the
-// notices in date order.
+// notices in date order; a notice dated the day of its route's last cell
+// start or window-close record passes.
 func TestPublicationComplete(t *testing.T) {
 	f := newPublicationFixture(t)
 	if err := f.check(t); err != nil {
 		t.Fatal(err)
+	}
+	f.p.Routes[0].Notice.Sent, f.p.Routes[1].Notice.Sent = "2026-10-26", "2026-10-20"
+	if err := f.check(t); err != nil {
+		t.Fatalf("notices on the days of the window-close record and the last cell start: %v", err)
 	}
 	want := []string{"Groq, by email, 2026-09-15", "AWS, by form, 2026-10-07", "OpenAI, by email, 2026-10-07"}
 	if got := f.p.ToldBefore(); !reflect.DeepEqual(got, want) {
@@ -237,10 +243,25 @@ func TestPublicationRefuses(t *testing.T) {
 			route(f, "groq").Notice.Pack = put(t, f.dir, "packs/groq.tar", "tables and evidence")
 		}, "route groq: notice.pack: packs/groq.tar is not the evidence pack the route's pages and manifests give (percentes-release pack)"},
 		{"pack before a later cell", func(t *testing.T, f *publicationFixture) {
-			f.s.Manifests["groq/c02-a1/manifest.json"] = []byte("m2")
-			f.p.Manifests = append(f.p.Manifests, PublishedFile{Path: "groq/c02-a1/manifest.json", SHA256: shaOf([]byte("m2"))})
+			m := []byte(`{"start_utc": "2026-10-22T09:00:00Z"}`)
+			f.s.Manifests["groq/c02-a1/manifest.json"] = m
+			f.p.Manifests = append(f.p.Manifests, PublishedFile{Path: "groq/c02-a1/manifest.json", SHA256: shaOf(m)})
 			f.s.Packs["groq"] = packOf(t, "groq", f.s)
 		}, "route groq: notice.pack: packs/groq.tar is not the evidence pack"},
+		{"notice before a later cell in its pack", func(t *testing.T, f *publicationFixture) {
+			m := []byte(`{"start_utc": "2026-10-28T09:00:00Z"}`)
+			f.s.Manifests["groq/c02-a1/manifest.json"] = m
+			f.p.Manifests = append(f.p.Manifests, PublishedFile{Path: "groq/c02-a1/manifest.json", SHA256: shaOf(m)})
+			f.s.Packs["groq"] = packOf(t, "groq", f.s)
+			route(f, "groq").Notice.Pack = put(t, f.dir, "packs/groq.tar", string(f.s.Packs["groq"]))
+		}, "evidence: publication refused: route groq: notice.sent: 2026-10-27, before the route's last cell in its pack started at 2026-10-28T09:00:00Z"},
+		{"notice before the last cell", func(_ *testing.T, f *publicationFixture) { route(f, "azure").Notice.Sent = "2026-10-19" },
+			"route azure: notice.sent: 2026-10-19, before the route's last cell in its pack started at 2026-10-20T09:00:00Z"},
+		{"notice before the window-close record", func(_ *testing.T, f *publicationFixture) { route(f, "groq").Notice.Sent = "2026-10-23" },
+			"evidence: publication refused: route groq: notice.sent: 2026-10-23, before the route's window-close record of 2026-10-26T12:00:00Z"},
+		{"manifest not JSON", func(_ *testing.T, f *publicationFixture) {
+			f.s.Manifests["groq/c01-a1/manifest.json"] = []byte("m-groq")
+		}, "route groq: notice.sent: groq/c01-a1/manifest.json: invalid character"},
 		{"no pack for the route", func(_ *testing.T, f *publicationFixture) { delete(f.s.Packs, "groq") },
 			"route groq: notice.pack: the release has no evidence pack for the route"},
 		{"empty pack, no pack for the route", func(t *testing.T, f *publicationFixture) {
