@@ -51,8 +51,9 @@ func RetainedError(text string) string {
 // it is Raw. It refuses a confidential value that is not a plain scalar
 // written in target.limits itself, a comment inside that limit, and a
 // comment or string scalar anywhere in the file that carries one of the
-// value's forms (valueForms) outside a hex run, a date or the text of a
-// fixed identifier (fixedIdentifiers). It refuses a file of more than
+// value's forms (valueForms) outside a hex run, a date or the text of an
+// identifier the provider fixes (FixedIdentifiers), and skips the fields
+// that hold those identifiers (fixedNodes). It refuses a file of more than
 // one YAML document or with text after its document-end marker, and a
 // file with a YAML directive or a tag outside coreTags.
 func (c *Config) Published() ([]byte, error) {
@@ -79,12 +80,12 @@ func (c *Config) Published() ([]byte, error) {
 	for i := 1; i < len(lines); i++ {
 		starts[i] = starts[i-1] + len(lines[i-1])
 	}
-	fixed, ids := c.fixedIdentifiers(root)
+	fixed, ids := fixedNodes(root), FixedIdentifiers(&c.Target, c.Release)
 	var comments, strs []string
 	walk(&doc, func(n *yaml.Node) {
-		comments = append(comments, unfixed(n.HeadComment, ids), unfixed(n.LineComment, ids), unfixed(n.FootComment, ids))
+		comments = append(comments, n.HeadComment, n.LineComment, n.FootComment)
 		if n.Kind == yaml.ScalarNode && n.ShortTag() == "!!str" && !slices.Contains(fixed, n) {
-			strs = append(strs, unfixed(n.Value, ids))
+			strs = append(strs, n.Value)
 		}
 	})
 
@@ -120,12 +121,12 @@ func (c *Config) Published() ([]byte, error) {
 		}
 		forms := valueForms(v.Value, l.Value)
 		for _, cm := range comments {
-			if form, ok := Carries(cm, forms); ok {
+			if form, ok := CarriesOutside(cm, forms, ids); ok {
 				return fail("%s.value: a comment in the file carries %s", field, form)
 			}
 		}
 		for _, s := range strs {
-			if form, ok := Carries(s, forms); ok {
+			if form, ok := CarriesOutside(s, forms, ids); ok {
 				return fail("%s.value: a string in the file carries %s", field, form)
 			}
 		}
@@ -156,52 +157,49 @@ func (c *Config) Published() ([]byte, error) {
 	return out, nil
 }
 
-// fixedIdentifiers are the scalars of root, the file's top-level mapping,
-// that hold an identifier the provider fixes and the route publishes:
+// fixedNodes are the scalars of root, the file's top-level mapping, that
+// hold an identifier the provider fixes and the route publishes:
 // target.model_name, target.reported_model.name, target.endpoint_url and
-// each release.other_hosts[].model. ids are the texts of those
-// identifiers that hold a letter other than e and E, which no value form
-// holds, longest first.
-func (c *Config) fixedIdentifiers(root *yaml.Node) (fixed []*yaml.Node, ids []string) {
+// each release.other_hosts[].model.
+func fixedNodes(root *yaml.Node) []*yaml.Node {
 	target := mapValue(root, "target")
-	fixed = []*yaml.Node{mapValue(target, "model_name"), mapValue(mapValue(target, "reported_model"), "name"), mapValue(target, "endpoint_url")}
-	ids = []string{c.Target.ModelName, c.Target.EndpointURL}
-	if r := c.Target.ReportedModel; r != nil {
-		ids = append(ids, r.Name)
-	}
+	fixed := []*yaml.Node{mapValue(target, "model_name"), mapValue(mapValue(target, "reported_model"), "name"), mapValue(target, "endpoint_url")}
 	if hosts := mapValue(mapValue(root, "release"), "other_hosts"); hosts != nil && hosts.Kind == yaml.SequenceNode {
 		for _, h := range hosts.Content {
 			fixed = append(fixed, mapValue(h, "model"))
 		}
 	}
-	if r := c.Release; r != nil {
+	return slices.DeleteFunc(fixed, func(n *yaml.Node) bool { return n == nil || n.Kind != yaml.ScalarNode })
+}
+
+// FixedIdentifiers are the texts of the identifiers the provider fixes
+// and a route of t in release r publishes: t's endpoint_url, model_name
+// and reported_model name and the model of each of r's other_hosts, each
+// model also without its provider prefix (the text through its last /).
+// Only texts holding a letter other than e and E, which no value form
+// holds, are kept. r may be nil.
+func FixedIdentifiers(t *Target, r *Release) []string {
+	models := []string{t.ModelName}
+	if m := t.ReportedModel; m != nil {
+		models = append(models, m.Name)
+	}
+	if r != nil {
 		for _, h := range r.OtherHosts {
-			ids = append(ids, h.Model)
+			models = append(models, h.Model)
+		}
+	}
+	ids := []string{t.EndpointURL}
+	for _, m := range models {
+		ids = append(ids, m)
+		if i := strings.LastIndex(m, "/"); i >= 0 {
+			ids = append(ids, m[i+1:])
 		}
 	}
 	ids = slices.DeleteFunc(ids, func(id string) bool {
-		return !strings.ContainsFunc(id, func(r rune) bool { return unicode.IsLetter(r) && r != 'e' && r != 'E' })
+		return !strings.ContainsFunc(id, func(c rune) bool { return unicode.IsLetter(c) && c != 'e' && c != 'E' })
 	})
-	slices.SortFunc(ids, func(a, b string) int { return len(b) - len(a) })
-	return slices.DeleteFunc(fixed, func(n *yaml.Node) bool { return n == nil || n.Kind != yaml.ScalarNode }), ids
-}
-
-// unfixed is s with each occurrence of ids that no digit adjoins replaced
-// by a space.
-func unfixed(s string, ids []string) string {
-	for _, id := range ids {
-		for at := 0; ; at++ {
-			i := strings.Index(s[at:], id)
-			if i < 0 {
-				break
-			}
-			at += i
-			if !digitAt(s, at-1) && !digitAt(s, at+len(id)) {
-				s = s[:at] + " " + s[at+len(id):]
-			}
-		}
-	}
-	return s
+	slices.Sort(ids)
+	return slices.Compact(ids)
 }
 
 // thousandsSeparators group the whole part of a number in threes.
@@ -285,7 +283,24 @@ var (
 // own: not within a longer number, a run of 32 or more hex digits or a
 // YYYY-MM-DD date.
 func Carries(text string, forms []string) (string, bool) {
-	text = hexRun.ReplaceAllLiteralString(text, " ")
+	return CarriesOutside(text, forms, nil)
+}
+
+// CarriesOutside is Carries counting no form that lies wholly within an
+// occurrence of one of ids in text; a form that runs on past it counts.
+func CarriesOutside(text string, forms, ids []string) (string, bool) {
+	var within [][2]int
+	for _, id := range ids {
+		for at := 0; id != ""; {
+			i := strings.Index(text[at:], id)
+			if i < 0 {
+				break
+			}
+			within = append(within, [2]int{at + i, at + i + len(id)})
+			at += i + 1
+		}
+	}
+	text = hexRun.ReplaceAllStringFunc(text, func(run string) string { return strings.Repeat(" ", len(run)) })
 	b := []byte(text)
 	for _, m := range dateRun.FindAllStringIndex(text, -1) {
 		if _, err := time.Parse(time.DateOnly, text[m[0]:m[1]]); err == nil && !digitAt(text, m[0]-1) && !digitAt(text, m[1]) {
@@ -302,7 +317,7 @@ func Carries(text string, forms []string) (string, bool) {
 			from, to := at+i, at+i+len(f)
 			before := digitAt(text, from-1) || from > 0 && (text[from-1] == '.' || text[from-1] == ',' && digitAt(text, from-2))
 			after := digitAt(text, to) || to < len(text) && (text[to] == '.' || text[to] == ',') && digitAt(text, to+1)
-			if !before && !after {
+			if !before && !after && !slices.ContainsFunc(within, func(w [2]int) bool { return w[0] <= from && to <= w[1] }) {
 				return f, true
 			}
 			at = from + 1

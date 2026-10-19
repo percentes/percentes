@@ -277,7 +277,7 @@ func newRoute(in routeInput) (*route, error) {
 		}
 		r.withhold(read)
 	}
-	if err := r.op.CheckConfidential(&cfg.Target); err != nil {
+	if err := r.op.CheckConfidential(&cfg.Target, cfg.Release); err != nil {
 		return nil, err
 	}
 	if err := evidence.CheckSource(in.build, r.op); err != nil {

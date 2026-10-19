@@ -1719,6 +1719,60 @@ func TestOperatorConfidentialValue(t *testing.T) {
 	}
 }
 
+// On a route of openai/gpt-oss-120b with a confidential limit of 120, an
+// operator record URL naming the model and a note naming it without its
+// provider prefix let the route start and a cell start, its records not
+// held; a note with 120 outside the model's name refuses the route.
+func TestOperatorFixedIdentifier(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+	enoughOpenFiles(t)
+	raw := confidentialConfig(t, e.url()).Raw
+	const balance = "  # A route whose balance command prints"
+	if bytes.Count(raw, []byte(balance)) != 1 {
+		t.Fatal("reference no longer carries the lines this test edits")
+	}
+	cfg, err := config.Parse(bytes.Replace(raw, []byte(balance), []byte("    - dimension: concurrent_requests\n      value: 120\n      marking: confidential\n"+
+		"      source: groq-console-limits.png\n      retrieved: 2026-10-07\n      hmac_sha256: \""+strings.Repeat("ab", 32)+"\"\n"+balance), 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Target.EndpointURL = e.url()
+	const limits, quota = `"url": "https://example.test/limits"`, `{"kind": "quota", "path": "r.txt", "retrieved": "2026-10-07"}`
+	if strings.Count(operatorJSON, limits) != 1 || strings.Count(operatorJSON, quota) != 1 {
+		t.Fatal("fixture lacks the records this test edits")
+	}
+	named := strings.Replace(operatorJSON, limits, `"url": "https://console.groq.com/docs/model/openai/gpt-oss-120b"`, 1)
+	noted := func(note string) []byte {
+		return []byte(strings.Replace(named, quota, `{"kind": "quota", "path": "r.txt", "retrieved": "2026-10-07", "note": "`+note+`"}`, 1))
+	}
+
+	f := newFixture(t, cfg, "+0.005")
+	writeFile(t, filepath.Dir(f.in.opPath), "operator.json", noted("gpt-oss-120b"))
+	r, err := newRoute(f.in)
+	if err != nil {
+		t.Fatalf("run start: %v", err)
+	}
+	run := r.runs[0]
+	rec, err := r.runCell(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(rec.Reasons, heldStartReason) {
+		t.Fatalf("cell start: outcome %s, reasons %q", rec.Outcome, rec.Reasons)
+	}
+	m, _ := checkRetained(t, r, run)
+	if p := filepath.Join(r.framesRoot, filepath.Dir(filepath.FromSlash(m.Frames.Name)), evidence.OperatorErrorFile); fileExists(p) {
+		t.Fatalf("cell start: %s written", p)
+	}
+
+	f = newFixture(t, cfg, "+0.005")
+	writeFile(t, filepath.Dir(f.in.opPath), "operator.json", noted("120 requests on gpt-oss-120b"))
+	const want = "a confidential limit's value is in records[2].note (concurrent_requests)"
+	if _, err := newRoute(f.in); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("a note with the value: %v; want %q", err, want)
+	}
+}
+
 // On a route with a confidential limit, a value of the limit the refresh
 // command reads that differs from the recorded one is searched for in the
 // operator file as the recorded one is: a cell whose refresh rewrites the

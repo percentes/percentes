@@ -867,7 +867,7 @@ func TestCheckConfidentialAccountTier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := op.CheckConfidential(target); err != nil {
+	if err := op.CheckConfidential(target, nil); err != nil {
 		t.Errorf("account tier: %v", err)
 	}
 	note := strings.Replace(tier, `"note": "T&C of 15 Sep 2026"`, `"note": "4 requests at once"`, 1)
@@ -878,8 +878,50 @@ func TestCheckConfidentialAccountTier(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "a confidential limit's value is in records[3].note (concurrent_requests)"
-	if err := op.CheckConfidential(target); err == nil || err.Error() != "evidence: operator file: "+want {
+	if err := op.CheckConfidential(target, nil); err == nil || err.Error() != "evidence: operator file: "+want {
 		t.Errorf("note: %v; want %q", err, want)
+	}
+}
+
+// CheckConfidential does not count a value within the text of a model
+// identifier the provider fixes, with or without its provider prefix, on
+// the route or on another host of the release, and refuses one that runs
+// on past that text or stands outside it.
+func TestCheckConfidentialFixedIdentifiers(t *testing.T) {
+	const url, note = `"url": "https://docs.example/limits"`, `"note": "T&C of 15 Sep 2026"`
+	rel := &config.Release{OtherHosts: []config.ModelHost{{Route: "baseten", Model: "deepseek-ai/DeepSeek-V3.1"}}}
+	for _, tc := range []struct {
+		name, model string
+		value       float64
+		old, new    string
+		// field is the field refused, or "" where the file passes.
+		field string
+	}{
+		{"url with the model", "openai/gpt-oss-120b", 120, url, `"url": "https://console.groq.com/docs/model/openai/gpt-oss-120b"`, ""},
+		{"note without the prefix", "openai/gpt-oss-120b", 120, note, `"note": "gpt-oss-120b"`, ""},
+		{"note with the value outside", "openai/gpt-oss-120b", 120, note, `"note": "120 requests on gpt-oss-120b"`, "records[3].note"},
+		{"another host's model", "openai/gpt-oss-120b", 3.1, note, `"note": "also DeepSeek-V3.1"`, ""},
+		{"the model itself", "qwen3-32", 32, note, `"note": "qwen3-32"`, ""},
+		{"a decimal point after", "qwen3-32", 32.5, note, `"note": "qwen3-32.5"`, "records[3].note"},
+		{"a decimal comma after", "qwen3-32", 32000, note, `"note": "qwen3-32,000"`, "records[3].note"},
+		{"a space after", "qwen3-32", 32000, note, `"note": "qwen3-32 000"`, "records[3].note"},
+	} {
+		body := strings.Replace(operatorJSON, tc.old, tc.new, 1)
+		if body == operatorJSON {
+			t.Fatalf("%s: fixture edit did not apply", tc.name)
+		}
+		op, err := LoadOperator(writeOperator(t, body))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		target := &config.Target{ModelName: tc.model, Limits: []config.Limit{{Dimension: config.LimitConcurrency, Value: tc.value, Marking: config.MarkingConfidential}}}
+		want := "<nil>"
+		if tc.field != "" {
+			want = "evidence: operator file: a confidential limit's value is in " + tc.field + " (concurrent_requests)"
+		}
+		if err := op.CheckConfidential(target, rel); fmt.Sprint(err) != want {
+			t.Errorf("%s: %v; want %s", tc.name, err, want)
+		}
 	}
 }
 

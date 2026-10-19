@@ -700,15 +700,19 @@ before any setup.
   date, `config.Carries`) in the file's own path, the provider, client
   host, cell, a role, or a record's path, URL or note. The account tier,
   which the provider fixes, is not searched, so a tier named `Tier 4`
-  passes with a limit of 4. It searches for the value as loaded and for
-  each value the route's refresh command read (`Operator.Withhold`), in
-  each form `public-config` searches (`config.ValueForms`): in decimal,
-  also with trailing zeros and with its whole part grouped in threes by
-  a comma or a space character, each with a fractional part also with a
-  decimal comma (`250.013,5`), and in scientific notation with a
-  lowercase or uppercase exponent mark, as `strconv.FormatFloat` prints
-  it in format `e` or `E` (`%g` and `%G` print that or the decimal). The
-  route keeps the values read in memory; a process that starts after
+  passes with a limit of 4. The value inside the text of an identifier
+  the provider fixes, with or without its provider prefix, is not
+  counted, as in `public-config` (`config.FixedIdentifiers`), so a
+  record URL ending `/openai/gpt-oss-120b` passes with a limit of 120.
+  It searches for the value as loaded and for each value the route's
+  refresh command read (`Operator.Withhold`), in each form
+  `public-config` searches (`config.ValueForms`): in decimal, also with
+  trailing zeros and with its whole part grouped in threes by a comma or
+  a space character, each with a fractional part also with a decimal
+  comma (`250.013,5`), and in scientific notation with a lowercase or
+  uppercase exponent mark, as `strconv.FormatFloat` prints it in format
+  `e` or `E` (`%g` and `%G` print that or the decimal). The route keeps
+  the values read in memory; a process that starts after
   earlier cells takes them from the refresh records as run beside those
   cells' frames (`retainedReads`, `evidence.ReadRetainedRefresh`). The
   refusal names the field and the limit's dimension, and neither the
@@ -998,11 +1002,15 @@ or string anywhere in the file, a key among them, that carries the
 value as a number of its own. The identifiers the provider fixes are
 left out of that search: `target.model_name`,
 `target.reported_model.name`, `target.endpoint_url` and each
-`release.other_hosts[].model` in their own fields, and their text inside
-any other string or comment where no digit adjoins it and the
-identifier holds a letter other than `e` and `E`. A limit of 4 on the
-model `gpt-4o-mini` therefore publishes, and `qwen3-3225` in a note
-still refuses a limit of 3225 on `qwen3-32`. The forms looked for are
+`release.other_hosts[].model` in their own fields. In any other string
+or comment, a form that lies inside the text of one of them, or of a
+model without its provider prefix (`gpt-oss-120b` for
+`openai/gpt-oss-120b`), does not count where the identifier holds a
+letter other than `e` and `E` (`config.FixedIdentifiers`,
+`config.CarriesOutside`); a form that runs on past that text counts. A
+limit of 4 on the model `gpt-4o-mini` therefore publishes, and
+`qwen3-3225` in a note still refuses a limit of 3225 on `qwen3-32`, as
+`qwen3-32,000` does a limit of 32000. The forms looked for are
 the value as written and in decimal, the decimal also with zeros added
 after its last digit up to 17 digits in all (`9876543.2500`), each also
 with its whole part grouped in threes by a comma, a space, a no-break

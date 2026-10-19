@@ -285,7 +285,7 @@ type ManifestInput struct {
 // are keyed under in.Key.
 func NewManifest(in ManifestInput) (*Manifest, error) {
 	cfg, t, res, op := in.Config, in.Target, in.Result, in.Operator
-	opFile, records, err := op.published(t, in.Key)
+	opFile, records, err := op.published(t, cfg.Release, in.Key)
 	if err != nil {
 		return nil, err
 	}

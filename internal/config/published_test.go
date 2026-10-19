@@ -376,10 +376,11 @@ func TestPublishedSkips(t *testing.T) {
 }
 
 // A small confidential value inside an identifier the provider fixes, in
-// that identifier's own field or as its text in the body, does not stop
-// the file loading and publishing; a naming line or a comment carrying the
-// value is still refused, and so is the value written on from the
-// identifier's last digits.
+// that identifier's own field or as its text in the body or a naming line,
+// with or without its provider prefix, does not stop the file loading and
+// publishing; a naming line or a comment carrying the value is still
+// refused, and so is the value written on from the identifier's last
+// digits by a digit, a decimal point, a decimal comma or a space.
 func TestPublishedFixedIdentifiers(t *testing.T) {
 	const (
 		model    = "openai/gpt-oss-120b"
@@ -412,6 +413,7 @@ func TestPublishedFixedIdentifiers(t *testing.T) {
 		{"1 in an endpoint with /v1/", "1", "Groq allows 1 request at once.", [][2]string{{provider, `section one: "Outputs are Customer Data"`}}},
 		{"70 in llama-3.3-70b-versatile", "70", "Groq allows 70 requests at once.", [][2]string{{model, "llama-3.3-70b-versatile"}, {"  limits:\n", reported}}},
 		{"3225 beside qwen3-32", "3225", "Served as qwen3-3225.", [][2]string{{model, "qwen3-32"}}},
+		{"120 in gpt-oss-120b without its prefix", "120", "Groq allows 120 requests at once.", [][2]string{{naming, "      - Served as gpt-oss-120b.\n" + naming}}},
 	} {
 		raw := confidentialRef(t, limit(tc.value))
 		for _, e := range tc.edits {
@@ -446,6 +448,27 @@ func TestPublishedFixedIdentifiers(t *testing.T) {
 			if b, err := c.Published(); err == nil || !strings.Contains(err.Error(), want) {
 				t.Errorf("%s: %q must fail naming %q, got %v and\n%s", tc.name, e[1], want, err, b)
 			}
+		}
+	}
+	for _, tc := range []struct{ value, line, form string }{
+		{"32.5", "Served as qwen3-32.5.", "32.5"},
+		{"32000", "Served as qwen3-32,000.", "32,000"},
+		{"32000", "Served as qwen3-32 000.", "32 000"},
+	} {
+		raw := bytes.ReplaceAll(confidentialRef(t, limit(tc.value)), []byte(model), []byte("qwen3-32"))
+		c, err := Parse(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.line, err)
+		}
+		if _, err := c.Published(); err != nil {
+			t.Errorf("%s: without the line: %v", tc.line, err)
+		}
+		if c, err = Parse(bytes.Replace(raw, []byte(naming), []byte("      - "+tc.line+"\n"+naming), 1)); err != nil {
+			t.Fatalf("%s: %v", tc.line, err)
+		}
+		want := "target.limits[2].value: a string in the file carries " + tc.form
+		if b, err := c.Published(); err == nil || !strings.HasSuffix(err.Error(), want) {
+			t.Errorf("%q must fail naming %q, got %v and\n%s", tc.line, want, err, b)
 		}
 	}
 }

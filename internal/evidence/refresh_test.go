@@ -156,7 +156,7 @@ func TestReadWindowClose(t *testing.T) {
 	op := &Operator{AccountTier: "Developer", File: FileRef{Name: "operator.json", SHA256: strings.Repeat("a", 64), Bytes: "9"},
 		Records: []OperatorRecord{{Kind: RecordLimits, FileRef: FileRef{Name: "limits.txt", SHA256: strings.Repeat("b", 64), Bytes: "4"}, URL: "https://example.test/limits", Retrieved: "2026-10-27T01:00:00Z"}}}
 	at := time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC)
-	w, err := NewWindowClose(&config.Target{Name: "groq"}, at, refreshRun(`{"limits": []}`), op, nil)
+	w, err := NewWindowClose(&config.Target{Name: "groq"}, nil, at, refreshRun(`{"limits": []}`), op, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestReadWindowClose(t *testing.T) {
 		t.Fatalf("public target's record %+v", w.Records[0].FileRef)
 	}
 	confidential := &config.Target{Name: "groq", Limits: []config.Limit{{Marking: config.MarkingConfidential}}}
-	if _, err := NewWindowClose(confidential, at, refreshRun(`{"limits": []}`), op, nil); err == nil || !strings.Contains(err.Error(), "needs the release key") {
+	if _, err := NewWindowClose(confidential, nil, at, refreshRun(`{"limits": []}`), op, nil); err == nil || !strings.Contains(err.Error(), "needs the release key") {
 		t.Fatalf("confidential target with no key: %v", err)
 	}
 	key, err := releasekey.New()
@@ -182,7 +182,7 @@ func TestReadWindowClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	op.Records[0].data, op.raw = []byte("limits"), []byte(`{"provider":"p"}`)
-	held, err := NewWindowClose(confidential, at, refreshRun(`{"limits": []}`), op, key)
+	held, err := NewWindowClose(confidential, nil, at, refreshRun(`{"limits": []}`), op, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestWindowCloseVerify(t *testing.T) {
 			k = key
 		}
 		op := loadOperator(t)
-		w, err := NewWindowClose(target, at, PublishedRefresh(rec, target, read), op, k)
+		w, err := NewWindowClose(target, nil, at, PublishedRefresh(rec, target, read), op, k)
 		if err != nil {
 			t.Fatal(err)
 		}

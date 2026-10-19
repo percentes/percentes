@@ -165,9 +165,9 @@ type WindowClose struct {
 // NewWindowClose is t's route's window-close record of refresh, as it
 // publishes, and op, read after it, at recorded, with op's file and
 // records keyed under key on a target with a confidential limit, as in a
-// cell's manifest.
-func NewWindowClose(t *config.Target, recorded time.Time, refresh *StatusRecord, op *Operator, key *releasekey.Key) (*WindowClose, error) {
-	opFile, records, err := op.published(t, key)
+// cell's manifest; rel is t's release.
+func NewWindowClose(t *config.Target, rel *config.Release, recorded time.Time, refresh *StatusRecord, op *Operator, key *releasekey.Key) (*WindowClose, error) {
+	opFile, records, err := op.published(t, rel, key)
 	if err != nil {
 		return nil, err
 	}

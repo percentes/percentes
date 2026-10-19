@@ -460,7 +460,7 @@ func (r *route) cellOperator(refresh *evidence.StatusRecord) (*evidence.Operator
 		return nil, err
 	}
 	op.Withhold(r.withheld)
-	if err := op.CheckConfidential(&r.cfg.Target); err != nil {
+	if err := op.CheckConfidential(&r.cfg.Target, r.cfg.Release); err != nil {
 		return nil, err
 	}
 	if err := evidence.CheckSource(r.build, op); err != nil {

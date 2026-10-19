@@ -247,13 +247,15 @@ func (op *Operator) Withhold(read []RefreshedLimit) {
 // of its own (config.Carries) in the operator file's path or in a text op
 // publishes: the provider, client host, cell or a role, or a record's
 // path, URL or note. The account tier, which the provider fixes, is not
-// searched. The value is searched in each form config.ValueForms gives:
+// searched, and a form within the text of an identifier the provider
+// fixes for t in release rel (config.FixedIdentifiers) is not counted. The
+// value is searched in each form config.ValueForms gives:
 // decimal, also with trailing zeros, with its whole part grouped in
 // threes and with a decimal comma, and as strconv.FormatFloat prints it
 // in format 'e' or 'E' (%g and %G print that or the decimal).
 // The refusal names each field and the limit's dimension, and neither
 // the value nor the file's name.
-func (op *Operator) CheckConfidential(t *config.Target) error {
+func (op *Operator) CheckConfidential(t *config.Target, rel *config.Release) error {
 	type text struct{ field, s string }
 	texts := []text{{"file path", op.path}, {"provider", op.Provider}, {"client_host", op.ClientHost}, {"cell", op.Cell}}
 	if r := op.Roles; r != nil {
@@ -270,12 +272,13 @@ func (op *Operator) CheckConfidential(t *config.Target) error {
 		}
 	}
 	held = append(held, op.withheld...)
+	ids := config.FixedIdentifiers(t, rel)
 	var found []string
 	for _, l := range held {
 		forms := config.ValueForms(l.Value)
 		for _, x := range texts {
 			hit := fmt.Sprintf("%s (%s)", x.field, l.Dimension)
-			if _, ok := config.Carries(x.s, forms); ok && !slices.Contains(found, hit) {
+			if _, ok := config.CarriesOutside(x.s, forms, ids); ok && !slices.Contains(found, hit) {
 				found = append(found, hit)
 			}
 		}
@@ -286,17 +289,17 @@ func (op *Operator) CheckConfidential(t *config.Target) error {
 	return nil
 }
 
-// published are op's file and records as a run on t names them: keyed
-// under key (FileRef) on a target with a confidential limit, which
-// requires key and op to pass CheckConfidential.
-func (op *Operator) published(t *config.Target, key *releasekey.Key) (FileRef, []OperatorRecord, error) {
+// published are op's file and records as a run on t in release rel names
+// them: keyed under key (FileRef) on a target with a confidential limit,
+// which requires key and op to pass CheckConfidential.
+func (op *Operator) published(t *config.Target, rel *config.Release, key *releasekey.Key) (FileRef, []OperatorRecord, error) {
 	if !t.Confidential() {
 		return op.File, op.Records, nil
 	}
 	if key == nil {
 		return FileRef{}, nil, errors.New("evidence: a target with a confidential limit needs the release key")
 	}
-	if err := op.CheckConfidential(t); err != nil {
+	if err := op.CheckConfidential(t, rel); err != nil {
 		return FileRef{}, nil, err
 	}
 	out := slices.Clone(op.Records)

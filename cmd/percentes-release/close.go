@@ -104,7 +104,7 @@ func (r *route) windowClose(ctx context.Context, st *routeState) error {
 		}
 		return fmt.Errorf("%s: window close: the records were not refreshed (SPEC-HOSTED §4): %s in %s", t.Name, windowCloseErrorHeld, dir)
 	}
-	w, err := evidence.NewWindowClose(t, r.now(), evidence.PublishedRefresh(refresh, t, read), op, r.key)
+	w, err := evidence.NewWindowClose(t, r.cfg.Release, r.now(), evidence.PublishedRefresh(refresh, t, read), op, r.key)
 	if err != nil {
 		return err
 	}

@@ -178,7 +178,7 @@ func TestOperatorConfidential(t *testing.T) {
 		}
 		return strings.Replace(operatorJSON, old, new, 1)
 	}
-	if err := loadOperator(t).CheckConfidential(&cfg.Target); err != nil {
+	if err := loadOperator(t).CheckConfidential(&cfg.Target, nil); err != nil {
 		t.Fatalf("an operator file without the value: %v", err)
 	}
 	for _, tc := range []struct {
@@ -215,7 +215,7 @@ func TestOperatorConfidential(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		if err := op.CheckConfidential(&public.Target); err != nil {
+		if err := op.CheckConfidential(&public.Target, nil); err != nil {
 			t.Errorf("%s: public target: %v", tc.name, err)
 		}
 		target := cfg.Target
@@ -226,11 +226,11 @@ func TestOperatorConfidential(t *testing.T) {
 			}
 		}
 		want := "a confidential limit's value is in " + tc.field + " (tokens_per_minute)"
-		err = op.CheckConfidential(&target)
+		err = op.CheckConfidential(&target, nil)
 		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), tc.value) {
 			t.Errorf("%s: %v; want %q", tc.name, err, want)
 		}
-		if _, err := NewWindowClose(&target, time.Now(), refreshRun(`{"limits": []}`), op, key); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := NewWindowClose(&target, nil, time.Now(), refreshRun(`{"limits": []}`), op, key); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: window-close record: %v", tc.name, err)
 		}
 	}
@@ -239,7 +239,7 @@ func TestOperatorConfidential(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := op.CheckConfidential(&cfg.Target); err != nil {
+		if err := op.CheckConfidential(&cfg.Target, nil); err != nil {
 			t.Errorf("%q: %v", note, err)
 		}
 	}
@@ -259,7 +259,7 @@ func TestOperatorWithhold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := op.CheckConfidential(&cfg.Target); err != nil {
+	if err := op.CheckConfidential(&cfg.Target, nil); err != nil {
 		t.Fatalf("before the read: %v", err)
 	}
 	read, err := ReadRefreshedLimits(refreshRun(`{"limits": [{"dimension": "requests_per_minute", "value": 1000}, {"dimension": "tokens_per_minute", "value": 310007}]}`), &cfg.Target)
@@ -267,19 +267,19 @@ func TestOperatorWithhold(t *testing.T) {
 		t.Fatal(err)
 	}
 	op.Withhold(read[:1])
-	if err := op.CheckConfidential(&cfg.Target); err != nil {
+	if err := op.CheckConfidential(&cfg.Target, nil); err != nil {
 		t.Fatalf("a public limit's value withheld: %v", err)
 	}
 	op.Withhold(read)
 	op.Withhold(read)
 	const want = "evidence: operator file: a confidential limit's value is in records[3].note (tokens_per_minute)"
-	if err := op.CheckConfidential(&cfg.Target); err == nil || err.Error() != want {
+	if err := op.CheckConfidential(&cfg.Target, nil); err == nil || err.Error() != want {
 		t.Fatalf("%v; want %q", err, want)
 	}
-	if _, err := NewWindowClose(&cfg.Target, time.Now(), refreshRun(`{"limits": []}`), op, key); err == nil || err.Error() != want {
+	if _, err := NewWindowClose(&cfg.Target, nil, time.Now(), refreshRun(`{"limits": []}`), op, key); err == nil || err.Error() != want {
 		t.Fatalf("window-close record: %v", err)
 	}
-	if _, _, err := op.published(&cfg.Target, key); err == nil || err.Error() != want {
+	if _, _, err := op.published(&cfg.Target, nil, key); err == nil || err.Error() != want {
 		t.Fatalf("manifest records: %v", err)
 	}
 }
