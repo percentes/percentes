@@ -40,8 +40,9 @@
 // each confidential limit's value withheld. Every command reads the
 // configuration as loaded. After
 // the window, pages writes the index page and each route's page from the
-// cells' records, which must carry one ceiling choice and one set of
-// probe records across the hosts of a model, and publish-check checks
+// cells' records, which must carry the SHA-256 of the schedule file
+// given and, across the hosts of a model, one ceiling choice and one set
+// of probe records, and publish-check checks
 // the release publication record against the cells, the pages and the
 // files it names.
 //
@@ -70,9 +71,10 @@
 //	    --byte-cap N --account-created DATE
 //	percentes-release dispatch --out DIR
 //	percentes-release pages --out DIR --frames DIR --config FILE ...
-//	    --pages DIR [--release-key FILE]
+//	    --schedule FILE --pages DIR [--release-key FILE]
 //	percentes-release publish-check --out DIR --frames DIR
-//	    --config FILE ... --pages DIR --record FILE [--release-key FILE]
+//	    --config FILE ... --schedule FILE --pages DIR --record FILE
+//	    [--release-key FILE]
 //	percentes-release rehearse --out DIR --frames DIR --clock-sync CMD
 //	    --byte-cap N [--scale N] [--master-seed SEED] [--source-diff FILE]
 //	percentes-release check-cpu

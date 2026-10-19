@@ -89,10 +89,10 @@ func TestCheckingNeedsReleaseKey(t *testing.T) {
 	cfgPath := writeFile(t, t.TempDir(), "groq.yaml", cfg.Raw)
 	out, frames := t.TempDir(), t.TempDir()
 	want := "--release-key is required: route groq has a confidential limit"
-	if code, err := pagesCmd([]string{"--out", out, "--frames", frames, "--config", cfgPath, "--pages", t.TempDir()}); code != exitError || err == nil || err.Error() != "pages: "+want {
+	if code, err := pagesCmd([]string{"--out", out, "--frames", frames, "--config", cfgPath, "--schedule", "schedule.json", "--pages", t.TempDir()}); code != exitError || err == nil || err.Error() != "pages: "+want {
 		t.Errorf("pages: %d, %v", code, err)
 	}
-	if code, err := publishCheckCmd([]string{"--out", out, "--frames", frames, "--config", cfgPath, "--pages", t.TempDir(), "--record", "r"}); code != exitError || err == nil || err.Error() != "publish-check: "+want {
+	if code, err := publishCheckCmd([]string{"--out", out, "--frames", frames, "--config", cfgPath, "--schedule", "schedule.json", "--pages", t.TempDir(), "--record", "r"}); code != exitError || err == nil || err.Error() != "publish-check: "+want {
 		t.Errorf("publish-check: %d, %v", code, err)
 	}
 	public, err := loadReleases([]string{"../../configs/release.reference.yaml"})

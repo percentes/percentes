@@ -38,6 +38,8 @@ const (
 // window-close record, nil when it has none. The verdict is nil when
 // every attempt is missed or interrupted with no manifest.
 type routeRecords struct {
+	// schedule is the schedule SHA-256 the route's cells carry.
+	schedule   string
 	verdict    *admission.Verdict
 	ceiling    probe.CeilingChoice
 	probes     []evidence.FileRef
@@ -52,9 +54,10 @@ type routeRecords struct {
 
 // pagesCmd writes the release's index page and each route's page from
 // the cells' records under --out (SPEC-HOSTED HA3 point 12). Every route
-// with a cell under --out must be given; nothing is written unless every
-// route's cells read. A route whose attempts are all missed or
-// interrupted gets no page.
+// with a cell under --out must be given, and every cell must have run
+// under the schedule file given; nothing is written unless every route's
+// cells read. A route whose attempts are all missed or interrupted gets
+// no page.
 func pagesCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("pages", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -62,11 +65,12 @@ func pagesCmd(args []string) (int, error) {
 	var cfgPaths listFlag
 	fs.Var(&cfgPaths, "config", "a route's release configuration, the file its cells ran (repeatable, required)")
 	pages := fs.String("pages", "", "directory to write the index page and the route pages in (required)")
+	schedulePath := fs.String("schedule", "", "the committed schedule file the cells ran under (required)")
 	keyPath := fs.String("release-key", "", "the release key file (required where a route has a confidential limit)")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
-	for name, v := range map[string]string{"--out": *out, "--frames": *framesRoot, "--pages": *pages} {
+	for name, v := range map[string]string{"--out": *out, "--frames": *framesRoot, "--pages": *pages, "--schedule": *schedulePath} {
 		if v == "" {
 			return exitError, fmt.Errorf("pages: %s is required", name)
 		}
@@ -79,7 +83,11 @@ func pagesCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, fmt.Errorf("pages: %w", err)
 	}
-	rp, err := buildPages(*out, *framesRoot, cfgs, key)
+	sched, err := scheduleSHA256(*schedulePath)
+	if err != nil {
+		return exitError, fmt.Errorf("pages: %w", err)
+	}
+	rp, err := buildPages(*out, *framesRoot, sched, cfgs, key)
 	if err != nil {
 		return exitError, err
 	}
@@ -111,10 +119,11 @@ type releasePages struct {
 
 // buildPages builds the index page and each route's page from the cells
 // of cfgs' routes under out. Every route with a cell under out must be
-// among cfgs, and the routes of one model among them must carry one
-// ceiling choice and one set of probe records. A route with no manifest
-// has no page and no index row.
-func buildPages(out, framesRoot string, cfgs []*config.Config, key *releasekey.Key) (*releasePages, error) {
+// among cfgs, every cell must carry the schedule SHA-256 sched, and the
+// routes of one model among them must carry one ceiling choice and one
+// set of probe records. A route with no manifest has no page and no
+// index row.
+func buildPages(out, framesRoot, sched string, cfgs []*config.Config, key *releasekey.Key) (*releasePages, error) {
 	given := map[string]bool{}
 	rp := &releasePages{routes: make([]report.IndexRoute, len(cfgs)), recs: make([]*routeRecords, len(cfgs))}
 	var paged []report.IndexRoute
@@ -123,6 +132,9 @@ func buildPages(out, framesRoot string, cfgs []*config.Config, key *releasekey.K
 		var err error
 		if rp.recs[i], err = readRouteCells(out, framesRoot, cfg, key); err != nil {
 			return nil, err
+		}
+		if s := rp.recs[i].schedule; s != sched {
+			return nil, fmt.Errorf("pages: route %s: the cells ran under schedule sha256 %q; --schedule has sha256 %s", cfg.Target.Name, s, sched)
 		}
 		rp.routes[i] = report.IndexRoute{Config: cfg, Verdict: rp.recs[i].verdict, Cells: rp.recs[i].cells}
 		if rp.recs[i].verdict != nil {
@@ -215,10 +227,11 @@ func marshalPage(v any) ([]byte, error) {
 // readRouteCells reads cfg's route's cells under out. Every attempt with
 // a manifest must pass the completeness check against cfg's file, the
 // frame store and the release key, and every manifest must carry the
-// same verdict, ceiling choice and probe records. An attempt enters the
-// route's frame when its run record and its manifest both count it, at
-// most one attempt per scheduled cell; only a missed
-// or interrupted attempt may have its run record alone. Each counted
+// same verdict, ceiling choice and probe records. Every run record must
+// carry the same schedule SHA-256, and every manifest its run record's.
+// An attempt enters the route's frame when its run record and its
+// manifest both count it, at most one attempt per scheduled cell; only a
+// missed or interrupted attempt may have its run record alone. Each counted
 // cell carries its scheduled start and the documentation state its
 // manifest records, which the drift rule compares. Each model_mismatch
 // attempt's expected and reported model ids are kept for the route's
@@ -232,7 +245,7 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 	}
 	rr := &routeRecords{}
 	counted := map[string]string{}
-	for _, p := range paths {
+	for i, p := range paths {
 		dir := filepath.Dir(p)
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -247,6 +260,10 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 			return nil, fmt.Errorf("pages: %s: the cell is running", dir)
 		case rec.Run.Route != name || filepath.Base(dir) != cellLabel(rec.Run):
 			return nil, fmt.Errorf("pages: %s: the run record is route %s, %s", dir, rec.Run.Route, cellLabel(rec.Run))
+		case i == 0:
+			rr.schedule = rec.ScheduleSHA256
+		case rec.ScheduleSHA256 != rr.schedule:
+			return nil, fmt.Errorf("pages: %s: the cell ran under schedule sha256 %q, the route's other cells under %q", dir, rec.ScheduleSHA256, rr.schedule)
 		}
 		if _, err := os.Stat(filepath.Join(dir, evidence.ManifestFile)); errors.Is(err, os.ErrNotExist) {
 			if rec.Outcome != outcomeMissed && rec.Outcome != outcomeInterrupted {
@@ -259,8 +276,11 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 		if err != nil {
 			return nil, fmt.Errorf("pages: %s: %w", dir, err)
 		}
-		if !sameRun(m.Release.Run, rec.Run) {
+		switch {
+		case !sameRun(m.Release.Run, rec.Run):
 			return nil, fmt.Errorf("pages: %s: the manifest is %s, the run record %s", dir, cellLabel(m.Release.Run), cellLabel(rec.Run))
+		case m.Release.ScheduleSHA256 != rec.ScheduleSHA256:
+			return nil, fmt.Errorf("pages: %s: the manifest's schedule sha256 %q, the run record's %q", dir, m.Release.ScheduleSHA256, rec.ScheduleSHA256)
 		}
 		switch {
 		case rr.verdict == nil:
@@ -301,6 +321,20 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 		}
 	}
 	return rr, nil
+}
+
+// scheduleSHA256 is the SHA-256 of the schedule file at path, which must
+// load as a committed schedule.
+func scheduleSHA256(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("schedule: %w", err)
+	}
+	if _, err := schedule.Load(raw); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // readAttempts reads the attempts file in dir when it is the file m

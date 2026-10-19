@@ -16,9 +16,10 @@ import (
 
 // publishCheckCmd checks the release publication record (SPEC-HOSTED HA3
 // point 14) against the cell manifests under --out, the pages the cells
-// generate, which must be the pages under --pages, and the files the
-// record names. When the record is complete it prints the providers told
-// of the measurement before the notices. pages runs without a record.
+// generate under the schedule file given, which must be the pages under
+// --pages, and the files the record names. When the record is complete
+// it prints the providers told of the measurement before the notices.
+// pages runs without a record.
 func publishCheckCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("publish-check", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -27,11 +28,12 @@ func publishCheckCmd(args []string) (int, error) {
 	fs.Var(&cfgPaths, "config", "a route's release configuration, the file its cells ran (repeatable, required)")
 	pages := fs.String("pages", "", "the directory pages wrote the index page and the route pages in (required)")
 	record := fs.String("record", "", "the release publication record; the files it names are relative to its directory (required)")
+	schedulePath := fs.String("schedule", "", "the committed schedule file the cells ran under (required)")
 	keyPath := fs.String("release-key", "", "the release key file (required where a route has a confidential limit)")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
-	for _, f := range [][2]string{{"--out", *out}, {"--frames", *framesRoot}, {"--pages", *pages}, {"--record", *record}} {
+	for _, f := range [][2]string{{"--out", *out}, {"--frames", *framesRoot}, {"--pages", *pages}, {"--record", *record}, {"--schedule", *schedulePath}} {
 		if f[1] == "" {
 			return exitError, fmt.Errorf("publish-check: %s is required", f[0])
 		}
@@ -44,11 +46,15 @@ func publishCheckCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, fmt.Errorf("publish-check: %w", err)
 	}
+	sched, err := scheduleSHA256(*schedulePath)
+	if err != nil {
+		return exitError, fmt.Errorf("publish-check: %w", err)
+	}
 	pub, err := evidence.LoadPublication(*record)
 	if err != nil {
 		return exitError, err
 	}
-	rp, err := buildPages(*out, *framesRoot, cfgs, key)
+	rp, err := buildPages(*out, *framesRoot, sched, cfgs, key)
 	if err != nil {
 		return exitError, err
 	}

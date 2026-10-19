@@ -94,8 +94,9 @@ func publication(t *testing.T, out, pages string, edit func(*evidence.Publicatio
 // before the notices; pages runs with no record; and the check refuses,
 // exiting 2, a record that lacks the naming permission the configuration
 // requires, misses responses, has an open window, misses a later cell's
-// manifest, or a page edited after pages wrote it. With no record, or
-// an absent one, it exits 1.
+// manifest, or a page edited after pages wrote it. With no record, an
+// absent one, no schedule, or a schedule other than the one the cells ran
+// under, it exits 1.
 func TestPublishCheck(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	path := routeConfigFile(t, "groq", e.url(), "10")
@@ -126,7 +127,7 @@ func TestPublishCheck(t *testing.T) {
 		}
 	}
 	pages := t.TempDir()
-	base := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--pages", pages}
+	base := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--pages", pages}
 	if code, err := pagesCmd(base); code != exitOK || err != nil {
 		t.Fatalf("pages with no record: exit %d: %v", code, err)
 	}
@@ -184,12 +185,23 @@ func TestPublishCheck(t *testing.T) {
 		t.Errorf("later cell: exit %d:\n%s", code, text)
 	}
 
+	raw, err := os.ReadFile(f.in.schedulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := testSchedule(t, nil, "groq", "other").JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, c := range []struct {
 		args []string
 		want string
 	}{
 		{base, "publish-check: --record is required"},
 		{append(base[:len(base):len(base)], "--record", filepath.Join(t.TempDir(), "absent.json")), "absent.json: no such file"},
+		{[]string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--pages", pages, "--record", record}, "publish-check: --schedule is required"},
+		{[]string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", writeFile(t, t.TempDir(), "schedule.json", other), "--pages", pages, "--record", record},
+			"pages: route groq: the cells ran under schedule sha256 \"" + sha(string(raw)) + "\"; --schedule has sha256 " + sha(string(other))},
 	} {
 		if code, err := publishCheckCmd(c.args); code != exitError || err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%q: exit %d: %v, want %q", c.args, code, err, c.want)

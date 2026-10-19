@@ -1482,7 +1482,7 @@ func TestCellOperatorRefreshed(t *testing.T) {
 		t.Skipf("client-validity gate failed (%s); no two counted cells to page", strings.Join(notCounted, "; "))
 	}
 	pages := t.TempDir()
-	if code, err := pagesCmd([]string{"--out", r.out, "--frames", r.framesRoot, "--config", cfgPath, "--pages", pages}); code != exitOK || err != nil {
+	if code, err := pagesCmd([]string{"--out", r.out, "--frames", r.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--pages", pages}); code != exitOK || err != nil {
 		t.Fatalf("pages: exit %d: %v", code, err)
 	}
 	b, err := os.ReadFile(filepath.Join(pages, routesDir, "groq.json"))
