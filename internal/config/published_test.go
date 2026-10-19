@@ -118,19 +118,25 @@ func TestPublishedRefusals(t *testing.T) {
 	}
 }
 
-// A file of more than one YAML document is refused by Parse, Decode and
-// Published, whatever the second document holds; one leading "---" is
-// one document.
+// A file of more than one YAML document, or with text after its
+// document-end marker, is refused by Parse, Decode and Published; one
+// leading "---" is one document, and a trailing "..." loads.
 func TestOneDocument(t *testing.T) {
 	const one = "one YAML document required"
 	ref := confidentialRef(t, confidentialTPM)
 	for name, tail := range map[string]string{
-		"a mapping":           "---\nleak: " + secretValue + "\n",
-		"a string":            "---\nnote: \"tpm " + secretValue + "\"\n",
-		"not YAML":            "---\n: : [\n",
-		"a comment":           "---\n# tokens_per_minute is " + secretValue + "\n",
-		"an empty document":   "---\n",
-		"after an end marker": "...\n---\nleak: " + secretValue + "\n",
+		"a mapping":                       "---\nleak: " + secretValue + "\n",
+		"a string":                        "---\nnote: \"tpm " + secretValue + "\"\n",
+		"not YAML":                        "---\n: : [\n",
+		"a comment":                       "---\n# tokens_per_minute is " + secretValue + "\n",
+		"an empty document":               "---\n",
+		"after an end marker":             "...\n---\nleak: " + secretValue + "\n",
+		"a comment on the end marker":     "... # tpm " + secretValue + "\n",
+		"a comment after two markers":     "...\n...\n# tpm " + secretValue + "\n",
+		"a comment after the marker":      "...\n# tpm " + secretValue + "\n",
+		"a marker after a line separator": "\u2028... # tpm " + secretValue + "\n",
+		"a marker after a return":         "\r... # tpm " + secretValue + "\n",
+		"a second marker":                 "...\n...",
 	} {
 		raw := append(slices.Clone(ref), tail...)
 		if _, err := Parse(raw); err == nil || !strings.Contains(err.Error(), one) {
@@ -155,6 +161,17 @@ func TestOneDocument(t *testing.T) {
 	}
 	if b, err := c.Published(); err != nil || bytes.Contains(b, []byte(secretValue)) || !bytes.HasPrefix(b, []byte("---\n")) {
 		t.Fatalf("one leading ---: published %v\n%s", err, b)
+	}
+
+	for _, tc := range [][2]string{{"", "..."}, {"", "...\n"}, {"", "... \n\n"}, {"---\n", "...\n"}} {
+		raw := append(append([]byte(tc[0]), ref...), tc[1]...)
+		c, err := Parse(raw)
+		if err != nil {
+			t.Fatalf("%q then %q: %v", tc[0], tc[1], err)
+		}
+		if b, err := c.Published(); err != nil || bytes.Contains(b, []byte(secretValue)) || !bytes.HasSuffix(b, []byte(tc[1])) {
+			t.Fatalf("%q then %q: published %v\n%s", tc[0], tc[1], err, b)
+		}
 	}
 }
 
