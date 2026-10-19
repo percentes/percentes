@@ -715,6 +715,39 @@ func TestCellConfidentialLimit(t *testing.T) {
 	}
 }
 
+// A probe answered with a documented billing refusal that names body
+// text stops a route with a confidential limit after that one request,
+// whether or not the start gate blocks the status, and probe.json still
+// withholds the body.
+func TestCellConfidentialBillingRefusal(t *testing.T) {
+	const body = `{"error":{"message":"Organization has been restricted.","code":"blocked_api_access"}}`
+	for _, status := range []int{http.StatusBadRequest, http.StatusPaymentRequired} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			e := newEndpoint(t, func(int64) (int, string) { return status, body })
+			cfg := confidentialConfig(t, e.url())
+			cfg.Target.BillingRefusals = []config.BillingRefusal{{Status: status, BodyContains: "blocked_api_access", Meaning: "spend limit reached", Source: "errors.png", Retrieved: "2026-10-07"}}
+			r, _ := newTestRoute(t, cfg, "+0.005")
+			shortLadder(r)
+			run := r.runs[0]
+			rec, err := r.runCell(context.Background(), run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := fmt.Sprintf("route stop: HTTP %d, the documented billing refusal: spend limit reached", status)
+			if rec.Outcome != outcomeStopped || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], want) {
+				t.Fatalf("outcome %s, reasons %q", rec.Outcome, rec.Reasons)
+			}
+			if n := e.hits.Load(); n != 1 || rec.Sent != (admission.Counts{Probe: 1}) {
+				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
+			}
+			b, err := os.ReadFile(filepath.Join(r.cellDir(run), probe.File))
+			if err != nil || bytes.Contains(b, []byte("blocked_api_access")) || !bytes.Contains(b, []byte(`"retained": true`)) {
+				t.Fatalf("%s: %v\n%s", probe.File, err, b)
+			}
+		})
+	}
+}
+
 // A route whose retention keeps no model output runs its cell with a
 // frame store that counts each answer's bytes and keeps none of them.
 func TestCellRetainsNoModelOutput(t *testing.T) {

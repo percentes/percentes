@@ -178,8 +178,13 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	}
 	ev.probePath, ev.probe = probePath, pr
 	rec.ProbeStatus = pr.Request.Status
+	// A target with a confidential limit withholds the probe's body.
+	b := pr.Request.Body
+	if h := pr.Request.Retained; h != nil && h.Body != nil {
+		b = h.Body
+	}
 	var probeBody []byte
-	if b := pr.Request.Body; b != nil && b.Text != nil {
+	if b != nil && b.Text != nil {
 		probeBody = []byte(*b.Text)
 	}
 	if stop := billingRefusal(t, pr.Request.Status, probeBody); stop != nil {
