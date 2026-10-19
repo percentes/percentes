@@ -1575,9 +1575,9 @@ func TestCellRefreshBlocks(t *testing.T) {
 // On a route with a confidential limit, run refuses an operator file
 // that holds the limit's value in a note, a record's path, a URL or its
 // own name, and a cell whose refresh rewrites the file with the value in
-// a note is blocked before admission. No refusal and no published file
-// carries the value. A route with the limit public accepts the same
-// files.
+// a note is blocked before admission, its refusal kept beside its
+// frames. No refusal and no published file carries the value. A route
+// with the limit public accepts the same files.
 func TestOperatorConfidentialValue(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
 	enoughOpenFiles(t)
@@ -1643,13 +1643,13 @@ func TestOperatorConfidentialValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "a confidential limit's value is in records[2].note (tokens_per_minute)"; rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], want) {
-		t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, want)
+	if rec.Outcome != outcomeBlocked || !slices.Equal(rec.Reasons, []string{heldStartReason}) {
+		t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, heldStartReason)
 	}
 	if n := e.hits.Load(); n != 0 {
 		t.Fatalf("server saw %d requests", n)
 	}
-	checkRetained(t, r, run)
+	checkHeldError(t, r, run, "a confidential limit's value is in records[2].note (tokens_per_minute)")
 	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -1668,7 +1668,7 @@ func TestOperatorConfidentialValue(t *testing.T) {
 // command reads that differs from the recorded one is searched for in the
 // operator file as the recorded one is: a cell whose refresh rewrites the
 // file with the value read in a note is blocked before admission with no
-// published file carrying it, and a later process's run refuses a file
+// published file carrying it, its refusal kept beside its frames, and a later process's run refuses a file
 // holding a value an earlier cell read, which the retained refresh record
 // keeps. A route with no earlier cell starts on that file.
 func TestOperatorRefreshedValue(t *testing.T) {
@@ -1714,13 +1714,13 @@ func TestOperatorRefreshedValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], want) {
-		t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, want)
+	if rec.Outcome != outcomeBlocked || !slices.Equal(rec.Reasons, []string{heldStartReason}) {
+		t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, heldStartReason)
 	}
 	if n := e.hits.Load(); n != 0 {
 		t.Fatalf("server saw %d requests", n)
 	}
-	checkRetained(t, r, run)
+	checkHeldError(t, r, run, want)
 	noValue(f.in.out)
 
 	f = newFixture(t, confidentialConfig(t, e.url()), "+0.005")
@@ -1747,9 +1747,29 @@ func TestOperatorRefreshedValue(t *testing.T) {
 	}
 }
 
+// heldStartReason is the reason of a cell, on a route with a confidential
+// limit, blocked for its operator records or refreshed limits.
+const heldStartReason = "operator records not refreshed at the cell's start (SPEC-HOSTED §4): " + operatorErrorHeld + "; the manifest carries the records read when the route started"
+
+// checkHeldError runs checkRetained over run and requires its frame
+// directory to hold want in the operator error file, readable by its
+// owner only.
+func checkHeldError(t *testing.T, r *route, run schedule.Run, want string) {
+	t.Helper()
+	m, _ := checkRetained(t, r, run)
+	p := filepath.Join(r.framesRoot, filepath.Dir(filepath.FromSlash(m.Frames.Name)), evidence.OperatorErrorFile)
+	b, err := os.ReadFile(p)
+	if err != nil || !strings.Contains(string(b), want) {
+		t.Fatalf("%s: %q, %v; want %q", run.Label, b, err, want)
+	}
+	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("%s: %v %v", run.Label, fi, err)
+	}
+}
+
 // On a route with a confidential limit, a cell blocked because its
 // refresh left an operator file that does not load, and a cell labelled
-// while the file does not load, give operatorNotLoaded as the load
+// while the file does not load, give operatorErrorHeld as the load
 // error's reason; each keeps the error, which quotes the file, beside its
 // frames, and no file under the release output directory carries the
 // limit's value. A route with the limit public gives the error itself.
@@ -1778,33 +1798,19 @@ func TestOperatorLoadErrorHeld(t *testing.T) {
 		}
 		return f, r
 	}
-	held := func(r *route, run schedule.Run) {
-		t.Helper()
-		m, _ := checkRetained(t, r, run)
-		p := filepath.Join(r.framesRoot, filepath.Dir(filepath.FromSlash(m.Frames.Name)), evidence.OperatorErrorFile)
-		b, err := os.ReadFile(p)
-		if err != nil || !strings.Contains(string(b), loadErr) {
-			t.Fatalf("%s: %q, %v; want %q", run.Label, b, err, loadErr)
-		}
-		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
-			t.Fatalf("%s: %v %v", run.Label, fi, err)
-		}
-	}
-
 	f, r := start(confidentialConfig(t, e.url()))
 	run := r.runs[0]
 	rec, err := r.runCell(context.Background(), run)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "operator records not refreshed at the cell's start (SPEC-HOSTED §4): " + operatorNotLoaded + "; the manifest carries the records read when the route started"
-	if rec.Outcome != outcomeBlocked || !slices.Equal(rec.Reasons, []string{want}) {
-		t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, want)
+	if rec.Outcome != outcomeBlocked || !slices.Equal(rec.Reasons, []string{heldStartReason}) {
+		t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, heldStartReason)
 	}
 	if n := e.hits.Load(); n != 0 {
 		t.Fatalf("server saw %d requests", n)
 	}
-	held(r, run)
+	checkHeldError(t, r, run, loadErr)
 
 	missed := r.runs[1]
 	rec = r.newRecord(missed)
@@ -1815,10 +1821,10 @@ func TestOperatorLoadErrorHeld(t *testing.T) {
 	if err := r.labelCell(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
-	if want := "operator records not read when the cell was labelled: " + operatorNotLoaded + "; the manifest carries the records read when the route started"; !slices.Contains(rec.Reasons, want) {
+	if want := "operator records not read when the cell was labelled: " + operatorErrorHeld + "; the manifest carries the records read when the route started"; !slices.Contains(rec.Reasons, want) {
 		t.Fatalf("labelled reasons %q; want %q", rec.Reasons, want)
 	}
-	held(r, missed)
+	checkHeldError(t, r, missed, loadErr)
 	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -1838,6 +1844,66 @@ func TestOperatorLoadErrorHeld(t *testing.T) {
 	}
 	if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], loadErr) {
 		t.Fatalf("public route: outcome %s, reasons %q; want the load error", rec.Outcome, rec.Reasons)
+	}
+}
+
+// On a route with a confidential limit, a cell whose refresh command
+// prints limits that do not parse, with the limit's value negative, in a
+// dimension string or in a number past float64's range, is blocked with
+// operatorErrorHeld as the reason, keeps the error, which quotes the
+// printed text, beside its frames, and publishes no file carrying the
+// value. A route with the limit public gives the error itself.
+func TestRefreshErrorHeld(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+	enoughOpenFiles(t)
+	values := []string{"250013.5", "250,013.5", "2.500135e+05"}
+	for _, tc := range []struct{ name, out, want string }{
+		{"negative value", tpmRefresh(`"value":-250013.5`), "refreshed limits: limits[1]: value -250013.5 is not a positive number"},
+		{"dimension", `{"limits":[{"dimension":"requests_per_minute","value":1000},{"dimension":"tokens_per_minute 250013.5","value":1}]}`, `refreshed limits: limits[1] is "tokens_per_minute 250013.5"`},
+		{"overflow", tpmRefresh(`"value":250013.5e400`), "250013.5e400"},
+	} {
+		f := newFixture(t, confidentialConfig(t, e.url()), "+0.005")
+		limitsRefresh(t, f, tc.out)
+		r, err := newRoute(f.in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run := r.runs[0]
+		rec, err := r.runCell(context.Background(), run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Outcome != outcomeBlocked || !slices.Equal(rec.Reasons, []string{heldStartReason}) {
+			t.Fatalf("%s: outcome %s, reasons %q; want blocked, %q", tc.name, rec.Outcome, rec.Reasons, heldStartReason)
+		}
+		checkHeldError(t, r, run, tc.want)
+		if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err == nil && slices.ContainsFunc(values, func(v string) bool { return bytes.Contains(b, []byte(v)) }) {
+				t.Errorf("%s: %s carries the confidential value", tc.name, p)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		f = newFixture(t, releaseConfig(t, e.url()), "+0.005")
+		limitsRefresh(t, f, tc.out)
+		if r, err = newRoute(f.in); err != nil {
+			t.Fatal(err)
+		}
+		if rec, err = r.runCell(context.Background(), r.runs[0]); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], tc.want) {
+			t.Fatalf("%s: public route: outcome %s, reasons %q; want %q", tc.name, rec.Outcome, rec.Reasons, tc.want)
+		}
+	}
+	if n := e.hits.Load(); n != 0 {
+		t.Fatalf("server saw %d requests", n)
 	}
 }
 

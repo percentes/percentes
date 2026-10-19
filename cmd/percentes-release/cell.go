@@ -24,9 +24,9 @@ import (
 // while its start checks were repeated.
 const priceChangedReason = "the route's price was recorded again during the cell's repeated start checks"
 
-// operatorNotLoaded stands in a cell's reasons, on a route with a
-// confidential limit, for the error of an operator file that did not load.
-const operatorNotLoaded = "the operator file does not load; its error is kept beside the cell's frames"
+// operatorErrorHeld stands in a cell's reasons, on a route with a
+// confidential limit, for an operator records or refreshed limits error.
+const operatorErrorHeld = "the error is kept beside the cell's frames"
 
 // cellConfig is the route's configuration for one cell attempt: the
 // attempt's seed, and the ladder cut at the top admitted step. The cut
@@ -289,7 +289,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 // status, refresh record and balance, the operator records it read, the
 // ledger position and the probe record, with what it withholds, where
 // the cell reached them; refreshHeld is the refresh record as run, and
-// opErrHeld the error of an operator file that did not load, each kept
+// opErrHeld the operator records or refreshed limits error, each kept
 // in the retained store for a route with a confidential limit. A
 // missed or interrupted cell that labelCell labels has no running
 // series: own is its series as last written, lastUTC the latest time its
@@ -319,9 +319,9 @@ type cellFiles struct {
 // retain writes a finished cell's evidence: the final dispatch series,
 // the end status and balance, the frame store, the probe's withheld
 // values, the operator copies, the refresh record as run and the
-// operator file's load error where they are held, the configuration as
-// loaded where it differs from the file as published, the
-// attempts file, the manifest carrying the cell's label, the host's
+// operator records or refreshed limits error where they are held, the
+// configuration as loaded where it differs from the file as published,
+// the attempts file, the manifest carrying the cell's label, the host's
 // aggregate dispatch series and the inter-chunk gap histograms, and the
 // report pair. A nil res is a cell with no ladder result: its attempts
 // file and frame store are empty, and its epoch is the cell's start. A
@@ -446,15 +446,14 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 // load, holds a confidential limit's value as recorded or as the route
 // read it (withhold, Operator.CheckConfidential) or does not cover the
 // build, and a limits or eligibility record whose file was not rewritten
-// since the command started. A file that does not load gives an
-// operatorLoadError. A nil refresh reads the file as it stands.
+// since the command started. A nil refresh reads the file as it stands.
 func (r *route) cellOperator(refresh *evidence.StatusRecord) (*evidence.Operator, error) {
 	if refresh != nil && refresh.Error != "" {
 		return nil, fmt.Errorf("refresh command: %s", refresh.Error)
 	}
 	op, err := evidence.LoadOperator(r.opPath)
 	if err != nil {
-		return nil, operatorLoadError{err}
+		return nil, err
 	}
 	op.Withhold(r.withheld)
 	if err := op.CheckConfidential(&r.cfg.Target); err != nil {
@@ -471,22 +470,16 @@ func (r *route) cellOperator(refresh *evidence.StatusRecord) (*evidence.Operator
 	return op, nil
 }
 
-// operatorLoadError is the error of an operator file that did not load,
-// which can quote the file's text.
-type operatorLoadError struct{ error }
-
-func (e operatorLoadError) Unwrap() error { return e.error }
-
-// operatorFault is a cellOperator error as a cell's reasons give it. On a
-// route with a confidential limit an operatorLoadError is kept in ev for
-// the retained store and operatorNotLoaded stands for it.
+// operatorFault is a cellOperator or evidence.ReadRefreshedLimits error
+// as a cell's reasons give it. On a route with a confidential limit the
+// error, which can quote the operator file or the refresh output, is kept
+// in ev for the retained store and operatorErrorHeld stands for it.
 func (r *route) operatorFault(ev *cellFiles, err error) error {
-	var le operatorLoadError
-	if !r.cfg.Target.Confidential() || !errors.As(err, &le) {
+	if !r.cfg.Target.Confidential() {
 		return err
 	}
 	ev.opErrHeld = err
-	return errors.New(operatorNotLoaded)
+	return errors.New(operatorErrorHeld)
 }
 
 // labelCell writes the labelled manifest and report pair of a missed or
