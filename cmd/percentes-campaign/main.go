@@ -4,7 +4,10 @@
 // (§5/§7 statistics + §10 validity gates). Phase 0 drives it against the
 // mock; Phase 1 swaps in the clean-delete, node-partition or process-kill
 // injector and supplies the graphics processing unit (GPU) cluster
-// observations. Each run's report pair is written as the run ends.
+// observations. Each run's report pair is written as the run ends. It
+// refuses a hosted target (target.hosted): hosted traffic runs under
+// percentes-release or percentes-pilot, which count each request in the
+// admission ledger before it is sent.
 // Exit codes: 0 = every run valid, 2 = at least one run failed a
 // run-validity gate or the campaign halted after one, 1 = error. On an
 // error or a halt the campaign report pair still holds the runs so far.
@@ -74,6 +77,9 @@ func main() {
 	}
 	if err := run.CheckConfig(cfg); err != nil {
 		log.Fatalf("percentes-campaign: %v", err)
+	}
+	if cfg.Target.Hosted {
+		log.Fatal("percentes-campaign: a hosted target runs under percentes-release or percentes-pilot only, whose ledger admits each request before it is sent")
 	}
 	overrides, err := applyOverrides(cfg, *target, *metrics)
 	if err != nil {
