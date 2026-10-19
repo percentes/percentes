@@ -179,8 +179,9 @@ func LoadPublication(path string) (*Publication, error) {
 // or of its window-close record, and whose pack is the route's pack in
 // s.Packs byte for byte, s.Packs holding one for the route, its
 // responses, its naming
-// permission where required and its replication pack, sent no later than
-// the notice and carrying every file of the route's pack (PackCarries),
+// permission where required and its replication pack, sent no earlier
+// than the same UTC date and no later than the notice and carrying every
+// file of the route's pack (PackCarries),
 // where required; every disclosure predates
 // the first notice; every pre-release copy withholds the routes that need
 // a replication pack; and every file the record names has the SHA-256 it
@@ -281,7 +282,7 @@ func (p *Publication) Check(s PublicationState) error {
 		}
 		seen[r.Route] = true
 		field := "route " + r.Route
-		var sent time.Time
+		var sent, started, recorded time.Time
 		if n := r.Notice; n == nil {
 			fail("%s: notice: required", field)
 		} else {
@@ -302,15 +303,15 @@ func (p *Publication) Check(s PublicationState) error {
 				firstNotice = sent
 			}
 			if okSent {
-				if started := routeStarted(s.Manifests, r.Route, field, fail); sent.Before(dayOf(started)) {
+				if started = routeStarted(s.Manifests, r.Route, field, fail); sent.Before(dayOf(started)) {
 					fail("%s: notice.sent: %s, before the route's last cell in its pack started at %s", field, n.Sent, started.UTC().Format(time.RFC3339Nano))
 				}
 				if b, ok := s.WindowCloses[r.Route+"/"+WindowCloseFile]; ok {
 					var w WindowClose
 					if err := json.Unmarshal(b, &w); err != nil {
 						fail("%s: notice.sent: %s/%s: %v", field, r.Route, WindowCloseFile, err)
-					} else if sent.Before(dayOf(w.RecordedUTC)) {
-						fail("%s: notice.sent: %s, before the route's window-close record of %s", field, n.Sent, w.RecordedUTC.UTC().Format(time.RFC3339Nano))
+					} else if recorded = w.RecordedUTC; sent.Before(dayOf(recorded)) {
+						fail("%s: notice.sent: %s, before the route's window-close record of %s", field, n.Sent, recorded.UTC().Format(time.RFC3339Nano))
 					}
 				}
 			}
@@ -361,8 +362,16 @@ func (p *Publication) Check(s PublicationState) error {
 					fail("%s: replication_pack.pack: %s: %v", field, rp.Pack.Path, err)
 				}
 			}
-			if got, ok := date(field+": replication_pack.sent", rp.Sent); ok && !sent.IsZero() && got.After(sent) {
-				fail("%s: replication_pack.sent: %s, after the notice of %s", field, rp.Sent, r.Notice.Sent)
+			if got, ok := date(field+": replication_pack.sent", rp.Sent); ok && !sent.IsZero() {
+				if got.After(sent) {
+					fail("%s: replication_pack.sent: %s, after the notice of %s", field, rp.Sent, r.Notice.Sent)
+				}
+				if got.Before(dayOf(started)) {
+					fail("%s: replication_pack.sent: %s, before the route's last cell in its pack started at %s", field, rp.Sent, started.UTC().Format(time.RFC3339Nano))
+				}
+				if got.Before(dayOf(recorded)) {
+					fail("%s: replication_pack.sent: %s, before the route's window-close record of %s", field, rp.Sent, recorded.UTC().Format(time.RFC3339Nano))
+				}
 			}
 		case d.ReplicationPack:
 			fail("%s: replication_pack: required", field)

@@ -1620,7 +1620,8 @@ dated no earlier than the UTC day on which the route's last cell
 started or its window-close record was taken, its responses, and its
 permission and pack where due, each notice's pack equals, byte for byte,
 the pack `percentes-release pack` builds from the cells as they stand,
-each replication pack holds that pack's
+each replication pack is dated no earlier than that same UTC day and no
+later than its notice and holds that pack's
 `inventory.json` and every file it names with the same bytes, and may
 hold other files (`evidence.PackCarries`), every disclosure
 predates the first notice, every pre-release copy withholds every

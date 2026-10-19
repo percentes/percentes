@@ -303,6 +303,14 @@ func TestPublicationRefuses(t *testing.T) {
 			"route bedrock: replication_pack: required"},
 		{"replication pack late", func(_ *testing.T, f *publicationFixture) { route(f, "bedrock").ReplicationPack.Sent = "2026-10-28" },
 			"route bedrock: replication_pack.sent: 2026-10-28, after the notice of 2026-10-27"},
+		{"replication pack before the last cell", func(_ *testing.T, f *publicationFixture) { route(f, "bedrock").ReplicationPack.Sent = "2026-10-01" },
+			"evidence: publication refused: route bedrock: replication_pack.sent: 2026-10-01, before the route's last cell in its pack started at 2026-10-20T10:00:00Z"},
+		{"replication pack before the window-close record", func(_ *testing.T, f *publicationFixture) {
+			w := []byte(`{"recorded_utc": "2026-10-26T12:00:00Z"}`)
+			f.s.WindowCloses["bedrock/"+WindowCloseFile] = w
+			f.p.WindowCloses = append(f.p.WindowCloses, PublishedFile{Path: "bedrock/" + WindowCloseFile, SHA256: shaOf(w)})
+			route(f, "bedrock").ReplicationPack.Sent = "2026-10-23"
+		}, "evidence: publication refused: route bedrock: replication_pack.sent: 2026-10-23, before the route's window-close record of 2026-10-26T12:00:00Z"},
 		{"replication pack changed", func(t *testing.T, f *publicationFixture) { put(t, f.dir, "packs/aws-replication.tar", "other") },
 			"route bedrock: replication_pack.pack: packs/aws-replication.tar has SHA-256"},
 		{"replication pack inventory differs", func(t *testing.T, f *publicationFixture) {
