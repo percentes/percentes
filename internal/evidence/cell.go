@@ -39,6 +39,9 @@ type Cell struct {
 	// pinned start offset inside the slot.
 	Run           schedule.Run `json:"run"`
 	OffsetMinutes int          `json:"offset_minutes"`
+	// ScheduleSHA256 is the SHA-256 of the schedule file the cell ran
+	// under.
+	ScheduleSHA256 string `json:"schedule_sha256"`
 	// Outcome and Reasons are the cell's label: why it does not count, or
 	// where the backoff rule ended a counted cell's ladder. LadderStarted
 	// is false for a cell stopped, blocked or missed before its ladder,
@@ -160,6 +163,9 @@ func checkCell(cfg *config.Config, t *config.Target, c *Cell) error {
 	}
 	if c.OffsetMinutes < 0 || c.OffsetMinutes%int(schedule.OffsetStep/time.Minute) != 0 {
 		fail("offset_minutes %d is not a multiple of %s", c.OffsetMinutes, schedule.OffsetStep)
+	}
+	if !sha256Hex.MatchString(c.ScheduleSHA256) {
+		fail("schedule_sha256 %q is not a lowercase hex SHA-256", c.ScheduleSHA256)
 	}
 	for _, r := range c.Concurrent {
 		if r.Route == "" || r.Route == t.Name {

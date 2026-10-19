@@ -35,9 +35,10 @@ func releaseCell(cfg *config.Config) *Cell {
 	start := time.Date(2026, 10, 17, 8, 20, 0, 0, time.UTC)
 	tpm := admission.Demand{Dimension: config.LimitTPM, Limit: 1, Value: 250000, Demand: 205440, Fraction: 0.82176, Half: true}
 	return withDispatch(&Cell{
-		Run:           schedule.Run{Route: cfg.Target.Name, Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start, Seed: 7},
-		OffsetMinutes: 20,
-		Concurrent:    []schedule.Run{{Route: "baseten", Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start.Add(10 * time.Minute), Seed: 8}},
+		Run:            schedule.Run{Route: cfg.Target.Name, Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start, Seed: 7},
+		OffsetMinutes:  20,
+		ScheduleSHA256: "5c0e1d2b3a4f5e6d7c8b9a0f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d",
+		Concurrent:     []schedule.Run{{Route: "baseten", Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start.Add(10 * time.Minute), Seed: 8}},
 		Admission: &admission.Verdict{Route: cfg.Target.Name, InputTokens: 1200, CeilingTokens: 512, TopRPS: 1, Steps: []admission.Step{
 			{RPS: 0.25, Admitted: true}, {RPS: 0.5, Admitted: true}, {RPS: 1, Admitted: true},
 			{RPS: 2, Binding: &tpm, Demands: []admission.Demand{tpm}}, {RPS: 4, Binding: &tpm},
@@ -195,6 +196,7 @@ func TestManifestCellRecord(t *testing.T) {
 	}
 	for _, field := range []string{`"frame_limit_bytes": 8388608`, `"error_body_limit_bytes": 4096`, `"error_body_wait_ns": 1000000000`,
 		`"offset_minutes": 20`, `"concurrent_runs": [`, `"binding": {`, `"ceiling_choice": {`, `"account_created": "2026-09-15"`, `"pre_window_requests": 25`,
+		`"schedule_sha256": "5c0e1d2b3a4f5e6d7c8b9a0f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d"`,
 		`"outcome": "counted"`, `"ladder_started": true`, `"dispatch_aggregate": {`, `"max_per_second": 3`, `"inter_chunk_gaps": []`,
 		`"balance_start": {`, `"balance_end": {`} {
 		if !strings.Contains(string(b), field) {
@@ -279,6 +281,8 @@ func TestManifestCellRefusals(t *testing.T) {
 		"no start":                   func(c *Cell) { c.Run.Start = time.Time{} },
 		"offset off the grid":        func(c *Cell) { c.OffsetMinutes = 15 },
 		"negative offset":            func(c *Cell) { c.OffsetMinutes = -10 },
+		"no schedule hash":           func(c *Cell) { c.ScheduleSHA256 = "" },
+		"schedule hash in uppercase": func(c *Cell) { c.ScheduleSHA256 = strings.ToUpper(c.ScheduleSHA256) },
 		"concurrent with itself":     func(c *Cell) { c.Concurrent[0].Route = cfg.Target.Name },
 		"concurrent without a route": func(c *Cell) { c.Concurrent[0].Route = "" },
 		"other ceiling":              func(c *Cell) { c.CeilingTokens = 1024 },

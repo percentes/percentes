@@ -50,7 +50,10 @@ type cellRecord struct {
 	SchemaVersion int          `json:"schema_version"`
 	Run           schedule.Run `json:"run"`
 	OffsetMinutes int          `json:"offset_minutes"`
-	Outcome       string       `json:"outcome"`
+	// ScheduleSHA256 is the SHA-256 of the schedule file the cell ran
+	// under.
+	ScheduleSHA256 string `json:"schedule_sha256"`
+	Outcome        string `json:"outcome"`
 	// Reasons say why the cell does not count, or why the ladder ended
 	// early.
 	Reasons []string `json:"reasons,omitempty"`
@@ -86,6 +89,8 @@ type route struct {
 	cfg        *config.Config
 	configName string
 	sched      *schedule.Schedule
+	// scheduleSHA256 is the SHA-256 of the schedule file's bytes.
+	scheduleSHA256 string
 	// runs are the route's attempt 1 runs in start order.
 	runs          []schedule.Run
 	offsetMinutes int
@@ -221,7 +226,9 @@ type routeInput struct {
 // newRoute checks the route's inputs and fixes what every cell shares:
 // the ceiling rule's verdict at the schedule's exact counts and the
 // route's newest price up to the ledger position the schedule froze, the
-// ceiling choice, the Shape S set and the account record.
+// ceiling choice, the Shape S set and the account record. It refuses an
+// output directory holding a cell of the route written under another
+// schedule file.
 func newRoute(in routeInput) (*route, error) {
 	cfg := in.cfg
 	if cfg.Profile != config.ProfileRelease || cfg.Release == nil {
@@ -247,9 +254,13 @@ func newRoute(in routeInput) (*route, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &route{cfg: cfg, configName: in.configName, sched: sched, runs: runs, out: in.out, dir: filepath.Join(in.out, name),
+	sum := sha256.Sum256(raw)
+	r := &route{cfg: cfg, configName: in.configName, sched: sched, scheduleSHA256: hex.EncodeToString(sum[:]), runs: runs, out: in.out, dir: filepath.Join(in.out, name),
 		ledgerPath: in.ledgerPath, key: in.key, framesRoot: in.framesRoot, opPath: in.opPath, build: in.build, now: time.Now, wait: waitUntil}
 	r.cell, r.label, r.close = r.runCell, r.labelCell, r.windowClose
+	if err := r.sameSchedule(); err != nil {
+		return nil, err
+	}
 	for _, o := range sched.Offsets {
 		if o.Route == name {
 			r.offsetMinutes = o.Minutes
@@ -613,8 +624,9 @@ func (r *route) retainedReads() ([]evidence.RefreshedLimit, error) {
 	return out, nil
 }
 
-// state reads the route's cell records. A record left running by an
-// ended process becomes interrupted. A re-run is taken, in order of the
+// state reads the route's cell records and refuses one written under
+// another schedule file. A record left running by an ended process
+// becomes interrupted. A re-run is taken, in order of the
 // attempt 1 runs, for each attempt 1 that does not count while the route
 // has re-runs left and the window holds the cell's attempt 2.
 func (r *route) state() (*routeState, error) {
@@ -634,6 +646,9 @@ func (r *route) state() (*routeState, error) {
 		}
 		if rec.Run.Route != r.cfg.Target.Name {
 			return nil, fmt.Errorf("%s: route %q, this process runs %q", p, rec.Run.Route, r.cfg.Target.Name)
+		}
+		if err := r.scheduleOf(p, &rec); err != nil {
+			return nil, err
 		}
 		if rec.Outcome == outcomeRunning {
 			rec.Outcome, rec.Reasons = outcomeInterrupted, append(rec.Reasons, "the process ended during the cell")
@@ -671,6 +686,38 @@ func (r *route) state() (*routeState, error) {
 		}
 	}
 	return st, nil
+}
+
+// sameSchedule refuses the route's cell records written under a schedule
+// file other than the route's.
+func (r *route) sameSchedule() error {
+	paths, err := filepath.Glob(filepath.Join(r.dir, "*", cellFile))
+	if err != nil {
+		return err
+	}
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		var rec cellRecord
+		if err := json.Unmarshal(b, &rec); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+		if err := r.scheduleOf(p, &rec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// scheduleOf refuses rec, read from path, unless it was written under
+// the route's schedule file.
+func (r *route) scheduleOf(path string, rec *cellRecord) error {
+	if rec.ScheduleSHA256 != r.scheduleSHA256 {
+		return fmt.Errorf("run: %s: the cell ran under schedule sha256 %q; --schedule has sha256 %s", path, rec.ScheduleSHA256, r.scheduleSHA256)
+	}
+	return nil
 }
 
 func (r *route) hasAttempt2(label string) bool {
@@ -762,7 +809,7 @@ func cellSummary(rec *cellRecord) string {
 
 // newRecord is a run's record before the cell begins.
 func (r *route) newRecord(run schedule.Run) *cellRecord {
-	return &cellRecord{SchemaVersion: 1, Run: run, OffsetMinutes: r.offsetMinutes, StartUTC: r.now().UTC(),
+	return &cellRecord{SchemaVersion: 1, Run: run, OffsetMinutes: r.offsetMinutes, ScheduleSHA256: r.scheduleSHA256, StartUTC: r.now().UTC(),
 		AdmittedRPS: r.verdict.Admitted(), OpenFilesLimit: r.openFiles}
 }
 

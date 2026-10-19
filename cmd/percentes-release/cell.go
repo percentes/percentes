@@ -663,6 +663,7 @@ func (r *route) cellEvidence(dir string, run schedule.Run, rec *cellRecord) (*ev
 	c := &evidence.Cell{
 		Run:               run,
 		OffsetMinutes:     r.offsetMinutes,
+		ScheduleSHA256:    r.scheduleSHA256,
 		Concurrent:        rec.Concurrent,
 		Admission:         r.verdict,
 		CeilingTokens:     r.cfg.Release.Shape.CeilingTokens,

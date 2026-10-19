@@ -297,6 +297,63 @@ func TestRestartKeepsFrozenVerdict(t *testing.T) {
 	}
 }
 
+// Each cell's run record and manifest carry the SHA-256 of the schedule
+// file it ran under. A route started again on a schedule written afresh
+// from the same inputs after a price is recorded, at the ledger's new
+// position, is refused while its output directory holds a cell written
+// under the first schedule; started again on the first schedule it runs.
+func TestRestartRefusesOtherSchedule(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+	enoughOpenFiles(t)
+	f := newFixture(t, rulingConfig(t, e.url()), "+0.005")
+	first, err := newRoute(f.in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortLadder(first)
+	raw, err := os.ReadFile(f.in.schedulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha(string(raw))
+	l, err := admission.Open(f.ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordPrice(l, first.rule.cfg, "0.30", "1.20", "https://example.test/pricing", "2026-10-08"); err != nil {
+		t.Fatal(err)
+	}
+	run := first.runs[1]
+	rec, err := first.runCell(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Outcome != outcomeStopped || readCell(t, first, run).ScheduleSHA256 != want {
+		t.Fatalf("outcome %s %q, schedule sha256 %q; want stopped under %s", rec.Outcome, rec.Reasons, readCell(t, first, run).ScheduleSHA256, want)
+	}
+	m, err := evidence.ReadManifest(filepath.Join(first.cellDir(run), evidence.ManifestFile))
+	if err != nil || m.Release.ScheduleSHA256 != want {
+		t.Fatalf("manifest: %v; want schedule sha256 %s", err, want)
+	}
+
+	in := f.in
+	in.cfg = rulingConfig(t, e.url())
+	fresh := frozenSchedule(t, f.ledger, in.cfg, in.hostCfgs)
+	in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", fresh)
+	msg := "the cell ran under schedule sha256 \"" + want + "\"; --schedule has sha256 " + sha(string(fresh))
+	if _, err := newRoute(in); err == nil || !strings.Contains(err.Error(), msg) {
+		t.Fatalf("restart on a fresh schedule: %v; want %q", err, msg)
+	}
+	in.schedulePath = f.in.schedulePath
+	r, err := newRoute(in)
+	if err != nil {
+		t.Fatalf("restart on the first schedule: %v", err)
+	}
+	if !reflect.DeepEqual(r.verdict, first.verdict) {
+		t.Fatalf("admitted %v; the first start admitted %v", r.verdict.Admitted(), first.verdict.Admitted())
+	}
+}
+
 // After the last cell the route records its operator file and records
 // once more after the refresh command, keeps their copies under the
 // frame store, and never writes the record again; the route page names
