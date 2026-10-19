@@ -199,3 +199,98 @@ func ReadWindowClose(path string) (*WindowClose, error) {
 	}
 	return &w, nil
 }
+
+// Verify returns nil when w is t's route's window-close record taken
+// after lastEnd, the latest end of any attempted cell of the route. The
+// record and its refresh must begin after lastEnd; the refresh must exit
+// 0 with limits ReadRefreshedLimits reads, published as PublishedRefresh
+// publishes them, read on a target with a confidential limit from the
+// refresh record as run kept beside the copies; the copies must be in the
+// directory WindowCloseDir names under framesRoot, with the operator
+// file's account tier, and match the operator file's and every record's
+// reference, keyed under key on such a target and plain elsewhere.
+// Otherwise it returns an error naming every problem.
+func (w *WindowClose) Verify(t *config.Target, framesRoot string, key *releasekey.Key, lastEnd time.Time) error {
+	var problems []string
+	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
+	held := t.Confidential()
+	end := lastEnd.UTC().Format(time.RFC3339Nano)
+	if w.SchemaVersion != 1 {
+		fail("schema_version %d, want 1", w.SchemaVersion)
+	}
+	if w.Route != t.Name {
+		fail("route %q, the configuration's %q", w.Route, t.Name)
+	}
+	if !w.RecordedUTC.After(lastEnd) {
+		fail("recorded %s, not after the route's last cell ended at %s", w.RecordedUTC.UTC().Format(time.RFC3339Nano), end)
+	}
+	dir := WindowCloseDir(framesRoot, t.Name, w.RecordedUTC)
+	if want := WindowCloseDir("", t.Name, w.RecordedUTC); w.Copies != want {
+		fail("copies %q, want %q", w.Copies, want)
+	}
+
+	switch rec := w.Refresh; {
+	case rec == nil:
+		fail("refresh: not recorded")
+	default:
+		if !rec.StartUTC.After(lastEnd) {
+			fail("refresh: started %s, not after the route's last cell ended at %s", rec.StartUTC.UTC().Format(time.RFC3339Nano), end)
+		}
+		if held {
+			var err error
+			if rec, err = ReadRetainedRefresh(dir); err != nil {
+				fail("refresh: the record as run: %v", err)
+				break
+			}
+		}
+		read, err := ReadRefreshedLimits(rec, t)
+		if err != nil {
+			fail("refresh: %v", err)
+			break
+		}
+		got, gerr := json.Marshal(w.Refresh)
+		want, werr := json.Marshal(PublishedRefresh(rec, t, read))
+		if gerr != nil || werr != nil || !bytes.Equal(got, want) {
+			fail("refresh: not the published form of the refresh record as run")
+		}
+	}
+
+	if held && key == nil {
+		fail("release key: the target has a confidential limit, whose window-close copies are keyed, and no release key was given")
+	}
+	check := func(base string, ref FileRef, what string) []byte {
+		switch {
+		case held && !ref.Keyed():
+			fail("%s: %s is named by its SHA-256 on a target with a confidential limit", what, ref.Name)
+			return nil
+		case !held && ref.Keyed():
+			fail("%s: %s is keyed on a target with public limits only", what, ref.Name)
+			return nil
+		case held && key == nil:
+			return nil
+		}
+		b, err := readRef(base, ref, key, "the window-close record holds")
+		if err != nil {
+			fail("%s: %v", what, err)
+		}
+		return b
+	}
+	op := w.Operator
+	op.Name = OperatorCopyFile
+	if b := check(dir, op, "operator copy"); b != nil {
+		var f struct {
+			AccountTier string `json:"account_tier"`
+		}
+		if err := json.Unmarshal(b, &f); err != nil || f.AccountTier != w.AccountTier {
+			fail("account_tier %q, the operator copy's %q", w.AccountTier, f.AccountTier)
+		}
+	}
+	for _, r := range w.Records {
+		check(filepath.Join(dir, RecordsCopyDir), r.FileRef, r.Kind+" record copy")
+	}
+
+	if len(problems) > 0 {
+		return fmt.Errorf("evidence: window-close record refused: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}

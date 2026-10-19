@@ -86,7 +86,7 @@ func CheckRelease(r Release) (*Manifest, error) {
 	// are keyed.
 	held := false
 	check := func(base string, ref FileRef, what string) []byte {
-		b, err := readRef(base, ref, nil)
+		b, err := readRef(base, ref, nil, "the manifest records")
 		if err != nil {
 			fail("%s: %v", what, err)
 		}
@@ -103,7 +103,7 @@ func CheckRelease(r Release) (*Manifest, error) {
 		case held && r.Key == nil:
 			return nil
 		}
-		b, err := readRef(base, ref, r.Key)
+		b, err := readRef(base, ref, r.Key, "the manifest records")
 		if err != nil {
 			fail("%s: %v", what, err)
 		}
@@ -328,8 +328,9 @@ func modelProblems(e Endpoint, recs []Record) []string {
 
 // readRef reads the file ref names under base and returns its bytes when
 // their SHA-256 and size, or for a keyed ref their HMAC-SHA256 under key,
-// are the ones ref records.
-func readRef(base string, ref FileRef, key *releasekey.Key) ([]byte, error) {
+// are the ones ref records. recorded is an error's name for ref's record
+// with its verb, such as "the manifest records".
+func readRef(base string, ref FileRef, key *releasekey.Key, recorded string) ([]byte, error) {
 	name := filepath.FromSlash(ref.Name)
 	if !filepath.IsLocal(name) {
 		return nil, fmt.Errorf("%q is not a path inside %s", ref.Name, base)
@@ -348,12 +349,12 @@ func readRef(base string, ref FileRef, key *releasekey.Key) ([]byte, error) {
 		case key == nil:
 			return nil, fmt.Errorf("%s is keyed and no release key was given", ref.Name)
 		case key.Sum(b) != ref.HMACSHA256:
-			return nil, fmt.Errorf("%s has another HMAC-SHA256 under the release key than the manifest records", ref.Name)
+			return nil, fmt.Errorf("%s has another HMAC-SHA256 under the release key than %s", ref.Name, recorded)
 		}
 		return b, nil
 	}
 	if got := refOf(ref.Name, b); got != ref {
-		return nil, fmt.Errorf("%s has SHA-256 %s and %s bytes, the manifest records %s and %s", ref.Name, got.SHA256, got.Bytes, ref.SHA256, ref.Bytes)
+		return nil, fmt.Errorf("%s has SHA-256 %s and %s bytes, %s %s and %s", ref.Name, got.SHA256, got.Bytes, recorded, ref.SHA256, ref.Bytes)
 	}
 	return b, nil
 }

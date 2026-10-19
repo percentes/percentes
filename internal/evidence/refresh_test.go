@@ -208,3 +208,148 @@ func TestReadWindowClose(t *testing.T) {
 		}
 	}
 }
+
+// A window-close record verifies when it and its refresh began after the
+// route's last cell ended, the refresh exited 0 and publishes as read,
+// and its copies match its references; any other is refused, naming each
+// problem. On a target with a confidential limit the copies are keyed,
+// the key is required, and the refresh record as run kept beside them
+// must publish as the record's.
+func TestWindowCloseVerify(t *testing.T) {
+	const out = `{"limits": [{"dimension": "requests_per_minute", "value": 1000}, {"dimension": "tokens_per_minute", "value": 300001}]}`
+	lastEnd := time.Date(2026, 10, 26, 23, 0, 0, 0, time.UTC)
+	at := lastEnd.Add(2 * time.Hour)
+	key, err := releasekey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// record writes target's record at at, of a refresh begun an hour
+	// after lastEnd, with its copies under a new frame store root.
+	record := func(target *config.Target) (*WindowClose, string) {
+		t.Helper()
+		root := t.TempDir()
+		rec := refreshRun(out)
+		rec.StartUTC, rec.EndUTC = lastEnd.Add(time.Hour), lastEnd.Add(time.Hour+time.Second)
+		read, err := ReadRefreshedLimits(rec, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var k *releasekey.Key
+		if target.Confidential() {
+			k = key
+		}
+		op := loadOperator(t)
+		w, err := NewWindowClose(target, at, PublishedRefresh(rec, target, read), op, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := WindowCloseDir(root, target.Name, at)
+		if w.Copies, err = filepath.Rel(root, dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := op.WriteCopies(dir); err != nil {
+			t.Fatal(err)
+		}
+		if target.Confidential() {
+			if err := WriteRetainedRefresh(dir, rec); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return w, root
+	}
+	replace := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	public, confidential := releaseCfg(t), confidentialCfg(t)
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+		key  *releasekey.Key
+		// end is the route's last cell's end, lastEnd where zero.
+		end  time.Time
+		edit func(w *WindowClose, held string)
+		want []string
+	}{
+		{"complete", public, nil, time.Time{}, nil, nil},
+		{"complete, confidential", confidential, key, time.Time{}, nil, nil},
+		{"before the last cell's end", public, nil, at.Add(time.Minute), nil, []string{
+			"recorded 2026-10-27T01:00:00Z, not after the route's last cell ended at 2026-10-27T01:01:00Z",
+			"refresh: started 2026-10-27T00:00:00Z, not after the route's last cell ended at 2026-10-27T01:01:00Z"}},
+		{"refresh between the end and the record", public, nil, lastEnd.Add(90 * time.Minute), nil, []string{
+			"refresh: started 2026-10-27T00:00:00Z, not after the route's last cell ended at 2026-10-27T00:30:00Z"}},
+		{"another route", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Route = "baseten" }, []string{`route "baseten", the configuration's "groq"`}},
+		{"no refresh", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Refresh = nil }, []string{"refresh: not recorded"}},
+		{"refresh failed", public, nil, time.Time{}, func(w *WindowClose, _ string) {
+			code := 4
+			w.Refresh.Error, w.Refresh.ExitCode = "exit status 4", &code
+		}, []string{"refresh: refreshed limits: the command failed: exit status 4"}},
+		{"refresh not exited", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Refresh.ExitCode = nil }, []string{"refresh: refreshed limits: the command did not exit 0"}},
+		{"limit edited", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Refresh.Limits[1].Value = 1 }, []string{"refresh: not the published form of the refresh record as run"}},
+		{"copies elsewhere", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Copies = "window-close/groq/x" }, []string{
+			`copies "window-close/groq/x", want "` + filepath.Join("window-close", "groq", "20261027T010000.000000000Z") + `"`}},
+		{"operator copy edited", public, nil, time.Time{}, func(_ *WindowClose, held string) {
+			replace(filepath.Join(held, OperatorCopyFile), "{}")
+		}, []string{"operator copy: " + OperatorCopyFile + " has SHA-256 " + sha("{}")}},
+		{"record copy missing", public, nil, time.Time{}, func(_ *WindowClose, held string) {
+			if err := os.Remove(filepath.Join(held, RecordsCopyDir, "limits.png")); err != nil {
+				t.Fatal(err)
+			}
+		}, []string{"limits record copy: limits.png is missing"}},
+		{"account tier edited", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.AccountTier = "Enterprise" }, []string{`account_tier "Enterprise", the operator copy's "Basic"`}},
+		{"keyed on a public target", public, key, time.Time{}, func(w *WindowClose, _ string) {
+			w.Records[0].FileRef = FileRef{Name: "limits.png", HMACSHA256: key.Sum([]byte(recordFiles["limits.png"]))}
+		}, []string{"limits record copy: limits.png is keyed on a target with public limits only"}},
+		{"no key", confidential, nil, time.Time{}, nil, []string{"release key: the target has a confidential limit, whose window-close copies are keyed, and no release key was given"}},
+		{"keyed copy edited", confidential, key, time.Time{}, func(_ *WindowClose, held string) {
+			replace(filepath.Join(held, RecordsCopyDir, "quota.txt"), "quota at start: 30 RPM")
+		}, []string{"quota record copy: quota.txt has another HMAC-SHA256 under the release key than the window-close record holds"}},
+		{"plain on a confidential target", confidential, key, time.Time{}, func(w *WindowClose, held string) {
+			b, err := os.ReadFile(filepath.Join(held, OperatorCopyFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			w.Operator = refOf("operator.json", b)
+		}, []string{"operator copy: operator.json is named by its SHA-256 on a target with a confidential limit"}},
+		{"no record as run", confidential, key, time.Time{}, func(_ *WindowClose, held string) {
+			if err := os.Remove(filepath.Join(held, RefreshFile)); err != nil {
+				t.Fatal(err)
+			}
+		}, []string{"refresh: the record as run: evidence: open ", RefreshFile + ": no such file"}},
+		{"another record as run", confidential, key, time.Time{}, func(_ *WindowClose, held string) {
+			b, err := os.ReadFile(filepath.Join(held, RefreshFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			replace(filepath.Join(held, RefreshFile), strings.Replace(string(b), `\"value\": 1000`, `\"value\": 999`, 1))
+		}, []string{"refresh: not the published form of the refresh record as run"}},
+	} {
+		w, root := record(&tc.cfg.Target)
+		if tc.edit != nil {
+			tc.edit(w, filepath.Join(root, w.Copies))
+		}
+		end := lastEnd
+		if !tc.end.IsZero() {
+			end = tc.end
+		}
+		err := w.Verify(&tc.cfg.Target, root, tc.key, end)
+		if tc.want == nil {
+			if err != nil {
+				t.Errorf("%s: %v", tc.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.HasPrefix(err.Error(), "evidence: window-close record refused: ") {
+			t.Errorf("%s: %v, want a refusal", tc.name, err)
+			continue
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: %v, want %q", tc.name, err, want)
+			}
+		}
+	}
+}
