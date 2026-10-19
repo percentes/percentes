@@ -277,24 +277,24 @@ func (op *Operator) CheckConfidential(t *config.Target) error {
 	return nil
 }
 
-// records are op's records as a run on t names them: keyed under key
-// (FileRef) on a target with a confidential limit, which requires key and
-// op to pass CheckConfidential.
-func (op *Operator) records(t *config.Target, key *releasekey.Key) ([]OperatorRecord, error) {
+// published are op's file and records as a run on t names them: keyed
+// under key (FileRef) on a target with a confidential limit, which
+// requires key and op to pass CheckConfidential.
+func (op *Operator) published(t *config.Target, key *releasekey.Key) (FileRef, []OperatorRecord, error) {
 	if !t.Confidential() {
-		return op.Records, nil
+		return op.File, op.Records, nil
 	}
 	if key == nil {
-		return nil, errors.New("evidence: a target with a confidential limit needs the release key")
+		return FileRef{}, nil, errors.New("evidence: a target with a confidential limit needs the release key")
 	}
 	if err := op.CheckConfidential(t); err != nil {
-		return nil, err
+		return FileRef{}, nil, err
 	}
 	out := slices.Clone(op.Records)
 	for i := range out {
 		out[i].FileRef = keyedRefOf(out[i].Name, out[i].data, key)
 	}
-	return out, nil
+	return keyedRefOf(op.File.Name, op.raw, key), out, nil
 }
 
 func (op *Operator) find(kind string) *OperatorRecord {

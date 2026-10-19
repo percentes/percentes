@@ -252,9 +252,10 @@ the route reads a limits URL. On such a route the probe and
 ceiling-check records also carry each non-200 response body as its
 keyed hash, and those records and the attempts file carry each in-band
 error object as a stand-in with its keyed hash. The texts stay in the
-retained store. Each cell's manifest names the frame store and the
-operator records by keyed hash, with no byte count, and the route's
-window-close record names the operator records the same way; the
+retained store. Each cell's manifest names the frame store, the
+operator file and its records by keyed hash, with no byte count, and
+the route's window-close record names the operator file and its records
+the same way; the
 manifest names its other files by SHA-256 hash and size. The routes of
 a release run as separate processes on one client host, each at its own
 offset inside the slot.

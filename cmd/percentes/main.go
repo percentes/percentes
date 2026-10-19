@@ -12,8 +12,8 @@
 // and the frame store under --frames all exist with the hashes DIR's
 // manifest records, and prints the label of a release cell that does not
 // count. --release-key names the release key, which --check-release
-// needs on a route with a confidential limit, whose frame store and
-// operator records the manifest names by HMAC-SHA256 under it.
+// needs on a route with a confidential limit, whose frame store,
+// operator file and records the manifest names by HMAC-SHA256 under it.
 // Exit codes: 0 = run valid, the replayed pair matches byte for byte, or
 // the release check passed; 2 = run completed but a run-failing gate
 // marked it invalid; 1 = execution error, a replayed pair that differs,

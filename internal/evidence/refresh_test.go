@@ -149,7 +149,8 @@ func TestPublishedRefresh(t *testing.T) {
 
 // A window-close record reads back as written; a field it does not
 // define or data after it is refused. On a target with a confidential
-// limit its records are keyed under the release key, which it requires.
+// limit its operator file and records are keyed under the release key,
+// with no size, and it requires the key.
 func TestReadWindowClose(t *testing.T) {
 	op := &Operator{AccountTier: "Developer", File: FileRef{Name: "operator.json", SHA256: strings.Repeat("a", 64), Bytes: "9"},
 		Records: []OperatorRecord{{Kind: RecordLimits, FileRef: FileRef{Name: "limits.txt", SHA256: strings.Repeat("b", 64), Bytes: "4"}, URL: "https://example.test/limits", Retrieved: "2026-10-27T01:00:00Z"}}}
@@ -179,13 +180,16 @@ func TestReadWindowClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	op.Records[0].data = []byte("limits")
+	op.Records[0].data, op.raw = []byte("limits"), []byte(`{"provider":"p"}`)
 	held, err := NewWindowClose(confidential, at, refreshRun(`{"limits": []}`), op, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (FileRef{Name: "limits.txt", HMACSHA256: key.Sum([]byte("limits"))}); held.Records[0].FileRef != want || held.Operator != op.File {
-		t.Fatalf("confidential target's record %+v, want %+v; operator %+v", held.Records[0].FileRef, want, held.Operator)
+	if want := (FileRef{Name: "limits.txt", HMACSHA256: key.Sum([]byte("limits"))}); held.Records[0].FileRef != want {
+		t.Fatalf("confidential target's record %+v, want %+v", held.Records[0].FileRef, want)
+	}
+	if want := (FileRef{Name: "operator.json", HMACSHA256: key.Sum(op.raw)}); held.Operator != want {
+		t.Fatalf("confidential target's operator file %+v, want %+v", held.Operator, want)
 	}
 	if got := WindowCloseDir("/frames", "groq", at.Add(time.Hour)); got != filepath.Join("/frames", "window-close", "groq", "20261027T020000.000000000Z") {
 		t.Fatalf("dir %s", got)

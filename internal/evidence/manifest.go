@@ -63,9 +63,10 @@ func HashFile(path, name string) (FileRef, error) {
 
 // Manifest is the SPEC-HOSTED §9 run manifest, with the HA2 §9 hashes and
 // roles. Every file it names is referenced by SHA-256 and size, except
-// that on a target with a confidential limit the frame store and the
-// operator records are keyed (FileRef); paths are relative to the output
-// directory, the frame store root, or the operator file's directory.
+// that on a target with a confidential limit the frame store, the
+// operator file and its records are keyed (FileRef); paths are relative
+// to the output directory, the frame store root, or the operator file's
+// directory.
 type Manifest struct {
 	SchemaVersion int `json:"schema_version"`
 	// StartUTC is the run epoch; for a release cell whose ladder never
@@ -280,11 +281,11 @@ type ManifestInput struct {
 }
 
 // NewManifest builds the manifest of one hosted run. On a target with a
-// confidential limit the frame store and the operator records are keyed
-// under in.Key.
+// confidential limit the frame store, the operator file and its records
+// are keyed under in.Key.
 func NewManifest(in ManifestInput) (*Manifest, error) {
 	cfg, t, res, op := in.Config, in.Target, in.Result, in.Operator
-	records, err := op.records(t, in.Key)
+	opFile, records, err := op.published(t, in.Key)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +329,7 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		Capture:        loadgen.CaptureLimits(),
 		Release:        in.Release,
 		Config:         refOf(in.ConfigName, published),
-		Operator:       op.File,
+		Operator:       opFile,
 		Roles:          op.Roles,
 		Records:        records,
 		Ledger:         in.Ledger,

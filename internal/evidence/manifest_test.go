@@ -275,7 +275,7 @@ func TestOperatorWithhold(t *testing.T) {
 	if _, err := NewWindowClose(&cfg.Target, time.Now(), refreshRun(`{"limits": []}`), op, key); err == nil || err.Error() != want {
 		t.Fatalf("window-close record: %v", err)
 	}
-	if _, err := op.records(&cfg.Target, key); err == nil || err.Error() != want {
+	if _, _, err := op.published(&cfg.Target, key); err == nil || err.Error() != want {
 		t.Fatalf("manifest records: %v", err)
 	}
 }

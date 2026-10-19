@@ -651,12 +651,13 @@ func rulingConfig(t *testing.T, endpoint string) *config.Config {
 // carries the value, which the endpoint echoes in a rate-limit header:
 // its manifest names the file as published, its verdict and report pair
 // name the limit by source and keyed hash, its attempts carry the
-// header's stand-in, its manifest names the frame store and the operator
-// records by HMAC-SHA256 under the release key with no size, and the
-// run's frame directory keeps the file as loaded, from which the
+// header's stand-in, its manifest names the frame store, the operator
+// file and its records by HMAC-SHA256 under the release key with no size,
+// and the run's frame directory keeps the file as loaded, from which the
 // completeness check and the replay work. No file under the output
-// directory carries the SHA-256 of the frame store or of a record, and
-// none there or under the frame store carries the release key.
+// directory carries the SHA-256 of the frame store, the operator file or
+// a record, and none there or under the frame store carries the release
+// key.
 func TestCellConfidentialLimit(t *testing.T) {
 	e := newEndpoint(t, always200)
 	endpoint, _ := withHeaders(t, e.url(), map[string]string{"X-Ratelimit-Limit-Tokens": "250013.5"})
@@ -710,6 +711,11 @@ func TestCellConfidentialLimit(t *testing.T) {
 		}
 		held[rec.Name] = b
 	}
+	opCopy := read(filepath.Join(runDir, evidence.OperatorCopyFile))
+	if m.Operator != (evidence.FileRef{Name: filepath.Base(f.in.opPath), HMACSHA256: r.key.Sum(opCopy)}) {
+		t.Errorf("operator file %+v", m.Operator)
+	}
+	held[evidence.OperatorCopyFile] = opCopy
 	files, withheld := 0, 0
 	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {

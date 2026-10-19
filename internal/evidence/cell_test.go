@@ -906,12 +906,12 @@ func confidentialCell(cfg *config.Config) *Cell {
 
 // A configuration with a confidential limit is named in the manifest by
 // the file as published; the run's frame directory keeps the file as
-// loaded; the manifest names the frame store and the operator records by
-// HMAC-SHA256 under the release key alone; the completeness check reads
-// the file as loaded and refuses a manifest naming another file, a
-// missing or different copy, a verdict that publishes the value, and a
-// frame store or operator record named by its SHA-256 or not matching
-// under the key it is given.
+// loaded; the manifest names the frame store, the operator file and its
+// records by HMAC-SHA256 under the release key alone; the completeness
+// check reads the file as loaded and refuses a manifest naming another
+// file, a missing or different copy, a verdict that publishes the value,
+// and a frame store, operator file or operator record named by its
+// SHA-256 or not matching under the key it is given.
 func TestConfidentialConfig(t *testing.T) {
 	cfg := confidentialCfg(t)
 	published, err := cfg.Published()
@@ -949,8 +949,8 @@ func TestConfidentialConfig(t *testing.T) {
 			t.Errorf("record %s: %+v, want %+v", r.Kind, r.FileRef, want)
 		}
 	}
-	if m.Source.Diff == nil || !m.Source.Diff.Keyed() || m.Operator != in.Operator.File || m.Operator.Keyed() {
-		t.Errorf("source diff %+v, operator file %+v", m.Source.Diff, m.Operator)
+	if want := (FileRef{Name: in.Operator.File.Name, HMACSHA256: key.Sum(in.Operator.raw)}); m.Source.Diff == nil || !m.Source.Diff.Keyed() || m.Operator != want {
+		t.Errorf("source diff %+v, operator file %+v, want %+v", m.Source.Diff, m.Operator, want)
 	}
 	path, err := WriteManifest(out, m)
 	if err != nil {
@@ -960,7 +960,7 @@ func TestConfidentialConfig(t *testing.T) {
 		t.Errorf("manifest carries the value or no confidential demand:\n%s", b)
 	}
 	b := mustRead(t, path)
-	for _, r := range append([]OperatorRecord{{FileRef: refOf(m.Frames.Name, frames)}}, in.Operator.Records...) {
+	for _, r := range append([]OperatorRecord{{FileRef: refOf(m.Frames.Name, frames)}, {FileRef: in.Operator.File}}, in.Operator.Records...) {
 		if bytes.Contains(b, []byte(r.SHA256)) {
 			t.Errorf("manifest carries %s's SHA-256:\n%s", r.Name, b)
 		}
@@ -1016,6 +1016,7 @@ func TestConfidentialConfig(t *testing.T) {
 		for i := range r.m.Records {
 			r.m.Records[i].FileRef = *keyedAt(t, filepath.Join(r.runDir, RecordsCopyDir), r.m.Records[i].FileRef, key)
 		}
+		r.m.Operator = keyedRefOf(r.m.Operator.Name, mustRead(t, filepath.Join(r.runDir, OperatorCopyFile)), key)
 		diff := r.m.Records[1].FileRef
 		r.m.Source.Diff = &diff
 		r.write(t)
@@ -1054,6 +1055,15 @@ func TestConfidentialConfig(t *testing.T) {
 			r.m.Frames = &ref
 			r.write(t)
 		}, "frame store: " + releaseRunDir + "/" + FramesFile + " is named by its SHA-256 on a target with a confidential limit"},
+		{"operator file by SHA-256", func(t *testing.T, r *releaseRun) {
+			r.m.Operator = refOf(r.m.Operator.Name, mustRead(t, filepath.Join(r.runDir, OperatorCopyFile)))
+			r.write(t)
+		}, "operator copy: " + OperatorCopyFile + " is named by its SHA-256 on a target with a confidential limit"},
+		{"operator copy changed", func(t *testing.T, r *releaseRun) {
+			if err := os.WriteFile(filepath.Join(r.runDir, OperatorCopyFile), []byte(`{"provider":"q"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "operator copy: " + OperatorCopyFile + " has another HMAC-SHA256 under the release key than the manifest records"},
 		{"limits record by SHA-256", func(t *testing.T, r *releaseRun) {
 			r.m.Records[0].FileRef = refOf("limits/groq.txt", []byte("limits"))
 			r.write(t)
@@ -1061,7 +1071,7 @@ func TestConfidentialConfig(t *testing.T) {
 		{"keyed with a size", func(t *testing.T, r *releaseRun) { r.m.Records[0].Bytes = "6"; r.write(t) },
 			"limits record copy: limits/groq.txt: a keyed reference with a SHA-256 or a size"},
 		{"no key", func(t *testing.T, r *releaseRun) { r.key = nil },
-			"release key: the target has a confidential limit, whose frame store and operator records are keyed, and no release key was given"},
+			"release key: the target has a confidential limit, whose frame store, operator file and records are keyed, and no release key was given"},
 		{"another key", func(t *testing.T, r *releaseRun) {
 			var err error
 			if r.key, err = releasekey.New(); err != nil {
@@ -1091,6 +1101,13 @@ func TestConfidentialConfig(t *testing.T) {
 	r.write(t)
 	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "frame store: "+releaseRunDir+"/"+FramesFile+" is keyed on a target with public limits only") {
 		t.Errorf("keyed frame store on a public target: %v", err)
+	}
+	r = newReleaseRun(t, config.ProfilePilot)
+	r.m.Operator = keyedRefOf(r.m.Operator.Name, mustRead(t, filepath.Join(r.runDir, OperatorCopyFile)), key)
+	r.write(t)
+	r.key = key
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "operator copy: "+OperatorCopyFile+" is keyed on a target with public limits only") {
+		t.Errorf("keyed operator file on a public target: %v", err)
 	}
 }
 

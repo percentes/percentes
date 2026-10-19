@@ -162,15 +162,15 @@ type WindowClose struct {
 }
 
 // NewWindowClose is t's route's window-close record of refresh, as it
-// publishes, and op, read after it, at recorded, with op's records keyed
-// under key on a target with a confidential limit, as in a cell's
-// manifest.
+// publishes, and op, read after it, at recorded, with op's file and
+// records keyed under key on a target with a confidential limit, as in a
+// cell's manifest.
 func NewWindowClose(t *config.Target, recorded time.Time, refresh *StatusRecord, op *Operator, key *releasekey.Key) (*WindowClose, error) {
-	records, err := op.records(t, key)
+	opFile, records, err := op.published(t, key)
 	if err != nil {
 		return nil, err
 	}
-	return &WindowClose{SchemaVersion: 1, Route: t.Name, RecordedUTC: recorded.UTC(), Refresh: refresh, AccountTier: op.AccountTier, Operator: op.File, Records: records}, nil
+	return &WindowClose{SchemaVersion: 1, Route: t.Name, RecordedUTC: recorded.UTC(), Refresh: refresh, AccountTier: op.AccountTier, Operator: opFile, Records: records}, nil
 }
 
 // WindowCloseDir is the retained store's directory of route's window-close

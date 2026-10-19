@@ -44,7 +44,8 @@ func tpmRefresh(tpm string) string {
 // source and hash, and neither its recorded value nor the value read
 // reaches a file under the release output directory; the refresh record
 // as run is kept in the run's frame directory and, at window close,
-// beside the record's copies.
+// beside the record's copies, and the window-close record names the
+// operator file by keyed hash.
 func TestCellLimitsStop(t *testing.T) {
 	const recorded = "250013.5"
 	for _, tc := range []struct {
@@ -146,6 +147,10 @@ func TestCellLimitsStop(t *testing.T) {
 			}
 			if b, err := os.ReadFile(filepath.Join(r.framesRoot, w.Copies, evidence.RefreshFile)); err != nil || !bytes.Contains(b, []byte("200000")) {
 				t.Fatalf("retained window-close refresh record %s: %v", b, err)
+			}
+			opCopy, err := os.ReadFile(filepath.Join(r.framesRoot, w.Copies, evidence.OperatorCopyFile))
+			if err != nil || w.Operator != (evidence.FileRef{Name: filepath.Base(f.in.opPath), HMACSHA256: r.key.Sum(opCopy)}) {
+				t.Fatalf("window-close operator file %+v: %v", w.Operator, err)
 			}
 			if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
 				if err != nil || d.IsDir() {

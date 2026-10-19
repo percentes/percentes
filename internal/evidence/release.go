@@ -66,9 +66,9 @@ func WriteConfigCopy(dir string, cfg *config.Config) error {
 // the report pair and the clock, status and balance records in r.Dir, a
 // release run's start balance among them, and the frame store and the
 // operator copies in the run's frame directory. On a target with a
-// confidential limit the frame store and the operator records must be
-// keyed, with the HMAC-SHA256 under r.Key the manifest records, and
-// elsewhere none may be. r.Config is the file as
+// confidential limit the frame store, the operator file and its records
+// must be keyed, with the HMAC-SHA256 under r.Key the manifest records,
+// and elsewhere none may be. r.Config is the file as
 // loaded: the manifest names the file as published
 // (config.Config.Published), a release cell's ceiling-rule verdict must
 // be the one published from r.Config's limits
@@ -82,7 +82,8 @@ func CheckRelease(r Release) (*Manifest, error) {
 	}
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
-	// held is whether the frame store and the operator records are keyed.
+	// held is whether the frame store, the operator file and its records
+	// are keyed.
 	held := false
 	check := func(base string, ref FileRef, what string) []byte {
 		b, err := readRef(base, ref, nil)
@@ -129,7 +130,7 @@ func CheckRelease(r Release) (*Manifest, error) {
 	default:
 		held = cfg.Target.Confidential()
 		if held && r.Key == nil {
-			fail("release key: the target has a confidential limit, whose frame store and operator records are keyed, and no release key was given")
+			fail("release key: the target has a confidential limit, whose frame store, operator file and records are keyed, and no release key was given")
 		}
 	}
 
@@ -265,7 +266,7 @@ func CheckRelease(r Release) (*Manifest, error) {
 		runDir := filepath.Join(r.FramesRoot, filepath.Dir(filepath.FromSlash(m.Frames.Name)))
 		op := m.Operator
 		op.Name = OperatorCopyFile
-		check(runDir, op, "operator copy")
+		checkHeld(runDir, op, "operator copy")
 		copies := filepath.Join(runDir, RecordsCopyDir)
 		diffChecked := false
 		for _, rec := range m.Records {
