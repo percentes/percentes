@@ -59,8 +59,10 @@ Three rules shape every measurement:
   bottleneck: send-skew, undispatched-request, central processing unit
   (CPU) and garbage-collection (GC) pause gates, all pinned and
   run-failing. These are the client gates; the full run-validity set is
-  SPEC §10. A run that cannot show its own validity exits invalid
-  instead of publishing.
+  SPEC §10. A self-hosted run that fails these checks exits invalid. A
+  release cell that fails them retains its evidence with a
+  client-invalid label and does not count toward frame completeness
+  (the twelve counted cells a route needs before it pools).
 
 | Document | What it is | Read it when |
 |---|---|---|
@@ -265,7 +267,7 @@ offset inside the slot.
 | Deadline and hard timeout | 30 s from intended dispatch splits completions into in time and late; 90 s from actual dispatch censors a request with no terminal event |
 | Request shape | Shape S: one frozen body per route with a synthetic support ticket per request, under a 1,200-token input bound and a 512- or 1,024-token output ceiling |
 | Admission | a step runs only where its nominal demand is at most half of every recorded rate, token, concurrency, daily and spend-window limit, and only where the account's monthly cap and the route's liability cap cover twelve cells, two re-runs and 100 probe requests |
-| Before each cell | the route's refresh command rewrites the recorded limits and model documentation and prints the limit values it read, and its balance command reads the account's balance; a cell whose records were not rewritten, or whose balance is below the cell's reservation, is blocked before any request, and a route whose limits as read, at its newest recorded price, no longer admit one of its steps stops |
+| Before each cell | the route's refresh command rewrites the recorded limits and model documentation and prints the limit values it read, and its balance command reads the account's balance; a cell is blocked before any request where its records were not rewritten, its balance is below the cell's reservation, the balance command fails, or the balance is unavailable and the route records no `balance_unavailable` ruling, and a route whose limits as read, at its newest recorded price, no longer admit one of its steps stops |
 | After the last cell | the refresh command runs once more; its record is the route's window-close record, compared with the last counted cell and printed on the route's page |
 | Model identifier | each response's reported model is compared with the expected one (the requested identifier, or the one `target.reported_model` records from the model documentation); a cell with any other is labelled `model_mismatch`, kept out of the frame and re-run, and the route's page lists it with the expected identifier, every identifier reported and how many requests reported another |
 | Retries | none; `Retry-After` is never honoured, and a release configuration must record it under `target.response_headers` |
@@ -304,8 +306,10 @@ line in the published tables.
 2. **Admission.** At the cell's start, after the clock and status
    records, the refresh command rewrites the recorded limits and model
    documentation and the balance command reads the account's balance;
-   a cell whose records were not rewritten, or whose balance is below
-   its reservation, is blocked here, and a route whose limits as read,
+   a cell is blocked here where its records were not rewritten, its
+   balance is below its reservation, the balance command fails, or the
+   balance is unavailable and the route records no
+   `balance_unavailable` ruling, and a route whose limits as read,
    at its newest recorded price, no longer admit one of its steps stops
    here. The ledger then reserves one probe request plus every scheduled
    request of the cell against the route's and the release's liability

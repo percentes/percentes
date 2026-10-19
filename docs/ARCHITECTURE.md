@@ -10,10 +10,8 @@ publish. This page describes how the code implements
 that is subordinate to it. A § number refers to a SPEC.md section unless
 it is prefixed SPEC-HOSTED.
 
-This page is written for an engineer who has not seen the code. Each
-section opens with what it covers and when you need it. A worked
-example follows one request from its schedule to its line in the report:
-[one release request](#following-one-release-request).
+A worked example follows one request from its schedule to its line in
+the report: [one release request](#following-one-release-request).
 
 - [Overview](#overview)
 - [A run on the clock](#a-run-on-the-clock)
@@ -73,9 +71,10 @@ and the pilot of SPEC-HOSTED's drafted hosted amendment 2 (HA2) that
 `cmd/percentes-pilot` runs. [The release runner](#the-release-runner)
 describes the public descriptive release of hosted amendment 3 (HA3),
 written into SPEC-HOSTED's body, that `cmd/percentes-release` runs:
-one route per process and twelve cells per route, each a five-step
-ladder of offered load, with the ceiling rule, the per-step tables and
-the index.
+one route per process and twelve cells per route, with the ceiling
+rule, the per-step tables and the index. A route is one provider, model,
+endpoint and account tier, and a cell is one run of a route's ladder,
+five steps of offered load.
 
 ### Design rules the code enforces
 
@@ -438,7 +437,7 @@ The diagram predates the hosted packages, which the table lists.
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
 | | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file with each route's frozen configuration hashes (as published, and keyed as loaded) and host group, the ledger's open-line hash and its position (line count and the hash of its bytes) | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun`, `Schedule.Config` | a pinned derivation; window and refusal cases |
-| | `internal/releasekey` | the release key ([The release key](#the-release-key)): 32 random bytes written once as lowercase hexadecimal to a new file readable by its owner only; the HMAC-SHA256 (a hash-based message authentication code built on SHA-256, the 256-bit Secure Hash Algorithm) under it of each configuration as loaded and, on a route with a confidential limit, of the withheld texts, the limit copies, the frame store and the operator records; a key that prints as `[release key]` under every format verb and that `encoding/json` cannot write | SPEC-HOSTED §9; HA3 points 9 and 15 | `New`, `Create`, `Read`, `Key.Sum` | create and read refusals; every format verb and JSON print no key byte |
+| | `internal/releasekey` | the release key ([The release key](#the-release-key)): 32 random bytes written once as lowercase hexadecimal to a new file readable by its owner only; the HMAC-SHA256 (a hash-based message authentication code built on SHA-256, the 256-bit Secure Hash Algorithm) under it of each configuration as loaded and, on a route with a confidential limit, of the withheld texts, the limit copies, the frame store and the operator records; a key that prints as `[release key]` under every format verb and that `encoding/json` cannot write | SPEC-HOSTED §9; HA3 points 9 and 15 | `New`, `Create`, `Read`, `Key.Sum` | create and read refusals; formatting and JavaScript Object Notation (JSON) encoding expose no key bytes |
 | Test support | `internal/hostqual` | the host qualification probe the timing-coupled tests run first | §2, §8 | `Measure`, `Observation.Qualify`, `Qualified`, `Allocation` | per-limit units |
 | | `internal/ac` | the §8 acceptance suite; the mock runs as a separate process, so it never shares the generator's Go scheduler | §8 | | |
 
@@ -1684,8 +1683,10 @@ committed schedule to its row in the index.
    never be scheduled. At the cell's start, after the clock and status
    records, the refresh command rewrites the recorded limits and model
    documentation and the balance command reads the account's balance;
-   a cell whose records were not rewritten, or whose balance is below
-   its reservation, is blocked here with no request sent, and a route
+   a cell is blocked here with no request sent where its records were
+   not rewritten, its balance is below its reservation, the balance
+   command fails, or the balance is unavailable and the route records
+   no `balance_unavailable` ruling, and a route
    whose limits as read, at its newest recorded price, no longer admit
    one of its steps stops here. The ledger then reserves one probe
    request plus every scheduled request of the cell against the route's
