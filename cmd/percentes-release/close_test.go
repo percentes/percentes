@@ -358,6 +358,8 @@ func TestRestartRefusesOtherSchedule(t *testing.T) {
 // once more after the refresh command, keeps their copies under the
 // frame store, and never writes the record again; the route page names
 // the record. A refresh fault writes no record and returns an error.
+// pages refuses the record once a retained copy is edited, and once a
+// cell has run after its refresh.
 func TestWindowCloseRecord(t *testing.T) {
 	enoughOpenFiles(t)
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
@@ -382,7 +384,7 @@ func TestWindowCloseRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	closed := time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC)
+	closed := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	r.now = func() time.Time { return closed }
 	path := filepath.Join(r.dir, evidence.WindowCloseFile)
 
@@ -412,7 +414,7 @@ func TestWindowCloseRecord(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if printed != "groq: window close recorded 2026-10-27T01:00:00Z; no counted cell to compare\n" {
+	if printed != "groq: window close recorded "+closed.Format(time.RFC3339)+"; no counted cell to compare\n" {
 		t.Fatalf("printed %q", printed)
 	}
 	b, err := os.ReadFile(path)
@@ -458,12 +460,32 @@ func TestWindowCloseRecord(t *testing.T) {
 	}
 
 	pages := t.TempDir()
-	if code, err := pagesCmd([]string{"--out", r.out, "--frames", r.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--pages", pages}); code != exitOK || err != nil {
+	args := []string{"--out", r.out, "--frames", r.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--pages", pages}
+	if code, err := pagesCmd(args); code != exitOK || err != nil {
 		t.Fatalf("pages: exit %d: %v", code, err)
 	}
 	text, err := os.ReadFile(filepath.Join(pages, routesDir, "groq.txt"))
-	if err != nil || !strings.Contains(string(text), "-- Window close, recorded 2026-10-27: no counted cell to compare --\n") {
+	if err != nil || !strings.Contains(string(text), "-- Window close, recorded "+closed.Format(time.DateOnly)+": no counted cell to compare --\n") {
 		t.Fatalf("route page: %v\n%s", err, text)
+	}
+
+	limitsCopy := filepath.Join(held, evidence.RecordsCopyDir, "limits.txt")
+	if err := os.WriteFile(limitsCopy, []byte("limits v9"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := "pages: route groq: evidence: window-close record refused: limits record copy: limits.txt has SHA-256 " + sha("limits v9")
+	if code, err := pagesCmd(args); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("edited copy: exit %d: %v; want %q", code, err, want)
+	}
+	if err := os.WriteFile(limitsCopy, []byte("limits v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	later := runCellOK(t, r, r.runs[1])
+	ended := ", not after the route's last cell ended at " + later.EndUTC.UTC().Format(time.RFC3339Nano)
+	want = "pages: route groq: evidence: window-close record refused: recorded " + closed.Format(time.RFC3339Nano) + ended +
+		"; refresh: started " + w.Refresh.StartUTC.UTC().Format(time.RFC3339Nano) + ended
+	if code, err := pagesCmd(args); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("a cell after the record: exit %d: %v; want %q", code, err, want)
 	}
 }
 

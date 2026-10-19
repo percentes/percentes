@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"time"
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
@@ -235,8 +236,9 @@ func marshalPage(v any) ([]byte, error) {
 // cell carries its scheduled start and the documentation state its
 // manifest records, which the drift rule compares. Each model_mismatch
 // attempt's expected and reported model ids are kept for the route's
-// page, and the route's window-close record is read where it has one.
-// A route with no cell record is refused.
+// page. The route's window-close record is read where it has one and
+// must verify against the latest end of any of the route's attempts
+// (evidence.WindowClose.Verify). A route with no cell record is refused.
 func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.Key) (*routeRecords, error) {
 	name := cfg.Target.Name
 	paths, err := filepath.Glob(filepath.Join(out, name, "*", cellFile))
@@ -245,6 +247,7 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 	}
 	rr := &routeRecords{}
 	counted := map[string]string{}
+	var lastEnd time.Time
 	for i, p := range paths {
 		dir := filepath.Dir(p)
 		b, err := os.ReadFile(p)
@@ -264,6 +267,13 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 			rr.schedule = rec.ScheduleSHA256
 		case rec.ScheduleSHA256 != rr.schedule:
 			return nil, fmt.Errorf("pages: %s: the cell ran under schedule sha256 %q, the route's other cells under %q", dir, rec.ScheduleSHA256, rr.schedule)
+		}
+		end := rec.StartUTC
+		if rec.EndUTC != nil {
+			end = *rec.EndUTC
+		}
+		if end.After(lastEnd) {
+			lastEnd = end
 		}
 		if _, err := os.Stat(filepath.Join(dir, evidence.ManifestFile)); errors.Is(err, os.ErrNotExist) {
 			if rec.Outcome != outcomeMissed && rec.Outcome != outcomeInterrupted {
@@ -318,6 +328,9 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 	if p := filepath.Join(out, name, evidence.WindowCloseFile); fileExists(p) {
 		if rr.close, err = evidence.ReadWindowClose(p); err != nil {
 			return nil, fmt.Errorf("pages: %w", err)
+		}
+		if err := rr.close.Verify(&cfg.Target, framesRoot, key, lastEnd); err != nil {
+			return nil, fmt.Errorf("pages: route %s: %w", name, err)
 		}
 	}
 	return rr, nil
