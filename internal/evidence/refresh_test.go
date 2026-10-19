@@ -104,6 +104,19 @@ func TestPublishedRefresh(t *testing.T) {
 	if err := WriteRetainedRefresh(dir, rec); err == nil {
 		t.Fatal("a second retained record was written")
 	}
+	back, err := ReadRetainedRefresh(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := ReadRefreshedLimits(back, &cfg.Target); err != nil || !reflect.DeepEqual(again, read) {
+		t.Fatalf("retained record read back as %+v, %v; want %+v", again, err, read)
+	}
+	if err := os.WriteFile(filepath.Join(dir, RefreshFile), bytes.Replace(held, []byte(`"command"`), []byte(`"extra": 1, "command"`), 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRetainedRefresh(dir); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("retained record with an unknown field: %v", err)
+	}
 
 	const reason, rpmReason = "console API 403; last seen Limit 250013.5", "console 403: rpm hidden, tpm 300001"
 	unread := refreshRun(`{"limits": [{"dimension": "requests_per_minute", "unavailable": "` + rpmReason + `"},

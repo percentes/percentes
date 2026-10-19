@@ -1658,6 +1658,89 @@ func TestOperatorConfidentialValue(t *testing.T) {
 	}
 }
 
+// On a route with a confidential limit, a value of the limit the refresh
+// command reads that differs from the recorded one is searched for in the
+// operator file as the recorded one is: a cell whose refresh rewrites the
+// file with the value read in a note is blocked before admission with no
+// published file carrying it, and a later process's run refuses a file
+// holding a value an earlier cell read, which the retained refresh record
+// keeps. A route with no earlier cell starts on that file.
+func TestOperatorRefreshedValue(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+	enoughOpenFiles(t)
+	const limits = `{"kind": "limits", "path": "r.txt", "url": "https://example.test/limits", "retrieved": "2026-10-07"}`
+	if strings.Count(operatorJSON, limits) != 1 {
+		t.Fatalf("fixture lacks %q", limits)
+	}
+	noted := []byte(strings.Replace(operatorJSON, limits, `{"kind": "limits", "path": "r.txt", "url": "https://example.test/limits", "retrieved": "2026-10-07", "note": "TPM now 310,007 per console"}`, 1))
+	read := tpmRefresh(`"value":310007`)
+	values := []string{"310007", "310,007", "3.10007e+05"}
+	const want = "a confidential limit's value is in records[0].note (tokens_per_minute)"
+	noValue := func(root string) {
+		t.Helper()
+		if err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err == nil && slices.ContainsFunc(values, func(v string) bool { return bytes.Contains(b, []byte(v)) }) {
+				t.Errorf("%s carries the value read", p)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	f := newFixture(t, confidentialConfig(t, e.url()), "+0.005")
+	leaked := writeFile(t, t.TempDir(), "operator.json", noted)
+	f.in.refreshCmd = filepath.Join(t.TempDir(), "refresh")
+	script := "#!/bin/sh\ncp '" + leaked + "' '" + f.in.opPath + "' && touch '" + filepath.Join(filepath.Dir(f.in.opPath), "r.txt") + "' && echo '" + read + "'\n"
+	if err := os.WriteFile(f.in.refreshCmd, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, err := newRoute(f.in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := r.runs[0]
+	rec, err := r.runCell(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], want) {
+		t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, want)
+	}
+	if n := e.hits.Load(); n != 0 {
+		t.Fatalf("server saw %d requests", n)
+	}
+	checkRetained(t, r, run)
+	noValue(f.in.out)
+
+	f = newFixture(t, confidentialConfig(t, e.url()), "+0.005")
+	limitsRefresh(t, f, read)
+	if r, err = newRoute(f.in); err != nil {
+		t.Fatal(err)
+	}
+	if rec, err = r.runCell(context.Background(), r.runs[0]); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], "probe request returned 401") {
+		t.Fatalf("outcome %s, reasons %q; want blocked at the probe", rec.Outcome, rec.Reasons)
+	}
+	writeFile(t, filepath.Dir(f.in.opPath), "operator.json", noted)
+	if _, err := newRoute(f.in); err == nil || !strings.Contains(err.Error(), want) || slices.ContainsFunc(values, func(v string) bool { return strings.Contains(err.Error(), v) }) {
+		t.Fatalf("restart: %v; want %q", err, want)
+	}
+	noValue(f.in.out)
+
+	f = newFixture(t, confidentialConfig(t, e.url()), "+0.005")
+	writeFile(t, filepath.Dir(f.in.opPath), "operator.json", noted)
+	if _, err := newRoute(f.in); err != nil {
+		t.Fatalf("no earlier cell: %v", err)
+	}
+}
+
 // A cell whose ledger path holds another ledger than the one the route
 // started on ends in an error before any request, appending nothing to
 // that file, at the cell's ledger read: also where the refresh failed and

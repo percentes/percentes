@@ -120,6 +120,26 @@ func WriteRetainedRefresh(dir string, rec *StatusRecord) error {
 	return writeNew(filepath.Join(dir, RefreshFile), append(b, '\n'))
 }
 
+// ReadRetainedRefresh reads a refresh record as run that
+// WriteRetainedRefresh wrote to RefreshFile in dir, refusing fields
+// StatusRecord does not define and data after it.
+func ReadRetainedRefresh(dir string) (*StatusRecord, error) {
+	b, err := os.ReadFile(filepath.Join(dir, RefreshFile))
+	if err != nil {
+		return nil, fmt.Errorf("evidence: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var rec StatusRecord
+	if err := dec.Decode(&rec); err != nil {
+		return nil, fmt.Errorf("evidence: %s: %w", RefreshFile, err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("evidence: %s: data after the record", RefreshFile)
+	}
+	return &rec, nil
+}
+
 // WindowCloseFile is a release route's window-close record, in the route's
 // directory under the release output directory.
 const WindowCloseFile = "window-close.json"

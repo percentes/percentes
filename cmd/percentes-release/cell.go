@@ -96,8 +96,9 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		return rec, err
 	}
 	refresh := evidence.ReadStatus(ctx, r.refresh)
-	op, oerr := r.cellOperator(refresh)
 	read, lerr := evidence.ReadRefreshedLimits(refresh, t)
+	r.withhold(read)
+	op, oerr := r.cellOperator(refresh)
 	if ev.refreshPath, err = evidence.WriteStatus(dir, evidence.RefreshFile, evidence.PublishedRefresh(refresh, t, read)); err != nil {
 		return rec, err
 	}
@@ -433,10 +434,10 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 // after the cell's refresh command ran (SPEC-HOSTED §4 drift inside the
 // window), with each limits and eligibility record dated by its file's
 // modification time. It refuses a failed command, a file that does not
-// load, holds a confidential limit's value (Operator.CheckConfidential)
-// or does not cover the build, and a limits or eligibility record whose
-// file was not rewritten since the command started. A nil refresh reads
-// the file as it stands.
+// load, holds a confidential limit's value as recorded or as the route
+// read it (withhold, Operator.CheckConfidential) or does not cover the
+// build, and a limits or eligibility record whose file was not rewritten
+// since the command started. A nil refresh reads the file as it stands.
 func (r *route) cellOperator(refresh *evidence.StatusRecord) (*evidence.Operator, error) {
 	if refresh != nil && refresh.Error != "" {
 		return nil, fmt.Errorf("refresh command: %s", refresh.Error)
@@ -445,6 +446,7 @@ func (r *route) cellOperator(refresh *evidence.StatusRecord) (*evidence.Operator
 	if err != nil {
 		return nil, err
 	}
+	op.Withhold(r.withheld)
 	if err := op.CheckConfidential(&r.cfg.Target); err != nil {
 		return nil, err
 	}

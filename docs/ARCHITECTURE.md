@@ -433,7 +433,7 @@ The diagram predates the hosted packages, which the table lists.
 | | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
 | Hosted | `internal/probe` | the pre-run probe: Domain Name System (DNS) resolution, the Transport Layer Security (TLS) handshake, one request, the response shape, the start gate; the release ceiling check, a record's results re-derived from its requests, the ceiling choice across a model's hosts with a host left out on its records' reported-model fault, the values a probe record withholds, and the reported-model fault of a route's own records | SPEC-HOSTED §2, §5; HA3 points 7 and 15 | `Run`, `RunRelease`, `ReleaseRecord.Verify`, `ChooseCeiling`, `ModelFault`, `ReleaseRecord.Expected`, `LengthValue`, `Gate`, `Write`, `Retains`, `Exposed`, `ExposedByMarking`, `WriteRetained` | an httptest server per shape and failure |
 | | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound, bound to one open line once `Bind` is called; the release ceiling rule, and the check of a published verdict against the configuration's limits | SPEC-HOSTED HA2 §3; HA3 points 6 and 15 | `Create`, `Open`, `Ledger.Bind`, `Ledger.Admit`, `Ledger.AdmitAt`, `Ledger.Settle`, `CeilingRule`, `CheckPublished`, `State.Covers`, `State.ReservationUSD`, `State.PriceRevision` | chain, cap and settlement units |
-| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadWindowClose`, `LoadOperator`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
+| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadRetainedRefresh`, `ReadWindowClose`, `LoadOperator`, `Operator.Withhold`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
 | | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file with each route's frozen configuration hashes (as published, and keyed as loaded) and host group, the ledger's open-line hash and its position (line count and the hash of its bytes) | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun`, `Schedule.Config` | a pinned derivation; window and refusal cases |
@@ -695,20 +695,24 @@ before any setup.
   that carries no version-control revision refuses to run, and one built
   from a modified tree needs a `source_diff` record (`CheckSource`). On a
   release route with a confidential limit, `Operator.CheckConfidential`
-  refuses the file where its own path, the provider, account tier, client
-  host, cell, a role, or a record's path, URL or note holds that limit's
-  value as loaded as a number of its own, outside a longer number, a run
-  of 32 or more hexadecimal digits and a date (`config.Carries`). The
-  value is searched in decimal, also with its whole part grouped in
-  threes by a comma or a space character (`config.ValueForms`, the forms
-  `public-config` searches), and as `strconv.FormatFloat` prints it in
-  format `e` (`%g` prints that or the decimal). The refusal names the
-  field and the limit's dimension, and neither the value nor the file's
-  name. `run` refuses to start on such a file; read at a
-  cell's start, it blocks the cell, whose manifest carries the records
-  read when the route started; read after the route's last cell, it
-  stops the window-close record being written. `NewManifest` and
-  `NewWindowClose` refuse it too.
+  refuses the file where the limit's value is a number of its own
+  (outside a longer number, a run of 32 or more hexadecimal digits and a
+  date, `config.Carries`) in the file's own path, the provider, account
+  tier, client host, cell, a role, or a record's path, URL or note. It
+  searches for the value as loaded and for each value the route's refresh
+  command read (`Operator.Withhold`), in decimal, also with its whole part
+  grouped in threes by a comma or a space character (`config.ValueForms`,
+  the forms `public-config` searches), and as `strconv.FormatFloat` prints
+  it in format `e` (`%g` prints that or the decimal). The route keeps the
+  values read in memory; a process that starts after earlier cells takes
+  them from the refresh records as run beside those cells' frames
+  (`retainedReads`, `evidence.ReadRetainedRefresh`). The refusal names
+  the field and the limit's dimension, and neither the value nor the
+  file's name. `run` refuses to start on such a file; read at a cell's
+  start, it blocks the cell, whose manifest carries the records read when
+  the route started; read after the route's last cell, it stops the
+  window-close record being written. `NewManifest` and `NewWindowClose`
+  refuse it too.
 - **The admission ledger** (`--ledger`, `internal/admission`) is one
   append-only JSON Lines (JSONL, one JavaScript Object Notation (JSON)
   object per line) file holding every inference request sent to a route,
@@ -1281,8 +1285,8 @@ their outputs and refuses to start on any of these.
 running and starts the cell's live dispatch series, then writes the
 clock record and the start status, runs the refresh command
 (`--refresh-cmd`, run like the status command with no shell) and writes
-its record, reads the operator file and its records again and the limits
-the command printed, reads the ledger once, and runs the balance command
+its record, reads the limits the command printed and the operator file
+and its records again, reads the ledger once, and runs the balance command
 (`--balance-cmd`) and writes its record with the check of the printed
 amount against the cell's reservation, the probe request plus every
 scheduled request at the price in that read. The refresh command prints one JSON object,

@@ -72,6 +72,9 @@ type Operator struct {
 	// path is the operator file's path as LoadOperator was given it.
 	path string
 	raw  []byte
+	// withheld are the confidential limits a refresh command read
+	// (Withhold), searched for with t's (CheckConfidential).
+	withheld []RefreshedLimit
 }
 
 // Roles are the HA2 pilot roles: who chose the task, who supplied the
@@ -222,15 +225,25 @@ func (op *Operator) Refreshed(since time.Time) error {
 	return nil
 }
 
-// CheckConfidential refuses op for t where t records a confidential limit
-// whose value, as loaded, is a number of its own (config.Carries) in the
-// operator file's path or in a text op publishes: the provider, account
-// tier, client host, cell or a role, or a record's path, URL or note. The
-// value is searched in decimal, with its whole part also grouped in
-// threes by a comma or a space character (config.ValueForms), and as
-// strconv.FormatFloat prints it in format 'e' (%g prints that or the
-// decimal). The refusal names each field and the limit's dimension, and
-// neither the value nor the file's name.
+// Withhold adds the value of each confidential limit in read, the limits
+// a refresh command printed, to the values CheckConfidential searches for.
+func (op *Operator) Withhold(read []RefreshedLimit) {
+	for _, l := range read {
+		if l.Confidential && l.Value > 0 && !slices.Contains(op.withheld, l) {
+			op.withheld = append(op.withheld, l)
+		}
+	}
+}
+
+// CheckConfidential refuses op for t where a confidential limit's value,
+// as t records it or as a refresh command read it (Withhold), is a number
+// of its own (config.Carries) in the operator file's path or in a text op
+// publishes: the provider, account tier, client host, cell or a role, or
+// a record's path, URL or note. The value is searched in decimal, with
+// its whole part also grouped in threes by a comma or a space character
+// (config.ValueForms), and as strconv.FormatFloat prints it in format 'e'
+// (%g prints that or the decimal). The refusal names each field and the
+// limit's dimension, and neither the value nor the file's name.
 func (op *Operator) CheckConfidential(t *config.Target) error {
 	type text struct{ field, s string }
 	texts := []text{{"file path", op.path}, {"provider", op.Provider}, {"account_tier", op.AccountTier}, {"client_host", op.ClientHost}, {"cell", op.Cell}}
@@ -241,11 +254,15 @@ func (op *Operator) CheckConfidential(t *config.Target) error {
 		field := fmt.Sprintf("records[%d]", i)
 		texts = append(texts, text{field + ".path", r.path}, text{field + ".path", r.Name}, text{field + ".url", r.URL}, text{field + ".note", r.Note})
 	}
-	var found []string
+	var held []RefreshedLimit
 	for _, l := range t.Limits {
-		if l.Marking != config.MarkingConfidential || !(l.Value > 0) {
-			continue
+		if l.Marking == config.MarkingConfidential && l.Value > 0 {
+			held = append(held, RefreshedLimit{Dimension: l.Dimension, Value: l.Value})
 		}
+	}
+	held = append(held, op.withheld...)
+	var found []string
+	for _, l := range held {
 		forms := append(config.ValueForms(l.Value), strconv.FormatFloat(l.Value, 'e', -1, 64))
 		for _, x := range texts {
 			hit := fmt.Sprintf("%s (%s)", x.field, l.Dimension)

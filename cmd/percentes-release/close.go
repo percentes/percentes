@@ -82,8 +82,9 @@ func (r *route) windowClose(ctx context.Context, st *routeState) error {
 	}
 	t := &r.cfg.Target
 	refresh := evidence.ReadStatus(ctx, r.refresh)
-	op, oerr := r.cellOperator(refresh)
 	read, lerr := evidence.ReadRefreshedLimits(refresh, t)
+	r.withhold(read)
+	op, oerr := r.cellOperator(refresh)
 	if oerr == nil {
 		oerr = lerr
 	}

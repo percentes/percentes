@@ -117,7 +117,10 @@ type route struct {
 	// as read when the route started.
 	opPath string
 	op     *evidence.Operator
-	build  *debug.BuildInfo
+	// withheld are the confidential limits the refresh command read, in
+	// this process and in the retained records of earlier cells.
+	withheld []evidence.RefreshedLimit
+	build    *debug.BuildInfo
 
 	now  func() time.Time
 	wait func(ctx context.Context, t time.Time) error
@@ -255,6 +258,13 @@ func newRoute(in routeInput) (*route, error) {
 
 	if r.op, err = evidence.LoadOperator(in.opPath); err != nil {
 		return nil, err
+	}
+	if cfg.Target.Confidential() {
+		read, err := r.retainedReads()
+		if err != nil {
+			return nil, err
+		}
+		r.withhold(read)
 	}
 	if err := r.op.CheckConfidential(&cfg.Target); err != nil {
 		return nil, err
@@ -559,6 +569,49 @@ type routeState struct {
 }
 
 func runKey(r schedule.Run) string { return fmt.Sprintf("%s/%d", r.Label, r.Attempt) }
+
+// withhold keeps the confidential limits in read, as the refresh command
+// printed them, for the operator file as read when the route started and
+// every later read of it (cellOperator).
+func (r *route) withhold(read []evidence.RefreshedLimit) {
+	for _, l := range read {
+		if l.Confidential {
+			r.withheld = append(r.withheld, l)
+		}
+	}
+	r.op.Withhold(read)
+}
+
+// retainedReads are the limits read by the refresh records as run that
+// the retained store keeps beside the frames of the route's cells with a
+// manifest.
+func (r *route) retainedReads() ([]evidence.RefreshedLimit, error) {
+	paths, err := filepath.Glob(filepath.Join(r.dir, "*", evidence.ManifestFile))
+	if err != nil {
+		return nil, err
+	}
+	var out []evidence.RefreshedLimit
+	for _, p := range paths {
+		m, err := evidence.ReadManifest(p)
+		if err != nil {
+			return nil, err
+		}
+		if m.Frames == nil {
+			continue
+		}
+		rec, err := evidence.ReadRetainedRefresh(filepath.Join(r.framesRoot, filepath.Dir(filepath.FromSlash(m.Frames.Name))))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if read, err := evidence.ReadRefreshedLimits(rec, &r.cfg.Target); err == nil {
+			out = append(out, read...)
+		}
+	}
+	return out, nil
+}
 
 // state reads the route's cell records. A record left running by an
 // ended process becomes interrupted. A re-run is taken, in order of the

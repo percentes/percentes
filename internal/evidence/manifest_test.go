@@ -241,6 +241,45 @@ func TestOperatorConfidential(t *testing.T) {
 	}
 }
 
+// A confidential limit's value a refresh command read, other than the one
+// recorded, refuses an operator file that holds it once the operator
+// withholds it, in a check and in a manifest's or window-close record's
+// records; a public limit's value read is not withheld.
+func TestOperatorWithhold(t *testing.T) {
+	cfg := confidentialCfg(t)
+	key, err := releasekey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err := LoadOperator(writeOperator(t, strings.Replace(operatorJSON, `"note": "T&C of 15 Sep 2026"`, `"note": "TPM now 310,007; RPM 1000"`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := op.CheckConfidential(&cfg.Target); err != nil {
+		t.Fatalf("before the read: %v", err)
+	}
+	read, err := ReadRefreshedLimits(refreshRun(`{"limits": [{"dimension": "requests_per_minute", "value": 1000}, {"dimension": "tokens_per_minute", "value": 310007}]}`), &cfg.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.Withhold(read[:1])
+	if err := op.CheckConfidential(&cfg.Target); err != nil {
+		t.Fatalf("a public limit's value withheld: %v", err)
+	}
+	op.Withhold(read)
+	op.Withhold(read)
+	const want = "evidence: operator file: a confidential limit's value is in records[3].note (tokens_per_minute)"
+	if err := op.CheckConfidential(&cfg.Target); err == nil || err.Error() != want {
+		t.Fatalf("%v; want %q", err, want)
+	}
+	if _, err := NewWindowClose(&cfg.Target, time.Now(), refreshRun(`{"limits": []}`), op, key); err == nil || err.Error() != want {
+		t.Fatalf("window-close record: %v", err)
+	}
+	if _, err := op.records(&cfg.Target, key); err == nil || err.Error() != want {
+		t.Fatalf("manifest records: %v", err)
+	}
+}
+
 // A copy holds the bytes hashed at load, though the file has changed
 // since, and an existing copy is never overwritten.
 func TestOperatorCopies(t *testing.T) {
