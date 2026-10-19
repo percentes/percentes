@@ -26,7 +26,8 @@ const (
 
 // Publication is the release publication record (SPEC-HOSTED HA3 point
 // 14), a file apart from the cell manifests, which it names by hash: the
-// manifests and pages the notices carried, each route's notice,
+// manifests, pages and window-close records the notices carried, each
+// route's notice,
 // responses, naming permission and replication pack, every email and
 // form that described the work to a provider before the notices, and
 // every pre-release copy. Files it names are relative to its own
@@ -34,6 +35,7 @@ const (
 type Publication struct {
 	Manifests      []PublishedFile    `json:"manifests"`
 	Pages          []PublishedFile    `json:"pages"`
+	WindowCloses   []PublishedFile    `json:"window_closes"`
 	Routes         []RoutePublication `json:"routes"`
 	Disclosures    []Disclosure       `json:"disclosures"`
 	Prerelease     []Prerelease       `json:"prerelease"`
@@ -107,24 +109,27 @@ type Prerelease struct {
 }
 
 // RouteDuties is what one route's publication requires: its name, its
-// naming permission (config Naming.PermissionRequired) and a replication
-// pack with any disclosure of its figures.
+// naming permission (config Naming.PermissionRequired), a replication
+// pack with any disclosure of its figures, and its window-close record
+// where it has a page.
 type RouteDuties struct {
 	Name            string
 	Permission      bool
 	ReplicationPack bool
+	WindowClose     bool
 }
 
 // PublicationState is the release as it stands: each cell manifest's
-// bytes by its slash path under the release output directory, each page
-// the cells generate by its slash path under PagesDir, the routes, and
-// the time of the check.
+// and each window-close record's bytes by its slash path under the
+// release output directory, each page the cells generate by its slash
+// path under PagesDir, the routes, and the time of the check.
 type PublicationState struct {
-	Manifests map[string][]byte
-	Pages     map[string][]byte
-	PagesDir  string
-	Routes    []RouteDuties
-	Now       time.Time
+	Manifests    map[string][]byte
+	WindowCloses map[string][]byte
+	Pages        map[string][]byte
+	PagesDir     string
+	Routes       []RouteDuties
+	Now          time.Time
 }
 
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -149,15 +154,17 @@ func LoadPublication(path string) (*Publication, error) {
 }
 
 // Check returns nil when the record is complete for s: it names every
-// cell manifest and every page by the hash of its bytes, and each page
-// is on disk with those bytes; every route has one entry, with a notice
-// whose window of at least NoticeWorkingDays working days closed before
-// s.Now, its responses, its naming permission where required and its
-// replication pack, sent no later than the notice, where required;
-// every disclosure predates the first notice; every pre-release copy
-// withholds the routes that need a replication pack; and every file the
-// record names has the SHA-256 it records. Otherwise it returns an error
-// naming every missing item and every mismatch.
+// cell manifest, every window-close record and every page by the hash of
+// its bytes, and each page is on disk with those bytes; every route with
+// the WindowClose duty has its record at <route>/WindowCloseFile; every
+// route has one entry, with a notice whose window of at least
+// NoticeWorkingDays working days closed before s.Now, its responses,
+// its naming permission where required and its replication pack, sent
+// no later than the notice, where required; every disclosure predates
+// the first notice; every pre-release copy withholds the routes that need
+// a replication pack; and every file the record names has the SHA-256 it
+// records. Otherwise it returns an error naming every missing item and
+// every mismatch.
 func (p *Publication) Check(s PublicationState) error {
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
@@ -176,6 +183,7 @@ func (p *Publication) Check(s PublicationState) error {
 	}
 
 	p.fileSet("manifests", p.Manifests, s.Manifests, fail)
+	p.fileSet("window_closes", p.WindowCloses, s.WindowCloses, fail)
 	p.fileSet("pages", p.Pages, s.Pages, fail)
 	for _, name := range sortedKeys(s.Pages) {
 		b, err := os.ReadFile(filepath.Join(s.PagesDir, filepath.FromSlash(name)))
@@ -274,6 +282,9 @@ func (p *Publication) Check(s PublicationState) error {
 	for _, r := range s.Routes {
 		if !seen[r.Name] {
 			fail("route %s: not in the record", r.Name)
+		}
+		if _, ok := s.WindowCloses[r.Name+"/"+WindowCloseFile]; r.WindowClose && !ok {
+			fail("route %s: window close: no %s; a route with a page needs its window-close record", r.Name, WindowCloseFile)
 		}
 	}
 

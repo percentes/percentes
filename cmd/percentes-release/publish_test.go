@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
@@ -53,8 +55,8 @@ func published(t *testing.T, dir, path string) *evidence.PublishedFile {
 }
 
 // publication writes the record of a release whose one route, groq,
-// needs its naming permission: the manifests under out and the pages
-// under pages by hash, a notice of 1 September 2026 whose window closed
+// needs its naming permission: the manifests and window-close records
+// under out and the pages under pages by hash, a notice of 1 September 2026 whose window closed
 // on 7 September, no response, and one disclosure before it.
 func publication(t *testing.T, out, pages string, edit func(*evidence.Publication)) string {
 	t.Helper()
@@ -77,6 +79,13 @@ func publication(t *testing.T, out, pages string, edit func(*evidence.Publicatio
 	for name := range manifests {
 		p.Manifests = append(p.Manifests, *published(t, out, name))
 	}
+	closes, err := releaseFiles(out, evidence.WindowCloseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range closes {
+		p.WindowCloses = append(p.WindowCloses, *published(t, out, name))
+	}
 	for name := range readPages(t, pages) {
 		p.Pages = append(p.Pages, *published(t, pages, name))
 	}
@@ -91,12 +100,15 @@ func publication(t *testing.T, out, pages string, edit func(*evidence.Publicatio
 }
 
 // publish-check passes a complete record and prints the providers told
-// before the notices; pages runs with no record; and the check refuses,
-// exiting 2, a record that lacks the naming permission the configuration
-// requires, misses responses, has an open window, misses a later cell's
-// manifest, or a page edited after pages wrote it. With no record, an
-// absent one, no schedule, or a schedule other than the one the cells ran
-// under, it exits 1.
+// before the notices; pages runs with no record and no window-close
+// record; and the check refuses, exiting 2, a paged route with no
+// window-close record, a record that lacks the naming permission the
+// configuration requires, misses responses, has an open window, misses a
+// later cell's manifest or window-close record, or a page or window-close
+// record edited after the record named it. It exits 1 on a window-close
+// record of a refresh that failed, with an edited retained copy, or taken
+// before the route's last cell ended, and with no record, an absent one,
+// no schedule, or a schedule other than the one the cells ran under.
 func TestPublishCheck(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	path := routeConfigFile(t, "groq", e.url(), "10")
@@ -142,6 +154,27 @@ func TestPublishCheck(t *testing.T) {
 		return code, text
 	}
 
+	if code, text := check(publication(t, groq.out, pages, nil)); code != exitAdverse ||
+		!strings.Contains(text, "NOT READY to publish: evidence: publication refused: route groq: window close: no window-close.json; a route with a page needs its window-close record\n") {
+		t.Fatalf("no window-close record: exit %d:\n%s", code, text)
+	}
+	closeRoute := func() {
+		t.Helper()
+		st, err := groq.state()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdoutOf(t, func() {
+			if err := groq.windowClose(context.Background(), st); err != nil {
+				t.Error(err)
+			}
+		})
+		if code, err := pagesCmd(base); code != exitOK || err != nil {
+			t.Fatalf("pages after the window close: exit %d: %v", code, err)
+		}
+	}
+	closeRoute()
+
 	var code int
 	complete := publication(t, groq.out, pages, nil)
 	text := stdoutOf(t, func() { code = dispatch(append([]string{"publish-check", "--record", complete}, base...)) })
@@ -165,6 +198,56 @@ func TestPublishCheck(t *testing.T) {
 		}
 	}
 
+	closePath := filepath.Join(groq.dir, evidence.WindowCloseFile)
+	closeBytes, err := os.ReadFile(closePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := evidence.ReadWindowClose(closePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opCopy := filepath.Join(groq.framesRoot, w.Copies, evidence.OperatorCopyFile)
+	opBytes, err := os.ReadFile(opCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := *w
+	refresh := *w.Refresh
+	refresh.Error = "exit status 1"
+	failed.Refresh = &refresh
+	failedBytes, err := json.Marshal(&failed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, path string
+		b, was     []byte
+		want       string
+	}{
+		{"refresh failed", closePath, failedBytes, closeBytes, "pages: route groq: evidence: window-close record refused: refresh: refreshed limits: the command failed: exit status 1"},
+		{"operator copy edited", opCopy, []byte("{}"), opBytes, "pages: route groq: evidence: window-close record refused: operator copy: operator.json has SHA-256 " + sha("{}")},
+	} {
+		if err := os.WriteFile(c.path, c.b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if code, err := publishCheckCmd(append(base[:len(base):len(base)], "--record", complete)); code != exitError || err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: exit %d: %v, want %q", c.name, code, err, c.want)
+		}
+		if err := os.WriteFile(c.path, c.was, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(closePath, append(closeBytes, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, text := check(complete); code != exitAdverse || !strings.Contains(text, "window_closes: groq/window-close.json has SHA-256 "+sha(string(closeBytes)+"\n")) {
+		t.Errorf("window-close record edited: exit %d:\n%s", code, text)
+	}
+	if err := os.WriteFile(closePath, closeBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	record := publication(t, groq.out, pages, nil)
 	if err := os.WriteFile(filepath.Join(pages, "routes", "groq.txt"), []byte("edited\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -178,10 +261,21 @@ func TestPublishCheck(t *testing.T) {
 	if code, _ := check(record); code != exitOK {
 		t.Errorf("pages rewritten: exit %d", code)
 	}
-	if rec := runCellOK(t, groq, groq.runs[2]); rec.Outcome != outcomeBlocked {
-		t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
+	later := runCellOK(t, groq, groq.runs[2])
+	if later.Outcome != outcomeBlocked {
+		t.Fatalf("outcome %s %q", later.Outcome, later.Reasons)
 	}
-	if code, text := check(record); code != exitAdverse || !strings.Contains(text, "manifests: groq/"+cellLabel(groq.runs[2])+"/manifest.json is not in the record") {
+	want := "pages: route groq: evidence: window-close record refused: recorded " + w.RecordedUTC.UTC().Format(time.RFC3339Nano) +
+		", not after the route's last cell ended at " + later.EndUTC.UTC().Format(time.RFC3339Nano)
+	if code, err := publishCheckCmd(append(base[:len(base):len(base)], "--record", record)); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("window close before a later cell: exit %d: %v, want %q", code, err, want)
+	}
+	if err := os.Remove(closePath); err != nil {
+		t.Fatal(err)
+	}
+	closeRoute()
+	if code, text := check(record); code != exitAdverse || !strings.Contains(text, "manifests: groq/"+cellLabel(groq.runs[2])+"/manifest.json is not in the record") ||
+		!strings.Contains(text, "window_closes: groq/window-close.json has SHA-256 ") {
 		t.Errorf("later cell: exit %d:\n%s", code, text)
 	}
 

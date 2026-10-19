@@ -15,11 +15,12 @@ import (
 )
 
 // publishCheckCmd checks the release publication record (SPEC-HOSTED HA3
-// point 14) against the cell manifests under --out, the pages the cells
-// generate under the schedule file given, which must be the pages under
-// --pages, and the files the record names. When the record is complete
-// it prints the providers told of the measurement before the notices.
-// pages runs without a record.
+// point 14) against the cell manifests and the window-close records under
+// --out, the pages the cells generate under the schedule file given,
+// which must be the pages under --pages, and the files the record names.
+// A route with a page needs its window-close record. When the record is
+// complete it prints the providers told of the measurement before the
+// notices. pages runs without a record.
 func publishCheckCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("publish-check", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -62,12 +63,18 @@ func publishCheckCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	closes, err := releaseFiles(*out, evidence.WindowCloseFile)
+	if err != nil {
+		return exitError, err
+	}
 	routes := make([]evidence.RouteDuties, len(cfgs))
 	for i, cfg := range cfgs {
 		n := cfg.Target.Naming
-		routes[i] = evidence.RouteDuties{Name: cfg.Target.Name, Permission: n != nil && n.PermissionRequired, ReplicationPack: replicationRoute(cfg)}
+		routes[i] = evidence.RouteDuties{Name: cfg.Target.Name, Permission: n != nil && n.PermissionRequired, ReplicationPack: replicationRoute(cfg),
+			WindowClose: rp.recs[i].verdict != nil}
 	}
-	if err := pub.Check(evidence.PublicationState{Manifests: manifests, Pages: rp.files, PagesDir: *pages, Routes: routes, Now: time.Now()}); err != nil {
+	state := evidence.PublicationState{Manifests: manifests, WindowCloses: closes, Pages: rp.files, PagesDir: *pages, Routes: routes, Now: time.Now()}
+	if err := pub.Check(state); err != nil {
 		fmt.Printf("NOT READY to publish: %v\n", err)
 		return exitAdverse, nil
 	}
@@ -82,12 +89,19 @@ func publishCheckCmd(args []string) (int, error) {
 // releaseManifests reads every cell manifest under out, by its slash
 // path under out.
 func releaseManifests(out string) (map[string][]byte, error) {
-	paths, err := filepath.Glob(filepath.Join(out, "*", "*", evidence.ManifestFile))
+	m, err := releaseFiles(out, "*", evidence.ManifestFile)
+	if err == nil && len(m) == 0 {
+		return nil, errors.New("publish-check: no cell manifest under " + out)
+	}
+	return m, err
+}
+
+// releaseFiles reads every file at out/<route>/elem..., whose elements
+// may be patterns, by its slash path under out.
+func releaseFiles(out string, elem ...string) (map[string][]byte, error) {
+	paths, err := filepath.Glob(filepath.Join(append([]string{out, "*"}, elem...)...))
 	if err != nil {
 		return nil, err
-	}
-	if len(paths) == 0 {
-		return nil, errors.New("publish-check: no cell manifest under " + out)
 	}
 	m := map[string][]byte{}
 	for _, p := range paths {

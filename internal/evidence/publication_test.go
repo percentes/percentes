@@ -13,9 +13,10 @@ import (
 )
 
 // publicationFixture is a complete release publication: three routes,
-// azure needing its naming permission and bedrock its replication pack,
-// with every file the record names written under dir and the pages
-// under the state's PagesDir.
+// azure needing its naming permission, bedrock its replication pack and
+// groq, the route with a page, its window-close record, with every file
+// the record names written under dir and the pages under the state's
+// PagesDir.
 type publicationFixture struct {
 	dir string
 	p   Publication
@@ -45,11 +46,12 @@ func newPublicationFixture(t *testing.T) *publicationFixture {
 	t.Helper()
 	f := &publicationFixture{dir: t.TempDir()}
 	f.s = PublicationState{
-		Manifests: map[string][]byte{"azure/c01-a1/manifest.json": []byte("m-azure"), "bedrock/c01-a1/manifest.json": []byte("m-bedrock"), "groq/c01-a1/manifest.json": []byte("m-groq")},
-		Pages:     map[string][]byte{"index.md": []byte("index"), "routes/groq.txt": []byte("groq page")},
-		PagesDir:  t.TempDir(),
-		Routes:    []RouteDuties{{Name: "groq"}, {Name: "azure", Permission: true}, {Name: "bedrock", ReplicationPack: true}},
-		Now:       time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC),
+		Manifests:    map[string][]byte{"azure/c01-a1/manifest.json": []byte("m-azure"), "bedrock/c01-a1/manifest.json": []byte("m-bedrock"), "groq/c01-a1/manifest.json": []byte("m-groq")},
+		WindowCloses: map[string][]byte{"groq/" + WindowCloseFile: []byte("wc-groq")},
+		Pages:        map[string][]byte{"index.md": []byte("index"), "routes/groq.txt": []byte("groq page")},
+		PagesDir:     t.TempDir(),
+		Routes:       []RouteDuties{{Name: "groq", WindowClose: true}, {Name: "azure", Permission: true}, {Name: "bedrock", ReplicationPack: true}},
+		Now:          time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC),
 	}
 	for name, b := range f.s.Pages {
 		put(t, f.s.PagesDir, name, string(b))
@@ -57,6 +59,9 @@ func newPublicationFixture(t *testing.T) *publicationFixture {
 	}
 	for name, b := range f.s.Manifests {
 		f.p.Manifests = append(f.p.Manifests, PublishedFile{Path: name, SHA256: shaOf(b)})
+	}
+	for name, b := range f.s.WindowCloses {
+		f.p.WindowCloses = append(f.p.WindowCloses, PublishedFile{Path: name, SHA256: shaOf(b)})
 	}
 	notice := func(route string) *Notice {
 		return &Notice{Sent: "2026-10-27", Recipient: route + " support", Account: route + "-account", Pack: put(t, f.dir, "packs/"+route+".tar", route+" pack"), WindowCloses: "2026-11-02"}
@@ -141,6 +146,18 @@ func TestPublicationRefuses(t *testing.T) {
 		{"manifest twice", func(_ *testing.T, f *publicationFixture) {
 			f.p.Manifests = append(f.p.Manifests, f.p.Manifests[0])
 		}, "recorded twice"},
+		{"no window close", func(_ *testing.T, f *publicationFixture) {
+			delete(f.s.WindowCloses, "groq/window-close.json")
+			f.p.WindowCloses = nil
+		}, "route groq: window close: no window-close.json; a route with a page needs its window-close record"},
+		{"window close unrecorded", func(_ *testing.T, f *publicationFixture) { f.p.WindowCloses = nil },
+			"window_closes: groq/window-close.json is not in the record"},
+		{"window close changed", func(_ *testing.T, f *publicationFixture) {
+			f.s.WindowCloses["groq/window-close.json"] = []byte("wc-groq edited")
+		}, "window_closes: groq/window-close.json has SHA-256 " + shaOf([]byte("wc-groq edited"))},
+		{"window close not in the release", func(_ *testing.T, f *publicationFixture) {
+			f.p.WindowCloses = append(f.p.WindowCloses, PublishedFile{Path: "azure/window-close.json", SHA256: shaOf([]byte("wc-azure"))})
+		}, "window_closes: azure/window-close.json is not among the release's window_closes"},
 		{"page unrecorded", func(t *testing.T, f *publicationFixture) {
 			f.s.Pages["routes/groq.json"] = []byte("{}")
 			put(t, f.s.PagesDir, "routes/groq.json", "{}")

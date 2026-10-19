@@ -590,10 +590,10 @@ func TestPagesHostGroup(t *testing.T) {
 	}
 }
 
-// A host whose attempts are all missed or interrupted gets no page and
-// leaves its sibling's pages and publication record to pass while its
-// configuration runs at the sibling's ceiling; at another ceiling pages
-// and publish-check refuse it, writing nothing.
+// A host whose attempts are all missed or interrupted gets no page, needs
+// no window-close record, and leaves its sibling's pages and publication
+// record to pass while its configuration runs at the sibling's ceiling;
+// at another ceiling pages and publish-check refuse it, writing nothing.
 func TestPagesMissedHost(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	release, sched := oneRelease(t, e.url(), "groq", "baseten")
@@ -610,10 +610,18 @@ func TestPagesMissedHost(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	st, err := groq.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutOf(t, func() {
+		if err := groq.windowClose(context.Background(), st); err != nil {
+			t.Error(err)
+		}
+	})
 	pages := t.TempDir()
 	args := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--config", basetenCfg, "--schedule", sched, "--pages", pages}
 	var code int
-	var err error
 	text := stdoutOf(t, func() { code, err = pagesCmd(args) })
 	if code != exitOK || err != nil || !strings.Contains(text, "baseten: no cell with a manifest.json, 2 with a run record only; no page\n") {
 		t.Fatalf("exit %d: %v:\n%s", code, err, text)
