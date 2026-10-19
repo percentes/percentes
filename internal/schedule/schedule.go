@@ -74,8 +74,8 @@ type Input struct {
 }
 
 // RouteConfig is a route's configuration as frozen with the schedule:
-// the file's SHA-256 and the routes of its model, its own among them,
-// sorted.
+// the SHA-256 of the file as published and the routes of its model, its
+// own among them, sorted.
 type RouteConfig struct {
 	Route        string   `json:"route"`
 	ConfigSHA256 string   `json:"config_sha256"`

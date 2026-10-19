@@ -140,7 +140,11 @@ func testSchedule(t *testing.T, cfgs []*config.Config, routes ...string) *schedu
 	t.Helper()
 	in := schedule.Input{MasterSeed: "percentes-release-test", First: "2026-10-17", Last: "2026-10-26", Routes: routes}
 	for _, cfg := range cfgs {
-		in.Configs = append(in.Configs, frozenConfig(cfg))
+		frozen, err := frozenConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.Configs = append(in.Configs, frozen)
 	}
 	s, err := schedule.New(in)
 	if err != nil {

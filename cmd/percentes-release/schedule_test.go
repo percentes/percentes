@@ -81,6 +81,51 @@ func TestScheduleCmd(t *testing.T) {
 	}
 }
 
+// The schedule of a route with a confidential limit freezes the file as
+// published, which run accepts, and carries no hash of the file as
+// loaded.
+func TestScheduleCmdConfidential(t *testing.T) {
+	groq := routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "10")
+	markConfidential(t, groq)
+	baseten := routeConfigFile(t, "baseten", "https://api.example.test/v1/chat/completions", "10")
+	path := filepath.Join(t.TempDir(), "schedule.json")
+	args := []string{"--master-seed", "percentes-release-test", "--first", "2026-10-17", "--last", "2026-10-26",
+		"--config", groq, "--config", baseten, "--ledger", releaseLedger(t, groq, baseten), "--schedule", path}
+	if code, err := scheduleCmd(args); err != nil || code != exitOK {
+		t.Fatalf("schedule: %d, %v", code, err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := schedule.Load(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgs, err := loadReleases([]string{groq})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgs[0]
+	published, err := cfg.Published()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(published, cfg.Raw) {
+		t.Fatal("the file as published is the file as loaded")
+	}
+	sum, loaded := sha256.Sum256(published), sha256.Sum256(cfg.Raw)
+	if got, ok := s.Config("groq"); !ok || got.ConfigSHA256 != hex.EncodeToString(sum[:]) {
+		t.Errorf("frozen %+v, %t; want the file as published, %x", got, ok, sum)
+	}
+	if bytes.Contains(b, []byte(hex.EncodeToString(loaded[:]))) {
+		t.Errorf("the schedule carries the hash of the file as loaded:\n%s", b)
+	}
+	if err := checkFrozen(cfg, s); err != nil {
+		t.Errorf("run refuses the frozen configuration: %v", err)
+	}
+}
+
 // schedule refuses a window the frame does not allow, a configuration
 // outside the release profile, a ledger that does not cap a route as its
 // configuration does or is missing, and a missing flag, and writes no

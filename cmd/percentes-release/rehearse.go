@@ -445,7 +445,9 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	}
 	frozen := make([]schedule.RouteConfig, n)
 	for i, cfg := range cfgs {
-		frozen[i] = frozenConfig(cfg)
+		if frozen[i], err = frozenConfig(cfg); err != nil {
+			return exitError, err
+		}
 	}
 	sched, err := schedule.New(schedule.Input{MasterSeed: in.masterSeed, First: today, Last: now.AddDate(0, 0, 9).Format(time.DateOnly), Routes: names, Configs: frozen,
 		LedgerSHA256: st.OpenSHA256})

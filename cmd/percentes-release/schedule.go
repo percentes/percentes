@@ -16,10 +16,10 @@ import (
 
 // scheduleCmd writes the committed schedule (SPEC-HOSTED HA3 point 9) of
 // the routes whose configurations are given, named by their targets,
-// whose host groups agree, with each configuration's SHA-256 and host
-// group and the open-line SHA-256 of the release ledger, which must cap
-// each route as its configuration does; run requires them. It never
-// replaces an existing file.
+// whose host groups agree, with the SHA-256 of each configuration as
+// published and its host group, and the open-line SHA-256 of the release
+// ledger, which must cap each route as its configuration does; run
+// requires them. It never replaces an existing file.
 func scheduleCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("schedule", flag.ContinueOnError)
 	seed := fs.String("master-seed", "", "the release's master seed (required)")
@@ -54,8 +54,12 @@ func scheduleCmd(args []string) (int, error) {
 	}
 	in := schedule.Input{MasterSeed: *seed, First: *first, Last: *last, LedgerSHA256: st.OpenSHA256}
 	for _, cfg := range cfgs {
+		frozen, err := frozenConfig(cfg)
+		if err != nil {
+			return exitError, err
+		}
 		in.Routes = append(in.Routes, cfg.Target.Name)
-		in.Configs = append(in.Configs, frozenConfig(cfg))
+		in.Configs = append(in.Configs, frozen)
 	}
 	s, err := schedule.New(in)
 	if err != nil {
@@ -100,21 +104,28 @@ func hostGroup(cfg *config.Config) []string {
 }
 
 // frozenConfig is cfg's record in the schedule: the SHA-256 of its file
-// and its host group.
-func frozenConfig(cfg *config.Config) schedule.RouteConfig {
-	sum := sha256.Sum256(cfg.Raw)
-	return schedule.RouteConfig{Route: cfg.Target.Name, ConfigSHA256: hex.EncodeToString(sum[:]), HostGroup: hostGroup(cfg)}
+// as published (config.Config.Published) and its host group.
+func frozenConfig(cfg *config.Config) (schedule.RouteConfig, error) {
+	published, err := cfg.Published()
+	if err != nil {
+		return schedule.RouteConfig{}, err
+	}
+	sum := sha256.Sum256(published)
+	return schedule.RouteConfig{Route: cfg.Target.Name, ConfigSHA256: hex.EncodeToString(sum[:]), HostGroup: hostGroup(cfg)}, nil
 }
 
 // checkFrozen refuses cfg unless the schedule froze its route's
-// configuration as cfg's file and host group.
+// configuration as cfg's file as published and cfg's host group.
 func checkFrozen(cfg *config.Config, sched *schedule.Schedule) error {
 	name := cfg.Target.Name
 	want, ok := sched.Config(name)
 	if !ok {
 		return fmt.Errorf("run: the schedule freezes no configuration of route %s", name)
 	}
-	got := frozenConfig(cfg)
+	got, err := frozenConfig(cfg)
+	if err != nil {
+		return err
+	}
 	if !slices.Equal(got.HostGroup, want.HostGroup) {
 		return fmt.Errorf("run: route %s: host group %v; the schedule froze %v", name, got.HostGroup, want.HostGroup)
 	}
