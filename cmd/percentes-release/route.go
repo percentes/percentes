@@ -216,8 +216,9 @@ type routeInput struct {
 }
 
 // newRoute checks the route's inputs and fixes what every cell shares:
-// the ceiling rule's verdict at the schedule's exact counts, the ceiling
-// choice, the Shape S set and the account record.
+// the ceiling rule's verdict at the schedule's exact counts and the
+// route's newest price up to the ledger position the schedule froze, the
+// ceiling choice, the Shape S set and the account record.
 func newRoute(in routeInput) (*route, error) {
 	cfg := in.cfg
 	if cfg.Profile != config.ProfileRelease || cfg.Release == nil {
@@ -294,11 +295,15 @@ func newRoute(in routeInput) (*route, error) {
 	if err := st.CheckRelease(cfg); err != nil {
 		return nil, err
 	}
-	entries, err := ledgerEntries(in.ledgerPath, sched.Input.LedgerSHA256)
+	entries, read, err := readLedger(in.ledgerPath, sched.Input.LedgerSHA256)
 	if err != nil {
 		return nil, err
 	}
-	price, err := routePrice(entries, name)
+	frozen, err := frozenEntries(entries, read.HeadSHA256, sched.Input)
+	if err != nil {
+		return nil, err
+	}
+	price, err := routePrice(frozen, name)
 	if err != nil {
 		return nil, err
 	}

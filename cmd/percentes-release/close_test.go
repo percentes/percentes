@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -199,6 +200,71 @@ func TestCellPriceStop(t *testing.T) {
 			if _, err := recordPrice(l, r.rule.cfg, tc.in, tc.out, "https://example.test/pricing", "2026-10-08"); err != nil {
 				t.Fatal(err)
 			}
+			before, err := ledgerEntries(f.ledger, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, err := r.runCell(context.Background(), r.runs[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.stop == "" {
+				if rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], "probe request returned 401") || e.hits.Load() != 1 {
+					t.Fatalf("outcome %s, reasons %q, %d requests; want blocked at the probe", rec.Outcome, rec.Reasons, e.hits.Load())
+				}
+				return
+			}
+			if rec.Outcome != outcomeStopped || len(rec.Reasons) != 1 || rec.Reasons[0] != tc.stop {
+				t.Fatalf("outcome %s, reasons %q; want stopped, %q", rec.Outcome, rec.Reasons, tc.stop)
+			}
+			if n := e.hits.Load(); n != 0 || rec.Sent != (admission.Counts{}) {
+				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
+			}
+			if after, err := ledgerEntries(f.ledger, ""); err != nil || len(after) != len(before) {
+				t.Fatalf("ledger lines %d, were %d: %v", len(after), len(before), err)
+			}
+		})
+	}
+}
+
+// A route started again after a price is recorded takes its verdict at
+// the price the schedule froze, so its admitted steps and verdict are the
+// first start's: under a raised price limitsStop stops its next cell
+// with no ledger line and no request, and under a lowered price the cell
+// goes on.
+func TestRestartKeepsFrozenVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, out, stop string
+	}{
+		{"raised", "0.30", "1.20", "route stop: the limits read at the cell's start, at the price retrieved 2026-10-08, no longer admit step 3 (1 rps) of the 3 the route runs: " +
+			"spend_per_month_usd recorded 10, read 10: nominal demand 13.3093824 above it; the route keeps its steps (SPEC-HOSTED §4)"},
+		{"lowered", "0.05", "0.20", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+			enoughOpenFiles(t)
+			f := newFixture(t, rulingConfig(t, e.url()), "+0.005")
+			first, err := newRoute(f.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l, err := admission.Open(f.ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := recordPrice(l, first.rule.cfg, tc.in, tc.out, "https://example.test/pricing", "2026-10-08"); err != nil {
+				t.Fatal(err)
+			}
+			in := f.in
+			in.cfg = rulingConfig(t, e.url())
+			r, err := newRoute(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := r.verdict.Admitted(); len(got) != 3 || !reflect.DeepEqual(r.verdict, first.verdict) {
+				t.Fatalf("admitted %v at US$%s a request; the first start admitted %v at US$%s", got, r.verdict.PerRequestUSD, first.verdict.Admitted(), first.verdict.PerRequestUSD)
+			}
+			shortLadder(r)
 			before, err := ledgerEntries(f.ledger, "")
 			if err != nil {
 				t.Fatal(err)

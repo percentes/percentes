@@ -265,6 +265,9 @@ type State struct {
 	// OpenSHA256 is the hex SHA-256 of the open line with its newline,
 	// which carries the ledger's creation time.
 	OpenSHA256 string
+	// HeadSHA256 is the hex SHA-256 of every byte read, which the next
+	// line carries as its prev.
+	HeadSHA256 string
 	// Caps are the caps the ledger was created with.
 	Caps       Caps
 	Routes     map[string]*Usage
@@ -824,6 +827,7 @@ func Parse(b []byte) (*State, error) {
 		}
 		st.Lines = seq
 	}
+	st.HeadSHA256 = hex.EncodeToString(h.Sum(nil))
 	return st, nil
 }
 

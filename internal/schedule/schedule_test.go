@@ -468,13 +468,13 @@ func TestNewConfigs(t *testing.T) {
 	}
 }
 
-// New keeps the frozen ledger's hash in the committed form without
-// changing the draws, and refuses one that is not a lowercase hex
-// SHA-256.
+// New keeps the frozen ledger's hash and position in the committed form
+// without changing the draws, and refuses a hash that is not a lowercase
+// hex SHA-256 and a position given in part or without the ledger's hash.
 func TestNewLedger(t *testing.T) {
-	sum := strings.Repeat("cd", 32)
+	sum, head := strings.Repeat("cd", 32), strings.Repeat("ef", 32)
 	in := target()
-	in.LedgerSHA256 = sum
+	in.LedgerSHA256, in.LedgerLines, in.LedgerHeadSHA256 = sum, 7, head
 	s := derived(t, in)
 	bare := derived(t, target())
 	if !reflect.DeepEqual(s.Cells, bare.Cells) || !reflect.DeepEqual(s.Offsets, bare.Offsets) {
@@ -491,10 +491,33 @@ func TestNewLedger(t *testing.T) {
 	if l.Input.LedgerSHA256 != sum || !bytes.Contains(b, []byte(`"ledger_sha256": "`+sum+`"`)) {
 		t.Fatalf("committed ledger %q in\n%s", l.Input.LedgerSHA256, b)
 	}
+	if l.Input.LedgerLines != 7 || l.Input.LedgerHeadSHA256 != head || !bytes.Contains(b, []byte(`"ledger_lines": 7,`)) || !bytes.Contains(b, []byte(`"ledger_head_sha256": "`+head+`"`)) {
+		t.Fatalf("committed ledger position %d, %q in\n%s", l.Input.LedgerLines, l.Input.LedgerHeadSHA256, b)
+	}
 	for _, bad := range []string{"abcd", strings.ToUpper(sum), sum + "00"} {
 		in.LedgerSHA256 = bad
 		if _, err := New(in); err == nil || !strings.Contains(err.Error(), `ledger_sha256 "`+bad+`" is not a lowercase hex SHA-256`) {
 			t.Errorf("%s: %v", bad, err)
+		}
+		in.LedgerSHA256, in.LedgerHeadSHA256 = sum, bad
+		if _, err := New(in); err == nil || !strings.Contains(err.Error(), `ledger_head_sha256 "`+bad+`" is not a lowercase hex SHA-256`) {
+			t.Errorf("head %s: %v", bad, err)
+		}
+		in.LedgerHeadSHA256 = head
+	}
+	for _, c := range []struct {
+		name, ledger, head string
+		lines              int
+		err                string
+	}{
+		{"no head", sum, "", 7, "both set or neither"},
+		{"no lines", sum, head, 0, "both set or neither"},
+		{"negative lines", sum, head, -1, "both set or neither"},
+		{"no ledger", "", head, 7, "a ledger position with no ledger_sha256"},
+	} {
+		in.LedgerSHA256, in.LedgerHeadSHA256, in.LedgerLines = c.ledger, c.head, c.lines
+		if _, err := New(in); err == nil || !strings.Contains(err.Error(), c.err) {
+			t.Errorf("%s: %v, want %q", c.name, err, c.err)
 		}
 	}
 }

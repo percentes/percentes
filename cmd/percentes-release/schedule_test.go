@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -30,11 +31,16 @@ func releaseLedger(t *testing.T, paths ...string) string {
 }
 
 // schedule writes the schedule its inputs derive for the configurations'
-// routes and the ledger, which run loads, and never replaces a file.
+// routes and the ledger, with the ledger's line count and the SHA-256 of
+// its bytes, which run loads, and never replaces a file.
 func TestScheduleCmd(t *testing.T) {
 	groq := routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "10")
 	baseten := routeConfigFile(t, "baseten", "https://api.example.test/v1/chat/completions", "10")
 	ledger := releaseLedger(t, groq, baseten)
+	if code, err := ledgerCmd([]string{"price", "--ledger", ledger, "--config", groq, "--input", "0.15", "--output", "0.60",
+		"--source", "https://example.test/pricing", "--retrieved", "2026-10-06"}); err != nil || code != exitOK {
+		t.Fatalf("ledger price: %d, %v", code, err)
+	}
 	path := filepath.Join(t.TempDir(), "schedule.json")
 	args := []string{"--master-seed", "percentes-release-test", "--first", "2026-10-17", "--last", "2026-10-26",
 		"--config", groq, "--config", baseten, "--ledger", ledger, "--release-key", testReleaseKeyPath, "--schedule", path}
@@ -68,8 +74,13 @@ func TestScheduleCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if open := sha256.Sum256(lb); s.Input.LedgerSHA256 != hex.EncodeToString(open[:]) {
+	if open := sha256.Sum256(lb[:bytes.IndexByte(lb, '\n')+1]); s.Input.LedgerSHA256 != hex.EncodeToString(open[:]) {
 		t.Errorf("frozen ledger %q, want the open line's %x", s.Input.LedgerSHA256, open)
+	}
+	head := sha256.Sum256(lb)
+	if s.Input.LedgerLines != bytes.Count(lb, []byte("\n")) || s.Input.LedgerHeadSHA256 != hex.EncodeToString(head[:]) ||
+		!bytes.Contains(b, []byte(`"ledger_lines": `+strconv.Itoa(s.Input.LedgerLines)+`,`)) || !bytes.Contains(b, []byte(`"ledger_head_sha256": "`+hex.EncodeToString(head[:])+`"`)) {
+		t.Errorf("frozen ledger position %d, %q; want %d lines, %x, in\n%s", s.Input.LedgerLines, s.Input.LedgerHeadSHA256, bytes.Count(lb, []byte("\n")), head, b)
 	}
 
 	other := append(slices.Clone(args[:len(args)-1]), path)

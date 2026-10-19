@@ -71,6 +71,12 @@ type Input struct {
 	// LedgerSHA256 is the frozen admission ledger's: the hex SHA-256 of
 	// its open line.
 	LedgerSHA256 string `json:"ledger_sha256,omitempty"`
+	// LedgerLines and LedgerHeadSHA256 are the ledger's position at the
+	// freeze: its line count and the hex SHA-256 of its bytes through
+	// that line. A route's admission verdict is taken at the prices up to
+	// it.
+	LedgerLines      int    `json:"ledger_lines,omitempty"`
+	LedgerHeadSHA256 string `json:"ledger_head_sha256,omitempty"`
 }
 
 // RouteConfig is a route's configuration as frozen with the schedule:
@@ -264,6 +270,14 @@ func New(in Input) (*Schedule, error) {
 	}
 	if in.LedgerSHA256 != "" && !isSHA256(in.LedgerSHA256) {
 		return nil, fmt.Errorf("schedule: ledger_sha256 %q is not a lowercase hex SHA-256", in.LedgerSHA256)
+	}
+	switch {
+	case in.LedgerHeadSHA256 != "" && !isSHA256(in.LedgerHeadSHA256):
+		return nil, fmt.Errorf("schedule: ledger_head_sha256 %q is not a lowercase hex SHA-256", in.LedgerHeadSHA256)
+	case in.LedgerLines < 0 || (in.LedgerLines == 0) != (in.LedgerHeadSHA256 == ""):
+		return nil, fmt.Errorf("schedule: ledger_lines %d and ledger_head_sha256 %q: both set or neither", in.LedgerLines, in.LedgerHeadSHA256)
+	case in.LedgerLines > 0 && in.LedgerSHA256 == "":
+		return nil, errors.New("schedule: a ledger position with no ledger_sha256")
 	}
 
 	for counter := 0; counter <= maxCounter; counter++ {

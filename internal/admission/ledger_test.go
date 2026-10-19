@@ -102,7 +102,8 @@ func TestWindowRequestsIsTheScheduleAndProbe(t *testing.T) {
 }
 
 // A ledger is created once and must exist to be opened; it starts with
-// the caps in force.
+// the caps in force. Its state names the SHA-256 of its open line and of
+// every byte read, which the next line carries as its prev.
 func TestCreateAndOpen(t *testing.T) {
 	_, path := newLedger(t)
 	if _, err := Create(path, PilotCaps()); err == nil {
@@ -136,6 +137,16 @@ func TestCreateAndOpen(t *testing.T) {
 	b, _ = os.ReadFile(path)
 	if st := state(t, l); st.OpenSHA256 != hex.EncodeToString(open[:]) || !bytes.Contains(b, []byte(`"seq":2,"prev":"`+st.OpenSHA256+`"`)) {
 		t.Errorf("open line sha256 %q, want %x, the second line's prev", st.OpenSHA256, open)
+	}
+	head := sha256.Sum256(b)
+	if st := state(t, l); st.HeadSHA256 != hex.EncodeToString(head[:]) {
+		t.Errorf("head sha256 %q, want the file's %x", st.HeadSHA256, head)
+	}
+	if err := l.RecordHosting("1", "host"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ = os.ReadFile(path); !bytes.Contains(b, []byte(`"seq":3,"prev":"`+hex.EncodeToString(head[:])+`"`)) {
+		t.Errorf("the third line's prev is not the head sha256 %x before it:\n%s", head, b)
 	}
 }
 

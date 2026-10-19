@@ -14,30 +14,37 @@ import (
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/schedule"
 )
 
 // ledgerEntries reads the ledger at path under a shared lock, as other
 // routes' processes append to it, checks it and returns its lines. Where
 // open is set, a file whose open-line SHA-256 differs is refused.
 func ledgerEntries(path, open string) ([]admission.Entry, error) {
+	out, _, err := readLedger(path, open)
+	return out, err
+}
+
+// readLedger is ledgerEntries also returning the state of the bytes read.
+func readLedger(path, open string) ([]admission.Entry, *admission.State, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("ledger: %w", err)
+		return nil, nil, fmt.Errorf("ledger: %w", err)
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
-		return nil, fmt.Errorf("ledger: lock: %w", err)
+		return nil, nil, fmt.Errorf("ledger: lock: %w", err)
 	}
 	b, err := io.ReadAll(f)
 	if err != nil {
-		return nil, fmt.Errorf("ledger: %w", err)
+		return nil, nil, fmt.Errorf("ledger: %w", err)
 	}
 	st, err := admission.Parse(b)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if open != "" && st.OpenSHA256 != open {
-		return nil, fmt.Errorf("ledger: open line sha256 %s; the route is bound to %s", st.OpenSHA256, open)
+		return nil, nil, fmt.Errorf("ledger: open line sha256 %s; the route is bound to %s", st.OpenSHA256, open)
 	}
 	var out []admission.Entry
 	sc := bufio.NewScanner(bytes.NewReader(b))
@@ -45,11 +52,35 @@ func ledgerEntries(path, open string) ([]admission.Entry, error) {
 	for sc.Scan() {
 		var e admission.Entry
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
-			return nil, fmt.Errorf("ledger line %d: %w", len(out)+1, err)
+			return nil, nil, fmt.Errorf("ledger line %d: %w", len(out)+1, err)
 		}
 		out = append(out, e)
 	}
-	return out, sc.Err()
+	if err := sc.Err(); err != nil {
+		return nil, nil, err
+	}
+	return out, st, nil
+}
+
+// frozenEntries returns entries up to the ledger position the schedule
+// input in froze, head being the SHA-256 of every byte read. It refuses
+// a ledger shorter than that position or whose bytes through it have
+// another SHA-256, which the next line's checked prev carries.
+func frozenEntries(entries []admission.Entry, head string, in schedule.Input) ([]admission.Entry, error) {
+	n := in.LedgerLines
+	switch {
+	case n == 0:
+		return nil, errors.New("run: the schedule freezes no ledger position")
+	case len(entries) < n:
+		return nil, fmt.Errorf("run: the ledger holds %d lines; the schedule froze it at line %d", len(entries), n)
+	}
+	if len(entries) > n {
+		head = entries[n].Prev
+	}
+	if head != in.LedgerHeadSHA256 {
+		return nil, fmt.Errorf("run: the ledger's lines 1 to %d have sha256 %s; the schedule froze %s", n, head, in.LedgerHeadSHA256)
+	}
+	return entries[:n], nil
 }
 
 // routePrice is route's newest recorded price: the price line with the

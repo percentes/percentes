@@ -20,8 +20,9 @@ import (
 // whose host groups agree, with the SHA-256 of each configuration as
 // published, its HMAC-SHA256 as loaded under the release key and its
 // host group, and the open-line SHA-256 of the release ledger, which
-// must cap each route as its configuration does; run requires them. It
-// never replaces an existing file.
+// must cap each route as its configuration does, with its line count and
+// the SHA-256 of its bytes; run requires them. It never replaces an
+// existing file.
 func scheduleCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("schedule", flag.ContinueOnError)
 	seed := fs.String("master-seed", "", "the release's master seed (required)")
@@ -59,7 +60,7 @@ func scheduleCmd(args []string) (int, error) {
 			return exitError, err
 		}
 	}
-	in := schedule.Input{MasterSeed: *seed, First: *first, Last: *last, LedgerSHA256: st.OpenSHA256}
+	in := schedule.Input{MasterSeed: *seed, First: *first, Last: *last, LedgerSHA256: st.OpenSHA256, LedgerLines: st.Lines, LedgerHeadSHA256: st.HeadSHA256}
 	for _, cfg := range cfgs {
 		frozen, err := frozenConfig(cfg, key)
 		if err != nil {
@@ -88,7 +89,7 @@ func scheduleCmd(args []string) (int, error) {
 		os.Remove(*path)
 		return exitError, fmt.Errorf("schedule: %w", err)
 	}
-	fmt.Printf("schedule written: %s; window %s to %s; counter %d; ledger %s\n", *path, s.Input.First, s.Input.Last, s.Counter, s.Input.LedgerSHA256)
+	fmt.Printf("schedule written: %s; window %s to %s; counter %d; ledger %s at line %d\n", *path, s.Input.First, s.Input.Last, s.Counter, s.Input.LedgerSHA256, s.Input.LedgerLines)
 	for _, o := range s.Offsets {
 		runs, err := s.Runs(o.Route)
 		if err != nil {

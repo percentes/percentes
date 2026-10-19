@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,12 @@ func TestNewRouteRefusals(t *testing.T) {
 		edit(&r)
 		return r
 	}
+	// refreeze replaces the route's schedule with one freezing its ledger
+	// as it now stands.
+	refreeze := func(t *testing.T, f *fixture) {
+		t.Helper()
+		f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", frozenSchedule(t, f.in.ledgerPath, f.in.cfg, f.in.hostCfgs))
+	}
 	// fresh replaces the route's ledger with a new one with its caps and
 	// no line after the open line, and its schedule with one freezing it.
 	fresh := func(t *testing.T, f *fixture) *admission.Ledger {
@@ -49,8 +56,32 @@ func TestNewRouteRefusals(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", frozenSchedule(t, f.in.ledgerPath, f.in.cfg, f.in.hostCfgs))
+		refreeze(t, f)
 		return l
+	}
+	// rewrite keeps the ledger's open line and writes its frozen lines
+	// again at another price, with a hosting line after them if extend.
+	rewrite := func(t *testing.T, f *fixture, extend bool) {
+		t.Helper()
+		b, err := os.ReadFile(f.in.ledgerPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f.in.ledgerPath, b[:bytes.IndexByte(b, '\n')+1], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		l, err := admission.Open(f.in.ledgerPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := recordPrice(l, f.in.cfg, "0.16", "0.64", "https://example.test/pricing", "2026-10-06"); err != nil {
+			t.Fatal(err)
+		}
+		if extend {
+			if err := l.RecordHosting("1", "host"); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	for _, tc := range []struct {
 		name   string
@@ -102,6 +133,30 @@ func TestNewRouteRefusals(t *testing.T) {
 				t.Fatalf("two ledgers open with sha256 %s", a)
 			}
 		}, "run: ledger open line sha256 "},
+		{"ledger position not frozen", func(t *testing.T, f *fixture) {
+			in := testSchedule(t, append([]*config.Config{f.in.cfg}, f.in.hostCfgs...), "groq", "other", "baseten").Input
+			in.LedgerSHA256 = f.open
+			s, err := schedule.New(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sb, err := s.JSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", sb)
+		}, "run: the schedule freezes no ledger position"},
+		{"ledger truncated", func(t *testing.T, f *fixture) {
+			b, err := os.ReadFile(f.in.ledgerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.in.ledgerPath, b[:bytes.LastIndexByte(b[:len(b)-1], '\n')+1], 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "run: the ledger holds 2 lines; the schedule froze it at line 3"},
+		{"ledger rewritten", func(t *testing.T, f *fixture) { rewrite(t, f, false) }, "run: the ledger's lines 1 to 3 have sha256 "},
+		{"ledger rewritten and extended", func(t *testing.T, f *fixture) { rewrite(t, f, true) }, "run: the ledger's lines 1 to 3 have sha256 "},
 		{"no price", func(t *testing.T, f *fixture) { fresh(t, f) }, "ledger: no price recorded for route groq"},
 		{"priced at the ceiling only", func(t *testing.T, f *fixture) {
 			l := fresh(t, f)
@@ -109,6 +164,7 @@ func TestNewRouteRefusals(t *testing.T) {
 				Source: "https://example.test/pricing", Retrieved: "2026-10-06"}); err != nil {
 				t.Fatal(err)
 			}
+			refreeze(t, f)
 		}, "no price recorded for groq at 1200 input and 1024 output tokens"},
 		{"fallback priced at 512 only", func(t *testing.T, f *fixture) {
 			fallback(t, f.in.cfg)
@@ -117,7 +173,14 @@ func TestNewRouteRefusals(t *testing.T) {
 				Source: "https://example.test/pricing", Retrieved: "2026-10-06"}); err != nil {
 				t.Fatal(err)
 			}
+			refreeze(t, f)
 		}, "no price recorded for groq at 1200 input and 1024 output tokens"},
+		{"priced after the freeze only", func(t *testing.T, f *fixture) {
+			l := fresh(t, f)
+			if _, err := recordPrice(l, f.in.cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
+				t.Fatal(err)
+			}
+		}, "ledger: no price recorded for route groq"},
 		{"probe price older", func(t *testing.T, f *fixture) {
 			l, err := admission.Open(f.in.ledgerPath)
 			if err != nil {
@@ -127,6 +190,7 @@ func TestNewRouteRefusals(t *testing.T) {
 				Source: "https://example.test/pricing", Retrieved: "2026-10-08"}); err != nil {
 				t.Fatal(err)
 			}
+			refreeze(t, f)
 		}, "under the ceiling rule's US$0.0010592"},
 		{"model excluded", func(t *testing.T, f *fixture) {
 			ceiling(t, f, pass(f, "groq", 512, false), pass(f, "groq", 1024, false), pass(f, "baseten", 512, true), pass(f, "baseten", 1024, true))

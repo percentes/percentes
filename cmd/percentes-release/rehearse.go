@@ -440,6 +440,11 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	for _, cfg := range cfgs {
+		if _, err := recordPrice(l, cfg, "0.15", "0.60", rehearsalURL, today); err != nil {
+			return exitError, err
+		}
+	}
 	st, err := l.State()
 	if err != nil {
 		return exitError, err
@@ -457,7 +462,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		}
 	}
 	sched, err := schedule.New(schedule.Input{MasterSeed: in.masterSeed, First: today, Last: now.AddDate(0, 0, 9).Format(time.DateOnly), Routes: names, Configs: frozen,
-		LedgerSHA256: st.OpenSHA256})
+		LedgerSHA256: st.OpenSHA256, LedgerLines: st.Lines, LedgerHeadSHA256: st.HeadSHA256})
 	if err != nil {
 		return exitError, err
 	}
@@ -473,11 +478,6 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	routes := make([]*route, n)
 	runs := make([]schedule.Run, n)
 	label := sched.Cells[0].Label
-	for _, cfg := range cfgs {
-		if _, err := recordPrice(l, cfg, "0.15", "0.60", rehearsalURL, today); err != nil {
-			return exitError, err
-		}
-	}
 	shape, err := pilot.GenerateShapeS(pilot.ShapeSSeed, in.byteCap)
 	if err != nil {
 		return exitError, err

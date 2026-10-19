@@ -196,11 +196,13 @@ func ledgerOpenSHA256(t *testing.T, path string) string {
 	return st.OpenSHA256
 }
 
-// ledgerSchedule is testSchedule freezing also the ledger at path.
+// ledgerSchedule is testSchedule freezing also the ledger at path at its
+// current position.
 func ledgerSchedule(t *testing.T, path string, cfgs []*config.Config, routes ...string) []byte {
 	t.Helper()
 	in := testSchedule(t, cfgs, routes...).Input
-	in.LedgerSHA256 = ledgerOpenSHA256(t, path)
+	st := ledgerState(t, path)
+	in.LedgerSHA256, in.LedgerLines, in.LedgerHeadSHA256 = st.OpenSHA256, st.Lines, st.HeadSHA256
 	s, err := schedule.New(in)
 	if err != nil {
 		t.Fatal(err)
