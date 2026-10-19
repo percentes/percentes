@@ -135,11 +135,11 @@ cmd/percentes            single-run harness command-line interface (CLI) for a s
 cmd/percentes-campaign   N-run campaign runner for a self-hosted target (SPEC §5 repetition, §10 gates)
 cmd/percentes-calibrate  SPEC §10 capacity ramp and §5 single-replica reference
 cmd/percentes-pilot      the SPEC-HOSTED hosted amendment 2 (HA2) pilot: ledger, probe, dev, session, check-cpu
-cmd/percentes-release    a SPEC-HOSTED hosted amendment 3 (HA3) release: schedule, ledger, ceiling-check, run, dispatch, pages, publish-check, rehearse, check-cpu
+cmd/percentes-release    a SPEC-HOSTED hosted amendment 3 (HA3) release: key, schedule, ledger, ceiling-check, run, dispatch, pages, publish-check, rehearse, check-cpu
 cmd/mockserver           fault-injectable mock inference server
 cmd/naivesweep           standalone reconnaissance probe, outside the instrument
 internal/                loadgen, collect, detect, orchestrator, validity, ...
-                         hosted: probe, admission, evidence, pilot, score, schedule
+                         hosted: probe, admission, evidence, pilot, score, schedule, releasekey
 configs/                 pinned configurations; a *.reference.yaml per profile
 deploy/                  kind, mock and Phase 1 manifests; reproduce and capture scripts
 docs/                    ARCHITECTURE.md and the draw.io diagrams under docs/diagrams/
@@ -229,10 +229,18 @@ as literal JavaScript Object Notation (JSON) frozen by hash, the header
 the key travels in, and every limit recorded for the account with its
 source and a marking: `public` where a public documentation page gives
 the value, which then publishes in full, or `confidential` where only
-the account console shows it under terms that keep it confidential,
-whose value the configuration as published, the ceiling rule's verdict,
-the refresh records and the ceiling-check snapshots do not carry (the
-configuration and the verdict name the limit by its source and hash).
+the account console shows it under terms that keep it confidential.
+A confidential limit's value is absent from the configuration as
+published, the ceiling rule's verdict, the refresh records and the
+ceiling-check snapshots. The configuration and the verdict name such a
+limit by its source and the keyed hash of its retained copy. A keyed
+hash here is an HMAC-SHA256 (a hash-based message authentication code
+built on SHA-256, the 256-bit Secure Hash Algorithm) under the release
+key: 32 random bytes that `percentes-release key create` writes once,
+at the freeze, to a file only its owner can read. Nobody without the
+key can check a guess against the published hash. Keep the key file
+private, as the API keys are: copy it to the client host, and leave it
+out of the repository.
 A provider can echo a limit in its rate-limit headers or in the body of
 its limits page, so a route with a confidential limit must withhold
 both: `target.retained_headers` must cover every recorded response
@@ -240,10 +248,9 @@ header other than `Retry-After` and a request identifier such as
 `X-Request-Id`, and `target.probe.limits_retained` must be set where
 the route reads a limits URL. On such a route the probe and
 ceiling-check records also carry each non-200 response body as its
-SHA-256 (256-bit Secure Hash Algorithm) hash and length, and those
-records and the attempts file carry each in-band error object as a
-stand-in with its hash and length. The texts stay in the retained
-store. The routes of a release run as separate processes on one
+keyed hash, and those records and the attempts file carry each in-band
+error object as a stand-in with its keyed hash. The texts stay in the
+retained store. The routes of a release run as separate processes on one
 client host, each at its own offset inside the slot.
 
 | Setting | Value |
@@ -265,10 +272,11 @@ that does not count is kept as a record outside the route's frame.
 
 | Command | When | What it does |
 |---|---|---|
+| `percentes-release key create`, `percentes-release key sum` | before the window, before `ledger create` | `key create` writes the release key to a new file readable by its owner only, and refuses an existing file; `key sum` prints each named file's keyed hash, the `hmac_sha256` a confidential limit records for its retained copy; `schedule` and `run` read the key from `--release-key`, as `ceiling-check` does on a route with a confidential limit |
 | `percentes-release ledger create` | before the window | starts the admission ledger the routes share, with every route's liability cap |
 | `percentes-release ledger price` | before the window | records a route's list prices at the token bounds of its cells and of its ceiling check; the ledger admits a request only at a bound it holds a price for |
-| `percentes-release ceiling-check` | before the window | sends a route's ten-request ceiling check, admitted in the ledger, and writes the record `run` reads, which names that ledger by the SHA-256 hash of its first line; it needs `--frames` where the route withholds probe values, as every route with a confidential limit does; exits 2 when the check fails or is blocked, or when the record reports a model identifier on which `run` refuses the route; `run` needs the record of every host of the route's model, binds each to the request it checked and to the ledger the schedule froze, re-derives its results from its requests, refuses the route when its own records report a model identifier other than the expected one, and leaves out of the model's ceiling choice another host whose records report an identifier other than the one they expect |
-| `percentes-release schedule` | before the window, after the ceiling checks | writes the committed schedule of every route from one master seed and the window's dates; it freezes each route's configuration as published and host group, and the ledger, by their SHA-256 hashes, and `run` refuses any other, at the route's start and again at each cell's admission and settlement; it never replaces an existing file |
+| `percentes-release ceiling-check` | before the window | sends a route's ten-request ceiling check, admitted in the ledger, and writes the record `run` reads, which names that ledger by the SHA-256 hash of its first line; it needs `--frames` where the route withholds probe values, and `--release-key` too on a route with a confidential limit; exits 2 when the check fails or is blocked, or when the record reports a model identifier on which `run` refuses the route; `run` needs the record of every host of the route's model, binds each to the request it checked, refuses one whose ledger hash is not the one the schedule froze, re-derives its results from its requests, refuses the route when its own records report a model identifier other than the expected one, and leaves out of the model's ceiling choice another host whose records report an identifier other than the one they expect |
+| `percentes-release schedule` | before the window, after the ceiling checks | writes the committed schedule of every route from one master seed and the window's dates; it freezes each route's configuration as published and the ledger by their SHA-256 hashes, the configuration as loaded by its keyed hash, and each route's host group; `run` refuses any other at the route's start, and checks the ledger's first line again at each cell; it never replaces an existing file |
 | `percentes-release public-config` | at the freeze | writes a route's configuration as published, each confidential limit's value replaced by the quoted string `"[retained]"`; the freeze commits that file, and every other command reads the file as loaded |
 | `percentes-release run` | from the first scheduled slot, one process per route | runs the route's cells over the window and writes each cell's evidence, labelled manifest and report pair; at each cell's start it runs the refresh and balance commands, blocks the cell where either does not let it start, and stops the route where the limits read no longer admit a step; once no cell is left it writes the window-close record |
 | `percentes-release dispatch` | after the window | sums every cell's dispatch series into the host's requests per second |
