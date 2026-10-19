@@ -1021,9 +1021,10 @@ holding a second YAML document, or anything but whitespace after a
 document-end marker (`...` at the start of a line), is refused by
 `config.Decode` and by `Config.Published`. Both also refuse a YAML
 directive (a line starting with `%`, such as `%TAG`) and a tag other
-than the core types yaml.v3 gives an untagged node (`!!str`, `!!int`,
-`!!float`, `!!bool`, `!!null`, `!!timestamp`, `!!merge`, `!!seq` and
-`!!map`), such as `!<tag:example.com,2000:x>` or `!x`. yaml.v3 keeps
+than the core types yaml.v3 (the Go YAML library the loader uses)
+gives an untagged node (`!!str`, `!!int`, `!!float`, `!!bool`,
+`!!null`, `!!timestamp`, `!!merge`, `!!seq` and `!!map`), such as
+`!<tag:example.com,2000:x>` or `!x`. yaml.v3 keeps
 neither a directive nor a tag in a comment or a string, where the scans
 above look. The file must be UTF-8 (8-bit Unicode Transformation
 Format), the encoding the directive check reads.
@@ -1297,7 +1298,7 @@ their outputs and refuses to start on any of these.
   `rate_limit_headers` or in the limits read, where the configuration
   does not record that header (`target.response_headers`) or retains it
   (`target.retained_headers`), and a limits body kept in clear, as text or
-  base64, where the configuration reads no limits URL
+  base64 (binary written as text), where the configuration reads no limits URL
   (`target.probe.limits_url`) or keeps the limits body unpublished
   (`target.probe.limits_retained`). A confidential limit's snapshot in a record carries
   no value. The runner also refuses the route where its own records report a
