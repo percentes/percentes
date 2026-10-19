@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -211,7 +212,8 @@ func TestReadWindowClose(t *testing.T) {
 
 // A window-close record verifies when it and its refresh began after the
 // route's last cell ended, the refresh exited 0 and publishes as read,
-// and its copies match its references; any other is refused, naming each
+// its copies match its references and its records are the operator
+// copy's by kind, path and url; any other is refused, naming each
 // problem. On a target with a confidential limit the copies are keyed,
 // the key is required, and the refresh record as run kept beside them
 // must publish as the record's.
@@ -300,6 +302,17 @@ func TestWindowCloseVerify(t *testing.T) {
 			}
 		}, []string{"limits record copy: limits.png is missing"}},
 		{"account tier edited", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.AccountTier = "Enterprise" }, []string{`account_tier "Enterprise", the operator copy's "Basic"`}},
+		{"record dropped", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Records = slices.Delete(w.Records, 5, 6) }, []string{
+			"records: 8, the operator copy's 9", "records: no eligibility record"}},
+		{"every record dropped", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Records = []OperatorRecord{} }, []string{
+			"records: 0, the operator copy's 9", "records: no limits record", "records: no affiliation record"}},
+		{"kind relabelled", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Records[0].Kind = RecordPrices }, []string{
+			`records[0]: kind "prices", path "limits.png", url "https://docs.example/limits"; the operator copy's kind "limits", path "limits.png", url "https://docs.example/limits"`,
+			"records: no limits record"}},
+		{"url changed", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Records[0].URL = "https://docs.example/limits-v2" }, []string{
+			`records[0]: kind "limits", path "limits.png", url "https://docs.example/limits-v2"; the operator copy's kind "limits", path "limits.png", url "https://docs.example/limits"`}},
+		{"path changed", public, nil, time.Time{}, func(w *WindowClose, _ string) { w.Records[1].FileRef = w.Records[0].FileRef }, []string{
+			`records[1]: kind "prices", path "limits.png", url "https://docs.example/pricing"; the operator copy's kind "prices", path "prices.html", url "https://docs.example/pricing"`}},
 		{"keyed on a public target", public, key, time.Time{}, func(w *WindowClose, _ string) {
 			w.Records[0].FileRef = FileRef{Name: "limits.png", HMACSHA256: key.Sum([]byte(recordFiles["limits.png"]))}
 		}, []string{"limits record copy: limits.png is keyed on a target with public limits only"}},
@@ -326,6 +339,10 @@ func TestWindowCloseVerify(t *testing.T) {
 			}
 			replace(filepath.Join(held, RefreshFile), strings.Replace(string(b), `\"value\": 1000`, `\"value\": 999`, 1))
 		}, []string{"refresh: not the published form of the refresh record as run"}},
+		{"url changed, confidential", confidential, key, time.Time{}, func(w *WindowClose, _ string) { w.Records[3].URL = "https://example/terms-v2" }, []string{
+			`records[3]: kind "terms", path "terms/verdict.md", url "https://example/terms-v2"; the operator copy's kind "terms", path "terms/verdict.md", url "https://example/terms"`}},
+		{"record dropped, confidential", confidential, key, time.Time{}, func(w *WindowClose, _ string) { w.Records = w.Records[:8] }, []string{
+			"records: 8, the operator copy's 9"}},
 	} {
 		w, root := record(&tc.cfg.Target)
 		if tc.edit != nil {

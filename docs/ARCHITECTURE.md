@@ -1528,9 +1528,11 @@ the latest end of any of the route's attempts (each `cell.json`'s
 `end_utc`, or its `start_utc` where it has none); the refresh exited 0
 and its published limits are the ones its output gives, read on a route
 with a confidential limit from the refresh record as run kept beside the
-copies; and the copies in `window-close/<route>/<UTC time>/` under
+copies; the copies in `window-close/<route>/<UTC time>/` under
 `--frames` match the record's plain or keyed hashes, the operator file's
-copy with the record's account tier. `--schedule` is the committed
+copy with the record's account tier; and the record's `records` list is
+the operator file copy's, in order, by kind, path and URL, with a record
+of each required kind. `--schedule` is the committed
 schedule file, which must load (`schedule.Load`). Every run record of a
 route must carry the same `schedule_sha256`, every manifest the one in
 its run record, and that value must be the SHA-256 of the `--schedule`

@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -208,8 +209,10 @@ func ReadWindowClose(path string) (*WindowClose, error) {
 // refresh record as run kept beside the copies; the copies must be in the
 // directory WindowCloseDir names under framesRoot, with the operator
 // file's account tier, and match the operator file's and every record's
-// reference, keyed under key on such a target and plain elsewhere.
-// Otherwise it returns an error naming every problem.
+// reference, keyed under key on such a target and plain elsewhere; and
+// its records must be the operator copy's, in order, by kind, path and
+// url, with a record of each required kind. Otherwise it returns an
+// error naming every problem.
 func (w *WindowClose) Verify(t *config.Target, framesRoot string, key *releasekey.Key, lastEnd time.Time) error {
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
@@ -278,11 +281,26 @@ func (w *WindowClose) Verify(t *config.Target, framesRoot string, key *releaseke
 	op := w.Operator
 	op.Name = OperatorCopyFile
 	if b := check(dir, op, "operator copy"); b != nil {
-		var f struct {
-			AccountTier string `json:"account_tier"`
-		}
-		if err := json.Unmarshal(b, &f); err != nil || f.AccountTier != w.AccountTier {
+		var f operatorFile
+		err := json.Unmarshal(b, &f)
+		if err != nil || f.AccountTier != w.AccountTier {
 			fail("account_tier %q, the operator copy's %q", w.AccountTier, f.AccountTier)
+		}
+		switch {
+		case err == nil && len(f.Records) != len(w.Records):
+			fail("records: %d, the operator copy's %d", len(w.Records), len(f.Records))
+		case err == nil:
+			for i, c := range f.Records {
+				r := w.Records[i]
+				if path := filepath.ToSlash(filepath.Clean(c.Path)); r.Kind != c.Kind || r.Name != path || r.URL != c.URL {
+					fail("records[%d]: kind %q, path %q, url %q; the operator copy's kind %q, path %q, url %q", i, r.Kind, r.Name, r.URL, c.Kind, path, c.URL)
+				}
+			}
+		}
+	}
+	for _, kind := range requiredRecords {
+		if !slices.ContainsFunc(w.Records, func(r OperatorRecord) bool { return r.Kind == kind }) {
+			fail("records: no %s record", kind)
 		}
 	}
 	for _, r := range w.Records {

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -358,8 +360,8 @@ func TestRestartRefusesOtherSchedule(t *testing.T) {
 // once more after the refresh command, keeps their copies under the
 // frame store, and never writes the record again; the route page names
 // the record. A refresh fault writes no record and returns an error.
-// pages refuses the record once a retained copy is edited, and once a
-// cell has run after its refresh.
+// pages refuses the record once a retained copy is edited, once a record
+// is dropped from its list, and once a cell has run after its refresh.
 func TestWindowCloseRecord(t *testing.T) {
 	enoughOpenFiles(t)
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
@@ -478,6 +480,18 @@ func TestWindowCloseRecord(t *testing.T) {
 		t.Fatalf("edited copy: exit %d: %v; want %q", code, err, want)
 	}
 	if err := os.WriteFile(limitsCopy, []byte("limits v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dropped := *w
+	dropped.Records = slices.DeleteFunc(slices.Clone(w.Records), func(rec evidence.OperatorRecord) bool { return rec.Kind == evidence.RecordEligibility })
+	if err := replaceJSON(path, &dropped); err != nil {
+		t.Fatal(err)
+	}
+	want = fmt.Sprintf("pages: route groq: evidence: window-close record refused: records: %d, the operator copy's %d; records: no eligibility record", len(dropped.Records), len(w.Records))
+	if code, err := pagesCmd(args); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("a record dropped from the list: exit %d: %v; want %q", code, err, want)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	later := runCellOK(t, r, r.runs[1])
