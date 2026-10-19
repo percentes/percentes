@@ -425,13 +425,13 @@ func hostTargets(cfg *config.Config, hostCfgs []*config.Config, sched *schedule.
 // the probe.Encode encoding of the record it decodes to. Every host's
 // record is judged by the host's target, this route's own or the one in
 // configs: it carries the host's model and byteCap, was admitted in the
-// ledger whose open-line SHA-256 is ledger, carries the target's adapter
-// and endpoint and the hash of its body at the record's ceiling
-// (config.ReleaseBodyAt), none of the values the target withholds
+// ledger whose open-line SHA-256 is ledger, carries the target's expected
+// model id, adapter and endpoint and the hash of its body at the record's
+// ceiling (config.ReleaseBodyAt), none of the values the target withholds
 // (probe.Exposed), and the results its requests give at the pinned input
 // bound through the target's start gate (probe.ReleaseRecord.Verify).
-// This route's records also carry its expected model id, and together no
-// reported model id that keeps the provider-model out (probe.ModelFault).
+// This route's records together carry no reported model id that keeps the
+// provider-model out (probe.ModelFault).
 // Another host's records also carry none of the values their snapshots'
 // confidential markings withhold (probe.ExposedByMarking), and another
 // host whose records carry a model fault is left out of the choice
@@ -492,8 +492,8 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 			fault = fmt.Sprintf("ledger open line sha256 %q; the schedule froze %s", rec.LedgerSHA256, ledger)
 		case ht == nil:
 			fault = "no configuration of the route"
-		case ht == t && rec.Expected() != t.ExpectedModel():
-			fault = fmt.Sprintf("expected model %q, want %q", rec.Expected(), t.ExpectedModel())
+		case rec.Expected() != ht.ExpectedModel():
+			fault = fmt.Sprintf("expected model %q, want %q", rec.Expected(), ht.ExpectedModel())
 		case rec.Adapter != ht.Adapter:
 			fault = fmt.Sprintf("adapter %q, want %q", rec.Adapter, ht.Adapter)
 		case rec.EndpointURL != redact.URL(ht.EndpointURL):

@@ -1129,7 +1129,7 @@ their outputs and refuses to start on any of these.
 | the schedule freezes no ledger position, the ledger holds fewer lines than the frozen count, or its bytes through that line have another SHA-256 than the one the schedule froze | `frozenEntries` |
 | the ledger's caps differ from the configuration's, the ledger holds no price line for the route up to the frozen position, or its prices do not cover the ceiling rule's verdict at the cell bounds and at the ceiling-check bounds | `State.CheckRelease`, `routePrice`, `State.Covers` |
 | the ceiling rule admits no step | `newRoute`, after `admission.CeilingRule` |
-| no `--ceiling-probe` record is given; a record's bytes differ from the encoding `ceiling-check` writes of the record they decode to, as with a value or text after it or a key written twice; a record is of a route outside the model's host group, or carries another model or byte cap, or names in `ledger_sha256` a ledger other than the one the schedule froze; a record carries an adapter, endpoint or body hash other than its host's configuration gives (this route's own, or the host's `--host-config` file; the hash is of `target.body` at the record's ceiling), or a value that configuration withholds; a record of this route carries another expected model identifier; another host's record carries a value its own confidential markings withhold; a record's stored results differ from the ones its requests give; a record of a host not left out of the choice was blocked at the start gate or failed its input bound; a host's record at a needed ceiling is missing; the records exclude the model or choose a ceiling other than the configuration's; or the route's own records report a model identifier other than the expected one, or none reports a recorded `target.reported_model` | `readCeilingProbes`, `probe.Encode`, `ReleaseRecord.Verify`, `probe.ChooseCeiling`, `probe.Exposed`, `probe.ExposedByMarking`, `probe.ModelFault` |
+| no `--ceiling-probe` record is given; a record's bytes differ from the encoding `ceiling-check` writes of the record they decode to, as with a value or text after it or a key written twice; a record is of a route outside the model's host group, or carries another model or byte cap, or names in `ledger_sha256` a ledger other than the one the schedule froze; a record carries an expected model identifier, adapter, endpoint or body hash other than its host's configuration gives (this route's own, or the host's `--host-config` file; the hash is of `target.body` at the record's ceiling), or a value that configuration withholds; another host's record carries a value its own confidential markings withhold; a record's stored results differ from the ones its requests give; a record of a host not left out of the choice was blocked at the start gate or failed its input bound; a host's record at a needed ceiling is missing; the records exclude the model or choose a ceiling other than the configuration's; or the route's own records report a model identifier other than the expected one, or none reports a recorded `target.reported_model` | `readCeilingProbes`, `probe.Encode`, `ReleaseRecord.Verify`, `probe.ChooseCeiling`, `probe.Exposed`, `probe.ExposedByMarking`, `probe.ModelFault` |
 | `--byte-cap` is missing, or `--account-created` is not a date | `newRoute` |
 | `--release-key` is missing, or names a file other users can read or one that is not a key | `readReleaseKey`, `releasekey.Read` |
 | the env file does not set the key | `loadKey` |
@@ -1242,8 +1242,8 @@ their outputs and refuses to start on any of these.
   the adapter and redacted endpoint of its host's configuration (this
   route's own, or the host's `--host-config` file), and the hash of that
   configuration's `target.body` with the adapter's ceiling key set to
-  the record's ceiling (`config.ReleaseBodyAt`). This route's records
-  must also carry its configuration's expected model identifier. The 512 record of a route that runs
+  the record's ceiling (`config.ReleaseBodyAt`). Each record must also
+  carry the expected model identifier of its host's configuration. The 512 record of a route that runs
   at 1,024 must therefore come from the same body with only the
   ceiling's digits changed. The runner then re-derives each record's
   results from its requests (`ReleaseRecord.Verify`): ten requests
@@ -1282,8 +1282,7 @@ their outputs and refuses to start on any of these.
   recorded, or where no response reported a recorded `reported_model`
   (`probe.ModelFault`). Another host whose records carry a fault is left
   out of the choice, as above. That host's own run refuses it, because
-  the run binds the host's records to its configuration's expected
-  identifier and applies `probe.ModelFault` to them.
+  that run applies `probe.ModelFault` to its own records.
 - **Shape S** (`pilot.GenerateShapeS`): 100 synthetic tickets from a fixed
   seed, each cut at the byte cap. The user text of request i is
   `cs-<seed>-<i>` with a six-digit index, a space, and the tickets in

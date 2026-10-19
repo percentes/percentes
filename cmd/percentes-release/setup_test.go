@@ -367,6 +367,27 @@ func TestNewRouteRefusals(t *testing.T) {
 				reports("openai/gpt-oss-120b-2026")(r)
 			}), pass(f, "baseten", 512, true))
 		}, `route groq at 512: expected model "openai/gpt-oss-120b", want "openai/gpt-oss-120b-2026"`},
+		{"another host's record expects another model", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
+				r.ExpectedModel = "openai/gpt-oss-120b-v2"
+				reports("openai/gpt-oss-120b-v2")(r)
+			}))
+		}, `route baseten at 512: expected model "openai/gpt-oss-120b-v2", want "openai/gpt-oss-120b"`},
+		{"another host's configuration records another model", func(t *testing.T, f *fixture) {
+			const line = "\n  model_name: openai/gpt-oss-120b\n"
+			raw := string(f.in.hostCfgs[0].Raw)
+			if strings.Count(raw, line) != 1 {
+				t.Fatalf("configuration: %q not found once", line)
+			}
+			raw = strings.Replace(raw, line, line+"  reported_model:\n    name: openai/gpt-oss-120b-2026\n    source: https://example.com/models\n    retrieved: 2026-10-12\n    sha256: \""+strings.Repeat("0", 64)+"\"\n", 1)
+			c, err := config.LoadFile(writeFile(t, t.TempDir(), "baseten.yaml", []byte(raw)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Target.EndpointURL = f.in.cfg.Target.EndpointURL
+			f.in.hostCfgs[0] = c
+			f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", frozenSchedule(t, f.in.ledgerPath, f.in.cfg, f.in.hostCfgs))
+		}, `route baseten at 512: expected model "openai/gpt-oss-120b", want "openai/gpt-oss-120b-2026"`},
 		{"no ceiling probe", func(t *testing.T, f *fixture) { f.in.probeFiles = nil }, "--ceiling-probe is required"},
 		{"byte cap", func(t *testing.T, f *fixture) { f.in.byteCap = 0 }, "--byte-cap 0"},
 		{"account date", func(t *testing.T, f *fixture) { f.in.accountCreated = "15 September" }, "--account-created"},
@@ -401,8 +422,8 @@ func reports(models ...string) func(r *probe.ReleaseRecord) {
 // starts: the requested one, or target.reported_model's where recorded.
 // Another host whose records report an id other than the one they expect
 // is left out of the ceiling choice, which records it, so its failure at
-// 512 does not move the ceiling; one reporting the id it expects stays
-// in.
+// 512 does not move the ceiling; one reporting the id its configuration
+// expects stays in.
 func TestNewRouteReportedModel(t *testing.T) {
 	enoughOpenFiles(t)
 	f := newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
@@ -421,6 +442,7 @@ func TestNewRouteReportedModel(t *testing.T) {
 		t.Fatalf("choice %+v, copies %d", r.ceiling, len(r.ceilingProbes))
 	}
 	other.ExpectedModel = "openai/gpt-oss-120b-v2"
+	f.in.hostCfgs[0].Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-v2", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
 	f.in.probeFiles = []string{writeCeiling(t, own), writeCeiling(t, other)}
 	if _, err := newRoute(f.in); err == nil || !strings.Contains(err.Error(), "route baseten has no check at 1024; baseten failed at 512") {
 		t.Fatalf("another host reporting the id it expects: %v", err)
