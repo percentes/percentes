@@ -131,7 +131,7 @@ this platform cannot supply one of their inputs. Reports are written to
 ## Layout
 
 ```
-cmd/percentes            single-run harness command-line interface (CLI); hosted runs, replay and the completeness check
+cmd/percentes            single-run harness command-line interface (CLI) for a self-hosted target; replay and the completeness check of a release cell
 cmd/percentes-campaign   N-run campaign runner (SPEC §5 repetition, §10 gates)
 cmd/percentes-calibrate  SPEC §10 capacity ramp and §5 single-replica reference
 cmd/percentes-pilot      the SPEC-HOSTED hosted amendment 2 (HA2) pilot: ledger, probe, dev, session, check-cpu
@@ -161,10 +161,13 @@ configuration profiles carry those pins. `release` carries the adopted
 protocol (hosted amendments 1 and 3, HA1 and HA3, written into its
 body) and is the path to published hosted figures. `pilot` carries the
 numbers of a drafted amendment, HA2, that is not adopted, and reports
-privately. Each profile refuses a value outside its pins. A run's report
-pair is `report.json`, the machine-readable report, and `report.txt`,
-its human-readable rendering, from one configuration. Every hosted run
-writes, beside the report pair, the evidence SPEC-HOSTED §9 requires:
+privately. Each profile refuses a value outside its pins. Hosted runs
+go through `percentes-pilot` or `percentes-release`, which reserve every
+request in the admission ledger before it is sent; `percentes` refuses a
+hosted target. A run's report pair is `report.json`, the
+machine-readable report, and `report.txt`, its human-readable rendering,
+from one configuration. Every hosted run writes the evidence
+SPEC-HOSTED §9 requires:
 
 - `attempts.jsonl`, one record per scheduled request;
 - the raw response frames, in a store outside the source tree;
@@ -227,11 +230,15 @@ the key travels in, and every limit recorded for the account with its
 source and a marking: `public` where a public documentation page gives
 the value, which then publishes in full, or `confidential` where only
 the account console shows it under terms that keep it confidential,
-whose value the configuration, the ceiling rule's verdict, the refresh
-records and the ceiling-check snapshots do not carry (the configuration
-and the verdict name the limit by its source and hash); the route's
-rate-limit headers are withheld only where `target.retained_headers`
-names them. The routes of a release run as separate processes on one
+whose value the configuration as published, the ceiling rule's verdict,
+the refresh records and the ceiling-check snapshots do not carry (the
+configuration and the verdict name the limit by its source and hash).
+A provider can echo a limit in its rate-limit headers or in the body of
+its limits page, so a route with a confidential limit must withhold
+both: `target.retained_headers` must cover every recorded response
+header that can match a name containing `ratelimit`, and
+`target.probe.limits_retained` must be set where the route reads a
+limits URL. The routes of a release run as separate processes on one
 client host, each at its own offset inside the slot.
 
 | Setting | Value |
@@ -242,7 +249,7 @@ client host, each at its own offset inside the slot.
 | Deadline and hard timeout | 30 s from intended dispatch splits completions into in time and late; 90 s from actual dispatch censors a request with no terminal event |
 | Request shape | Shape S: one frozen body per route with a synthetic support ticket per request, under a 1,200-token input bound and a 512- or 1,024-token output ceiling |
 | Admission | a step runs only where its nominal demand is at most half of every recorded rate, token, concurrency, daily and spend-window limit, and only where the account's monthly cap and the route's liability cap cover twelve cells, two re-runs and 100 probe requests |
-| Before each cell | the route's refresh command rewrites the recorded limits and model documentation and prints the limit values it read, and its balance command reads the account's balance; a cell whose records were not rewritten, or whose balance is below the cell's reservation, is blocked before any request, and a route whose limits as read no longer admit one of its steps stops |
+| Before each cell | the route's refresh command rewrites the recorded limits and model documentation and prints the limit values it read, and its balance command reads the account's balance; a cell whose records were not rewritten, or whose balance is below the cell's reservation, is blocked before any request, and a route whose limits as read, at its newest recorded price, no longer admit one of its steps stops |
 | After the last cell | the refresh command runs once more; its record is the route's window-close record, compared with the last counted cell and printed on the route's page |
 | Model identifier | each response's reported model is compared with the expected one (the requested identifier, or the one `target.reported_model` records from the model documentation); a cell with any other is labelled `model_mismatch`, kept out of the frame and re-run, and the route's page lists it with the expected identifier, every identifier reported and how many requests reported another |
 | Retries | none; `Retry-After` is never honoured, and a release configuration must record it under `target.response_headers` |
@@ -253,16 +260,16 @@ that does not count is kept as a record outside the route's frame.
 
 | Command | When | What it does |
 |---|---|---|
-| `percentes-release schedule` | before the window | writes the committed schedule of every route from one master seed and the window's dates; it never replaces an existing file |
 | `percentes-release ledger create` | before the window | starts the admission ledger the routes share, with every route's liability cap |
 | `percentes-release ledger price` | before the window | records a route's list prices at the token bounds of its cells and of its ceiling check; the ledger admits a request only at a bound it holds a price for |
-| `percentes-release ceiling-check` | before the window | sends a route's ten-request ceiling check and writes the record `run` reads; exits 2 when the check fails or is blocked, or when the record reports a model identifier on which `run` refuses the route; `run` needs the record of every host of the route's model, each bound to the request it checked, refuses the route when its own records report a model identifier other than the expected one, and leaves out of the model's ceiling choice another host whose records report an identifier other than the one they expect |
+| `percentes-release ceiling-check` | before the window | sends a route's ten-request ceiling check, admitted in the ledger, and writes the record `run` reads; exits 2 when the check fails or is blocked, or when the record reports a model identifier on which `run` refuses the route; `run` needs the record of every host of the route's model, binds each to the request it checked, re-derives its results from its requests, refuses the route when its own records report a model identifier other than the expected one, and leaves out of the model's ceiling choice another host whose records report an identifier other than the one they expect |
+| `percentes-release schedule` | before the window, after the ceiling checks | writes the committed schedule of every route from one master seed and the window's dates; it freezes each route's configuration file and host group, and the ledger, by their SHA-256 (256-bit Secure Hash Algorithm) hashes, and `run` refuses any other; it never replaces an existing file |
 | `percentes-release public-config` | at the freeze | writes a route's configuration as published, each confidential limit's value replaced by the quoted string `"[retained]"`; the freeze commits that file, and every other command reads the file as loaded |
 | `percentes-release run` | from the first scheduled slot, one process per route | runs the route's cells over the window and writes each cell's evidence, labelled manifest and report pair; at each cell's start it runs the refresh and balance commands, blocks the cell where either does not let it start, and stops the route where the limits read no longer admit a step; once no cell is left it writes the window-close record |
 | `percentes-release dispatch` | after the window | sums every cell's dispatch series into the host's requests per second |
-| `percentes-release pages` | after the window | writes the index page and each route's page from the cells' records and each route's window-close record; a route's page lists each `model_mismatch` cell with its identifiers |
+| `percentes-release pages` | after the window | writes the index page and each route's page from the cells' records and each route's window-close record; a route's page lists each `model_mismatch` cell with its identifiers; it refuses cells of one model that carry different ceiling choices or ceiling-check records |
 | `percentes-release publish-check` | before publication | checks the release publication record (each provider's notice, its window of at least four working days, its response and consent, the naming permission and replication pack where a route needs them) against the cells and the pages, and exits 2 while anything is missing |
-| `percentes-release rehearse` | before the window, on the client host | the acceptance run: one cell of each of six mock routes, which the command serves itself on loopback, run at their offsets up the whole ladder; writes `rehearsal.json`, which says whether the rehearsal is green (among [its checks](docs/ARCHITECTURE.md#the-rehearsal), every cell counted with G2, the check that the client machine was not the bottleneck, passing at every step); at full length, the default, that file is the run's evidence |
+| `percentes-release rehearse` | before the window, on the client host | the acceptance run: each of six mock routes, which the command serves itself on loopback, gets its ten-request ceiling check and then one cell, run at their offsets up the whole ladder; writes `rehearsal.json`, which says whether the rehearsal is green (among [its checks](docs/ARCHITECTURE.md#the-rehearsal), every cell counted with G2, the check that the client machine was not the bottleneck, passing at every step); at full length, the default, that file is the run's evidence |
 | `percentes --replay`, `percentes --check-release` | any time after a cell | render a cell's report pair again and compare it byte for byte; refuse a cell whose files, the unpublished frame store among them, are missing or differ from their recorded hashes |
 
 ```
@@ -281,12 +288,13 @@ line in the published tables.
    records, the refresh command rewrites the recorded limits and model
    documentation and the balance command reads the account's balance;
    a cell whose records were not rewritten, or whose balance is below
-   its reservation, is blocked here, and a route whose limits as read
-   no longer admit one of its steps stops here. The ledger then
-   reserves one probe request plus every scheduled request of the cell
-   against the route's and the release's liability caps; a refusal
-   stops the route before any request is sent. The request's step was
-   admitted by the ceiling rule when the route started.
+   its reservation, is blocked here, and a route whose limits as read,
+   at its newest recorded price, no longer admit one of its steps stops
+   here. The ledger then reserves one probe request plus every scheduled
+   request of the cell against the route's and the release's liability
+   caps; a refusal stops the route before any request is sent. The
+   request's step was admitted by the ceiling rule when the route
+   started.
 3. **Body.** The request's user text is the prefix `cs-<seed>-<index>`
    (six-digit index), a space and a synthetic support ticket. It replaces
    the one slot in the route's frozen body; every other byte is sent as
