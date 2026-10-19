@@ -438,7 +438,7 @@ The diagram predates the hosted packages, which the table lists.
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
 | | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file with each route's frozen configuration hashes (as published, and keyed as loaded) and host group and the ledger's open-line hash | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun`, `Schedule.Config` | a pinned derivation; window and refusal cases |
-| | `internal/releasekey` | the release key ([The release key](#the-release-key)): 32 random bytes written once as lowercase hexadecimal to a new file readable by its owner only; the HMAC-SHA256 (a hash-based message authentication code built on SHA-256, the 256-bit Secure Hash Algorithm) under it of each text a confidential route withholds and of each configuration as loaded; a key that prints as `[release key]` under every format verb and that `encoding/json` cannot write | SPEC-HOSTED §9; HA3 points 9 and 15 | `New`, `Create`, `Read`, `Key.Sum` | create and read refusals; every format verb and JSON print no key byte |
+| | `internal/releasekey` | the release key ([The release key](#the-release-key)): 32 random bytes written once as lowercase hexadecimal to a new file readable by its owner only; the HMAC-SHA256 (a hash-based message authentication code built on SHA-256, the 256-bit Secure Hash Algorithm) under it of each configuration as loaded and, on a route with a confidential limit, of the withheld texts, the limit copies, the frame store and the operator records; a key that prints as `[release key]` under every format verb and that `encoding/json` cannot write | SPEC-HOSTED §9; HA3 points 9 and 15 | `New`, `Create`, `Read`, `Key.Sum` | create and read refusals; every format verb and JSON print no key byte |
 | Test support | `internal/hostqual` | the host qualification probe the timing-coupled tests run first | §2, §8 | `Measure`, `Observation.Qualify`, `Qualified`, `Allocation` | per-limit units |
 | | `internal/ac` | the §8 acceptance suite; the mock runs as a separate process, so it never shares the generator's Go scheduler | §8 | | |
 
@@ -764,10 +764,10 @@ before any setup.
 | `balance-start.json`, `balance-end.json` | release cells only: the operator's account balance or quota command, run like the status command, with its output verbatim, exit code and timing at the cell's start and at its end; the start record adds `check`, the printed amount against the cell's reservation (`sufficient`, `insufficient`, `unavailable` or `check_failed`) | `evidence.ReadBalance`, `evidence.CheckBalance`, `evidence.WriteStatus` |
 | `probe.json` | the probe record: the exchange (DNS, connects, TLS, peer, protocol, status, allowed headers, a non-200 body), the response shape, the findings against the configured shape and the start decision; a header `target.retained_headers` names carries `[retained]`; where `target.probe.limits_retained` is set the limits body is a stand-in marked `retained` with its SHA-256 (`sha256`), or its HMAC-SHA256 under the release key (`hmac_sha256`) on a target with a confidential limit; on such a target each non-200 body is the same kind of stand-in with its `hmac_sha256`, and the response shape's in-band error is the `config.RetainedError` stand-in with `error_hmac_sha256` | `probe.Write` |
 | `probe-retained.json` | what a probe or ceiling-check record withholds: the retained headers' values in each request and the limits read, the limits body, and on a target with a confidential limit each non-200 body and in-band error object (`stream_error`); beside a cell's frames, or under `ceiling-check --frames` | `probe.WriteRetained` |
-| `manifest.json` | the build revision and whether the tree was modified; the capture limits; the configuration file by hash, the file as published under the release profile; the endpoint as configured and as observed (requested, expected and reported models, mismatches, protocols, the parameters recorded as not applied); the client host; the clock and status records, and under the release profile the balance records; the operator file and its records by hash; the ledger's hash and line count; every artifact and the frame store by hash; validity and its reasons; the G2 and G6 gates, per ladder step under the release profile; the release cell record ([The cell's files and report](#the-cells-files-and-report)); and the replay record the report pair needs, absent for a release cell, whose pair reads its cell record | `evidence.NewManifest` |
+| `manifest.json` | the build revision and whether the tree was modified; the capture limits; the configuration file by hash, the file as published under the release profile; the endpoint as configured and as observed (requested, expected and reported models, mismatches, protocols, the parameters recorded as not applied); the client host; the clock and status records, and under the release profile the balance records; the operator file and its records by hash; the ledger's hash and line count; every artifact and the frame store by hash; each hash a SHA-256 with the size in bytes (`sha256`, `bytes`), except that on a target with a confidential limit the frame store and the operator records carry only their HMAC-SHA256 under the release key (`hmac_sha256`); validity and its reasons; the G2 and G6 gates, per ladder step under the release profile; the release cell record ([The cell's files and report](#the-cells-files-and-report)); and the replay record the report pair needs, absent for a release cell, whose pair reads its cell record | `evidence.NewManifest` |
 | `operator.json`, `records/` | copies of the operator file and its records as read at the cell's start, beside the frame store | `Operator.WriteCopies` |
 | `config.yaml` | release cells of a route with a confidential limit: the configuration as loaded, beside the cell's frames, readable by its owner only | `evidence.WriteConfigCopy` |
-| `window-close.json` | per release route, in `<route>/` under `--out`, after its last cell: the refresh record as it publishes, the account tier, and the operator file and its records as read after it; their copies under `--frames` in `window-close/<route>/<UTC time>/` | `windowClose`, `evidence.NewWindowClose` |
+| `window-close.json` | per release route, in `<route>/` under `--out`, after its last cell: the refresh record as it publishes, the account tier, and the operator file and its records as read after it, the records keyed as in the manifest; their copies under `--frames` in `window-close/<route>/<UTC time>/` | `windowClose`, `evidence.NewWindowClose` |
 
 ### The pilot
 
@@ -826,13 +826,17 @@ requests, reported models, protocols, validity and its reasons, the G2
 and G6 gates), writes the pair to OUT and exits 1 unless both files match
 the manifest's references byte for byte.
 
-`percentes --check-release DIR --config FILE --frames ROOT` runs
-`evidence.CheckRelease`: the commit record, the configuration, the
-attempts file, the report pair, the manifest, the scorer output on every
-measured attempt of a pilot run, and the frame store with one line per
-attempt must all exist with the hashes and sizes the manifest records,
-and the operator copies beside the frame store with them. For a release
-cell it also checks the cell's label against its gates, the dispatches
+`percentes --check-release DIR --config FILE --frames ROOT
+[--release-key FILE]` runs `evidence.CheckRelease`: the commit record,
+the configuration, the attempts file, the report pair, the manifest, the
+scorer output on every measured attempt of a pilot run, and the frame
+store with one line per attempt must all exist with the hashes and sizes
+the manifest records, and the operator copies beside the frame store
+with them. On a target with a confidential limit the manifest names the
+frame store and the operator copies by HMAC-SHA256 under the release
+key, with no size, so the command needs `--release-key`; it refuses such
+a manifest where either is named by SHA-256, and any other target's
+where either is keyed (`readRef`). For a release cell it also checks the cell's label against its gates, the dispatches
 its own part of the aggregate dispatch series counts against the
 attempts file, its gap histograms against the completions, the balance
 records, and that the attempts file carries no answer text; the ceiling
@@ -988,9 +992,25 @@ The release key stops a withheld value from being recovered through its
 published hash. You need this section before the freeze, and to read an
 `hmac_sha256` field. A plain SHA-256 of a short text, such as a 429
 message that names a limit, can be matched by hashing guessed texts
-until one agrees. A route with a confidential limit therefore publishes
-each such hash as an HMAC-SHA256 under the release key, and nobody
-without the key can test a guess against it.
+until one agrees. On a route with a confidential limit a release
+therefore publishes the hashes below as HMAC-SHA256 under the release
+key, and nobody without the key can test a guess against one of them.
+The schedule's hash of each configuration as loaded is keyed on every
+route. Every other hash a release publishes is a plain SHA-256, among
+them the manifest's references to the configuration as published, the
+attempts file, the report pair, the clock, status and balance records,
+the operator file and the ledger.
+
+| Record | Keyed field | What it hashes |
+|---|---|---|
+| the configuration (`target.limits`), ceiling-check records (each snapshot), `report.json` (`tables.limits`), `routes/<route>.json` (`limits`) | `hmac_sha256`; `routes/<route>.txt` prints `hmac-sha256` | a confidential limit's retained copy |
+| `probe.json`, ceiling-check records | `hmac_sha256` of a body stand-in | each non-200 body, and the limits body where it is withheld |
+| `probe.json`, ceiling-check records | `error_hmac_sha256` | the response shape's in-band error object |
+| `attempts.jsonl` | `stream_error_hmac_sha256` | each request's in-band error object |
+| `manifest.json` | `frames.hmac_sha256`, `records[].hmac_sha256`, and `source.diff.hmac_sha256` where the build was modified | the frame store and each operator record, named with no `bytes` |
+| `window-close.json` | `records[].hmac_sha256` | each operator record read after the route's last cell |
+| `routes/<route>.json` (`drift_changes`, `drift_parts`, `window_close`) | `hmac_sha256`; `routes/<route>.txt` prints `hmac-sha256` | each limits and eligibility record the drift rule compares |
+| `schedule.json`, every route | `config_hmac_sha256` | the configuration as loaded |
 
 `percentes-release key create --key FILE` writes the key
 (`releasekey.Create`): 32 random bytes from `crypto/rand`, as 64
@@ -1007,10 +1027,10 @@ outside the source tree and the frame store.
 | Command | `--release-key` | What the key hashes |
 |---|---|---|
 | `schedule` | required | each configuration as loaded (`config_hmac_sha256`) |
-| `run` | required, read before the route starts | the configuration as loaded, for `checkFrozen`; on a route with a confidential limit, the texts the probe and the attempts file withhold |
+| `run` | required, read before the route starts | the configuration as loaded, for `checkFrozen`; on a route with a confidential limit, the texts the probe and the attempts file withhold, and the frame store and the operator records each manifest and the window-close record name |
 | `ceiling-check` | required on a route with a confidential limit | the texts the record withholds, and each confidential limit's retained copy for its check |
 | `rehearse` | none | what `schedule`, `ceiling-check` and `run` hash, under a key made in memory and never written |
-| `pages`, `publish-check` | none | nothing: they read records and the configuration as loaded |
+| `pages`, `publish-check`, `percentes --check-release` | required where a route has a confidential limit | nothing new: the completeness check compares the frame store and the operator records with the keyed hashes each manifest records |
 
 ### The schedule
 
@@ -1383,7 +1403,8 @@ larger of 1 and the cluster-robust variance over the independent one
 counted cell's manifest records a documentation state as read at the
 cell's start, after its refresh command rewrote the limits and
 eligibility records: the account tier, and those records by URL and
-hash (`report.DocsOf`).
+hash, the keyed hash on a route with a confidential limit
+(`report.DocsOf`).
 A change between consecutive cells in start order is named, with the
 entries removed and added. The frame then pools each side apart, as a
 `drift_parts` entry with its cells, dates and shared state, and carries
@@ -1419,13 +1440,15 @@ model or page string, and a rendered page, that carries `rank`, `winner`,
 its one cell's table through the same code.
 
 `percentes-release pages --out DIR --frames DIR --config FILE ...
---pages DIR` writes the pages after the window. It reads every route's
-cell records under `--out`, with its window-close record where present,
-and runs the completeness check on every manifest against the route's
-configuration file as loaded and the frame store. Every manifest of a
-route must carry the same ceiling-rule verdict, checked against the
-configuration's limits (`admission.CheckPublished`), and the same
-ceiling choice and ceiling-check records. Two routes given to `pages`
+--pages DIR [--release-key FILE]` writes the pages after the window. It
+reads every route's cell records under `--out`, with its window-close
+record where present, and runs the completeness check on every manifest
+against the route's configuration file as loaded, the frame store and
+the release key, which it requires where a route has a confidential
+limit (`checkingKey`). Every manifest of a route must carry the same
+ceiling-rule verdict, checked against the configuration's limits
+(`admission.CheckPublished`), and the same ceiling choice and
+ceiling-check records. Two routes given to `pages`
 that name each other as hosts of one model must carry the same choice
 and records too (`sameCeiling`). A route whose cells hold only the run
 records (`cell.json`) of missed or interrupted attempts, with no
@@ -1444,10 +1467,11 @@ Nothing is written unless every route reads, and a route with cells
 under `--out` and no `--config` is refused.
 
 `percentes-release publish-check --out DIR --frames DIR --config FILE
-... --pages DIR --record FILE` checks the release publication record
-(`evidence.Publication`, SPEC-HOSTED HA3 point 14): a strictly decoded
-JSON file apart from the cell manifests that names, by path and
-SHA-256, every cell manifest and every page, and holds per route its
+... --pages DIR --record FILE [--release-key FILE]` checks the release
+publication record (`evidence.Publication`, SPEC-HOSTED HA3 point 14):
+a strictly decoded JSON file apart from the cell manifests that names,
+by path and SHA-256, every cell manifest and every page, and holds per
+route its
 notice (date, recipient, account identifier, evidence pack and the date
 its window closes), its responses (a verbatim one with its text and
 consent files, any other with its corrections), its naming permission
@@ -1500,8 +1524,10 @@ in-band error object of each request, in the attempts file and in the
 probe records, and each non-200 body and withheld limits body of the
 probe records publish only as a stand-in with the text's HMAC-SHA256
 under the release key; the text is in the frame store and in
-`probe-retained.json`, and the key is in neither. Per route,
-`window-close.json` publishes and its record copies stay under
+`probe-retained.json`, and the key is in neither. The manifest names
+such a route's frame store and operator records by HMAC-SHA256 under
+the release key, with no size, and its operator file by SHA-256. Per
+route, `window-close.json` publishes and its record copies stay under
 `--frames`. `percentes --check-release` refuses a cell whose named files
 are missing or differ from their recorded hashes.
 
@@ -1750,6 +1776,7 @@ A release cell ([The release runner](#the-release-runner)):
 | `routes/<route>.json`: `model_mismatch_cells` | `readRouteCells`, from each `model_mismatch` manifest's endpoint record; the text line by `StepTables.Text` | SPEC-HOSTED §2 |
 | the configuration as published, and the manifest's configuration hash | `Config.Published`, through `publicConfigCmd` and `evidence.NewManifest` | HA3 point 15 |
 | `probe-retained.json` | `probe.Withheld`, `probe.WriteRetained` | HA3 point 15 |
+| `manifest.json`: `frames`, `records` (`sha256` and `bytes`, or `hmac_sha256`) | `evidence.NewManifest` through `refOf`, `keyedRefOf` and `Operator.records`; checked by `readRef` in `evidence.CheckRelease` | SPEC-HOSTED §9; HA3 point 15 |
 | the publication record's check | `evidence.LoadPublication`, `Publication.Check`, through `publishCheckCmd` | HA3 point 14 |
 | `report.json`: `tables.cells[*].steps[*].signals.content_events_errored`, `content_events_censored`, `prompt_tokens` | `report.signals`, `promptTokens` | SPEC-HOSTED §8 |
 | `routes/<route>.json`: `naming` | `report.NewStepTables`, from `target.naming.lines` | HA3 point 14 |
@@ -1858,7 +1885,8 @@ mode or a diagram.
   its dimension, marked confidential (SPEC-HOSTED §9).
 - **Completeness check**: `evidence.CheckRelease`, run by
   `percentes --check-release`: every file a hosted run's manifest names
-  must exist with the hash and size it records.
+  must exist with the hash and size it records, or with the keyed hash
+  a keyed reference records.
 - **Coordinated omission**: the under-sampling of slow periods by a load
   generator that waits for responses before sending more.
 - **Deadline**: under the release profile, 30 s from intended dispatch; a
@@ -1918,8 +1946,8 @@ mode or a diagram.
   counts and the ITL label](#token-counts-and-the-itl-label) gives the
   label each case gets.
 - **Keyed hash**: an HMAC-SHA256 under the release key; a release
-  publishes one in place of the plain SHA-256 of a text a confidential
-  route withholds ([The release key](#the-release-key)).
+  publishes one for each field [The release key](#the-release-key)
+  lists, and a plain SHA-256 elsewhere.
 - **kind**: Kubernetes in Docker, the local cluster of Phase 0.
 - **Ladder**: a release cell's five steps of offered load at 0.25, 0.5,
   1, 2 and 4 requests per second, each a 480 s window followed by a drain,

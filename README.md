@@ -238,7 +238,7 @@ hash here is an HMAC-SHA256 (a hash-based message authentication code
 built on SHA-256, the 256-bit Secure Hash Algorithm) under the release
 key: 32 random bytes that `percentes-release key create` writes once,
 at the freeze, to a file only its owner can read. Nobody without the
-key can check a guess against the published hash. Keep the key file
+key can check a guess against a keyed hash. Keep the key file
 private, as the API keys are: copy it to the client host, and leave it
 out of the repository.
 A provider can echo a limit in its rate-limit headers or in the body of
@@ -250,8 +250,12 @@ the route reads a limits URL. On such a route the probe and
 ceiling-check records also carry each non-200 response body as its
 keyed hash, and those records and the attempts file carry each in-band
 error object as a stand-in with its keyed hash. The texts stay in the
-retained store. The routes of a release run as separate processes on one
-client host, each at its own offset inside the slot.
+retained store. Each cell's manifest names the frame store and the
+operator records by keyed hash, with no byte count, and the route's
+window-close record names the operator records the same way; the
+manifest names its other files by SHA-256 hash and size. The routes of
+a release run as separate processes on one client host, each at its own
+offset inside the slot.
 
 | Setting | Value |
 |---|---|
@@ -272,7 +276,7 @@ that does not count is kept as a record outside the route's frame.
 
 | Command | When | What it does |
 |---|---|---|
-| `percentes-release key create`, `percentes-release key sum` | before the window, before `ledger create` | `key create` writes the release key to a new file readable by its owner only, and refuses an existing file; `key sum` prints each named file's keyed hash, the `hmac_sha256` a confidential limit records for its retained copy; `schedule` and `run` read the key from `--release-key`, as `ceiling-check` does on a route with a confidential limit |
+| `percentes-release key create`, `percentes-release key sum` | before the window, before `ledger create` | `key create` writes the release key to a new file readable by its owner only, and refuses an existing file; `key sum` prints each named file's keyed hash, the `hmac_sha256` a confidential limit records for its retained copy; `schedule` and `run` read the key from `--release-key`, as `ceiling-check`, `pages`, `publish-check` and `percentes --check-release` do where a route has a confidential limit |
 | `percentes-release ledger create` | before the window | starts the admission ledger the routes share, with every route's liability cap |
 | `percentes-release ledger price` | before the window | records a route's list prices at the token bounds of its cells and of its ceiling check; the ledger admits a request only at a bound it holds a price for |
 | `percentes-release ceiling-check` | before the window | sends a route's ten-request ceiling check, admitted in the ledger, and writes the record `run` reads, which names that ledger by the SHA-256 hash of its first line; it needs `--frames` where the route withholds probe values, and `--release-key` too on a route with a confidential limit; exits 2 when the check fails or is blocked, or when the record reports a model identifier on which `run` refuses the route; `run` needs the record of every host of the route's model, binds each to the request it checked, refuses one whose ledger hash is not the one the schedule froze, re-derives its results from its requests, refuses the route when its own records report a model identifier other than the expected one, and leaves out of the model's ceiling choice another host whose records report an identifier other than the one they expect |
