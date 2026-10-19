@@ -1387,7 +1387,7 @@ retained.
 | `model_mismatch` | a response reported a model other than the expected one; re-run within the bound. A route stop labels the cell `stopped` instead; a cell that is also client-invalid keeps this label, with both reasons | the full set, labelled, with the expected and every reported identifier in the manifest; a line on the route's page |
 | `blocked` | the refresh fault, the balance check, a route price recorded during the repeated start checks or the probe's status blocked the start | the files reached, an empty attempts file and frame store, and a labelled manifest and report pair |
 | `stopped` | a route stop before or during the ladder; the process exits 3 | as blocked, with whatever the ladder sent |
-| `interrupted` | the process ended or failed during the cell | `cell.json` and the files reached at the time; when the process next reads the route's records, `labelCell` writes the empty attempts file, reads any start record the cell did not write, and adds the labelled manifest and report pair |
+| `interrupted` | the process ended or failed during the cell | `cell.json` and the files reached at the time; when the process next reads the route's records, `labelCell` writes the empty attempts file, reads any start record the cell did not write (a clock record that does not decode counts as not written), and adds the labelled manifest and report pair |
 | `missed` | the start was more than 15 minutes past when the process reached it | `cell.json`, then the labelled manifest and report pair from `labelCell`, with no end records and no concurrent runs |
 
 Each file a cell writes in its directory goes to a temporary file there

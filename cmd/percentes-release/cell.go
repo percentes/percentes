@@ -490,7 +490,8 @@ func (r *route) operatorFault(ev *cellFiles, err error) error {
 // interrupted cell (SPEC-HOSTED HA3 point 16) from what its directory
 // holds: the clock record, start status and balance, refresh record,
 // probe record and dispatch series the cell wrote, each start record it
-// did not write read now, and the operator file and its records as they
+// did not write read now (a clock record that does not decode counts as
+// not written), and the operator file and its records as they
 // stand (cellOperator, with no refresh). The empty attempts file is written first, so a label that
 // fails part-way is never written again and the cell keeps its record.
 func (r *route) labelCell(ctx context.Context, rec *cellRecord) error {
@@ -504,19 +505,19 @@ func (r *route) labelCell(ctx context.Context, rec *cellRecord) error {
 		rec.Reasons = append(rec.Reasons, "execution error: "+rec.Error)
 	}
 	ev := &cellFiles{dir: dir, run: run, cfg: cfg, clockPath: filepath.Join(dir, evidence.ClockFile)}
-	switch b, err := os.ReadFile(ev.clockPath); {
-	case err == nil:
+	if b, err := os.ReadFile(ev.clockPath); err == nil {
 		ev.clock = &evidence.ClockRecord{}
-		if err := json.Unmarshal(b, ev.clock); err != nil {
-			return fmt.Errorf("%s: %w", ev.clockPath, err)
+		if json.Unmarshal(b, ev.clock) != nil {
+			ev.clock = nil
 		}
-	case errors.Is(err, os.ErrNotExist):
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if ev.clock == nil {
 		ev.clock = evidence.ReadClock(ctx, r.clock)
-		if ev.clockPath, err = evidence.WriteClock(dir, ev.clock); err != nil {
+		if _, err := evidence.WriteClock(dir, ev.clock); err != nil {
 			return err
 		}
-	default:
-		return err
 	}
 	for _, s := range []struct {
 		path *string

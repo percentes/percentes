@@ -1382,6 +1382,45 @@ func TestLabelMissedAndInterrupted(t *testing.T) {
 	}
 }
 
+// An interrupted cell whose clock record does not decode is labelled
+// with the clock read again, as one that wrote none, and the route runs
+// on to its next wait.
+func TestLabelUndecodableClock(t *testing.T) {
+	fastDispatch(t)
+	e := newEndpoint(t, always200)
+	r, _ := newTestRoute(t, releaseConfig(t, e.url()), "+0.005032")
+	gone := r.runs[0]
+	now := gone.Start.Add(time.Minute)
+	r.now = func() time.Time {
+		now = now.Add(time.Second)
+		return now
+	}
+	r.wait = func(context.Context, time.Time) error { return errors.New("operator abort") }
+	rec := r.newRecord(gone)
+	rec.Outcome, rec.StartUTC = outcomeRunning, gone.Start
+	if err := r.writeNew(gone, rec); err != nil {
+		t.Fatal(err)
+	}
+	dir := r.cellDir(gone)
+	path := writeFile(t, dir, evidence.ClockFile, []byte(`{"`))
+
+	if code, err := r.loop(context.Background()); err != nil || code != exitStopped {
+		t.Fatalf("loop: %d, %v", code, err)
+	}
+	if got := readCell(t, r, gone); got.Outcome != outcomeInterrupted {
+		t.Fatalf("cell record %s %q", got.Outcome, got.Reasons)
+	}
+	m, _ := checkRetained(t, r, gone)
+	var clock evidence.ClockRecord
+	if b, err := os.ReadFile(path); err != nil || json.Unmarshal(b, &clock) != nil || clock.AbsOffsetS == nil || m.Clock.AbsOffsetS == nil || *m.Clock.AbsOffsetS != *clock.AbsOffsetS {
+		t.Fatalf("clock record %+v, manifest clock %+v: %v", clock, m.Clock, err)
+	}
+	if n := e.hits.Load(); n != 0 {
+		t.Fatalf("server saw %d requests", n)
+	}
+	noTempFiles(t, r.out, r.framesRoot)
+}
+
 // refreshFixture gives f's operator file a limits record of its own,
 // limits.txt, and a refresh command that copies page over it, touches
 // the file of the other records and prints the recorded limits, and
