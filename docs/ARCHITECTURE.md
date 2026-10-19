@@ -1177,8 +1177,9 @@ their outputs and refuses to start on any of these.
   that verdict at the route's newest price among the lines up to the
   position the schedule froze (`frozenEntries`, `routePrice`), so every
   start of the route, a restart included, admits the same steps at the
-  same price. A price recorded after the schedule reaches the route only
-  through the limits check at each cell's start.
+  same price. A price recorded after the schedule leaves those steps
+  unchanged; it reaches each cell at its start through the limits check,
+  the balance check's reservation and the ledger's charge.
 
 - **The ceiling rule** (`admission.CeilingRule`, HA3 point 6) tests
   each step's nominal demand against every recorded limit, at the
