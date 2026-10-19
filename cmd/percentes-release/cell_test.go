@@ -1380,6 +1380,84 @@ func TestCellRefreshBlocks(t *testing.T) {
 	}
 }
 
+// On a route with a confidential limit, run refuses an operator file
+// that holds the limit's value in a note, a record's path or a URL, and
+// a cell whose refresh rewrites the file with the value in a note is
+// blocked before admission. No refusal and no published file carries the
+// value. A route with the limit public accepts the same files.
+func TestOperatorConfidentialValue(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+	enoughOpenFiles(t)
+	quota := `{"kind": "quota", "path": "r.txt", "retrieved": "2026-10-07"}`
+	edit := func(old, new string) []byte {
+		if !strings.Contains(operatorJSON, old) {
+			t.Fatalf("fixture lacks %q", old)
+		}
+		return []byte(strings.Replace(operatorJSON, old, new, 1))
+	}
+	values := []string{"250013.5", "2.500135e+05"}
+	carries := func(b []byte) bool {
+		return slices.ContainsFunc(values, func(v string) bool { return bytes.Contains(b, []byte(v)) })
+	}
+	for _, tc := range []struct {
+		name, field string
+		body        []byte
+	}{
+		{"note", "records[2].note", edit(quota, `{"kind": "quota", "path": "r.txt", "retrieved": "2026-10-07", "note": "TPM 250013.5"}`)},
+		{"path", "records[2].path", edit(quota, `{"kind": "quota", "path": "tpm-250013.5/../r.txt", "retrieved": "2026-10-07"}`)},
+		{"url", "records[0].url", edit("https://example.test/limits", "https://example.test/limits?tpm=250013.5")},
+	} {
+		f := newFixture(t, confidentialConfig(t, e.url()), "+0.005")
+		writeFile(t, filepath.Dir(f.in.opPath), "operator.json", tc.body)
+		want := "a confidential limit's value is in " + tc.field + " (tokens_per_minute)"
+		if _, err := newRoute(f.in); err == nil || !strings.Contains(err.Error(), want) || carries([]byte(err.Error())) {
+			t.Errorf("%s: %v; want %q", tc.name, err, want)
+		}
+		f = newFixture(t, releaseConfig(t, e.url()), "+0.005")
+		writeFile(t, filepath.Dir(f.in.opPath), "operator.json", tc.body)
+		if _, err := newRoute(f.in); err != nil {
+			t.Errorf("%s: public route: %v", tc.name, err)
+		}
+	}
+
+	f := newFixture(t, confidentialConfig(t, e.url()), "+0.005")
+	leaked := writeFile(t, t.TempDir(), "operator.json", edit(quota, `{"kind": "quota", "path": "r.txt", "retrieved": "2026-10-07", "note": "TPM 2.500135e+05"}`))
+	f.in.refreshCmd = filepath.Join(t.TempDir(), "refresh")
+	script := "#!/bin/sh\ncp '" + leaked + "' '" + f.in.opPath + "' && touch '" + filepath.Join(filepath.Dir(f.in.opPath), "r.txt") + "' && echo '" +
+		tpmRefresh(`"unavailable":"console only"`) + "'\n"
+	if err := os.WriteFile(f.in.refreshCmd, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, err := newRoute(f.in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := r.runs[0]
+	rec, err := r.runCell(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "a confidential limit's value is in records[2].note (tokens_per_minute)"; rec.Outcome != outcomeBlocked || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], want) {
+		t.Fatalf("outcome %s, reasons %q; want blocked, %q", rec.Outcome, rec.Reasons, want)
+	}
+	if n := e.hits.Load(); n != 0 {
+		t.Fatalf("server saw %d requests", n)
+	}
+	checkRetained(t, r, run)
+	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err == nil && carries(b) {
+			t.Errorf("%s carries the confidential value", p)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A cell whose ledger path holds another ledger than the one the route
 // started on ends in an error before any request, appending nothing to
 // that file: at the limits re-check, and at the reservation's read where

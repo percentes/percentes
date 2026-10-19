@@ -408,15 +408,19 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 // after the cell's refresh command ran (SPEC-HOSTED §4 drift inside the
 // window), with each limits and eligibility record dated by its file's
 // modification time. It refuses a failed command, a file that does not
-// load or does not cover the build, and a limits or eligibility record
-// whose file was not rewritten since the command started. A nil refresh
-// reads the file as it stands.
+// load, holds a confidential limit's value (Operator.CheckConfidential)
+// or does not cover the build, and a limits or eligibility record whose
+// file was not rewritten since the command started. A nil refresh reads
+// the file as it stands.
 func (r *route) cellOperator(refresh *evidence.StatusRecord) (*evidence.Operator, error) {
 	if refresh != nil && refresh.Error != "" {
 		return nil, fmt.Errorf("refresh command: %s", refresh.Error)
 	}
 	op, err := evidence.LoadOperator(r.opPath)
 	if err != nil {
+		return nil, err
+	}
+	if err := op.CheckConfidential(&r.cfg.Target); err != nil {
 		return nil, err
 	}
 	if err := evidence.CheckSource(r.build, op); err != nil {

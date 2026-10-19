@@ -434,7 +434,7 @@ The diagram predates the hosted packages, which the table lists.
 | | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
 | Hosted | `internal/probe` | the pre-run probe: Domain Name System (DNS) resolution, the Transport Layer Security (TLS) handshake, one request, the response shape, the start gate; the release ceiling check, a record's results re-derived from its requests, the ceiling choice across a model's hosts with a host left out on its records' reported-model fault, the values a probe record withholds, and the reported-model fault of a route's own records | SPEC-HOSTED §2, §5; HA3 points 7 and 15 | `Run`, `RunRelease`, `ReleaseRecord.Verify`, `ChooseCeiling`, `ModelFault`, `ReleaseRecord.Expected`, `LengthValue`, `Gate`, `Write`, `Retains`, `Exposed`, `ExposedByMarking`, `WriteRetained` | an httptest server per shape and failure |
 | | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound, bound to one open line once `Bind` is called; the release ceiling rule, and the check of a published verdict against the configuration's limits | SPEC-HOSTED HA2 §3; HA3 points 6 and 15 | `Create`, `Open`, `Ledger.Bind`, `Ledger.Admit`, `Ledger.Settle`, `CeilingRule`, `CheckPublished`, `State.Covers`, `State.ReservationUSD` | chain, cap and settlement units |
-| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadWindowClose`, `LoadOperator`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
+| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadWindowClose`, `LoadOperator`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
 | | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file with each route's frozen configuration hashes (as published, and keyed as loaded) and host group and the ledger's open-line hash | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun`, `Schedule.Config` | a pinned derivation; window and refusal cases |
@@ -518,7 +518,7 @@ hosted-G6 ([The release runner](#the-release-runner)):
 | Reported model at the check | the route's own ceiling-check records expect the configuration's expected identifier and report no other, and some response reported a recorded `target.reported_model` | the ceiling check; route start | `ceiling-check` prints a `REFUSED` line and exits 2 where its record reports an identifier with such a fault; `run` refuses to start | `modelRefusal`, `readCeilingProbes`, `probe.ModelFault` |
 | Ledger prices | the ledger's highest price at the cell bounds and at the ceiling-check bounds covers the ceiling rule's verdict | route start | refusal to start | `State.Covers` |
 | Clock offset | at most 60 s | cell start | the route stops; the cell is retained and labelled | `runCell` |
-| Refresh | the refresh command exits 0 within 30 s, the operator file loads and covers the build, and every limits and eligibility record's file was rewritten after the command started | cell start | the cell is blocked before admission: no ledger line, no request | `cellOperator`, `Operator.Refreshed` |
+| Refresh | the refresh command exits 0 within 30 s, the operator file loads, holds no confidential limit's value and covers the build, and every limits and eligibility record's file was rewritten after the command started | cell start | the cell is blocked before admission: no ledger line, no request | `cellOperator`, `Operator.CheckConfidential`, `Operator.Refreshed` |
 | Limits read | the refresh command prints one entry per recorded limit, its value or why it is unavailable; the ceiling rule with those values, at the route's newest recorded price, still admits every step the route runs | cell start | output that does not parse blocks the cell as a refresh fault does; limits that no longer admit a step stop the route before admission | `evidence.ReadRefreshedLimits`, `limitsStop` |
 | Balance check | the balance command prints `{"amount_usd": "<decimal>"}` at or above the cell's reservation, or `{"unavailable": "<reason>"}` under a `target.balance_unavailable` ruling | cell start | the cell is blocked before admission | `evidence.CheckBalance`, `BalanceCheck.Blocks` |
 | Ledger admission | the route and global liability caps of the configuration | cell start | the route stops | `Ledger.Admit` |
@@ -694,7 +694,17 @@ before any setup.
   cell's start, after its refresh command rewrote the limits and
   eligibility records ([A cell, in order](#a-cell-in-order)). A binary
   that carries no version-control revision refuses to run, and one built
-  from a modified tree needs a `source_diff` record (`CheckSource`).
+  from a modified tree needs a `source_diff` record (`CheckSource`). On a
+  release route with a confidential limit, `Operator.CheckConfidential`
+  refuses the file where the provider, account tier, client host, cell,
+  a role, or a record's path, URL or note holds that limit's value as
+  loaded, written as `strconv.FormatFloat` prints it in format `f` or `e`
+  (`%g` prints one of the two). The refusal names the field and the
+  limit's dimension. `run` refuses to start on such a file; read at a
+  cell's start, it blocks the cell, whose manifest carries the records
+  read when the route started; read after the route's last cell, it
+  stops the window-close record being written. `NewManifest` and
+  `NewWindowClose` refuse it too.
 - **The admission ledger** (`--ledger`, `internal/admission`) is one
   append-only JSON Lines (JSONL, one JavaScript Object Notation (JSON)
   object per line) file holding every inference request sent to a route,
@@ -1091,7 +1101,7 @@ their outputs and refuses to start on any of these.
 | the schedule does not name the route, or does not re-derive from its own input | `schedule.Load`, `Schedule.Runs` |
 | the schedule freezes no configuration of the route, or froze another host group, another SHA-256 of the configuration as published, or no HMAC-SHA256 of the configuration as loaded or another one under the key `--release-key` names | `checkFrozen` |
 | a route in `release.other_hosts` has no `--host-config`; a `--host-config` file is not under the `release` profile, is of a route `release.other_hosts` does not list or of one already given, or is not the configuration the schedule froze for its route, as above | `hostTargets`, `checkFrozen` |
-| the operator file fails to load, the build has no version-control revision, or the tree was modified and no `source_diff` record is given | `evidence.LoadOperator`, `evidence.CheckSource` |
+| the operator file fails to load or, on a route with a confidential limit, holds that limit's value in a text it publishes; the build has no version-control revision; or the tree was modified and no `source_diff` record is given | `evidence.LoadOperator`, `Operator.CheckConfidential`, `evidence.CheckSource` |
 | the open-file soft limit is below 65,536 | `checkOpenFiles` |
 | the frame root is inside the source tree | `evidence.CheckFramesRoot` |
 | the clock-sync, status, balance or refresh command is missing or does not parse | `evidence.ParseClockCommand`, `ParseStatusCommand`, `ParseBalanceCommand`, `ParseRefreshCommand` |
@@ -1270,7 +1280,8 @@ reason naming the lowest such step, the price's retrieval date and the
 binding limit.
 The cell is blocked before admission, with no ledger line and no
 request, when the refresh command failed, timed out or printed past the
-limit, the operator file no longer loads or covers the build, a limits
+limit, the operator file no longer loads or covers the build or holds a
+confidential limit's value, a limits
 or eligibility file was not rewritten after the command started, or the
 limits it printed do not parse; and when the balance check does not let
 it start: the command failed or printed anything but one JSON object

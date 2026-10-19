@@ -17,6 +17,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/validity"
 )
 
@@ -155,6 +156,64 @@ func TestLoadOperatorRefusals(t *testing.T) {
 	}
 	if _, err := LoadOperator(""); err == nil {
 		t.Error("empty path accepted")
+	}
+}
+
+// On a target with a confidential limit, an operator file that holds the
+// limit's value as loaded, in any printed form, in a published text is
+// refused with an error that names the field and the limit's dimension
+// and carries no value; a window-close record of it is refused too. A
+// public target accepts the same file.
+func TestOperatorConfidential(t *testing.T) {
+	cfg, public := confidentialCfg(t), releaseCfg(t)
+	key, err := releasekey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit := func(old, new string) string {
+		if !strings.Contains(operatorJSON, old) {
+			t.Fatalf("fixture lacks %q", old)
+		}
+		return strings.Replace(operatorJSON, old, new, 1)
+	}
+	if err := loadOperator(t).CheckConfidential(&cfg.Target); err != nil {
+		t.Fatalf("an operator file without the value: %v", err)
+	}
+	for _, tc := range []struct {
+		name, body, field, value string
+		// tpm, where set, is the confidential limit's value in place of
+		// the configuration's.
+		tpm float64
+	}{
+		{"note", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 300001 per console"`), "records[3].note", "300001", 0},
+		{"path", edit(`"path": "quota.txt"`, `"path": "tpm-300001/../quota.txt"`), "records[2].path", "300001", 0},
+		{"url", edit(`"url": "https://docs.example/limits"`, `"url": "https://docs.example/limits?tpm=300001"`), "records[0].url", "300001", 0},
+		{"client host", edit(`"client_host": "one Mac, London"`, `"client_host": "one Mac, 300001"`), "client_host", "300001", 0},
+		{"e form", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 3.00001e+05"`), "records[3].note", "3.00001e+05", 0},
+		{"%g form", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 3.00001e+06"`), "records[3].note", "3.00001e+06", 3000010},
+	} {
+		op, err := LoadOperator(writeOperator(t, tc.body))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if err := op.CheckConfidential(&public.Target); err != nil {
+			t.Errorf("%s: public target: %v", tc.name, err)
+		}
+		target := cfg.Target
+		target.Limits = append([]config.Limit(nil), target.Limits...)
+		for i := range target.Limits {
+			if target.Limits[i].Dimension == config.LimitTPM && tc.tpm != 0 {
+				target.Limits[i].Value = tc.tpm
+			}
+		}
+		want := "a confidential limit's value is in " + tc.field + " (tokens_per_minute)"
+		err = op.CheckConfidential(&target)
+		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), tc.value) {
+			t.Errorf("%s: %v; want %q", tc.name, err, want)
+		}
+		if _, err := NewWindowClose(&target, time.Now(), refreshRun(`{"limits": []}`), op, key); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: window-close record: %v", tc.name, err)
+		}
 	}
 }
 

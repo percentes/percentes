@@ -255,6 +255,9 @@ func newRoute(in routeInput) (*route, error) {
 	if r.op, err = evidence.LoadOperator(in.opPath); err != nil {
 		return nil, err
 	}
+	if err := r.op.CheckConfidential(&cfg.Target); err != nil {
+		return nil, err
+	}
 	if err := evidence.CheckSource(in.build, r.op); err != nil {
 		return nil, err
 	}

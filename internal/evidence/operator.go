@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,8 +90,10 @@ type OperatorRecord struct {
 	URL       string `json:"url,omitempty"`
 	Retrieved string `json:"retrieved"`
 	Note      string `json:"note,omitempty"`
-	data      []byte
-	modified  time.Time
+	// path is the record's path as the operator file gives it.
+	path     string
+	data     []byte
+	modified time.Time
 }
 
 // operatorFile is the operator file's JSON form.
@@ -167,7 +170,7 @@ func LoadOperator(path string) (*Operator, error) {
 		if err != nil {
 			return fail("%s: %v", field, err)
 		}
-		op.Records = append(op.Records, OperatorRecord{Kind: in.Kind, FileRef: refOf(filepath.ToSlash(name), data), URL: in.URL, Retrieved: in.Retrieved, Note: in.Note, data: data, modified: modified})
+		op.Records = append(op.Records, OperatorRecord{Kind: in.Kind, FileRef: refOf(filepath.ToSlash(name), data), URL: in.URL, Retrieved: in.Retrieved, Note: in.Note, path: in.Path, data: data, modified: modified})
 	}
 	for _, kind := range requiredRecords {
 		if op.find(kind) == nil {
@@ -217,14 +220,53 @@ func (op *Operator) Refreshed(since time.Time) error {
 	return nil
 }
 
+// CheckConfidential refuses op for t where t records a confidential limit
+// whose value, as loaded and printed by strconv.FormatFloat in format 'f'
+// or 'e' at precision -1 (%g prints one of the two), appears in a text op
+// publishes: the provider, account tier, client host, cell or a role, or a
+// record's path, URL or note. The refusal names each field and the
+// limit's dimension.
+func (op *Operator) CheckConfidential(t *config.Target) error {
+	type text struct{ field, s string }
+	texts := []text{{"provider", op.Provider}, {"account_tier", op.AccountTier}, {"client_host", op.ClientHost}, {"cell", op.Cell}}
+	if r := op.Roles; r != nil {
+		texts = append(texts, text{"roles.task", r.Task}, text{"roles.cases_labels", r.CasesLabels}, text{"roles.rubric", r.Rubric}, text{"roles.pair_interest", r.PairInterest})
+	}
+	for i, r := range op.Records {
+		field := fmt.Sprintf("records[%d]", i)
+		texts = append(texts, text{field + ".path", r.path}, text{field + ".path", r.Name}, text{field + ".url", r.URL}, text{field + ".note", r.Note})
+	}
+	var found []string
+	for _, l := range t.Limits {
+		if l.Marking != config.MarkingConfidential || !(l.Value > 0) {
+			continue
+		}
+		forms := []string{strconv.FormatFloat(l.Value, 'f', -1, 64), strconv.FormatFloat(l.Value, 'e', -1, 64)}
+		for _, x := range texts {
+			hit := fmt.Sprintf("%s (%s)", x.field, l.Dimension)
+			if !slices.Contains(found, hit) && slices.ContainsFunc(forms, func(v string) bool { return strings.Contains(x.s, v) }) {
+				found = append(found, hit)
+			}
+		}
+	}
+	if len(found) > 0 {
+		return fmt.Errorf("evidence: operator file %s: a confidential limit's value is in %s", op.File.Name, strings.Join(found, ", "))
+	}
+	return nil
+}
+
 // records are op's records as a run on t names them: keyed under key
-// (FileRef) on a target with a confidential limit, which requires key.
+// (FileRef) on a target with a confidential limit, which requires key and
+// op to pass CheckConfidential.
 func (op *Operator) records(t *config.Target, key *releasekey.Key) ([]OperatorRecord, error) {
 	if !t.Confidential() {
 		return op.Records, nil
 	}
 	if key == nil {
 		return nil, errors.New("evidence: a target with a confidential limit needs the release key")
+	}
+	if err := op.CheckConfidential(t); err != nil {
+		return nil, err
 	}
 	out := slices.Clone(op.Records)
 	for i := range out {
