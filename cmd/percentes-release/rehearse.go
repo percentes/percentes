@@ -498,7 +498,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	}
 	for i, cfg := range cfgs {
 		name := cfg.Target.Name
-		cp, err := json.Marshal(checks[i])
+		cp, err := probe.Encode(checks[i])
 		if err != nil {
 			return exitError, err
 		}

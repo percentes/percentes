@@ -350,7 +350,8 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // readCeilingProbes reads the ceiling check's records of the route's
 // model, whose hosts are the target and release.other_hosts, and requires
 // their choice to run the model at the configured ceiling. Every record
-// holds no field probe.ReleaseRecord does not define. Every host's
+// holds no field probe.ReleaseRecord does not define and is byte for byte
+// the probe.Encode encoding of the record it decodes to. Every host's
 // record carries the host's model and byteCap, was admitted in the ledger
 // whose open-line SHA-256 is ledger, and carries the results its
 // requests give at the pinned input bound (probe.ReleaseRecord.Verify,
@@ -393,6 +394,9 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int, ledger s
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&rec); err != nil {
 			return none, nil, fmt.Errorf("ceiling probe %s: %w", f, err)
+		}
+		if canon, err := probe.Encode(&rec); err != nil || !bytes.Equal(b, canon) {
+			return none, nil, fmt.Errorf("ceiling probe %s: not the record as ceiling-check writes it", f)
 		}
 		var fault string
 		model, host := models[rec.Route]

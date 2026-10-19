@@ -313,7 +313,7 @@ func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pas
 // writeCeiling writes rec to a new file and returns its path.
 func writeCeiling(t *testing.T, rec probe.ReleaseRecord) string {
 	t.Helper()
-	b, err := json.Marshal(&rec)
+	b, err := probe.Encode(&rec)
 	if err != nil {
 		t.Fatal(err)
 	}

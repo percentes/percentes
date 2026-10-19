@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -336,7 +337,8 @@ func markConfidential(t *testing.T, path string) {
 }
 
 // A confidential limit's snapshot in the check's record carries no value,
-// and run refuses a record of the route whose snapshot carries one.
+// and run refuses a record of the route whose snapshot carries one, and
+// the record with a value or text after it or a key written twice.
 func TestCeilingCheckConfidential(t *testing.T) {
 	f := newCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), testKey)
 	markConfidential(t, f.cfg)
@@ -358,6 +360,28 @@ func TestCeilingCheckConfidential(t *testing.T) {
 	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true, ledgerOpenSHA256(t, f.ledger)))
 	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000, ledgerOpenSHA256(t, f.ledger)); err != nil {
 		t.Fatalf("run reads the record: %v", err)
+	}
+	for name, edit := range map[string]func([]byte) []byte{
+		"a second value":  func(b []byte) []byte { return append(b, `{"tokens_per_minute":250013.5}`...) },
+		"a tail not JSON": func(b []byte) []byte { return append(b, " tpm=250013.5 }}}{{"...) },
+		"a duplicate key": func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"limits_from":`), []byte(`"limits_from": "tpm 250013.5",
+  "limits_from":`), 1)
+		},
+		"a case-folded duplicate key": func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"limits_from":`), []byte(`"LIMITS_FROM": "tpm 250013.5",
+  "limits_from":`), 1)
+		},
+	} {
+		edited := edit(slices.Clone(raw))
+		if bytes.Equal(edited, raw) {
+			t.Fatalf("%s: the edit did not apply", name)
+		}
+		file := writeFile(t, t.TempDir(), probe.File, edited)
+		if _, _, err := readCeilingProbes(cfgs[0], []string{file, baseten}, 2000, ledgerOpenSHA256(t, f.ledger)); err == nil ||
+			err.Error() != "ceiling probe "+file+": not the record as ceiling-check writes it" {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 	rec.Snapshots[1].Value = 250013.5
 	leaked := writeCeiling(t, *rec)

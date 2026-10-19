@@ -302,21 +302,30 @@ func Run(ctx context.Context, in Input) (*Record, error) {
 	return rec, nil
 }
 
-// Write writes rec, a *Record or a *ReleaseRecord, indented, to File in
-// dir and returns the file's path.
-func Write(dir string, rec any) (string, error) {
+// Encode returns rec, a *Record or a *ReleaseRecord, as Write writes it.
+func Encode(rec any) ([]byte, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(rec); err != nil {
-		return "", fmt.Errorf("probe: %w", err)
+		return nil, fmt.Errorf("probe: %w", err)
+	}
+	return b.Bytes(), nil
+}
+
+// Write writes rec, a *Record or a *ReleaseRecord, indented, to File in
+// dir and returns the file's path.
+func Write(dir string, rec any) (string, error) {
+	b, err := Encode(rec)
+	if err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("probe: %w", err)
 	}
 	path := filepath.Join(dir, File)
-	if err := os.WriteFile(path, b.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, b, 0o644); err != nil {
 		return "", fmt.Errorf("probe: %w", err)
 	}
 	return path, nil
