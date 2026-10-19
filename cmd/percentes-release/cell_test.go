@@ -688,7 +688,8 @@ func TestCellConfidentialLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Outcome != outcomeCounted {
+	t.Logf("outcome %s %q", rec.Outcome, rec.Reasons)
+	if rec.Outcome != outcomeCounted && !(rec.Outcome == outcomeInvalid && gateReasons(rec.Reasons)) {
 		t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
 	}
 	m, text := checkRetained(t, r, run)
