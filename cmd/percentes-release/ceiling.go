@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/pilot"
 	"github.com/percentes/percentes/internal/probe"
@@ -19,7 +20,8 @@ import (
 // text, admitted in the release ledger before the first is sent and
 // settled with the requests sent. It writes the record run reads with
 // --ceiling-probe, also when the check fails or is blocked, and what the
-// record withholds under --frames.
+// record withholds under --frames. A record reporting a model id on which
+// run refuses the route (probe.ModelFault) is refused here too.
 func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	fs := flag.NewFlagSet("ceiling-check", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "the route's release configuration at the ceiling checked (required)")
@@ -111,6 +113,10 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	c, ib := rec.Ceiling, rec.InputBound
 	fmt.Printf("%s: ceiling %d: %d of %d sent passed; input bound %d tokens: %d reported, largest %d, %d above; %d findings; written %s\n",
 		name, c.Ceiling, c.Passed, c.Sent, ib.BoundTokens, ib.Reported, ib.MaxPromptTokens, ib.Exceeded, len(rec.Findings), path)
+	refusal := modelRefusal(&cfg.Target, rec)
+	if refusal != "" {
+		fmt.Printf("%s: REFUSED: run refuses the route (SPEC-HOSTED §2): %s\n", name, refusal)
+	}
 	switch {
 	case rec.Start.Blocked:
 		fmt.Printf("%s: BLOCKED: %s\n", name, rec.Start.Reason)
@@ -118,8 +124,18 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 		fmt.Printf("%s: FAILED the ceiling check at %d\n", name, c.Ceiling)
 	case !ib.Pass:
 		fmt.Printf("%s: FAILED the input bound of %d tokens\n", name, ib.BoundTokens)
-	default:
+	case refusal == "":
 		return exitOK, nil
 	}
 	return exitAdverse, nil
+}
+
+// modelRefusal is the fault in the model ids rec reports on which run
+// refuses t's route (probe.ModelFault), or "". A record reporting no id
+// is left to run, which reads it beside the route's other records.
+func modelRefusal(t *config.Target, rec *probe.ReleaseRecord) string {
+	if len(rec.ReportedModels()) == 0 {
+		return ""
+	}
+	return probe.ModelFault(t, []*probe.ReleaseRecord{rec})
 }

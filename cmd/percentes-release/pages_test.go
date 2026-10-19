@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -307,6 +309,45 @@ func TestPagesCmd(t *testing.T) {
 	if line := "-- Change of limits or documentation, first observed at cell " + cellLabel(later) + ", started " + later.Start.UTC().Format(time.DateOnly) +
 		" --\n  removed: account tier Developer\n  added: account tier Scale\n"; !strings.Contains(page, line) {
 		t.Errorf("groq page lacks %q:\n%s", line, page)
+	}
+}
+
+// A route's page lists each model_mismatch cell, outside the frame, with
+// its expected and reported model ids and its mismatch count, as its
+// JSON does.
+func TestPagesModelMismatch(t *testing.T) {
+	stream := strings.ReplaceAll(chatStream, `"model":"openai/gpt-oss-120b"`, `"model":"openai/gpt-oss-120b-v2"`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body) //nolint:errcheck
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, stream) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	groq, groqCfg := pagesRoute(t, "groq", srv.URL+"/openai/v1/chat/completions", "", "")
+	shortLadder(groq)
+	run := groq.runs[0]
+	rec := runCellOK(t, groq, run)
+	if rec.Outcome != outcomeMismatch {
+		t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
+	}
+	n := rec.Sent.Warmup + rec.Sent.Measured
+	pages := t.TempDir()
+	if code, err := pagesCmd([]string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--pages", pages}); code != exitOK || err != nil {
+		t.Fatalf("exit %d: %v", code, err)
+	}
+	files := readPages(t, pages)
+	page := string(files["routes/groq.txt"])
+	line := fmt.Sprintf("-- Cell %s, model_mismatch, outside the frame (SPEC-HOSTED §2): %d requests reported a model other than the expected \"openai/gpt-oss-120b\"; reported [\"openai/gpt-oss-120b-v2\"] --\n", cellLabel(run), n)
+	if !strings.Contains(page, line) || strings.Contains(page, "-- Cell "+cellLabel(run)+":") {
+		t.Errorf("groq page lacks %q or tables the cell:\n%s", line, page)
+	}
+	var st report.StepTables
+	if err := json.Unmarshal(files["routes/groq.json"], &st); err != nil {
+		t.Fatal(err)
+	}
+	want := []report.ModelMismatch{{Cell: cellLabel(run), Expected: "openai/gpt-oss-120b", Reported: []string{"openai/gpt-oss-120b-v2"}, Requests: n}}
+	if !reflect.DeepEqual(st.ModelMismatches, want) || len(st.Cells) != 0 {
+		t.Errorf("groq tables: %d cells, mismatches %+v", len(st.Cells), st.ModelMismatches)
 	}
 }
 

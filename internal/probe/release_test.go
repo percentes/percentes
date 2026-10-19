@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -840,10 +841,26 @@ func checked(route string, ceiling, passed int) *ReleaseRecord {
 		InputBound: InputCheck{BoundTokens: 1200, Reported: 10, MaxPromptTokens: 1100, Pass: true}}
 }
 
+// reporting is route's record at ceiling with passed of the ten requests
+// passing, of openai/gpt-oss-120b expecting expected, with one request
+// per model in models, each reporting that model.
+func reporting(route string, ceiling, passed int, expected string, models ...string) *ReleaseRecord {
+	r := checked(route, ceiling, passed)
+	r.RequestedModel, r.ExpectedModel = "openai/gpt-oss-120b", expected
+	for i, m := range models {
+		r.Requests = append(r.Requests, CheckRequest{Index: i, Shape: &Shape{Models: []string{m}}})
+	}
+	return r
+}
+
 // The model runs at 512 when every host passes there, at 1,024 when any
 // failed at 512 and every host passes at 1,024, and is excluded when any
 // host fails at 1,024. A record of no host, one whose input bound failed
-// and a host with no record refuse the choice.
+// and a host with no record refuse the choice. A host whose records
+// report a model id other than the one they expect, or expect a recorded
+// reported_model none reported, or expect two ids, is left out of the
+// choice, its records unread, and the choice names it; the model is
+// excluded when every host is left out.
 func TestChooseCeiling(t *testing.T) {
 	blocked := checked("bedrock", 512, 0)
 	blocked.Start = Start{Blocked: true, Reason: "probe request returned 401"}
@@ -852,6 +869,10 @@ func TestChooseCeiling(t *testing.T) {
 	unreported := checked("baseten", 1024, 10)
 	unreported.InputBound = InputCheck{BoundTokens: 1200, Reported: 9, MaxPromptTokens: 1100}
 	gpt, claude := []string{"groq", "baseten"}, []string{"anthropic", "bedrock"}
+	const v2, documented = "openai/gpt-oss-120b-v2", "openai/gpt-oss-120b-2026"
+	undocumented := `the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b", and target.reported_model records no documentation naming both as one build: identifier-not-documented`
+	silent := reporting("baseten", 512, 0, documented)
+	silent.Start = Start{Blocked: true, Reason: "probe request returned 401"}
 	for _, c := range []struct {
 		name  string
 		hosts []string
@@ -889,9 +910,25 @@ func TestChooseCeiling(t *testing.T) {
 			CeilingChoice{}, "probe: route groq: ceiling 256 is not one of [512 1024]"},
 		{"no records", gpt, nil, CeilingChoice{}, "probe: route baseten has no check at 512"},
 		{"no hosts", nil, []*ReleaseRecord{checked("groq", 512, 10)}, CeilingChoice{}, "probe: no hosts"},
+		{"another reported id left out", gpt, []*ReleaseRecord{reporting("groq", 512, 10, "", "openai/gpt-oss-120b"), reporting("baseten", 512, 9, "", "openai/gpt-oss-120b", v2)},
+			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512; baseten left out on the reported model id",
+				LeftOut: []LeftOut{{Route: "baseten", Fault: undocumented}}}, ""},
+		{"a recorded id reported", gpt, []*ReleaseRecord{reporting("groq", 512, 10, "openai/gpt-oss-120b", "openai/gpt-oss-120b"), reporting("baseten", 512, 10, documented, documented)},
+			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"}, ""},
+		{"a recorded id never reported, blocked", gpt, []*ReleaseRecord{checked("groq", 512, 10), silent},
+			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512; baseten left out on the reported model id",
+				LeftOut: []LeftOut{{Route: "baseten", Fault: `target.reported_model "openai/gpt-oss-120b-2026" is recorded and no response of the ceiling check reported a model`}}}, ""},
+		{"a fault at the fallback's 1024", gpt, []*ReleaseRecord{checked("groq", 512, 0), checked("groq", 1024, 10), reporting("baseten", 512, 10, ""), reporting("baseten", 1024, 10, "", v2)},
+			CeilingChoice{Ceiling: 1024, Reason: "groq failed at 512; every host passed at 1024; baseten left out on the reported model id",
+				LeftOut: []LeftOut{{Route: "baseten", Fault: undocumented}}}, ""},
+		{"records expecting two ids", gpt, []*ReleaseRecord{checked("groq", 512, 10), reporting("baseten", 512, 0, "", "openai/gpt-oss-120b"), reporting("baseten", 1024, 10, documented, documented)},
+			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512; baseten left out on the reported model id",
+				LeftOut: []LeftOut{{Route: "baseten", Fault: `the ceiling-check records expect model "openai/gpt-oss-120b" and "openai/gpt-oss-120b-2026"`}}}, ""},
+		{"every host left out", []string{"groq"}, []*ReleaseRecord{reporting("groq", 512, 10, "", v2)},
+			CeilingChoice{Excluded: true, Reason: "groq left out on the reported model id", LeftOut: []LeftOut{{Route: "groq", Fault: undocumented}}}, ""},
 	} {
 		got, err := ChooseCeiling(c.hosts, c.recs)
-		if got != c.want || fmt.Sprint(err) != map[bool]string{true: "<nil>", false: c.err}[c.err == ""] {
+		if !reflect.DeepEqual(got, c.want) || fmt.Sprint(err) != map[bool]string{true: "<nil>", false: c.err}[c.err == ""] {
 			t.Errorf("%s: got %+v, %v; want %+v, %q", c.name, got, err, c.want, c.err)
 		}
 	}
@@ -900,6 +937,8 @@ func TestChooseCeiling(t *testing.T) {
 // The route's own ceiling-check records keep the provider-model out when
 // a response reported a model id other than the expected one, or when
 // target.reported_model is recorded and no response reported a model.
+// A probe records the expected id; a record naming none expects the
+// requested one.
 func TestModelFault(t *testing.T) {
 	noSpacing(t)
 	addr := startShaped(t, mock.Shape{Answer: "The customer was billed twice."})
@@ -911,6 +950,17 @@ func TestModelFault(t *testing.T) {
 	}
 	if f := ModelFault(tg, []*ReleaseRecord{rec}); f != "" {
 		t.Fatalf("requested model reported: %s", f)
+	}
+	if rec.ExpectedModel != "openai/gpt-oss-120b" || rec.Expected() != "openai/gpt-oss-120b" {
+		t.Errorf("expected model %q, %q", rec.ExpectedModel, rec.Expected())
+	}
+	if r := (&ReleaseRecord{RequestedModel: "m"}); r.Expected() != "m" {
+		t.Errorf("a record naming no expected model expects %q", r.Expected())
+	}
+	documented := releaseConfig(t, "http://"+addr+"/v1/chat/completions")
+	documented.Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026"}
+	if r := releaseProbe(t, ReleaseInput{Config: documented, Texts: texts(0), ByteCap: byteCap}); r.ExpectedModel != "openai/gpt-oss-120b-2026" || r.RequestedModel != "openai/gpt-oss-120b" {
+		t.Errorf("under reported_model: expected %q, requested %q", r.ExpectedModel, r.RequestedModel)
 	}
 	tg.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026"}
 	if f := ModelFault(tg, []*ReleaseRecord{rec}); f != `the ceiling check reported model "openai/gpt-oss-120b", not target.reported_model "openai/gpt-oss-120b-2026"` {

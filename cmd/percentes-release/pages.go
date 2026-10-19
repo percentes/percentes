@@ -30,12 +30,13 @@ const (
 
 // routeRecords are one route's cells as the pages read them: the
 // ceiling rule's verdict every manifest carries, the counted cells'
-// records, the attempts outside the frame and the route's window-close
-// record, nil when it has none.
+// records, the attempts outside the frame, the model_mismatch attempts'
+// identifiers and the route's window-close record, nil when it has none.
 type routeRecords struct {
-	verdict *admission.Verdict
-	cells   []report.CellRecords
-	close   *evidence.WindowClose
+	verdict    *admission.Verdict
+	cells      []report.CellRecords
+	mismatches []report.ModelMismatch
+	close      *evidence.WindowClose
 	// labelled counts the attempts with a manifest that do not count;
 	// unrecorded the missed and interrupted attempts with no manifest,
 	// which keep their run record only.
@@ -131,6 +132,7 @@ func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, e
 				return nil, fmt.Errorf("pages: %w", err)
 			}
 		}
+		st.ModelMismatches = rp.recs[i].mismatches
 		rp.files[r.Page] = []byte(st.Text())
 		if rp.files[path.Join(routesDir, r.Config.Target.Name+".json")], err = marshalPage(st); err != nil {
 			return nil, err
@@ -154,8 +156,9 @@ func marshalPage(v any) ([]byte, error) {
 // both count it, at most one attempt per scheduled cell; only a missed
 // or interrupted attempt may have its run record alone. Each counted
 // cell carries its scheduled start and the documentation state its
-// manifest records, which the drift rule compares, and the route's
-// window-close record is read where it has one.
+// manifest records, which the drift rule compares. Each model_mismatch
+// attempt's expected and reported model ids are kept for the route's
+// page, and the route's window-close record is read where it has one.
 func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, error) {
 	name := cfg.Target.Name
 	paths, err := filepath.Glob(filepath.Join(out, name, "*", cellFile))
@@ -205,6 +208,10 @@ func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, 
 			return nil, fmt.Errorf("pages: %s: counted in the run record, %s in the manifest", dir, m.Release.Outcome)
 		case rec.Outcome != outcomeCounted || !m.Counted():
 			rr.labelled++
+			if e := m.Endpoint; m.Release.Outcome == evidence.CellModelMismatch {
+				rr.mismatches = append(rr.mismatches, report.ModelMismatch{Cell: cellLabel(rec.Run), Expected: e.ExpectedModel,
+					Reported: e.ReportedModels, Requests: e.ModelMismatches})
+			}
 			continue
 		}
 		if prev, ok := counted[rec.Run.Label]; ok {

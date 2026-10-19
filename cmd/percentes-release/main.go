@@ -65,8 +65,10 @@
 //	percentes-release check-cpu
 //
 // Exit codes: 0 = the route's runs are over and every cell counts, or
-// the ceiling check passed with the input bound; 2 = the runs are over
-// and a cell does not count, or the ceiling check failed or was blocked;
+// the ceiling check passed with the input bound and run accepts the
+// model ids it reported; 2 = the runs are over and a cell does not
+// count, or the ceiling check failed, was blocked or reported a model id
+// on which run refuses the route;
 // 3 = the route stopped (a ledger refusal, a documented billing refusal,
 // a clock offset above the pinned bound, limits read at a cell's start
 // that no longer admit the route's steps, a probe 401 or 403 the route's

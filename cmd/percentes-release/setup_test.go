@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -153,7 +154,22 @@ func TestNewRouteRefusals(t *testing.T) {
 		}, `the ceiling check reported model "openai/gpt-oss-120b", not target.reported_model "openai/gpt-oss-120b-2026"`},
 		{"recorded model never reported", func(t *testing.T, f *fixture) {
 			f.in.cfg.Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+			ceiling(t, f, pass(f, "groq", 512, true), pass(f, "baseten", 512, true))
 		}, `target.reported_model "openai/gpt-oss-120b-2026" is recorded and no response of the ceiling check reported a model`},
+		{"own record expects another model", func(t *testing.T, f *fixture) {
+			f.in.cfg.Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) {
+				r.ExpectedModel = "openai/gpt-oss-120b"
+				reports("openai/gpt-oss-120b")(r)
+			}), pass(f, "baseten", 512, true))
+		}, `route groq at 512: expected model "openai/gpt-oss-120b", want "openai/gpt-oss-120b-2026"`},
+		{"own record expects no model under a recorded one", func(t *testing.T, f *fixture) {
+			f.in.cfg.Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) {
+				r.ExpectedModel = ""
+				reports("openai/gpt-oss-120b-2026")(r)
+			}), pass(f, "baseten", 512, true))
+		}, `route groq at 512: expected model "openai/gpt-oss-120b", want "openai/gpt-oss-120b-2026"`},
 		{"no ceiling probe", func(t *testing.T, f *fixture) { f.in.probeFiles = nil }, "--ceiling-probe is required"},
 		{"byte cap", func(t *testing.T, f *fixture) { f.in.byteCap = 0 }, "--byte-cap 0"},
 		{"account date", func(t *testing.T, f *fixture) { f.in.accountCreated = "15 September" }, "--account-created"},
@@ -186,17 +202,31 @@ func reports(models ...string) func(r *probe.ReleaseRecord) {
 
 // A route whose own ceiling check reported only the expected model id
 // starts: the requested one, or target.reported_model's where recorded.
-// Another host's reported ids are its own route's to check.
+// Another host whose records report an id other than the one they expect
+// is left out of the ceiling choice, which records it, so its failure at
+// 512 does not move the ceiling; one reporting the id it expects stays
+// in.
 func TestNewRouteReportedModel(t *testing.T) {
 	enoughOpenFiles(t)
 	f := newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
 	own := hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true)
 	reports("openai/gpt-oss-120b", "openai/gpt-oss-120b")(&own)
-	other := hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true)
+	other := hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, false)
 	reports("openai/gpt-oss-120b-v2")(&other)
 	f.in.probeFiles = []string{writeCeiling(t, own), writeCeiling(t, other)}
-	if _, err := newRoute(f.in); err != nil {
+	r, err := newRoute(f.in)
+	if err != nil {
 		t.Fatalf("requested model reported: %v", err)
+	}
+	want := probe.CeilingChoice{Ceiling: 512, Reason: "every host passed at 512; baseten left out on the reported model id", LeftOut: []probe.LeftOut{{Route: "baseten",
+		Fault: `the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b", and target.reported_model records no documentation naming both as one build: identifier-not-documented`}}}
+	if !reflect.DeepEqual(r.ceiling, want) || len(r.ceilingProbes) != 2 {
+		t.Fatalf("choice %+v, copies %d", r.ceiling, len(r.ceilingProbes))
+	}
+	other.ExpectedModel = "openai/gpt-oss-120b-v2"
+	f.in.probeFiles = []string{writeCeiling(t, own), writeCeiling(t, other)}
+	if _, err := newRoute(f.in); err == nil || !strings.Contains(err.Error(), "route baseten has no check at 1024; baseten failed at 512") {
+		t.Fatalf("another host reporting the id it expects: %v", err)
 	}
 
 	f = newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
@@ -239,7 +269,7 @@ func TestNewRouteCeilingRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.ceiling != (probe.CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"}) || len(r.ceilingProbes) != 2 ||
+	if !reflect.DeepEqual(r.ceiling, probe.CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"}) || len(r.ceilingProbes) != 2 ||
 		r.ceilingProbes["ceiling-probe-groq-512.json"] == nil || r.ceilingProbes["ceiling-probe-baseten-512.json"] == nil {
 		t.Fatalf("at 512: %+v, copies %d", r.ceiling, len(r.ceilingProbes))
 	}
@@ -252,7 +282,7 @@ func TestNewRouteCeilingRecords(t *testing.T) {
 	if r, err = newRoute(f.in); err != nil {
 		t.Fatal(err)
 	}
-	if r.ceiling != (probe.CeilingChoice{Ceiling: 1024, Reason: "groq failed at 512; every host passed at 1024"}) || len(r.ceilingProbes) != 4 {
+	if !reflect.DeepEqual(r.ceiling, probe.CeilingChoice{Ceiling: 1024, Reason: "groq failed at 512; every host passed at 1024"}) || len(r.ceilingProbes) != 4 {
 		t.Fatalf("fallback: %+v, copies %d", r.ceiling, len(r.ceilingProbes))
 	}
 }

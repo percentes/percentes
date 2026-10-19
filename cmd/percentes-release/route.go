@@ -335,10 +335,11 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // model, whose hosts are the target and release.other_hosts, and requires
 // their choice to run the model at the configured ceiling. Every host's
 // record carries the host's model and byteCap; this route's also carry
-// its adapter and endpoint and none of the values the route withholds
-// (probe.Exposed), the one at the configured ceiling its body's hash, and
-// together no reported model id that keeps the provider-model out
-// (probe.ModelFault).
+// its adapter, endpoint and expected model id and none of the values the
+// route withholds (probe.Exposed), the one at the configured ceiling its
+// body's hash, and together no reported model id that keeps the
+// provider-model out (probe.ModelFault). Another host whose records carry
+// such a fault is left out of the choice (probe.ChooseCeiling).
 func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.CeilingChoice, map[string][]byte, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
@@ -371,6 +372,8 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.C
 		case rec.ByteCap != byteCap:
 			fault = fmt.Sprintf("byte cap %d, want --byte-cap %d", rec.ByteCap, byteCap)
 		case rec.Route != t.Name:
+		case rec.Expected() != t.ExpectedModel():
+			fault = fmt.Sprintf("expected model %q, want %q", rec.Expected(), t.ExpectedModel())
 		case rec.Adapter != t.Adapter:
 			fault = fmt.Sprintf("adapter %q, want %q", rec.Adapter, t.Adapter)
 		case rec.EndpointURL != redact.URL(t.EndpointURL):

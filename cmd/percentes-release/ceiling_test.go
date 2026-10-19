@@ -314,6 +314,77 @@ func TestCeilingCheckConfidential(t *testing.T) {
 	}
 }
 
+// A check whose responses report a model id other than the requested
+// one, with no target.reported_model recorded, is written and exits
+// adverse with the refusal run gives its record.
+func TestCeilingCheckReportedModel(t *testing.T) {
+	f := newCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), testKey)
+	b, err := os.ReadFile(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const body = `{"model": "openai/gpt-oss-120b",`
+	if strings.Count(string(b), body) != 1 {
+		t.Fatalf("configuration: %q not found once", body)
+	}
+	f.cfg = writeFile(t, t.TempDir(), "groq.yaml", []byte(strings.Replace(string(b), body, `{"model": "openai/gpt-oss-120b-v2",`, 1)))
+	var code int
+	out := stdoutOf(t, func() { code, err = ceilingCheckCmd(context.Background(), f.args()) })
+	if err != nil || code != exitAdverse {
+		t.Fatalf("ceiling-check: %d, %v\n%s", code, err, out)
+	}
+	path, rec := f.record(t)
+	if !rec.Ceiling.Pass || !rec.InputBound.Pass || rec.ExpectedModel != "openai/gpt-oss-120b" {
+		t.Fatalf("check %+v, input bound %+v, expected model %q", rec.Ceiling, rec.InputBound, rec.ExpectedModel)
+	}
+	const fault = `the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b", and target.reported_model records no documentation naming both as one build: identifier-not-documented`
+	if line := "groq: REFUSED: run refuses the route (SPEC-HOSTED §2): " + fault + "\n"; !strings.Contains(out, line) {
+		t.Fatalf("output lacks %q:\n%s", line, out)
+	}
+	cfgs, err := loadReleases([]string{f.cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true))
+	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000); err == nil || err.Error() != "run: route groq is not characterized (SPEC-HOSTED §2): "+fault {
+		t.Fatalf("run reads the record: %v", err)
+	}
+}
+
+// The refusal ceiling-check prints is run's on a record reporting a model
+// id: another id than the expected one, or than a recorded
+// target.reported_model. A record reporting none is left to run.
+func TestModelRefusal(t *testing.T) {
+	cfg := releaseConfig(t, "https://api.example.test/openai/v1/chat/completions")
+	tg := &cfg.Target
+	rec := func(models ...string) *probe.ReleaseRecord {
+		r := hostCeiling(cfg, 2000, "groq", 512, true)
+		reports(models...)(&r)
+		return &r
+	}
+	documented := &config.ReportedModel{Name: "openai/gpt-oss-120b-2026", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+	for _, c := range []struct {
+		name     string
+		recorded *config.ReportedModel
+		rec      *probe.ReleaseRecord
+		want     string
+	}{
+		{"requested reported", nil, rec("openai/gpt-oss-120b"), ""},
+		{"another reported", nil, rec("openai/gpt-oss-120b", "openai/gpt-oss-120b-v2"),
+			`the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b", and target.reported_model records no documentation naming both as one build: identifier-not-documented`},
+		{"recorded reported", documented, rec("openai/gpt-oss-120b-2026"), ""},
+		{"requested reported under a record", documented, rec("openai/gpt-oss-120b"),
+			`the ceiling check reported model "openai/gpt-oss-120b", not target.reported_model "openai/gpt-oss-120b-2026"`},
+		{"none reported under a record", documented, rec(), ""},
+		{"none reported", nil, rec(), ""},
+	} {
+		tg.ReportedModel = c.recorded
+		if got := modelRefusal(tg, c.rec); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // A check the start gate blocks ends at its first request, is settled at
 // one request, is recorded, and exits adverse.
 func TestCeilingCheckCmdBlocked(t *testing.T) {

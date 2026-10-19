@@ -284,22 +284,36 @@ type PooledStep struct {
 // the route's adapter reports when the output ceiling stopped the
 // answer. StepS is the configured step window throughput is over.
 // Naming is the route's naming lines (config Naming.Lines), which the
-// route's page prints and a cell's report does not carry.
+// route's page prints and a cell's report does not carry. ModelMismatches
+// lists the route's model_mismatch cells, which the pages set.
 type StepTables struct {
-	Route         string           `json:"route"`
-	Naming        []string         `json:"naming,omitempty"`
-	CeilingTokens int              `json:"ceiling_tokens"`
-	LengthValue   string           `json:"length_value"`
-	DeadlineS     int              `json:"deadline_s"`
-	StepS         float64          `json:"step_s"`
-	HardTimeoutS  int              `json:"hard_timeout_s"`
-	Limits        []admission.Step `json:"limits"`
-	Cells         []CellTable      `json:"cells"`
-	FrameCells    int              `json:"frame_cells"`
-	Pooled        []PooledStep     `json:"pooled,omitempty"`
-	DriftChanges  []DriftChange    `json:"drift_changes,omitempty"`
-	DriftParts    []DriftPart      `json:"drift_parts,omitempty"`
-	WindowClose   *WindowClose     `json:"window_close,omitempty"`
+	Route           string           `json:"route"`
+	Naming          []string         `json:"naming,omitempty"`
+	CeilingTokens   int              `json:"ceiling_tokens"`
+	LengthValue     string           `json:"length_value"`
+	DeadlineS       int              `json:"deadline_s"`
+	StepS           float64          `json:"step_s"`
+	HardTimeoutS    int              `json:"hard_timeout_s"`
+	Limits          []admission.Step `json:"limits"`
+	Cells           []CellTable      `json:"cells"`
+	FrameCells      int              `json:"frame_cells"`
+	Pooled          []PooledStep     `json:"pooled,omitempty"`
+	DriftChanges    []DriftChange    `json:"drift_changes,omitempty"`
+	DriftParts      []DriftPart      `json:"drift_parts,omitempty"`
+	WindowClose     *WindowClose     `json:"window_close,omitempty"`
+	ModelMismatches []ModelMismatch  `json:"model_mismatch_cells,omitempty"`
+}
+
+// ModelMismatch is a cell labelled model_mismatch
+// (evidence.CellModelMismatch), outside the route's frame: the
+// identifier its responses were compared with, every distinct identifier
+// they reported, in request order, and the number of requests that
+// reported another (SPEC-HOSTED §2 reported identifier).
+type ModelMismatch struct {
+	Cell     string   `json:"cell"`
+	Expected string   `json:"expected_model"`
+	Reported []string `json:"reported_models"`
+	Requests int      `json:"model_mismatches"`
 }
 
 // CellRecords is one cell's label, the outcome and inter-chunk gap
@@ -845,6 +859,11 @@ func (t *StepTables) text(frame bool) string {
 		for _, d := range c.Added {
 			w("  added: %s", d)
 		}
+		w("")
+	}
+	for _, m := range t.ModelMismatches {
+		w("-- Cell %s, model_mismatch, outside the frame (SPEC-HOSTED §2): %d requests reported a model other than the expected %q; reported %q --",
+			m.Cell, m.Requests, m.Expected, m.Reported)
 		w("")
 	}
 	switch c := t.WindowClose; {

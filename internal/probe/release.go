@@ -51,13 +51,15 @@ type ReleaseInput struct {
 // over CeilingRequests requests at the configured ceiling, the response
 // shape of each, the limits read and the recorded limit snapshots. The
 // route, adapter, endpoint, model, body hash and byte cap name the
-// request it checked.
+// request it checked; ExpectedModel is the route's expected identifier
+// at the check (config.Target.ExpectedModel).
 type ReleaseRecord struct {
 	SchemaVersion  int       `json:"schema_version"`
 	Route          string    `json:"route"`
 	Adapter        string    `json:"adapter"`
 	EndpointURL    string    `json:"endpoint_url"`
 	RequestedModel string    `json:"requested_model"`
+	ExpectedModel  string    `json:"expected_model,omitempty"`
 	StartUTC       time.Time `json:"start_utc"`
 	EndUTC         time.Time `json:"end_utc"`
 	// BodySHA256 is the hash of the configured body before the user text
@@ -166,6 +168,7 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 		Adapter:        t.Adapter,
 		EndpointURL:    redact.URL(t.EndpointURL),
 		RequestedModel: t.ModelName,
+		ExpectedModel:  t.ExpectedModel(),
 		StartUTC:       time.Now().UTC(),
 		BodySHA256:     hex.EncodeToString(sum[:]),
 		ByteCap:        in.ByteCap,
@@ -270,12 +273,42 @@ func (r *ReleaseRecord) ReportedModels() []string {
 	return out
 }
 
+// Expected is the identifier the record's reported model ids are
+// compared with: ExpectedModel, or RequestedModel in a record that names
+// none.
+func (r *ReleaseRecord) Expected() string {
+	if r.ExpectedModel != "" {
+		return r.ExpectedModel
+	}
+	return r.RequestedModel
+}
+
 // ModelFault says why the reported model ids of recs, the route's own
 // ceiling-check records, keep t's provider-model out (SPEC-HOSTED §2
 // reported identifier): a reported id other than t.ExpectedModel(), or a
 // target.reported_model that no response reported. It is "" when
 // neither holds.
 func ModelFault(t *config.Target, recs []*ReleaseRecord) string {
+	return modelFault(t.ExpectedModel(), t.ReportedModel != nil, recs)
+}
+
+// hostModelFault is ModelFault for recs, one host's records, against the
+// identifier they expect (ReleaseRecord.Expected), which names a
+// target.reported_model where it differs from the requested model. It
+// is a fault when the records expect different identifiers.
+func hostModelFault(recs []*ReleaseRecord) string {
+	want := recs[0].Expected()
+	for _, r := range recs[1:] {
+		if e := r.Expected(); e != want {
+			return fmt.Sprintf("the ceiling-check records expect model %q and %q", want, e)
+		}
+	}
+	return modelFault(want, want != recs[0].RequestedModel, recs)
+}
+
+// modelFault is ModelFault against want, the expected identifier, which
+// documented says a target.reported_model records.
+func modelFault(want string, documented bool, recs []*ReleaseRecord) string {
 	var reported []string
 	for _, r := range recs {
 		for _, m := range r.ReportedModels() {
@@ -284,17 +317,16 @@ func ModelFault(t *config.Target, recs []*ReleaseRecord) string {
 			}
 		}
 	}
-	want := t.ExpectedModel()
 	for _, m := range reported {
 		switch {
 		case m == want:
-		case t.ReportedModel == nil:
+		case !documented:
 			return fmt.Sprintf("the ceiling check reported model %q, the requested %q, and target.reported_model records no documentation naming both as one build: identifier-not-documented", m, want)
 		default:
 			return fmt.Sprintf("the ceiling check reported model %q, not target.reported_model %q", m, want)
 		}
 	}
-	if t.ReportedModel != nil && len(reported) == 0 {
+	if documented && len(reported) == 0 {
 		return fmt.Sprintf("target.reported_model %q is recorded and no response of the ceiling check reported a model", want)
 	}
 	return ""
@@ -481,29 +513,72 @@ func snapshot(l config.Limit, dir string) Snapshot {
 }
 
 // CeilingChoice is the ceiling one model runs at on every host, or its
-// exclusion with the reason.
+// exclusion with the reason. LeftOut lists the hosts the choice was made
+// without.
 type CeilingChoice struct {
-	Ceiling  int    `json:"ceiling,omitempty"`
-	Excluded bool   `json:"excluded,omitempty"`
-	Reason   string `json:"reason"`
+	Ceiling  int       `json:"ceiling,omitempty"`
+	Excluded bool      `json:"excluded,omitempty"`
+	Reason   string    `json:"reason"`
+	LeftOut  []LeftOut `json:"left_out,omitempty"`
+}
+
+// LeftOut is a host left out of its model's ceiling choice, with the
+// fault in its records' reported model ids (hostModelFault). Its own
+// route's run refuses it on that fault (ModelFault).
+type LeftOut struct {
+	Route string `json:"route"`
+	Fault string `json:"model_fault"`
 }
 
 // ChooseCeiling applies the ceiling rule (SPEC-HOSTED HA3 point 7) to the
 // release probe records of hosts, every route of one model: 512 when
 // every host passed the check at 512; otherwise 1,024 when every host
-// passed it at 1,024; otherwise the model is excluded. It returns an
-// error when a record is of no host, was blocked at the start gate or
-// failed the input bound, a host has two records at one ceiling, or a
-// record the rule needs is missing.
+// passed it at 1,024; otherwise the model is excluded. A host whose
+// records report a model id other than the one they expect, or expect a
+// recorded target.reported_model that none reported, is left out of the
+// choice; the model is excluded when every host is. It returns an error
+// when a record is of no host, or a record of a host not left out was
+// blocked at the start gate or failed the input bound, a host has two
+// records at one ceiling, or a record the rule needs is missing.
 func ChooseCeiling(hosts []string, recs []*ReleaseRecord) (CeilingChoice, error) {
 	low, high := config.PinnedReleaseCeilings[0], config.PinnedReleaseCeilings[1]
 	if len(hosts) == 0 {
 		return CeilingChoice{}, errors.New("probe: no hosts")
 	}
-	at := map[int]map[string]*ReleaseRecord{low: {}, high: {}}
+	byHost := map[string][]*ReleaseRecord{}
 	for _, r := range recs {
 		if !slices.Contains(hosts, r.Route) {
 			return CeilingChoice{}, fmt.Errorf("probe: route %s is not a host of the model (%s)", r.Route, strings.Join(hosts, ", "))
+		}
+		byHost[r.Route] = append(byHost[r.Route], r)
+	}
+	all := slices.Clone(hosts)
+	slices.Sort(all)
+	var routes, leftNames []string
+	var left []LeftOut
+	for _, rt := range all {
+		if rs := byHost[rt]; len(rs) > 0 {
+			if f := hostModelFault(rs); f != "" {
+				left, leftNames = append(left, LeftOut{Route: rt, Fault: f}), append(leftNames, rt)
+				continue
+			}
+		}
+		routes = append(routes, rt)
+	}
+	choice := func(c CeilingChoice) CeilingChoice {
+		if len(left) > 0 {
+			c.Reason += fmt.Sprintf("; %s left out on the reported model id", strings.Join(leftNames, ", "))
+			c.LeftOut = left
+		}
+		return c
+	}
+	if len(routes) == 0 {
+		return CeilingChoice{Excluded: true, Reason: fmt.Sprintf("%s left out on the reported model id", strings.Join(leftNames, ", ")), LeftOut: left}, nil
+	}
+	at := map[int]map[string]*ReleaseRecord{low: {}, high: {}}
+	for _, r := range recs {
+		if !slices.Contains(routes, r.Route) {
+			continue
 		}
 		if r.Start.Blocked {
 			return CeilingChoice{}, fmt.Errorf("probe: route %s: the probe was blocked (%s); it is not a ceiling check", r.Route, r.Start.Reason)
@@ -521,8 +596,6 @@ func ChooseCeiling(hosts []string, recs []*ReleaseRecord) (CeilingChoice, error)
 		}
 		byRoute[r.Route] = r
 	}
-	routes := slices.Clone(hosts)
-	slices.Sort(routes)
 	failed := func(ceiling int) []string {
 		var out []string
 		for _, rt := range routes {
@@ -545,13 +618,13 @@ func ChooseCeiling(hosts []string, recs []*ReleaseRecord) (CeilingChoice, error)
 	}
 	lowFailed := failed(low)
 	if len(lowFailed) == 0 {
-		return CeilingChoice{Ceiling: low, Reason: fmt.Sprintf("every host passed at %d", low)}, nil
+		return choice(CeilingChoice{Ceiling: low, Reason: fmt.Sprintf("every host passed at %d", low)}), nil
 	}
 	if err := need(high); err != nil {
 		return CeilingChoice{}, fmt.Errorf("%w; %s failed at %d", err, strings.Join(lowFailed, ", "), low)
 	}
 	if f := failed(high); len(f) > 0 {
-		return CeilingChoice{Excluded: true, Reason: fmt.Sprintf("%s failed at %d", strings.Join(f, ", "), high)}, nil
+		return choice(CeilingChoice{Excluded: true, Reason: fmt.Sprintf("%s failed at %d", strings.Join(f, ", "), high)}), nil
 	}
-	return CeilingChoice{Ceiling: high, Reason: fmt.Sprintf("%s failed at %d; every host passed at %d", strings.Join(lowFailed, ", "), low, high)}, nil
+	return choice(CeilingChoice{Ceiling: high, Reason: fmt.Sprintf("%s failed at %d; every host passed at %d", strings.Join(lowFailed, ", "), low, high)}), nil
 }

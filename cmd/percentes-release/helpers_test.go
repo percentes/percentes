@@ -190,13 +190,13 @@ func otherHosts(cfg *config.Config) []string {
 
 // hostCeiling is host route's ceiling check record at ceiling, passed or
 // not, of cfg's model at byteCap: cfg's request when route is cfg's, else
-// route's model from release.other_hosts.
+// route's model from release.other_hosts, expected as requested.
 func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pass bool) probe.ReleaseRecord {
 	rec := *passedCeiling(cfg, byteCap)
 	rec.Route, rec.Ceiling.Ceiling = route, ceiling
 	for _, h := range cfg.Release.OtherHosts {
 		if h.Route == route {
-			rec.RequestedModel = h.Model
+			rec.RequestedModel, rec.ExpectedModel = h.Model, h.Model
 		}
 	}
 	if !pass {

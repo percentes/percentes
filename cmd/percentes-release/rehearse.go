@@ -163,7 +163,7 @@ func passedCeiling(cfg *config.Config, byteCap int) *probe.ReleaseRecord {
 	}
 	sum := sha256.Sum256([]byte(t.Body))
 	return &probe.ReleaseRecord{SchemaVersion: 1, Route: t.Name, Adapter: t.Adapter, EndpointURL: redact.URL(t.EndpointURL),
-		RequestedModel: t.ModelName, BodySHA256: hex.EncodeToString(sum[:]), ByteCap: byteCap,
+		RequestedModel: t.ModelName, ExpectedModel: t.ExpectedModel(), BodySHA256: hex.EncodeToString(sum[:]), ByteCap: byteCap,
 		Ceiling:    probe.CeilingCheck{Ceiling: cfg.Release.Shape.CeilingTokens, LengthValue: length, Sent: probe.CeilingRequests, Passed: probe.CeilingRequests, Pass: true},
 		InputBound: probe.InputCheck{BoundTokens: cfg.Release.Shape.InputBoundTokens, Reported: probe.CeilingRequests, Pass: true}}
 }
