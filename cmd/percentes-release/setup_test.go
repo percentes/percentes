@@ -480,7 +480,8 @@ func mustCaps(t *testing.T, cfg *config.Config) admission.Caps {
 
 // run reads a record of every host of the model: at 512 when every host
 // passed there, and for the fallback at both ceilings, the route's 512
-// check carrying the 512 body. Another host's record is copied with the
+// check carrying the 512 body. It refuses a 1,024 record where every host
+// passed at 512. Another host's record is copied with the
 // rate-limit values of a public limit, and with the stand-in for those
 // of a confidential one.
 func TestNewRouteCeilingRecords(t *testing.T) {
@@ -493,6 +494,13 @@ func TestNewRouteCeilingRecords(t *testing.T) {
 	if !reflect.DeepEqual(r.ceiling, probe.CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"}) || len(r.ceilingProbes) != 2 ||
 		r.ceilingProbes["ceiling-probe-groq-512.json"] == nil || r.ceilingProbes["ceiling-probe-baseten-512.json"] == nil {
 		t.Fatalf("at 512: %+v, copies %d", r.ceiling, len(r.ceilingProbes))
+	}
+
+	f = newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
+	unneeded := writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 1024, true, f.open))
+	f.in.probeFiles = append(f.in.probeFiles, unneeded)
+	if _, err := newRoute(f.in); err == nil || err.Error() != "ceiling probe "+unneeded+": route baseten at 1024: the ceiling check chose 512, which does not need this record" {
+		t.Fatalf("a 1,024 record at 512: %v", err)
 	}
 
 	f = newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")

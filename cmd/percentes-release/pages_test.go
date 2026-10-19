@@ -542,10 +542,12 @@ func TestPagesCmdRefusals(t *testing.T) {
 // manifest records another choice.
 func TestPagesHostGroup(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
-	extra := func(f *fixture) {
-		for _, h := range []string{"baseten", "groq"} {
-			f.in.probeFiles = append(f.in.probeFiles, writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, h, 1024, true, f.open)))
+	retaken := func(f *fixture) {
+		rec := hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true, f.open)
+		for i := range rec.Requests {
+			rec.Requests[i].Exchange.DispatchUTC = rec.Requests[i].Exchange.DispatchUTC.Add(time.Hour)
 		}
+		f.in.probeFiles[1] = writeCeiling(t, rec)
 	}
 	for _, c := range []struct {
 		name     string
@@ -554,7 +556,7 @@ func TestPagesHostGroup(t *testing.T) {
 		want     string
 	}{
 		{"one choice", func(*fixture) {}, nil, ""},
-		{"other probe records", extra, nil, "pages: routes groq and baseten, hosts of one model, carry different ceiling probe records"},
+		{"other probe records", retaken, nil, "pages: routes groq and baseten, hosts of one model, carry different ceiling probe records"},
 		{"other choice", func(*fixture) {}, func(m *evidence.Manifest) {
 			m.Release.Ceiling.Reason = "groq failed at 512; every host passed at 1024"
 		}, "pages: routes groq and baseten, hosts of one model, ran at different ceiling choices"},

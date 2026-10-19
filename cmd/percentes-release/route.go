@@ -435,7 +435,8 @@ func hostTargets(cfg *config.Config, hostCfgs []*config.Config, sched *schedule.
 // Another host's records also carry none of the values their snapshots'
 // confidential markings withhold (probe.ExposedByMarking), and another
 // host whose records carry a model fault is left out of the choice
-// (probe.ChooseCeiling).
+// (probe.ChooseCeiling). It refuses a record at a ceiling the choice does
+// not need: one at 1,024 where the choice is 512.
 func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, files []string, byteCap int, ledger string) (probe.CeilingChoice, map[string][]byte, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
@@ -464,6 +465,7 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 		}
 	}
 	var recs, own []*probe.ReleaseRecord
+	var paths []string
 	copies := map[string][]byte{}
 	for _, f := range files {
 		b, err := os.ReadFile(f)
@@ -521,7 +523,7 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 		if fault != "" {
 			return none, nil, fmt.Errorf("ceiling probe %s: route %s at %d: %s", f, rec.Route, rec.Ceiling.Ceiling, fault)
 		}
-		recs = append(recs, &rec)
+		recs, paths = append(recs, &rec), append(paths, f)
 		if rec.Route == t.Name {
 			own = append(own, &rec)
 		}
@@ -539,6 +541,11 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 		return none, nil, fmt.Errorf("run: the ceiling rule excludes the model: %s", choice.Reason)
 	case choice.Ceiling != cfg.Release.Shape.CeilingTokens:
 		return none, nil, fmt.Errorf("run: the ceiling check chose %d (%s); the configuration runs at %d", choice.Ceiling, choice.Reason, cfg.Release.Shape.CeilingTokens)
+	}
+	for i, rec := range recs {
+		if c := rec.Ceiling.Ceiling; c != config.PinnedReleaseCeilings[0] && c != choice.Ceiling {
+			return none, nil, fmt.Errorf("ceiling probe %s: route %s at %d: the ceiling check chose %d, which does not need this record", paths[i], rec.Route, c, choice.Ceiling)
+		}
 	}
 	return choice, copies, nil
 }
