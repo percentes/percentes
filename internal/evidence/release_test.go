@@ -31,8 +31,10 @@ var releasePair = [2]string{"report.json", "report.txt"}
 func newReleaseRun(t *testing.T, profile config.Profile) *releaseRun {
 	t.Helper()
 	r := &releaseRun{dir: t.TempDir(), root: t.TempDir(), cfg: []byte("profile: " + string(profile) + "\n")}
+	expected := ""
 	if profile == config.ProfileRelease {
-		r.cfg = releaseCfg(t).Raw
+		cfg := releaseCfg(t)
+		r.cfg, expected = cfg.Raw, cfg.Target.ExpectedModel()
 	}
 	r.runDir = filepath.Join(r.root, releaseRunDir)
 	measured := int64(config.PinnedPilotWarmupS) * int64(time.Second)
@@ -64,7 +66,7 @@ func newReleaseRun(t *testing.T, profile config.Profile) *releaseRun {
 		Profile:       profile,
 		Source:        Source{Revision: "0123456789abcdef0123456789abcdef01234567", Modified: true},
 		Config:        refOf("pilot.yaml", r.cfg),
-		Endpoint:      Endpoint{Protocols: map[string]int{"HTTP/1.1": 3}},
+		Endpoint:      Endpoint{ExpectedModel: expected, Protocols: map[string]int{"HTTP/1.1": 3}},
 		Artifacts: []FileRef{
 			put(r.dir, AttemptsFile, attempts.Bytes()),
 			put(r.dir, releasePair[0], []byte("{}\n")),

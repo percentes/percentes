@@ -44,9 +44,11 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 // the start ends the cell before the ladder, unless it is a 401 or 403
 // the route's previous probed cell also saw, which stops the route; a
 // documented billing refusal on the probe or inside the ladder stops the
-// route; an EMFILE error ends the ladder and the cell is client-invalid.
-// Every finished cell keeps its evidence with a labelled manifest and a
-// report pair (retain). An error is an execution error.
+// route; an EMFILE error ends the ladder and the cell is client-invalid;
+// a response whose reported model differs from the expected one labels
+// the cell model_mismatch. Every finished cell keeps its evidence with a
+// labelled manifest and a report pair (retain). An error is an execution
+// error.
 func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord, err error) {
 	dir := r.cellDir(run)
 	rec = r.newRecord(run)
@@ -534,7 +536,9 @@ func fileExists(path string) bool {
 
 // cellOutcome classifies a run that reached the ladder. cause is the
 // cell context's cause, nil when it was never cancelled. A route stop or
-// any other cancellation stops the route; an EMFILE error, a failed
+// any other cancellation stops the route; otherwise a response whose
+// reported model differs from the expected one labels the cell
+// model_mismatch (SPEC-HOSTED §2); otherwise an EMFILE error, a failed
 // client-validity gate, a tripwire, a protocol other than HTTP/1.1, a
 // flagged clock or a canary that did not start makes the cell
 // client-invalid; otherwise the cell counts, with the reason the backoff
@@ -600,9 +604,15 @@ func cellOutcome(res *loadgen.Result, runErr, cause error, clock *evidence.Clock
 	if l := res.Ladder; l != nil && l.End != "" {
 		ended = append(ended, fmt.Sprintf("ladder ended at step %d: %s", l.EndStep, l.End))
 	}
+	if res.ModelMismatches > 0 {
+		invalid = append([]string{fmt.Sprintf("model mismatch (SPEC-HOSTED §2): %d requests reported a model other than the expected %q; reported %q",
+			res.ModelMismatches, res.ExpectedModel, res.ReportedModels)}, invalid...)
+	}
 	switch {
 	case len(stopped) > 0:
 		return outcomeStopped, append(append(stopped, invalid...), ended...)
+	case res.ModelMismatches > 0:
+		return outcomeMismatch, append(invalid, ended...)
 	case len(invalid) > 0:
 		return outcomeInvalid, append(invalid, ended...)
 	}

@@ -94,8 +94,8 @@ type Request struct {
 	// carried.
 	SystemFingerprint string `json:"system_fingerprint,omitempty"`
 	// ModelMismatch lists, in arrival order, each distinct model id a
-	// chunk reported that differs from the requested one, up to
-	// modelMismatchLimit ids.
+	// chunk reported that differs from the expected one (ExpectedModel),
+	// up to modelMismatchLimit ids.
 	ModelMismatch []string `json:"model_mismatch,omitempty"`
 	// StreamError is the first in-band error object, compacted, with
 	// credentials masked and cut at errorBodyLimit bytes.
@@ -179,12 +179,14 @@ type Result struct {
 	// fault.t_inject_offset_s).
 	TInjectNs int64 `json:"t_inject_ns"`
 
-	// RequestedModel is the model id every request sent. ReportedModels
-	// lists each distinct id recorded on the requests (reported_model and
+	// RequestedModel is the model id every request sent; ExpectedModel
+	// the id each reported one is compared with. ReportedModels lists
+	// each distinct id recorded on the requests (reported_model and
 	// model_mismatch), in request order. ModelMismatches counts requests
 	// with a mismatch; SplitSeries marks a hosted run that had one, which
 	// splits the series at this run.
 	RequestedModel  string   `json:"requested_model,omitempty"`
+	ExpectedModel   string   `json:"expected_model,omitempty"`
 	ReportedModels  []string `json:"reported_models,omitempty"`
 	ModelMismatches int      `json:"model_mismatches,omitempty"`
 	SplitSeries     bool     `json:"split_series,omitempty"`
@@ -393,12 +395,14 @@ type gen struct {
 	client *http.Client
 	epoch  time.Time
 	filler string
-	// model and apiKey are resolved once at Run start: the requested
-	// model name (mock default when unset) and the key from
-	// cfg.Target.APIKeyEnv ("" = send no key header).
-	model  string
-	apiKey string
-	trip   *tripwire
+	// model, expected and apiKey are resolved once at Run start: the
+	// requested model name (mock default when unset), the identifier
+	// reported ones are compared with ("" compares with model) and the key
+	// from cfg.Target.APIKeyEnv ("" = send no key header).
+	model    string
+	expected string
+	apiKey   string
+	trip     *tripwire
 	// cases are a pilot run's user texts by request index.
 	cases []string
 	// gates evaluates the client-validity gate; a ladder step's verdict
@@ -504,6 +508,7 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 		client:     &http.Client{Transport: transport},
 		filler:     buildFiller(cfg.Load.InputLengthTokens),
 		model:      model,
+		expected:   ExpectedModel(cfg),
 		apiKey:     apiKey,
 		trip:       newTripwire(cfg, len(schedule)),
 		cases:      cases,
@@ -762,6 +767,16 @@ func RequestedModel(cfg *config.Config) string {
 	return cfg.Target.ModelName
 }
 
+// ExpectedModel is the identifier each response's reported model is
+// compared with under cfg: target.reported_model's name where recorded,
+// otherwise RequestedModel.
+func ExpectedModel(cfg *config.Config) string {
+	if r := cfg.Target.ReportedModel; r != nil {
+		return r.Name
+	}
+	return RequestedModel(cfg)
+}
+
 // CompareModels fills res's model fields from its requests, as Run does.
 func CompareModels(cfg *config.Config, res *Result) {
 	compareModels(cfg, RequestedModel(cfg), res)
@@ -817,7 +832,10 @@ func checkProtocols(cfg *config.Config, requests []Request) error {
 
 // compareModels fills res's model fields from its requests.
 func compareModels(cfg *config.Config, requested string, res *Result) {
-	res.RequestedModel = requested
+	res.RequestedModel, res.ExpectedModel = requested, requested
+	if r := cfg.Target.ReportedModel; r != nil {
+		res.ExpectedModel = r.Name
+	}
 	for i := range res.Requests {
 		r := &res.Requests[i]
 		for _, m := range append([]string{r.ReportedModel}, r.ModelMismatch...) {

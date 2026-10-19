@@ -478,6 +478,10 @@ type Target struct {
 	// Retention records whether the frame store keeps the route's model
 	// output and the terms that setting rests on.
 	Retention *Retention `yaml:"retention,omitempty" json:"retention,omitempty"`
+	// ReportedModel records the identifier the route's responses carry in
+	// place of model_name, where the provider's model documentation names
+	// both as one fixed build (SPEC-HOSTED §2 reported identifier).
+	ReportedModel *ReportedModel `yaml:"reported_model,omitempty" json:"reported_model,omitempty"`
 }
 
 // ResponseShape names where a target's stream chunks carry each field.

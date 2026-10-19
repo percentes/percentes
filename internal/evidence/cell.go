@@ -19,14 +19,17 @@ import (
 // never does. A missed cell never started. An interrupted cell's process
 // ended or failed before its evidence was written: its requests went with
 // the process, so its attempts file and frame store are empty, and its
-// own dispatch series is the running one as last written.
+// own dispatch series is the running one as last written. A
+// model_mismatch cell had a response whose reported model identifier
+// differs from the expected one (SPEC-HOSTED §2 reported identifier).
 const (
-	CellCounted     = "counted"
-	CellInvalid     = "client_invalid"
-	CellBlocked     = "blocked"
-	CellStopped     = "stopped"
-	CellMissed      = "missed"
-	CellInterrupted = "interrupted"
+	CellCounted       = "counted"
+	CellInvalid       = "client_invalid"
+	CellModelMismatch = "model_mismatch"
+	CellBlocked       = "blocked"
+	CellStopped       = "stopped"
+	CellMissed        = "missed"
+	CellInterrupted   = "interrupted"
 )
 
 // Cell is a release run's cell record in its manifest (SPEC-HOSTED HA3
@@ -201,8 +204,9 @@ func checkCell(cfg *config.Config, t *config.Target, c *Cell) error {
 }
 
 // checkLabel reports every way c's label disagrees with itself and with
-// the manifest's run validity, invalid reasons and gates.
-func (c *Cell) checkLabel(runValid bool, invalid []string, gates []validity.Gate) error {
+// the manifest's run validity, invalid reasons, gates and count of
+// requests whose reported model differs from the expected one.
+func (c *Cell) checkLabel(runValid bool, invalid []string, gates []validity.Gate, mismatches int) error {
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
 	switch c.Outcome {
@@ -223,7 +227,10 @@ func (c *Cell) checkLabel(runValid bool, invalid []string, gates []validity.Gate
 		if !whole {
 			fail("counted with no whole-ladder G2 result")
 		}
-	case CellInvalid, CellBlocked, CellStopped, CellMissed, CellInterrupted:
+		if mismatches > 0 {
+			fail("counted, and %d requests reported a model other than the expected one", mismatches)
+		}
+	case CellInvalid, CellModelMismatch, CellBlocked, CellStopped, CellMissed, CellInterrupted:
 		if len(c.Reasons) == 0 {
 			fail("%s with no reason", c.Outcome)
 		}
@@ -231,7 +238,10 @@ func (c *Cell) checkLabel(runValid bool, invalid []string, gates []validity.Gate
 			fail("%s %q, and the manifest records valid=%t %q", c.Outcome, c.Reasons, runValid, invalid)
 		}
 	default:
-		fail("outcome %q is not %s, %s, %s, %s, %s or %s", c.Outcome, CellCounted, CellInvalid, CellBlocked, CellStopped, CellMissed, CellInterrupted)
+		fail("outcome %q is not %s, %s, %s, %s, %s, %s or %s", c.Outcome, CellCounted, CellInvalid, CellModelMismatch, CellBlocked, CellStopped, CellMissed, CellInterrupted)
+	}
+	if c.Outcome == CellModelMismatch && mismatches == 0 {
+		fail("%s, and no request reported a model other than the expected one", c.Outcome)
 	}
 	if (c.Outcome == CellBlocked || c.Outcome == CellMissed) && c.LadderStarted {
 		fail("%s after its ladder started", c.Outcome)
@@ -243,7 +253,9 @@ func (c *Cell) checkLabel(runValid bool, invalid []string, gates []validity.Gate
 }
 
 // Counted reports whether m is a release cell that enters its route's
-// frame (SPEC-HOSTED HA3 point 9).
+// frame (SPEC-HOSTED HA3 point 9): counted, valid, and with no request
+// whose reported model differs from the expected one.
 func (m *Manifest) Counted() bool {
-	return m.Profile == config.ProfileRelease && m.Release != nil && m.Release.Outcome == CellCounted && m.RunValid
+	return m.Profile == config.ProfileRelease && m.Release != nil && m.Release.Outcome == CellCounted && m.RunValid &&
+		m.Endpoint.ModelMismatches == 0
 }

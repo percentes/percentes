@@ -29,12 +29,14 @@ import (
 const cellFile = "cell.json"
 
 // Cell outcomes. A cell counts when its ladder ran to the top admitted
-// step's drain or the backoff rule ended it; every other finished outcome
-// takes a re-run within the route's bound.
+// step's drain or the backoff rule ended it, with no response reporting a
+// model other than the expected one; every other finished outcome takes a
+// re-run within the route's bound.
 const (
 	outcomeRunning     = "running"
 	outcomeCounted     = evidence.CellCounted
 	outcomeInvalid     = evidence.CellInvalid
+	outcomeMismatch    = evidence.CellModelMismatch
 	outcomeBlocked     = evidence.CellBlocked
 	outcomeStopped     = evidence.CellStopped
 	outcomeMissed      = "missed"
@@ -334,8 +336,9 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // their choice to run the model at the configured ceiling. Every host's
 // record carries the host's model and byteCap; this route's also carry
 // its adapter and endpoint and none of the values the route withholds
-// (probe.Exposed), and the one at the configured ceiling its body's
-// hash.
+// (probe.Exposed), the one at the configured ceiling its body's hash, and
+// together no reported model id that keeps the provider-model out
+// (probe.ModelFault).
 func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.CeilingChoice, map[string][]byte, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
@@ -348,7 +351,7 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.C
 	}
 	sum := sha256.Sum256([]byte(t.Body))
 	body := hex.EncodeToString(sum[:])
-	var recs []*probe.ReleaseRecord
+	var recs, own []*probe.ReleaseRecord
 	copies := map[string][]byte{}
 	for _, f := range files {
 		b, err := os.ReadFile(f)
@@ -383,7 +386,13 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.C
 			return none, nil, fmt.Errorf("ceiling probe %s: route %s at %d: %s", f, rec.Route, rec.Ceiling.Ceiling, fault)
 		}
 		recs = append(recs, &rec)
+		if rec.Route == t.Name {
+			own = append(own, &rec)
+		}
 		copies[fmt.Sprintf("ceiling-probe-%s-%d.json", rec.Route, rec.Ceiling.Ceiling)] = b
+	}
+	if fault := probe.ModelFault(t, own); fault != "" {
+		return none, nil, fmt.Errorf("run: route %s is not characterized (SPEC-HOSTED §2): %s", t.Name, fault)
 	}
 	choice, err := probe.ChooseCeiling(hosts, recs)
 	if err != nil {

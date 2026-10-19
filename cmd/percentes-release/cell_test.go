@@ -723,6 +723,60 @@ func TestCellRetainsNoModelOutput(t *testing.T) {
 	}
 }
 
+// A cell whose responses report a model id other than the expected one is
+// labelled model_mismatch with the expected and every reported id: it
+// passes the completeness check and the replay, stays out of the frame,
+// and takes a re-run within the route's bound.
+func TestCellModelMismatch(t *testing.T) {
+	stream := strings.ReplaceAll(chatStream, `"model":"openai/gpt-oss-120b"`, `"model":"openai/gpt-oss-120b-v2"`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body) //nolint:errcheck
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, stream) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	r, _ := newTestRoute(t, releaseConfig(t, srv.URL+"/openai/v1/chat/completions"), "+0.005032")
+	shortLadder(r)
+	var run schedule.Run
+	for _, a := range r.runs {
+		if r.hasAttempt2(a.Label) {
+			run = a
+			break
+		}
+	}
+	if run.Label == "" {
+		t.Fatal("the test schedule has no cell with an attempt 2")
+	}
+	rec, err := r.runCell(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `model mismatch (SPEC-HOSTED §2): %d requests reported a model other than the expected "openai/gpt-oss-120b"; reported ["openai/gpt-oss-120b-v2"]`
+	if rec.Outcome != outcomeMismatch || len(rec.Reasons) == 0 || !strings.HasPrefix(rec.Reasons[0], "model mismatch (SPEC-HOSTED §2): ") ||
+		rec.Reasons[0] != fmt.Sprintf(want, rec.Sent.Warmup+rec.Sent.Measured) {
+		t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
+	}
+	m, text := checkRetained(t, r, run)
+	if m.Counted() || m.RunValid || m.Release.Outcome != evidence.CellModelMismatch || m.Endpoint.ExpectedModel != "openai/gpt-oss-120b" ||
+		!slices.Equal(m.Endpoint.ReportedModels, []string{"openai/gpt-oss-120b-v2"}) || m.Endpoint.ModelMismatches != rec.Sent.Warmup+rec.Sent.Measured {
+		t.Fatalf("manifest: counted %t, valid %t, outcome %s, endpoint %+v", m.Counted(), m.RunValid, m.Release.Outcome, m.Endpoint)
+	}
+	if !strings.Contains(text, "Outcome: model_mismatch; a labelled record, outside the route's frame") {
+		t.Errorf("report text:\n%s", text)
+	}
+	st, err := r.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reran := false
+	for _, rr := range st.runs {
+		reran = reran || rr.Label == run.Label && rr.Attempt == 2
+	}
+	if !reran {
+		t.Errorf("no re-run of %s in %v", run.Label, st.runs)
+	}
+}
+
 // A failed balance check, a balance below the cell's reservation, and a
 // balance unavailable where the route records no balance_unavailable
 // ruling each block the cell before admission: the ledger gains no line

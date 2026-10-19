@@ -138,6 +138,22 @@ func TestNewRouteRefusals(t *testing.T) {
 			fallback(t, f.in.cfg)
 			ceiling(t, f, pass(f, "groq", 512, false), pass(f, "groq", 1024, true), pass(f, "baseten", 512, true))
 		}, "route baseten has no check at 1024; groq failed at 512"},
+		{"reported model differs", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", reports("openai/gpt-oss-120b", "openai/gpt-oss-120b-v2")), pass(f, "baseten", 512, true))
+		}, `run: route groq is not characterized (SPEC-HOSTED §2): the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b", and target.reported_model records no documentation naming both as one build: identifier-not-documented`},
+		{"reported model differs at the fallback's 512 check", func(t *testing.T, f *fixture) {
+			fallback(t, f.in.cfg)
+			at512 := with(f, "groq", reports("openai/gpt-oss-120b-v2"))
+			at512.Ceiling.Pass = false
+			ceiling(t, f, at512, pass(f, "groq", 1024, true), pass(f, "baseten", 512, true), pass(f, "baseten", 1024, true))
+		}, `the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b"`},
+		{"reported model other than the recorded one", func(t *testing.T, f *fixture) {
+			f.in.cfg.Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+			ceiling(t, f, with(f, "groq", reports("openai/gpt-oss-120b")), pass(f, "baseten", 512, true))
+		}, `the ceiling check reported model "openai/gpt-oss-120b", not target.reported_model "openai/gpt-oss-120b-2026"`},
+		{"recorded model never reported", func(t *testing.T, f *fixture) {
+			f.in.cfg.Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+		}, `target.reported_model "openai/gpt-oss-120b-2026" is recorded and no response of the ceiling check reported a model`},
 		{"no ceiling probe", func(t *testing.T, f *fixture) { f.in.probeFiles = nil }, "--ceiling-probe is required"},
 		{"byte cap", func(t *testing.T, f *fixture) { f.in.byteCap = 0 }, "--byte-cap 0"},
 		{"account date", func(t *testing.T, f *fixture) { f.in.accountCreated = "15 September" }, "--account-created"},
@@ -155,6 +171,41 @@ func TestNewRouteRefusals(t *testing.T) {
 				t.Fatalf("got %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// reports gives a ceiling check record one request per model, each
+// reporting that model.
+func reports(models ...string) func(r *probe.ReleaseRecord) {
+	return func(r *probe.ReleaseRecord) {
+		for i, m := range models {
+			r.Requests = append(r.Requests, probe.CheckRequest{Index: i, Shape: &probe.Shape{Models: []string{m}}, Pass: true})
+		}
+	}
+}
+
+// A route whose own ceiling check reported only the expected model id
+// starts: the requested one, or target.reported_model's where recorded.
+// Another host's reported ids are its own route's to check.
+func TestNewRouteReportedModel(t *testing.T) {
+	enoughOpenFiles(t)
+	f := newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
+	own := hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true)
+	reports("openai/gpt-oss-120b", "openai/gpt-oss-120b")(&own)
+	other := hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true)
+	reports("openai/gpt-oss-120b-v2")(&other)
+	f.in.probeFiles = []string{writeCeiling(t, own), writeCeiling(t, other)}
+	if _, err := newRoute(f.in); err != nil {
+		t.Fatalf("requested model reported: %v", err)
+	}
+
+	f = newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
+	f.in.cfg.Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+	own = hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true)
+	reports("openai/gpt-oss-120b-2026")(&own)
+	f.in.probeFiles = []string{writeCeiling(t, own), writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true))}
+	if _, err := newRoute(f.in); err != nil {
+		t.Fatalf("recorded model reported: %v", err)
 	}
 }
 
@@ -264,6 +315,7 @@ func TestCellOutcome(t *testing.T) {
 	}
 	clean := &evidence.ClockRecord{}
 	stop := &routeStop{"HTTP 402"}
+	mismatch := `model mismatch (SPEC-HOSTED §2): 2 requests reported a model other than the expected "m"; reported ["m" "m-v2"]`
 	for _, tc := range []struct {
 		name    string
 		res     func() *loadgen.Result
@@ -307,6 +359,22 @@ func TestCellOutcome(t *testing.T) {
 		{"protocol", ok, errors.New("loadgen: hosted target: 1 responses not over HTTP/1.1"), nil, clean, nil, outcomeInvalid, []string{"loadgen: hosted target: 1 responses not over HTTP/1.1"}},
 		{"clock unread", ok, nil, nil, &evidence.ClockRecord{Flag: "clock offset: no reading"}, nil, outcomeInvalid, []string{"clock offset: no reading"}},
 		{"canary", ok, nil, nil, clean, errors.New("listen"), outcomeInvalid, []string{"loopback canary did not start: listen"}},
+		{"model mismatch", func() *loadgen.Result {
+			r := ok()
+			r.ExpectedModel, r.ReportedModels, r.ModelMismatches = "m", []string{"m", "m-v2"}, 2
+			r.Ladder.End, r.Ladder.EndStep = loadgen.LadderEndBackoff, 2
+			return r
+		}, nil, nil, clean, nil, outcomeMismatch, []string{mismatch, "ladder ended at step 2: backoff"}},
+		{"model mismatch and client-invalid", func() *loadgen.Result {
+			r := ok()
+			r.ExpectedModel, r.ReportedModels, r.ModelMismatches = "m", []string{"m", "m-v2"}, 2
+			return r
+		}, nil, nil, clean, errors.New("listen"), outcomeMismatch, []string{mismatch, "loopback canary did not start: listen"}},
+		{"model mismatch on a stopped route", func() *loadgen.Result {
+			r := ok()
+			r.ExpectedModel, r.ReportedModels, r.ModelMismatches = "m", []string{"m", "m-v2"}, 2
+			return r
+		}, errors.New("aborted"), loadgen.ErrOperatorAbort, clean, nil, outcomeStopped, []string{"stopped: operator abort", mismatch}},
 	} {
 		got, reasons := cellOutcome(tc.res(), tc.runErr, tc.cause, tc.clock, tc.canary)
 		if got != tc.outcome || !slices.Equal(reasons, tc.reasons) {

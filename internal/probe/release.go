@@ -253,6 +253,53 @@ func (r *ReleaseRecord) Sent() int {
 	return n
 }
 
+// ReportedModels lists each distinct model id the record's responses
+// reported, in request order.
+func (r *ReleaseRecord) ReportedModels() []string {
+	var out []string
+	for _, q := range r.Requests {
+		if q.Shape == nil {
+			continue
+		}
+		for _, m := range q.Shape.Models {
+			if !slices.Contains(out, m) {
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+// ModelFault says why the reported model ids of recs, the route's own
+// ceiling-check records, keep t's provider-model out (SPEC-HOSTED §2
+// reported identifier): a reported id other than t.ExpectedModel(), or a
+// target.reported_model that no response reported. It is "" when
+// neither holds.
+func ModelFault(t *config.Target, recs []*ReleaseRecord) string {
+	var reported []string
+	for _, r := range recs {
+		for _, m := range r.ReportedModels() {
+			if !slices.Contains(reported, m) {
+				reported = append(reported, m)
+			}
+		}
+	}
+	want := t.ExpectedModel()
+	for _, m := range reported {
+		switch {
+		case m == want:
+		case t.ReportedModel == nil:
+			return fmt.Sprintf("the ceiling check reported model %q, the requested %q, and target.reported_model records no documentation naming both as one build: identifier-not-documented", m, want)
+		default:
+			return fmt.Sprintf("the ceiling check reported model %q, not target.reported_model %q", m, want)
+		}
+	}
+	if t.ReportedModel != nil && len(reported) == 0 {
+		return fmt.Sprintf("target.reported_model %q is recorded and no response of the ceiling check reported a model", want)
+	}
+	return ""
+}
+
 // checkRequest reads one request's finish reason and token counts and
 // applies the ceiling check to it.
 func checkRequest(i int, r posted, length string, m masker) CheckRequest {

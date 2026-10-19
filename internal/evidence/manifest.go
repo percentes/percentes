@@ -144,6 +144,7 @@ type Endpoint struct {
 	BaseURL         string         `json:"base_url,omitempty"`
 	EndpointURL     string         `json:"endpoint_url,omitempty"`
 	RequestedModel  string         `json:"requested_model"`
+	ExpectedModel   string         `json:"expected_model,omitempty"`
 	ReportedModels  []string       `json:"reported_models,omitempty"`
 	ModelMismatches int            `json:"model_mismatches,omitempty"`
 	SplitSeries     bool           `json:"split_series,omitempty"`
@@ -277,7 +278,7 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		if err := checkCell(cfg, t, in.Release); err != nil {
 			return nil, err
 		}
-		if err := in.Release.checkLabel(in.RunValid, in.InvalidReasons, gates); err != nil {
+		if err := in.Release.checkLabel(in.RunValid, in.InvalidReasons, gates, res.ModelMismatches); err != nil {
 			return nil, err
 		}
 		if !in.Release.LadderStarted && len(res.Requests) > 0 {
@@ -323,6 +324,7 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		BaseURL:         redact.URL(t.BaseURL),
 		EndpointURL:     redact.URL(t.EndpointURL),
 		RequestedModel:  t.ModelName,
+		ExpectedModel:   t.ExpectedModel(),
 		ReportedModels:  res.ReportedModels,
 		ModelMismatches: res.ModelMismatches,
 		SplitSeries:     res.SplitSeries,

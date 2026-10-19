@@ -86,7 +86,7 @@ func TestCompareModels(t *testing.T) {
 			cfg := &config.Config{Target: config.Target{Hosted: c.hosted}}
 			res := &Result{Requests: c.requests}
 			compareModels(cfg, "m", res)
-			if res.RequestedModel != "m" || !slices.Equal(res.ReportedModels, c.reported) ||
+			if res.RequestedModel != "m" || res.ExpectedModel != "m" || !slices.Equal(res.ReportedModels, c.reported) ||
 				res.ModelMismatches != c.count || res.SplitSeries != c.split {
 				t.Fatalf("requested %q reported %q mismatches %d split %v, want %q %d %v",
 					res.RequestedModel, res.ReportedModels, res.ModelMismatches, res.SplitSeries, c.reported, c.count, c.split)
@@ -146,5 +146,58 @@ func TestRunRecordsModelSplit(t *testing.T) {
 		if strings.Contains(string(b), `"split_series":true`) != hosted {
 			t.Fatalf("hosted=%v: split_series in JSON: %s", hosted, b)
 		}
+	}
+}
+
+// Under a recorded target.reported_model, responses reporting that
+// identifier match and responses reporting the requested one do not.
+func TestRunComparesExpectedModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		model := "m-2026-10-01"
+		if m := indexRE.FindSubmatch(body); m != nil {
+			if i, _ := strconv.Atoi(string(m[1])); i >= 2 {
+				model = "m"
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(modelFrame(model, "hi") + stopFrame + doneFrame)) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &config.Config{Target: config.Target{BaseURL: srv.URL, Hosted: true, ModelName: "m",
+		ReportedModel: &config.ReportedModel{Name: "m-2026-10-01"}}}
+	cfg.Load.RateRPS = 10
+	cfg.Load.ArrivalProcess = "deterministic"
+	cfg.Load.Connections = 2
+	cfg.Load.MaxTokens = 8
+	cfg.Run.Phases = config.Phases{BaselineS: 0.5}
+	if got := ExpectedModel(cfg); got != "m-2026-10-01" {
+		t.Fatalf("ExpectedModel %q", got)
+	}
+	res, err := Run(context.Background(), cfg, nil)
+	if res == nil {
+		t.Fatalf("no result: %v", err)
+	}
+	n := len(res.Requests)
+	if n < 3 {
+		t.Fatalf("%d requests, want at least 3", n)
+	}
+	for i := range res.Requests {
+		r := &res.Requests[i]
+		want := []string(nil)
+		if r.Index >= 2 {
+			want = []string{"m"}
+		}
+		if r.Outcome != OutcomeCompleted || !slices.Equal(r.ModelMismatch, want) {
+			t.Fatalf("request %d %v/%q mismatch %q, want %q", r.Index, r.Outcome, r.ErrClass, r.ModelMismatch, want)
+		}
+	}
+	if res.RequestedModel != "m" || res.ExpectedModel != "m-2026-10-01" || res.ModelMismatches != n-2 ||
+		!slices.Equal(res.ReportedModels, []string{"m-2026-10-01", "m"}) {
+		t.Fatalf("requested %q expected %q reported %q mismatches %d of %d", res.RequestedModel, res.ExpectedModel, res.ReportedModels, res.ModelMismatches, n)
+	}
+	cfg.Target.ReportedModel = nil
+	if got := ExpectedModel(cfg); got != "m" {
+		t.Fatalf("ExpectedModel with no record %q", got)
 	}
 }

@@ -251,7 +251,7 @@ func maskSecretPrefixTail(b []byte, secrets []string) {
 }
 
 // recordChunk keeps a chunk's usage, finish reason, reported model and
-// any mismatch with the requested one, system fingerprint, in-band error,
+// any mismatch with the expected one, system fingerprint, in-band error,
 // refusal text and reasoning arrival on r.
 func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	if !c.known {
@@ -278,7 +278,11 @@ func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	if c.fingerprint != "" && r.SystemFingerprint == "" {
 		r.SystemFingerprint = c.fingerprint
 	}
-	if c.model != "" && c.model != g.model &&
+	expected := g.expected
+	if expected == "" {
+		expected = g.model
+	}
+	if c.model != "" && c.model != expected &&
 		len(r.ModelMismatch) < modelMismatchLimit && !slices.Contains(r.ModelMismatch, c.model) {
 		r.ModelMismatch = append(r.ModelMismatch, c.model)
 	}

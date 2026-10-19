@@ -517,6 +517,40 @@ func TestReleaseRetention(t *testing.T) {
 	}
 }
 
+// A recorded reported_model becomes the expected identifier; without one
+// it is model_name. Each part of the record is required, and its name
+// must differ from model_name.
+func TestReleaseReportedModel(t *testing.T) {
+	c := loadRef(t, releaseRef)
+	if c.Target.ReportedModel != nil || c.Target.ExpectedModel() != c.Target.ModelName {
+		t.Fatalf("reference: reported_model %+v, expected %q", c.Target.ReportedModel, c.Target.ExpectedModel())
+	}
+	c.Target.ReportedModel = &ReportedModel{Name: "m-2026-10-01", Source: "https://example.com/models", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+	if err := c.Validate(); err != nil || c.Target.ExpectedModel() != "m-2026-10-01" {
+		t.Fatalf("recorded: %v, expected %q", err, c.Target.ExpectedModel())
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*ReportedModel)
+		want string
+	}{
+		{"no name", func(r *ReportedModel) { r.Name = "" }, `target.reported_model.name: a model identifier with no surrounding space required, got ""`},
+		{"spaced name", func(r *ReportedModel) { r.Name = " m" }, `target.reported_model.name: a model identifier with no surrounding space required, got " m"`},
+		{"model_name", func(r *ReportedModel) { r.Name = "openai/gpt-oss-120b" }, `target.reported_model.name: "openai/gpt-oss-120b" is target.model_name`},
+		{"no source", func(r *ReportedModel) { r.Source = " " }, "target.reported_model.source: required"},
+		{"bad source", func(r *ReportedModel) { r.Source = "https://" }, `target.reported_model.source: "https://" is not an http or https URL with a host`},
+		{"bad date", func(r *ReportedModel) { r.Retrieved = "12 Oct 2026" }, `target.reported_model.retrieved: a date as YYYY-MM-DD required, got "12 Oct 2026"`},
+		{"bad hash", func(r *ReportedModel) { r.SHA256 = "" }, "target.reported_model.sha256: 64 lowercase hex characters required"},
+	} {
+		c := loadRef(t, releaseRef)
+		c.Target.ReportedModel = &ReportedModel{Name: "m-2026-10-01", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+		tc.edit(c.Target.ReportedModel)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want %q, got %v", tc.name, tc.want, err)
+		}
+	}
+}
+
 // The release section and the release-only target fields refuse to load
 // under every other profile.
 func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
@@ -554,17 +588,20 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 		},
 		func(t *Target) { t.BalanceUnavailable = rel.Target.BalanceUnavailable },
 		func(t *Target) { t.Retention = rel.Target.Retention },
+		func(t *Target) {
+			t.ReportedModel = &ReportedModel{Name: "m-2026-10-01", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+		},
 	} {
 		for _, ref := range []string{acRef, experimentRef} {
 			c := loadRef(t, ref)
 			f(&c.Target)
-			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals, balance_unavailable and retention are set on the release profile's target only") {
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "target: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals, balance_unavailable, retention and reported_model are set on the release profile's target only") {
 				t.Errorf("%s: got %v", ref, err)
 			}
 		}
 		p := loadRef(t, pilotRef)
 		f(&p.Pilot.Targets[1])
-		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals, balance_unavailable and retention are set on the release profile's target only") {
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "pilot.targets[1]: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals, balance_unavailable, retention and reported_model are set on the release profile's target only") {
 			t.Errorf("pilot: got %v", err)
 		}
 	}

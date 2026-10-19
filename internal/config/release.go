@@ -217,6 +217,28 @@ func (t *Target) KeepsModelOutput() bool {
 	return t.Retention == nil || t.Retention.ModelOutput != RetainNone
 }
 
+// ReportedModel is the identifier a route's responses carry in place of
+// target.model_name, with the model documentation page that names both as
+// one fixed build.
+type ReportedModel struct {
+	Name string `yaml:"name" json:"name"`
+	// Source, Retrieved and SHA256 record the model documentation page as
+	// a Limit's.
+	Source    string `yaml:"source" json:"source"`
+	Retrieved string `yaml:"retrieved" json:"retrieved"`
+	SHA256    string `yaml:"sha256" json:"sha256"`
+}
+
+// ExpectedModel is the identifier each response's reported model is
+// compared with: target.reported_model's name where recorded, otherwise
+// target.model_name.
+func (t *Target) ExpectedModel() string {
+	if t.ReportedModel != nil {
+		return t.ReportedModel.Name
+	}
+	return t.ModelName
+}
+
 // Naming is the route's provider-naming record.
 type Naming struct {
 	// Provider is the word mark printed for the route, as plain text.
@@ -496,6 +518,9 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 	} else {
 		validateRetention(v, field+".retention", t.Retention)
 	}
+	if r := t.ReportedModel; r != nil {
+		validateReportedModel(v, field+".reported_model", r, t.ModelName)
+	}
 	seen := map[int]bool{}
 	for i := range t.StatusDocs {
 		validateStatusDoc(v, fmt.Sprintf("%s.status_docs[%d]", field, i), &t.StatusDocs[i], seen)
@@ -696,6 +721,29 @@ func validateRetention(v *validator, field string, r *Retention) {
 	}
 }
 
+// validateReportedModel requires an identifier other than model_name and
+// the model documentation page's source, retrieval date and hash.
+func validateReportedModel(v *validator, field string, r *ReportedModel, requested string) {
+	switch {
+	case r.Name == "" || strings.TrimSpace(r.Name) != r.Name:
+		v.errf("%s.name: a model identifier with no surrounding space required, got %q", field, r.Name)
+	case r.Name == requested:
+		v.errf("%s.name: %q is target.model_name", field, r.Name)
+	}
+	switch src := strings.TrimSpace(r.Source); {
+	case src == "":
+		v.errf("%s.source: required (the model documentation page's URL or the retained copy's file name)", field)
+	case strings.Contains(src, "://") && !parsesAsURL(src):
+		v.errf("%s.source: %q is not an http or https URL with a host", field, r.Source)
+	}
+	if _, err := time.Parse(time.DateOnly, r.Retrieved); err != nil {
+		v.errf("%s.retrieved: a date as YYYY-MM-DD required, got %q", field, r.Retrieved)
+	}
+	if !sha256Hex(r.SHA256) {
+		v.errf("%s.sha256: 64 lowercase hex characters required, got %q", field, r.SHA256)
+	}
+}
+
 // validateStatusDoc requires a status other than 200 that no earlier
 // entry documents, a meaning, a source and a retrieval date.
 func validateStatusDoc(v *validator, field string, d *StatusDoc, seen map[int]bool) {
@@ -810,8 +858,8 @@ func validateRetainedHeaders(v *validator, field string, t *Target) {
 // outside the release profile.
 func refuseReleaseFields(v *validator, field string, t *Target) {
 	if t.Adapter != "" || len(t.Limits) > 0 || len(t.UnpublishedLimits) > 0 || len(t.RetainedHeaders) > 0 || t.Naming != nil || len(t.StatusDocs) > 0 || len(t.ErrorDocs) > 0 ||
-		len(t.BillingRefusals) > 0 || t.BalanceUnavailable != nil || t.Retention != nil {
-		v.errf("%s: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals, balance_unavailable and retention are set on the release profile's target only", field)
+		len(t.BillingRefusals) > 0 || t.BalanceUnavailable != nil || t.Retention != nil || t.ReportedModel != nil {
+		v.errf("%s: adapter, limits, unpublished_limits, retained_headers, naming, status_docs, error_docs, billing_refusals, balance_unavailable, retention and reported_model are set on the release profile's target only", field)
 	}
 }
 

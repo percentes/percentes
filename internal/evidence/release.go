@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,28 +45,30 @@ func WriteConfigCopy(dir string, cfg *config.Config) error {
 
 // CheckRelease reads the manifest in r.Dir and returns it when the run
 // has every SPEC-HOSTED §9 artifact: the commit record (a revision, and
-// the source diff when the build was modified), the verbatim config, the
-// attempts file, the report pair, the manifest, the scorer output on
-// every measured attempt of a pilot run, the cell record with a
+// the source diff when the build was modified), the verbatim config,
+// the attempts file, the report pair, the manifest, the scorer output
+// on every measured attempt of a pilot run, the cell record with a
 // consistent label and aggregate dispatch series, whose own run's part
 // counts the attempts file's dispatches, and inter-chunk gap histograms
-// that agree with the attempts file's completions, and an attempts file
-// without answer text for a release run, and the frame store with one
-// line per attempt. A release cell that does not count passes as a
-// labelled record, which never enters its route's frame
-// (Manifest.Counted); one whose ladder never started, and an interrupted
-// one, has empty attempts and frame files, and an interrupted cell's own
-// dispatch series need not be final or match its attempts file. Every
-// file the manifest names must exist with the SHA-256 and size it
-// records: the config, the attempts file, the report pair and the clock,
-// status and balance records in r.Dir, a release run's start balance
-// among them, and the frame store and the operator copies in the run's
-// frame directory. r.Config is the file as loaded: the manifest names
-// the file as published (config.Config.Published), a release cell's
-// ceiling-rule verdict must be the one published from r.Config's limits
+// that agree with the attempts file's completions, model fields that
+// agree with the attempts file's records and the configuration's
+// expected model, and an attempts file without answer text for a
+// release run, and the frame store with one line per attempt. A release
+// cell that does not count passes as a labelled record, which never
+// enters its route's frame (Manifest.Counted); one whose ladder never
+// started, and an interrupted one, has empty attempts and frame files,
+// and an interrupted cell's own dispatch series need not be final or
+// match its attempts file. Every file the manifest names must exist
+// with the SHA-256 and size it records: the config, the attempts file,
+// the report pair and the clock, status and balance records in r.Dir, a
+// release run's start balance among them, and the frame store and the
+// operator copies in the run's frame directory. r.Config is the file as
+// loaded: the manifest names the file as published
+// (config.Config.Published), a release cell's ceiling-rule verdict must
+// be the one published from r.Config's limits
 // (admission.CheckPublished), and where the two files differ the run's
-// frame directory keeps r.Config as ConfigCopyFile. Otherwise it returns
-// an error naming every missing item and every mismatch.
+// frame directory keeps r.Config as ConfigCopyFile. Otherwise it
+// returns an error naming every missing item and every mismatch.
 func CheckRelease(r Release) (*Manifest, error) {
 	m, err := ReadManifest(filepath.Join(r.Dir, ManifestFile))
 	if err != nil {
@@ -162,8 +165,16 @@ func CheckRelease(r Release) (*Manifest, error) {
 		case c == nil:
 			fail("cell record: not in the manifest")
 		default:
-			if err := c.checkLabel(m.RunValid, m.InvalidReasons, m.Gates); err != nil {
+			if err := c.checkLabel(m.RunValid, m.InvalidReasons, m.Gates, m.Endpoint.ModelMismatches); err != nil {
 				fail("cell record: %v", err)
+			}
+			if cfg != nil && m.Endpoint.ExpectedModel != cfg.Target.ExpectedModel() {
+				fail("expected model %q, the configuration's %q", m.Endpoint.ExpectedModel, cfg.Target.ExpectedModel())
+			}
+			if attempts != nil {
+				for _, p := range modelProblems(m.Endpoint, recs) {
+					fail("%s", p)
+				}
 			}
 			switch {
 			case c.Admission == nil:
@@ -250,6 +261,38 @@ func CheckRelease(r Release) (*Manifest, error) {
 		return nil, fmt.Errorf("evidence: release refused: %s", strings.Join(problems, "; "))
 	}
 	return m, nil
+}
+
+// modelProblems reports every way e's model fields disagree with the
+// attempts' records: each record whose first reported model differs from
+// the expected one lists it as a mismatch, no mismatch is the expected
+// one, and e counts the records with a mismatch and lists every model
+// they report, in record order.
+func modelProblems(e Endpoint, recs []Record) []string {
+	var problems []string
+	var reported []string
+	n := 0
+	for i := range recs {
+		r := &recs[i]
+		if r.ReportedModel != "" && r.ReportedModel != e.ExpectedModel && !slices.Contains(r.ModelMismatch, r.ReportedModel) {
+			problems = append(problems, fmt.Sprintf("%s: attempt %d reported model %q, the expected %q, with no mismatch recorded", AttemptsFile, r.Index, r.ReportedModel, e.ExpectedModel))
+		}
+		if slices.Contains(r.ModelMismatch, e.ExpectedModel) {
+			problems = append(problems, fmt.Sprintf("%s: attempt %d records the expected model %q as a mismatch", AttemptsFile, r.Index, e.ExpectedModel))
+		}
+		if len(r.ModelMismatch) > 0 {
+			n++
+		}
+		for _, m := range append([]string{r.ReportedModel}, r.ModelMismatch...) {
+			if m != "" && !slices.Contains(reported, m) {
+				reported = append(reported, m)
+			}
+		}
+	}
+	if n != e.ModelMismatches || !slices.Equal(reported, e.ReportedModels) {
+		problems = append(problems, fmt.Sprintf("models: %s gives %d mismatches over reported %q, the manifest %d over %q", AttemptsFile, n, reported, e.ModelMismatches, e.ReportedModels))
+	}
+	return problems
 }
 
 // readRef reads the file ref names under base and returns its bytes when

@@ -56,6 +56,7 @@ func releaseCell(cfg *config.Config) *Cell {
 // gate report and a one-step ladder whose gates passed.
 func releaseInput(in *ManifestInput, cfg *config.Config) {
 	res := *in.Result
+	res.ReportedModels, res.ModelMismatches, res.SplitSeries = nil, 0, false
 	res.Gates = loadgen.GateReport{Pass: true, CPUMeasured: true}
 	res.Ladder = &loadgen.LadderRecord{Steps: []loadgen.StepRecord{{RateRPS: 0.25, Attempted: true, Gates: &loadgen.GateReport{Pass: true, CPUMeasured: true}}}}
 	in.Config, in.Target, in.Result, in.Gates = cfg, &cfg.Target, &res, nil
@@ -389,6 +390,62 @@ func TestManifestCellLabel(t *testing.T) {
 	}
 }
 
+// A cell with a request whose reported model differs from the expected
+// one is labelled model_mismatch and never counts; the label needs such a
+// request. The manifest names the expected model.
+func TestManifestModelMismatchLabel(t *testing.T) {
+	in, _ := manifestRun(t)
+	cfg := releaseCfg(t)
+	cfg.Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
+	releaseInput(&in, cfg)
+	base := *in.Result
+	reason := []string{`reported model "openai/gpt-oss-120b" differs from the expected "openai/gpt-oss-120b-2026" on 1 requests (SPEC-HOSTED §2)`}
+	for _, tc := range []struct {
+		name       string
+		outcome    string
+		reasons    []string
+		valid      bool
+		mismatches int
+		want       string
+	}{
+		{"labelled", CellModelMismatch, reason, false, 1, ""},
+		{"counted with a mismatch", CellCounted, nil, true, 1, "counted, and 1 requests reported a model other than the expected one"},
+		{"labelled with no mismatch", CellModelMismatch, reason, false, 0, "model_mismatch, and no request reported a model other than the expected one"},
+		{"labelled with no reason", CellModelMismatch, nil, false, 1, "model_mismatch with no reason"},
+		{"labelled and valid", CellModelMismatch, reason, true, 1, "and the manifest records valid=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := releaseCell(cfg)
+			c.Outcome, c.Reasons = tc.outcome, tc.reasons
+			res := base
+			res.ModelMismatches = tc.mismatches
+			in.Result, in.Release, in.RunValid, in.InvalidReasons = &res, c, tc.valid, nil
+			if !tc.valid {
+				in.InvalidReasons = tc.reasons
+			}
+			m, err := NewManifest(in)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatal(err)
+			case tc.want == "":
+				if m.Counted() || m.Endpoint.ExpectedModel != "openai/gpt-oss-120b-2026" || m.Endpoint.RequestedModel != "openai/gpt-oss-120b" {
+					t.Errorf("counted %t, expected %q, requested %q", m.Counted(), m.Endpoint.ExpectedModel, m.Endpoint.RequestedModel)
+				}
+			case err == nil || !strings.Contains(err.Error(), tc.want):
+				t.Errorf("error %v, want %q", err, tc.want)
+			}
+		})
+	}
+	m := &Manifest{Profile: config.ProfileRelease, Release: releaseCell(cfg), RunValid: true}
+	if !m.Counted() {
+		t.Fatal("a counted cell with no mismatch does not count")
+	}
+	m.Endpoint.ModelMismatches = 1
+	if m.Counted() {
+		t.Error("a counted cell with a mismatch counts")
+	}
+}
+
 // A release cell's manifest carries G2 over the whole ladder and at each
 // attempted step, and hosted-G6 at each step its measured records reach:
 // completion within the deadline over the step's scheduled requests,
@@ -684,6 +741,92 @@ func TestCheckReleaseCellAndAnswer(t *testing.T) {
 	r.write(t)
 	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "cell record: dispatch_aggregate: counts sum to 6, the sources to 5") {
 		t.Errorf("counts off the sources: %v", err)
+	}
+}
+
+// The manifest's model fields agree with the attempts file's records and
+// the configuration's expected model: each record whose first reported
+// model differs from the expected one carries the mismatch.
+func TestCheckReleaseModels(t *testing.T) {
+	r := newReleaseRun(t, config.ProfileRelease)
+	cfg := releaseCfg(t)
+	r.m.Release = releaseCell(cfg)
+	r.m.Gates = []validity.Gate{validity.G2(0, &loadgen.GateReport{Pass: true})}
+	writeRecs := func(edit func([]Record)) {
+		t.Helper()
+		recs, err := ReadRecords(bytes.NewReader(mustRead(t, filepath.Join(r.dir, AttemptsFile))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range recs {
+			recs[i].Answer, recs[i].Score, recs[i].ReportedModel, recs[i].ModelMismatch = nil, nil, cfg.Target.ModelName, nil
+		}
+		edit(recs)
+		var b bytes.Buffer
+		if err := Write(&b, recs); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(r.dir, AttemptsFile), b.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.m.Artifacts[0] = refOf(AttemptsFile, b.Bytes())
+		r.write(t)
+	}
+	r.m.Endpoint.ReportedModels = []string{cfg.Target.ModelName}
+	writeRecs(func([]Record) {})
+	if _, err := r.check(); err != nil {
+		t.Fatalf("matching models: %v", err)
+	}
+
+	// A labelled cell whose records carry the mismatch passes and never
+	// counts; a counted one is refused.
+	other := "openai/gpt-oss-120b-v2"
+	reason := []string{"reported model differs"}
+	writeRecs(func(recs []Record) { recs[2].ReportedModel, recs[2].ModelMismatch = other, []string{other} })
+	r.m.Endpoint.ReportedModels, r.m.Endpoint.ModelMismatches = []string{cfg.Target.ModelName, other}, 1
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "cell label: counted, and 1 requests reported a model other than the expected one") {
+		t.Errorf("counted cell with a mismatch: %v", err)
+	}
+	r.m.Release.Outcome, r.m.Release.Reasons, r.m.RunValid, r.m.InvalidReasons = CellModelMismatch, reason, false, reason
+	r.write(t)
+	if m, err := r.check(); err != nil || m.Counted() {
+		t.Fatalf("model_mismatch cell: %v", err)
+	}
+
+	// The manifest's count and list must be the records'.
+	r.m.Endpoint.ModelMismatches = 2
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "models: "+AttemptsFile+" gives 1 mismatches") {
+		t.Errorf("count off the records: %v", err)
+	}
+	r.m.Endpoint.ModelMismatches = 1
+
+	// A record whose first reported model is not the expected one carries
+	// it as a mismatch, and no mismatch is the expected model.
+	writeRecs(func(recs []Record) { recs[2].ReportedModel = other })
+	r.m.Endpoint.ModelMismatches = 0
+	r.m.Release.Outcome, r.m.Release.Reasons, r.m.RunValid, r.m.InvalidReasons = CellCounted, nil, true, nil
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), `attempt 2 reported model "openai/gpt-oss-120b-v2", the expected "openai/gpt-oss-120b", with no mismatch recorded`) {
+		t.Errorf("unrecorded mismatch: %v", err)
+	}
+	writeRecs(func(recs []Record) { recs[1].ModelMismatch = []string{cfg.Target.ModelName} })
+	r.m.Endpoint.ReportedModels, r.m.Endpoint.ModelMismatches = []string{cfg.Target.ModelName}, 1
+	r.m.Release.Outcome, r.m.Release.Reasons, r.m.RunValid, r.m.InvalidReasons = CellModelMismatch, reason, false, reason
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), `attempt 1 records the expected model "openai/gpt-oss-120b" as a mismatch`) {
+		t.Errorf("expected model as a mismatch: %v", err)
+	}
+
+	// The expected model is the configuration's.
+	writeRecs(func([]Record) {})
+	r.m.Endpoint.ModelMismatches = 0
+	r.m.Release.Outcome, r.m.Release.Reasons, r.m.RunValid, r.m.InvalidReasons = CellCounted, nil, true, nil
+	r.m.Endpoint.ExpectedModel = "openai/gpt-oss-120b-2026"
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), `expected model "openai/gpt-oss-120b-2026", the configuration's "openai/gpt-oss-120b"`) {
+		t.Errorf("expected model off the configuration: %v", err)
 	}
 }
 

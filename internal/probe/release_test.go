@@ -896,3 +896,52 @@ func TestChooseCeiling(t *testing.T) {
 		}
 	}
 }
+
+// The route's own ceiling-check records keep the provider-model out when
+// a response reported a model id other than the expected one, or when
+// target.reported_model is recorded and no response reported a model.
+func TestModelFault(t *testing.T) {
+	noSpacing(t)
+	addr := startShaped(t, mock.Shape{Answer: "The customer was billed twice."})
+	cfg := releaseConfig(t, "http://"+addr+"/v1/chat/completions")
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	tg := &cfg.Target
+	if got := rec.ReportedModels(); len(got) != 1 || got[0] != "openai/gpt-oss-120b" {
+		t.Fatalf("reported %q", got)
+	}
+	if f := ModelFault(tg, []*ReleaseRecord{rec}); f != "" {
+		t.Fatalf("requested model reported: %s", f)
+	}
+	tg.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026"}
+	if f := ModelFault(tg, []*ReleaseRecord{rec}); f != `the ceiling check reported model "openai/gpt-oss-120b", not target.reported_model "openai/gpt-oss-120b-2026"` {
+		t.Errorf("recorded another model: %s", f)
+	}
+	tg.ReportedModel = nil
+	tg.ModelName = "openai/gpt-oss-120b-2026"
+	if f := ModelFault(tg, []*ReleaseRecord{rec}); f != `the ceiling check reported model "openai/gpt-oss-120b", the requested "openai/gpt-oss-120b-2026", and target.reported_model records no documentation naming both as one build: identifier-not-documented` {
+		t.Errorf("requested another model: %s", f)
+	}
+	tg.ModelName, tg.ReportedModel = "m", &config.ReportedModel{Name: "openai/gpt-oss-120b"}
+	if f := ModelFault(tg, []*ReleaseRecord{rec}); f != "" {
+		t.Errorf("recorded model reported: %s", f)
+	}
+
+	// Every record counts, in order; a record with no reported model
+	// faults only a recorded reported_model.
+	silent := &ReleaseRecord{Requests: []CheckRequest{{Shape: &Shape{}}, {}}}
+	other := &ReleaseRecord{Requests: []CheckRequest{{Shape: &Shape{Models: []string{"m", "m-v2"}}}}}
+	if got := (&ReleaseRecord{Requests: append(other.Requests, rec.Requests...)}).ReportedModels(); fmt.Sprint(got) != "[m m-v2 openai/gpt-oss-120b]" {
+		t.Errorf("reported %q", got)
+	}
+	tg.ModelName, tg.ReportedModel = "m", nil
+	if f := ModelFault(tg, []*ReleaseRecord{silent}); f != "" {
+		t.Errorf("no model reported: %s", f)
+	}
+	if f := ModelFault(tg, []*ReleaseRecord{silent, other}); !strings.Contains(f, `reported model "m-v2", the requested "m"`) {
+		t.Errorf("second record: %s", f)
+	}
+	tg.ReportedModel = &config.ReportedModel{Name: "m-2026"}
+	if f := ModelFault(tg, []*ReleaseRecord{silent}); f != `target.reported_model "m-2026" is recorded and no response of the ceiling check reported a model` {
+		t.Errorf("recorded model, none reported: %s", f)
+	}
+}

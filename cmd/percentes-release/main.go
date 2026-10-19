@@ -13,10 +13,11 @@
 // a cell stopped or blocked before its ladder. A missed cell, and one
 // whose process ended or failed during it, gets its labelled pair from
 // what its directory holds when the process next reads the route's
-// records. A cell that does not count is re-run on its attempt 2 date
-// within the route's two re-runs. After the last cell the refresh command
-// runs once more and the records read after it are the route's
-// window-close record.
+// records. A cell in which a response reported a model identifier other
+// than the expected one is labelled model_mismatch. A cell that does not
+// count is re-run on its attempt 2 date within the route's two re-runs.
+// After the last cell the refresh command runs once more and the records
+// read after it are the route's window-close record.
 // Each route of a release runs as its own process on one client host, all
 // writing under one --out directory. The key comes from the env file
 // named with --env, never from the inherited environment, and is never
