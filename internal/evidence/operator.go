@@ -248,9 +248,9 @@ func (op *Operator) Withhold(read []RefreshedLimit) {
 // publishes: the provider, client host, cell or a role, or a record's
 // path, URL or note. The account tier, which the provider fixes, is not
 // searched. The value is searched in each form config.ValueForms gives:
-// decimal, also with trailing zeros and with its whole part grouped in
-// threes by a comma or a space character, and as strconv.FormatFloat
-// prints it in format 'e' or 'E' (%g and %G print that or the decimal).
+// decimal, also with trailing zeros, with its whole part grouped in
+// threes and with a decimal comma, and as strconv.FormatFloat prints it
+// in format 'e' or 'E' (%g and %G print that or the decimal).
 // The refusal names each field and the limit's dimension, and neither
 // the value nor the file's name.
 func (op *Operator) CheckConfidential(t *config.Target) error {
