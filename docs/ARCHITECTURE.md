@@ -514,7 +514,7 @@ hosted-G6 ([The release runner](#the-release-runner)):
 | Open-file limit | soft limit at least 65,536 | route start | refusal to start | `checkOpenFiles` |
 | Balance command | one is given and parses | route start | refusal to start; a release manifest without its start balance record is refused | `ParseBalanceCommand`, `evidence.NewManifest` |
 | Frozen inputs | the schedule froze this route's configuration as published and this ledger by their SHA-256 (256-bit Secure Hash Algorithm) hashes, the configuration as loaded by its HMAC-SHA256 under the release key `--release-key` names, and the route's host group; at each cell the ledger still has the frozen open line, its first | route start; each cell's ledger reads | refusal to start; at a cell, the cell is labelled interrupted and `run` exits 1 | `checkFrozen`, `checkLedger`, `Ledger.Bind`, `ledgerEntries` |
-| Ceiling records | one record per host of the route's model at 512, and at 1,024 when any host failed at 512, each bound to the request it checked and naming in `ledger_sha256` the ledger the schedule froze, with its results re-derived from its requests; another host whose records carry a reported-model fault is left out of the choice, and its records are then neither required at a ceiling nor checked for the start gate or the input bound | route start | refusal to start | `readCeilingProbes`, `ReleaseRecord.Verify`, `probe.ChooseCeiling` |
+| Ceiling records | one record per host of the route's model at 512, and at 1,024 when any host failed at 512, each bound to the request it checked and naming in `ledger_sha256` the ledger the schedule froze, with its results re-derived from its requests; another host's records are also judged against that host's configuration as the schedule froze it (`--host-config`); another host whose records carry a reported-model fault is left out of the choice, and its records are then neither required at a ceiling nor checked for the start gate or the input bound | route start | refusal to start | `hostTargets`, `readCeilingProbes`, `ReleaseRecord.Verify`, `probe.ChooseCeiling` |
 | Reported model at the check | the route's own ceiling-check records expect the configuration's expected identifier and report no other, and some response reported a recorded `target.reported_model` | the ceiling check; route start | `ceiling-check` prints a `REFUSED` line and exits 2 where its record reports an identifier with such a fault; `run` refuses to start | `modelRefusal`, `readCeilingProbes`, `probe.ModelFault` |
 | Ledger prices | the ledger's highest price at the cell bounds and at the ceiling-check bounds covers the ceiling rule's verdict | route start | refusal to start | `State.Covers` |
 | Clock offset | at most 60 s | cell start | the route stops; the cell is retained and labelled | `runCell` |
@@ -1090,6 +1090,7 @@ their outputs and refuses to start on any of these.
 | the profile is not `release` | `newRoute` |
 | the schedule does not name the route, or does not re-derive from its own input | `schedule.Load`, `Schedule.Runs` |
 | the schedule freezes no configuration of the route, or froze another host group, another SHA-256 of the configuration as published, or no HMAC-SHA256 of the configuration as loaded or another one under the key `--release-key` names | `checkFrozen` |
+| a route in `release.other_hosts` has no `--host-config`; a `--host-config` file is not under the `release` profile, is of a route `release.other_hosts` does not list or of one already given, or is not the configuration the schedule froze for its route, as above | `hostTargets`, `checkFrozen` |
 | the operator file fails to load, the build has no version-control revision, or the tree was modified and no `source_diff` record is given | `evidence.LoadOperator`, `evidence.CheckSource` |
 | the open-file soft limit is below 65,536 | `checkOpenFiles` |
 | the frame root is inside the source tree | `evidence.CheckFramesRoot` |
@@ -1097,7 +1098,7 @@ their outputs and refuses to start on any of these.
 | the schedule freezes no ledger, or the ledger's open line has another SHA-256 than the one the schedule froze | `checkLedger` |
 | the ledger's caps differ from the configuration's, the ledger holds no price line for the route, or its prices do not cover the ceiling rule's verdict at the cell bounds and at the ceiling-check bounds | `State.CheckRelease`, `routePrice`, `State.Covers` |
 | the ceiling rule admits no step | `newRoute`, after `admission.CeilingRule` |
-| no `--ceiling-probe` record is given; a record's bytes differ from the encoding `ceiling-check` writes of the record they decode to, as with a value or text after it or a key written twice; a record is of a route outside the model's host group, or carries another model or byte cap, or names in `ledger_sha256` a ledger other than the one the schedule froze; a record of this route carries another adapter, endpoint or expected model identifier, a body hash other than that of `target.body` at the record's ceiling, or a value the route withholds; another host's record carries a value its own confidential markings withhold; a record's stored results differ from the ones its requests give; a record of a host not left out of the choice was blocked at the start gate or failed its input bound; a host's record at a needed ceiling is missing; the records exclude the model or choose a ceiling other than the configuration's; or the route's own records report a model identifier other than the expected one, or none reports a recorded `target.reported_model` | `readCeilingProbes`, `probe.Encode`, `ReleaseRecord.Verify`, `probe.ChooseCeiling`, `probe.Exposed`, `probe.ExposedByMarking`, `probe.ModelFault` |
+| no `--ceiling-probe` record is given; a record's bytes differ from the encoding `ceiling-check` writes of the record they decode to, as with a value or text after it or a key written twice; a record is of a route outside the model's host group, or carries another model or byte cap, or names in `ledger_sha256` a ledger other than the one the schedule froze; a record of this route carries another adapter, endpoint or expected model identifier, a body hash other than that of `target.body` at the record's ceiling, or a value the route withholds; another host's record carries a value that host's `--host-config` configuration withholds, or one its own confidential markings withhold; a record's stored results differ from the ones its requests give; a record of a host not left out of the choice was blocked at the start gate or failed its input bound; a host's record at a needed ceiling is missing; the records exclude the model or choose a ceiling other than the configuration's; or the route's own records report a model identifier other than the expected one, or none reports a recorded `target.reported_model` | `readCeilingProbes`, `probe.Encode`, `ReleaseRecord.Verify`, `probe.ChooseCeiling`, `probe.Exposed`, `probe.ExposedByMarking`, `probe.ModelFault` |
 | `--byte-cap` is missing, or `--account-created` is not a date | `newRoute` |
 | `--release-key` is missing, or names a file other users can read or one that is not a key | `readReleaseKey`, `releasekey.Read` |
 | the env file does not set the key | `loadKey` |
@@ -1193,8 +1194,11 @@ their outputs and refuses to start on any of these.
   also prints a `REFUSED` line with the fault and exits 2, after writing
   the record, even when both checks passed. A record that reports no
   identifier is left to `run`, which reads it beside the route's other
-  records. The runner reads the records from `--ceiling-probe`, one flag
-  per record of every host of the model, each byte for byte as
+  records. The runner reads the configuration of each other host of the
+  model from `--host-config`, one flag per route in
+  `release.other_hosts`, each of which the schedule must have frozen
+  (`hostTargets`, `checkFrozen`). It reads the records from
+  `--ceiling-probe`, one flag per record of every host of the model, each byte for byte as
   `ceiling-check` writes it (`probe.Encode`), and binds each to the request
   it checked: its host's model, the `--byte-cap` and the ledger hash
   the schedule froze, which the record's `ledger_sha256` must equal, and for this route's records also its adapter, redacted endpoint and expected model
@@ -1214,13 +1218,18 @@ their outputs and refuses to start on any of these.
   a route with a confidential limit, a kept non-200 body or in-band
   error text, or the plain SHA-256 of a withheld body or of a
   confidential limit's snapshot, among them), and
-  a record of another host that carries a value its own confidential
-  markings withhold (`probe.ExposedByMarking`: where a snapshot in the
+  a record of another host that carries a value that host's
+  configuration withholds (`probe.Exposed` against its `--host-config`
+  file) or its own confidential markings withhold
+  (`probe.ExposedByMarking`: where a snapshot in the
   record is marked confidential, every header other than `Retry-After`
   and a request identifier, the limits body, each non-200 body and each
   in-band error object, and the plain SHA-256 of a withheld body or of a
   confidential snapshot), and copies the records into each
-  cell's directory. A confidential limit's snapshot in a record carries
+  cell's directory. `probe.Exposed` matches each snapshot to the
+  `target.limits` entry of the same dimension and window (`window_s`),
+  wherever that entry sits in the list, and treats the value and SHA-256
+  of a snapshot whose dimension and window no entry records as withheld. A confidential limit's snapshot in a record carries
   no value. The runner also refuses the route where its own records report a
   model identifier other than the expected one, worded
   `identifier-not-documented` where no `target.reported_model` is
