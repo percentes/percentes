@@ -1631,10 +1631,11 @@ date; and the fixed lines on naming, the accounts' ordinary paid status
 and the absence of provider funding (`evidence.PublicationStatements`).
 Recipients, account identifiers and the paths of the files the record
 keeps stay out of it. A verbatim text prints in a fenced block longer
-than any run of backticks in it. With `--write-page` the command writes
-both files under `--pages`; without it, it exits 2 unless both are there
-with the bytes it built. The record does not name the publication
-page. It then prints the counts and the providers told before the
+than any run of backticks in it, each CRLF (carriage return and line
+feed) or lone carriage return in it as a line feed. With `--write-page`
+the command writes both files under `--pages`; without it, it exits 2
+unless both are there with the bytes it built. The record does not
+name the publication page. It then prints the counts and the providers told before the
 notices, in date order. `pages` runs without a record and writes no
 publication page.
 

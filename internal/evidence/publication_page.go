@@ -72,7 +72,8 @@ func (d PageDisclosure) String() string {
 // routes in name order, each route's responses by date received, and
 // the corrections log in the same order. It reads each verbatim
 // response's text again and refuses one that no longer has its recorded
-// SHA-256.
+// SHA-256. Each carriage return and line feed pair, and each lone
+// carriage return, in the text becomes a line feed.
 func (p *Publication) Page() (*PublicationPage, error) {
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
@@ -92,7 +93,7 @@ func (p *Publication) Page() (*PublicationPage, error) {
 			out := PageResponse{Received: resp.Received, Verbatim: resp.Verbatim, Corrections: []string{}}
 			if resp.Verbatim {
 				b := p.file(fmt.Sprintf("route %s: responses[%d].text", r.Route, j), resp.Text, fail)
-				out.Text = string(b)
+				out.Text = strings.ReplaceAll(strings.ReplaceAll(string(b), "\r\n", "\n"), "\r", "\n")
 			}
 			out.Corrections = append(out.Corrections, resp.Corrections...)
 			for _, c := range resp.Corrections {

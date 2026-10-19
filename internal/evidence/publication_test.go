@@ -403,8 +403,9 @@ func TestPublicationWithheld(t *testing.T) {
 // dates, a consented response's text, another response's date and
 // corrections, the corrections log, the providers told before the
 // notices and the fixed lines, and no recipient, account identifier or
-// file path; a fence outruns the backticks in a verbatim text; and the
-// page is refused when a verbatim text changed after the check.
+// file path; a fence outruns the backticks in a verbatim text; a
+// carriage return, alone or before a line feed, prints as a line feed;
+// and the page is refused when a verbatim text changed after the check.
 func TestPublicationPage(t *testing.T) {
 	f := newPublicationFixture(t)
 	p := f.load(t)
@@ -461,6 +462,22 @@ func TestPublicationPage(t *testing.T) {
 	}
 	if md := pg.Markdown(); !strings.Contains(md, "\n\n`````text\nsee ```go\nx\n```` here\n`````\n\n") {
 		t.Errorf("fence:\n%s", md)
+	}
+	f = newPublicationFixture(t)
+	f.p.Routes[0].Responses[0].Text = put(t, f.dir, "responses/groq.txt", "line one\r\nline two\rline three\r\n")
+	p = f.load(t)
+	if err := p.Check(f.s); err != nil {
+		t.Fatal(err)
+	}
+	if pg, err = p.Page(); err != nil {
+		t.Fatal(err)
+	}
+	if js, err = json.Marshal(pg); err != nil {
+		t.Fatal(err)
+	}
+	if md := pg.Markdown(); !strings.Contains(md, "\n\n```text\nline one\nline two\nline three\n```\n\n") || strings.Contains(md, "\r") ||
+		!strings.Contains(string(js), `"text":"line one\nline two\nline three\n"`) {
+		t.Errorf("CRLF text:\n%q\n%s", md, js)
 	}
 	put(t, f.dir, "responses/groq.txt", "edited")
 	if _, err := p.Page(); err == nil || !strings.Contains(err.Error(), "evidence: publication page: route groq: responses[0].text: responses/groq.txt has SHA-256 "+shaOf([]byte("edited"))) {
