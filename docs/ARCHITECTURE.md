@@ -433,7 +433,7 @@ The diagram predates the hosted packages, which the table lists.
 | | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
 | Hosted | `internal/probe` | the pre-run probe: Domain Name System (DNS) resolution, the Transport Layer Security (TLS) handshake, one request, the response shape, the start gate; the release ceiling check, a record's results re-derived from its requests, the ceiling choice across a model's hosts with a host left out on its records' reported-model fault, the values a probe record withholds, and the reported-model fault of a route's own records | SPEC-HOSTED §2, §5; HA3 points 7 and 15 | `Run`, `RunRelease`, `ReleaseRecord.Verify`, `ChooseCeiling`, `ModelFault`, `ReleaseRecord.Expected`, `LengthValue`, `Gate`, `Write`, `Retains`, `Exposed`, `ExposedByMarking`, `WriteRetained` | an httptest server per shape and failure |
 | | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound, bound to one open line once `Bind` is called; the release ceiling rule, and the check of a published verdict against the configuration's limits | SPEC-HOSTED HA2 §3; HA3 points 6 and 15 | `Create`, `Open`, `Ledger.Bind`, `Ledger.Admit`, `Ledger.AdmitAt`, `Ledger.Settle`, `CeilingRule`, `CheckPublished`, `State.Covers`, `State.ReservationUSD`, `State.PriceRevision` | chain, cap and settlement units |
-| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadRetainedRefresh`, `ReadWindowClose`, `LoadOperator`, `Operator.Withhold`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
+| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadRetainedRefresh`, `ReadWindowClose`, `WindowClose.Verify`, `LoadOperator`, `Operator.Withhold`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
 | | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file with each route's frozen configuration hashes (as published, and keyed as loaded) and host group, the ledger's open-line hash and its position (line count and the hash of its bytes) | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun`, `Schedule.Config` | a pinned derivation; window and refusal cases |
@@ -1513,7 +1513,15 @@ the window. It reads every route's cell records under `--out`, with its
 window-close record where present, and runs the completeness check on
 every manifest against the route's configuration file as loaded, the
 frame store and the release key, which it requires where a route has a
-confidential limit (`checkingKey`). `--schedule` is the committed
+confidential limit (`checkingKey`). A window-close record must verify
+(`evidence.WindowClose.Verify`): the record and its refresh began after
+the latest end of any of the route's attempts (each `cell.json`'s
+`end_utc`, or its `start_utc` where it has none); the refresh exited 0
+and its published limits are the ones its output gives, read on a route
+with a confidential limit from the refresh record as run kept beside the
+copies; and the copies in `window-close/<route>/<UTC time>/` under
+`--frames` match the record's plain or keyed hashes, the operator file's
+copy with the record's account tier. `--schedule` is the committed
 schedule file, which must load (`schedule.Load`). Every run record of a
 route must carry the same `schedule_sha256`, every manifest the one in
 its run record, and that value must be the SHA-256 of the `--schedule`
@@ -1543,7 +1551,8 @@ under `--out` and no `--config` is refused.
 checks the release publication record (`evidence.Publication`,
 SPEC-HOSTED HA3 point 14):
 a strictly decoded JSON file apart from the cell manifests that names,
-by path and SHA-256, every cell manifest and every page, and holds per
+by path and SHA-256, every cell manifest, every `<route>/window-close.json`
+under `--out` (`window_closes`) and every page, and holds per
 route its
 notice (date, recipient, account identifier, evidence pack and the date
 its window closes), its responses (a verbatim one with its text and
@@ -1556,9 +1565,10 @@ file, with the refusals of `pages`, takes each given route's
 duties, a route with no page among them, from its configuration (`naming.permission_required`; a
 replication pack where the endpoint host ends in `.amazonaws.com`) and
 refuses, exiting 2 with every problem named, unless the record matches
-the cells and the pages on disk, every route has its notice with at
-least four working days up to a window close that has passed, its
-responses, and its permission and pack where due, every disclosure
+the cells, the window-close records and the pages on disk, every route
+with a page has its window-close record, every route has its notice
+with at least four working days up to a window close that has passed,
+its responses, and its permission and pack where due, every disclosure
 predates the first notice, every pre-release copy withholds every
 replication-pack route, and every named file matches its hash. When the
 record is complete it prints the counts and the providers told before
