@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -13,6 +17,7 @@ import (
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/redact"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
@@ -191,9 +196,31 @@ func otherHosts(cfg *config.Config) []string {
 	return out
 }
 
+// passedCeiling is a ceiling check record of cfg's request at its
+// configured ceiling, with texts cut at byteCap: ten requests answered 200
+// with visible content, finish reason "stop" and 1,000 prompt tokens,
+// which pass the ceiling check and the input bound.
+func passedCeiling(cfg *config.Config, byteCap int) *probe.ReleaseRecord {
+	t := &cfg.Target
+	sum := sha256.Sum256([]byte(t.Body))
+	rec := &probe.ReleaseRecord{SchemaVersion: 1, Route: t.Name, Adapter: t.Adapter, EndpointURL: redact.URL(t.EndpointURL),
+		RequestedModel: t.ModelName, ExpectedModel: t.ExpectedModel(), BodySHA256: hex.EncodeToString(sum[:]), ByteCap: byteCap,
+		Ceiling: probe.CeilingCheck{Ceiling: cfg.Release.Shape.CeilingTokens, LengthValue: probe.LengthValue(t.Adapter), Sent: probe.CeilingRequests,
+			Passed: probe.CeilingRequests, Pass: true},
+		InputBound: probe.InputCheck{BoundTokens: cfg.Release.Shape.InputBoundTokens, Reported: probe.CeilingRequests, MaxPromptTokens: 1000, Pass: true}}
+	at := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < probe.CeilingRequests; i++ {
+		n := 1000
+		rec.Requests = append(rec.Requests, probe.CheckRequest{Index: i, Exchange: probe.Exchange{Status: http.StatusOK, DispatchUTC: at.Add(time.Duration(i) * 4 * time.Second)},
+			Shape: &probe.Shape{Done: true, ContentEvents: 1}, FinishReason: "stop", PromptTokens: &n, Pass: true})
+	}
+	return rec
+}
+
 // hostCeiling is host route's ceiling check record at ceiling, passed or
 // not, of cfg's model at byteCap: cfg's request when route is cfg's, else
-// route's model from release.other_hosts, expected as requested.
+// route's model from release.other_hosts, expected as requested. One that
+// did not pass has its last request stopped at the ceiling.
 func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pass bool) probe.ReleaseRecord {
 	rec := *passedCeiling(cfg, byteCap)
 	rec.Route, rec.Ceiling.Ceiling = route, ceiling
@@ -203,6 +230,8 @@ func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pas
 		}
 	}
 	if !pass {
+		q := &rec.Requests[probe.CeilingRequests-1]
+		q.FinishReason, q.Pass, q.Fail = rec.Ceiling.LengthValue, false, fmt.Sprintf("finish reason %q: stopped at the ceiling", rec.Ceiling.LengthValue)
 		rec.Ceiling.Passed, rec.Ceiling.Pass = probe.CeilingRequests-1, false
 	}
 	return rec

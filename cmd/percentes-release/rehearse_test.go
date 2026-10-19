@@ -12,6 +12,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
+	"github.com/percentes/percentes/internal/probe"
 )
 
 // shortRehearsal scales the rehearsal to shortLadder's ladder and CPU
@@ -33,14 +34,16 @@ func shortRehearsal(t *testing.T) {
 	t.Cleanup(func() { settingsAt = orig })
 }
 
-// The rehearsal runs one cell of each release form against its own mock,
-// concurrently at the schedule's offsets, and its summary names every
-// cell with its G2 verdicts, its completeness check and its manifest's
-// hash, and the host's dispatch series summing every cell's sends. The
-// rehearsal is green, and exits 0, when every cell counts; under the race
-// detector the client-validity gate can fail, and when that is the only
-// reason a cell does not count the test is skipped after the rest is
-// checked. A second rehearsal into the same directory is refused.
+// The rehearsal sends each route's ceiling check to its mock, writing the
+// record run reads, then runs one cell of each release form against its
+// own mock, concurrently at the schedule's offsets, and its summary names
+// every cell with its G2 verdicts, its completeness check and its
+// manifest's hash, and the host's dispatch series summing every cell's
+// sends. The rehearsal is green, and exits 0, when every cell counts;
+// under the race detector the client-validity gate can fail, and when
+// that is the only reason a cell does not count the test is skipped after
+// the rest is checked. A second rehearsal into the same directory is
+// refused.
 func TestRehearse(t *testing.T) {
 	enoughOpenFiles(t)
 	fastDispatch(t)
@@ -90,8 +93,21 @@ func TestRehearse(t *testing.T) {
 			t.Errorf("%s: steps %+v", rr.Route, rr.Steps)
 		}
 		n := rr.Sent.Probe + rr.Sent.Warmup + rr.Sent.Measured
-		if rr.Sent.Probe != 1 || len(rr.MockFinished) != 1 || rr.MockFinished["200"] != n {
+		if rr.Sent.Probe != 1 || len(rr.MockFinished) != 1 || rr.MockFinished["200"] != n+probe.CeilingRequests {
 			t.Errorf("%s: sent %+v, the mock finished %v", rr.Route, rr.Sent, rr.MockFinished)
+		}
+		if rr.CeilingCheck != (probe.CeilingCheck{Ceiling: 512, LengthValue: probe.LengthValue(f.adapter), Sent: 10, Passed: 10, Pass: true}) {
+			t.Errorf("%s: ceiling check %+v", rr.Route, rr.CeilingCheck)
+		}
+		var check probe.ReleaseRecord
+		if b, err := os.ReadFile(filepath.Join(in.out, "inputs", "ceiling-"+f.name+".json")); err != nil || json.Unmarshal(b, &check) != nil ||
+			len(check.Requests) != probe.CeilingRequests || check.Ceiling != rr.CeilingCheck || !check.InputBound.Pass {
+			t.Errorf("%s: ceiling check record %+v with %d requests, %v", rr.Route, check.Ceiling, len(check.Requests), err)
+		}
+		for _, q := range check.Requests {
+			if !q.Pass || q.Exchange.Status != 200 || q.PromptTokens == nil {
+				t.Errorf("%s: ceiling check request %+v", rr.Route, q)
+			}
 		}
 		sent += rr.Sent.Warmup + rr.Sent.Measured
 		if rr.Completeness != "pass" || rr.Manifest == nil {

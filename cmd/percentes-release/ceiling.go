@@ -59,12 +59,6 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	// The ceiling is the texts' request-reference seed, so the checks at
-	// the two ceilings send different texts.
-	texts := make([]string, probe.CeilingRequests)
-	for i := range texts {
-		texts[i] = shape.UserText(int64(ceiling), i)
-	}
 	ledger, err := admission.Open(*ledgerPath)
 	if err != nil {
 		return exitError, err
@@ -80,18 +74,7 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 		return exitError, err
 	}
 
-	a, err := ledger.Admit(name, admission.PurposeProbe, probe.CeilingRequests, admission.ReleaseProbeTokens(cfg))
-	if err != nil {
-		return exitError, err
-	}
-	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: *snapshots, ByteCap: *byteCap})
-	sent := 0
-	if rec != nil {
-		sent = rec.Sent()
-	}
-	if serr := ledger.Settle(a, admission.Counts{Probe: sent}); serr != nil {
-		return exitError, errors.Join(err, serr)
-	}
+	rec, err := sendCeiling(ctx, ledger, cfg, shape, *snapshots, *byteCap)
 	if err != nil {
 		return exitError, err
 	}
@@ -128,6 +111,30 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 		return exitOK, nil
 	}
 	return exitAdverse, nil
+}
+
+// sendCeiling admits cfg's ceiling check in ledger, sends it with
+// shape's texts cut at byteCap, and settles the requests sent. The
+// ceiling is the texts' request-reference seed, so the checks at the two
+// ceilings send different texts.
+func sendCeiling(ctx context.Context, ledger *admission.Ledger, cfg *config.Config, shape *pilot.ShapeS, snapshots string, byteCap int) (*probe.ReleaseRecord, error) {
+	texts := make([]string, probe.CeilingRequests)
+	for i := range texts {
+		texts[i] = shape.UserText(int64(cfg.Release.Shape.CeilingTokens), i)
+	}
+	a, err := ledger.Admit(cfg.Target.Name, admission.PurposeProbe, probe.CeilingRequests, admission.ReleaseProbeTokens(cfg))
+	if err != nil {
+		return nil, err
+	}
+	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: snapshots, ByteCap: byteCap})
+	sent := 0
+	if rec != nil {
+		sent = rec.Sent()
+	}
+	if serr := ledger.Settle(a, admission.Counts{Probe: sent}); serr != nil {
+		return nil, errors.Join(err, serr)
+	}
+	return rec, err
 }
 
 // modelRefusal is the fault in the model ids rec reports on which run

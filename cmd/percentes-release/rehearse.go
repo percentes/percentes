@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,8 +27,8 @@ import (
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/mock"
+	"github.com/percentes/percentes/internal/pilot"
 	"github.com/percentes/percentes/internal/probe"
-	"github.com/percentes/percentes/internal/redact"
 	"github.com/percentes/percentes/internal/report"
 	"github.com/percentes/percentes/internal/schedule"
 	"gopkg.in/yaml.v3"
@@ -152,22 +151,6 @@ func writeMockRefresh(path string, cfg *config.Config) error {
 	return os.WriteFile(path, []byte(script), 0o755)
 }
 
-// passedCeiling is a ceiling check record of cfg's request at its
-// configured ceiling, with texts cut at byteCap, that passed the ceiling
-// check and the input bound.
-func passedCeiling(cfg *config.Config, byteCap int) *probe.ReleaseRecord {
-	t := &cfg.Target
-	length := probe.LengthChatCompletions
-	if t.Adapter == config.AdapterMessages {
-		length = probe.LengthMessages
-	}
-	sum := sha256.Sum256([]byte(t.Body))
-	return &probe.ReleaseRecord{SchemaVersion: 1, Route: t.Name, Adapter: t.Adapter, EndpointURL: redact.URL(t.EndpointURL),
-		RequestedModel: t.ModelName, ExpectedModel: t.ExpectedModel(), BodySHA256: hex.EncodeToString(sum[:]), ByteCap: byteCap,
-		Ceiling:    probe.CeilingCheck{Ceiling: cfg.Release.Shape.CeilingTokens, LengthValue: length, Sent: probe.CeilingRequests, Passed: probe.CeilingRequests, Pass: true},
-		InputBound: probe.InputCheck{BoundTokens: cfg.Release.Shape.InputBoundTokens, Reported: probe.CeilingRequests, Pass: true}}
-}
-
 // mockFinished is the count of finished requests by outcome label that
 // the mock at addr reports on its metrics endpoint.
 func mockFinished(addr string) (map[string]int, error) {
@@ -254,7 +237,7 @@ var settingsAt = func(scale int) rehearsalSettings {
 // whether the rehearsal is green. Green needs every cell counted with
 // G2 passing at each of the five steps, no tripwire, the completeness
 // check passed, and each mock's answers equal to the requests its cell
-// sent, all 200.
+// and ceiling check sent, all 200.
 type rehearsal struct {
 	SchemaVersion int  `json:"schema_version"`
 	Green         bool `json:"green"`
@@ -271,8 +254,7 @@ type rehearsal struct {
 	MockITL         config.LatencyDist `json:"mock_itl"`
 	MockReasoning   int                `json:"mock_reasoning_tokens"`
 	MockAnswerRunes int                `json:"mock_answer_runes"`
-	// CeilingProbes says that each route's ceiling check is a written
-	// record, never sent.
+	// CeilingProbes says how each route's ceiling check record was made.
 	CeilingProbes string `json:"ceiling_probes"`
 
 	MasterSeed string          `json:"master_seed"`
@@ -314,6 +296,7 @@ type rehearsalRoute struct {
 	Steps         []rehearsalStep    `json:"steps,omitempty"`
 	Tripwires     *loadgen.Tripwires `json:"tripwires,omitempty"`
 	Sent          admission.Counts   `json:"sent"`
+	CeilingCheck  probe.CeilingCheck `json:"ceiling_check"`
 	Concurrent    int                `json:"concurrent_runs"`
 	MockFinished  map[string]int     `json:"mock_finished,omitempty"`
 	Completeness  string             `json:"completeness,omitempty"`
@@ -472,12 +455,32 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	routes := make([]*route, n)
 	runs := make([]schedule.Run, n)
 	label := sched.Cells[0].Label
-	for i, cfg := range cfgs {
-		name := cfg.Target.Name
+	for _, cfg := range cfgs {
 		if _, err := recordPrice(l, cfg, "0.15", "0.60", rehearsalURL, today); err != nil {
 			return exitError, err
 		}
-		cp, err := json.Marshal(passedCeiling(cfg, in.byteCap))
+	}
+	shape, err := pilot.GenerateShapeS(pilot.ShapeSSeed, in.byteCap)
+	if err != nil {
+		return exitError, err
+	}
+	checks := make([]*probe.ReleaseRecord, n)
+	checkErrs := make([]error, n)
+	var cwg sync.WaitGroup
+	for i, cfg := range cfgs {
+		cwg.Add(1)
+		go func(i int, cfg *config.Config) {
+			defer cwg.Done()
+			checks[i], checkErrs[i] = sendCeiling(ctx, l, cfg, shape, "", in.byteCap)
+		}(i, cfg)
+	}
+	cwg.Wait()
+	if err := errors.Join(checkErrs...); err != nil {
+		return exitError, fmt.Errorf("rehearse: ceiling check: %w", err)
+	}
+	for i, cfg := range cfgs {
+		name := cfg.Target.Name
+		cp, err := json.Marshal(checks[i])
 		if err != nil {
 			return exitError, err
 		}
@@ -545,7 +548,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		SchemaVersion: 1, FullLength: set.fullLength(), Scale: in.scale,
 		Ladder: set.ladder, CPUWindowS: set.cpuWindowS, OffsetMinuteS: set.minute.Seconds(),
 		MockTTFT: set.ttft, MockITL: set.itl, MockReasoning: set.reasoning, MockAnswerRunes: len([]rune(set.answer)),
-		CeilingProbes: "a passed record at the configured ceiling per route; no ceiling check is sent",
+		CeilingProbes: "each route's ceiling check, sent to its mock at the configured ceiling before the cells",
 		MasterSeed:    in.masterSeed, Cell: label, Source: evidence.SourceOf(in.build),
 		Host:      rehearsalHost{OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: runtime.NumCPU(), OpenFilesLimit: routes[0].openFiles},
 		ClockSync: routes[0].clock.Args, StartUTC: now,
@@ -553,7 +556,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	sum.Host.Name, _ = os.Hostname()
 	sum.Green = true
 	for i, r := range routes {
-		rr := r.rehearsed(&releaseForms[i], runs[i], recs[i], mocks[i].Addr(), in.frames)
+		rr := r.rehearsed(&releaseForms[i], runs[i], recs[i], checks[i], mocks[i].Addr(), in.frames)
 		switch {
 		case notStarted[i] != nil:
 			rr.Problems = append(rr.Problems, "not started: "+notStarted[i].Error())
@@ -598,10 +601,11 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	return exitOK, nil
 }
 
-// rehearsed is the summary of route r's rehearsal cell, with the
-// problems that keep it from green. rec is nil for a cell never run.
-func (r *route) rehearsed(f *mockForm, run schedule.Run, rec *cellRecord, mockAddr, framesRoot string) rehearsalRoute {
-	rr := rehearsalRoute{Route: f.name, Adapter: f.adapter, AuthHeader: f.auth, Path: f.path, OffsetMinutes: r.offsetMinutes, Run: run}
+// rehearsed is the summary of route r's ceiling check and rehearsal
+// cell, with the problems that keep it from green. rec is nil for a cell
+// never run.
+func (r *route) rehearsed(f *mockForm, run schedule.Run, rec *cellRecord, check *probe.ReleaseRecord, mockAddr, framesRoot string) rehearsalRoute {
+	rr := rehearsalRoute{Route: f.name, Adapter: f.adapter, AuthHeader: f.auth, Path: f.path, OffsetMinutes: r.offsetMinutes, Run: run, CeilingCheck: check.Ceiling}
 	if rec == nil {
 		return rr
 	}
@@ -640,8 +644,8 @@ func (r *route) rehearsed(f *mockForm, run schedule.Run, rec *cellRecord, mockAd
 	sent := rec.Sent.Probe + rec.Sent.Warmup + rec.Sent.Measured
 	if c, err := mockFinished(mockAddr); err != nil {
 		problem("mock metrics: %v", err)
-	} else if rr.MockFinished = c; len(c) != 1 || c["200"] != sent {
-		problem("the mock finished %v; the cell sent %d", c, sent)
+	} else if rr.MockFinished = c; len(c) != 1 || c["200"] != sent+check.Sent() {
+		problem("the mock finished %v; the ceiling check sent %d and the cell %d", c, check.Sent(), sent)
 	}
 	rr.Completeness = "pass"
 	if _, err := evidence.CheckRelease(evidence.Release{Dir: dir, Config: r.cfg.Raw, FramesRoot: framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}}); err != nil {

@@ -100,13 +100,29 @@ func TestNewRouteRefusals(t *testing.T) {
 		}, "route azure is not a host of the model (groq, baseten)"},
 		{"input bound failed", func(t *testing.T, f *fixture) {
 			over := with(f, "groq", func(r *probe.ReleaseRecord) {
-				r.InputBound = probe.InputCheck{BoundTokens: 1200, Reported: 10, Exceeded: 2}
+				*r.Requests[2].PromptTokens, *r.Requests[7].PromptTokens = 1300, 1201
+				r.InputBound = probe.InputCheck{BoundTokens: 1200, Reported: 10, MaxPromptTokens: 1300, Exceeded: 2}
 			})
 			ceiling(t, f, over, pass(f, "baseten", 512, true))
 		}, "route groq: the input bound failed at ceiling 512: 10 of 10 requests reported, 2 above 1200 tokens"},
 		{"another host's input bound failed", func(t *testing.T, f *fixture) {
-			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) { r.InputBound = probe.InputCheck{BoundTokens: 1200, Reported: 8} }))
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
+				r.Requests[3].PromptTokens, r.Requests[9].PromptTokens = nil, nil
+				r.InputBound = probe.InputCheck{BoundTokens: 1200, Reported: 8, MaxPromptTokens: 1000}
+			}))
 		}, "route baseten: the input bound failed at ceiling 512: 8 of 10 requests reported"},
+		{"own record without requests", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.Requests = nil }), pass(f, "baseten", 512, true))
+		}, "route groq at 512: 0 requests, want 10"},
+		{"another host's record without requests", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) { r.Requests = nil }))
+		}, "route baseten at 512: 0 requests, want 10"},
+		{"failed request recorded as passed", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.Requests[4].FinishReason = "length" }), pass(f, "baseten", 512, true))
+		}, `route groq at 512: request 4 records pass true (""); its response gives false ("finish reason \"length\": stopped at the ceiling")`},
+		{"input bound at another bound", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.InputBound.BoundTokens = 8000 }), pass(f, "baseten", 512, true))
+		}, "route groq at 512: input bound recorded {BoundTokens:8000"},
 		{"own model", func(t *testing.T, f *fixture) {
 			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.RequestedModel = "openai/gpt-oss-20b" }), pass(f, "baseten", 512, true))
 		}, `route groq at 512: model "openai/gpt-oss-20b", want "openai/gpt-oss-120b"`},
@@ -144,8 +160,8 @@ func TestNewRouteRefusals(t *testing.T) {
 		}, `run: route groq is not characterized (SPEC-HOSTED §2): the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b", and target.reported_model records no documentation naming both as one build: identifier-not-documented`},
 		{"reported model differs at the fallback's 512 check", func(t *testing.T, f *fixture) {
 			fallback(t, f.in.cfg)
-			at512 := with(f, "groq", reports("openai/gpt-oss-120b-v2"))
-			at512.Ceiling.Pass = false
+			at512 := pass(f, "groq", 512, false)
+			reports("openai/gpt-oss-120b-v2")(&at512)
 			ceiling(t, f, at512, pass(f, "groq", 1024, true), pass(f, "baseten", 512, true), pass(f, "baseten", 1024, true))
 		}, `the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b"`},
 		{"reported model other than the recorded one", func(t *testing.T, f *fixture) {
@@ -190,12 +206,12 @@ func TestNewRouteRefusals(t *testing.T) {
 	}
 }
 
-// reports gives a ceiling check record one request per model, each
-// reporting that model.
+// reports gives a ceiling check record's first requests one model each,
+// which the request's response reported.
 func reports(models ...string) func(r *probe.ReleaseRecord) {
 	return func(r *probe.ReleaseRecord) {
 		for i, m := range models {
-			r.Requests = append(r.Requests, probe.CheckRequest{Index: i, Shape: &probe.Shape{Models: []string{m}}, Pass: true})
+			r.Requests[i].Shape.Models = []string{m}
 		}
 	}
 }

@@ -29,6 +29,15 @@ const (
 	LengthMessages        = "max_tokens"
 )
 
+// LengthValue is adapter's finish reason for an answer the output ceiling
+// stopped.
+func LengthValue(adapter string) string {
+	if adapter == config.AdapterMessages {
+		return LengthMessages
+	}
+	return LengthChatCompletions
+}
+
 // releaseSpacing is the least time between two dispatches of a release
 // probe: the interval of the ladder's lowest step.
 var releaseSpacing = time.Duration(float64(time.Second) / config.PinnedReleaseStepsRPS[0])
@@ -179,10 +188,7 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 	transport := newTransport(1)
 	defer transport.CloseIdleConnections()
 	p := &prober{rt: transport, target: t, mask: m, timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second}
-	length := LengthChatCompletions
-	if t.Adapter == config.AdapterMessages {
-		length = LengthMessages
-	}
+	length := LengthValue(t.Adapter)
 
 	for i, text := range in.Texts {
 		if i > 0 {
@@ -349,27 +355,78 @@ func checkRequest(i int, r posted, length string, m masker) CheckRequest {
 			}
 		}
 	}
-	switch {
-	case r.ex.Status != http.StatusOK && r.ex.Status != 0:
-		c.Fail = fmt.Sprintf("status %d", r.ex.Status)
-	case s == nil:
-		c.Fail = "no response"
-	case s.ReadError != "" || s.DroppedEvents > 0 || s.Undecodable > 0:
-		c.Fail = "malformed stream"
-	case !s.Done:
-		c.Fail = "no terminator"
-	case s.Error != "":
-		c.Fail = "in-band error"
-	case s.ContentEvents == 0:
-		c.Fail = "no visible content"
-	case s.finish == "":
-		c.Fail = "no finish reason"
-	case s.finish == length:
-		c.Fail = fmt.Sprintf("finish reason %q: stopped at the ceiling", length)
-	default:
-		c.Pass = true
-	}
+	c.Fail = ceilingFail(r.ex.Status, s, c.FinishReason, length)
+	c.Pass = c.Fail == ""
 	return c
+}
+
+// ceilingFail is the first reason a request with status, stream shape s
+// and recorded finish reason fails the ceiling check, or "".
+func ceilingFail(status int, s *Shape, finish, length string) string {
+	switch {
+	case status != http.StatusOK && status != 0:
+		return fmt.Sprintf("status %d", status)
+	case s == nil:
+		return "no response"
+	case s.ReadError != "" || s.DroppedEvents > 0 || s.Undecodable > 0:
+		return "malformed stream"
+	case !s.Done:
+		return "no terminator"
+	case s.Error != "":
+		return "in-band error"
+	case s.ContentEvents == 0:
+		return "no visible content"
+	case finish == "":
+		return "no finish reason"
+	case finish == length:
+		return fmt.Sprintf("finish reason %q: stopped at the ceiling", length)
+	}
+	return ""
+}
+
+// Verify re-derives r's results from its requests: each request's pass
+// from its status, shape and finish reason; the start gate from each
+// status through Gate(t, status), t being nil for another host's record,
+// whose gate is then config.SetupDefectStatuses alone; the ceiling check
+// at r's ceiling with length, the adapter's LengthValue; and the input
+// bound at bound. It returns why r is refused: a count of requests other
+// than CeilingRequests in a record not blocked, a request after the one
+// the gate blocks on, a passed request not answered 200, or a recorded
+// result other than the re-derived one.
+func (r *ReleaseRecord) Verify(t *config.Target, length string, bound int) error {
+	if t == nil {
+		t = &config.Target{}
+	}
+	blocked := false
+	for i, q := range r.Requests {
+		if q.Index != i {
+			return fmt.Errorf("request %d has index %d", i, q.Index)
+		}
+		if blocked {
+			return fmt.Errorf("request %d follows the one the start gate blocks on", i)
+		}
+		fail := ceilingFail(q.Exchange.Status, q.Shape, q.FinishReason, length)
+		if q.Pass != (fail == "") || q.Fail != fail {
+			return fmt.Errorf("request %d records pass %t (%q); its response gives %t (%q)", i, q.Pass, q.Fail, fail == "", fail)
+		}
+		if q.Pass && (q.Exchange.Status != http.StatusOK || q.Exchange.DispatchUTC.IsZero()) {
+			return fmt.Errorf("request %d passed with status %d, dispatched %t", i, q.Exchange.Status, !q.Exchange.DispatchUTC.IsZero())
+		}
+		blocked = Gate(t, q.Exchange.Status).Blocked
+	}
+	switch {
+	case blocked && !r.Start.Blocked:
+		return fmt.Errorf("request %d's status %d blocks the start; the record is not blocked", len(r.Requests)-1, r.Requests[len(r.Requests)-1].Exchange.Status)
+	case !r.Start.Blocked && len(r.Requests) != CeilingRequests:
+		return fmt.Errorf("%d requests, want %d", len(r.Requests), CeilingRequests)
+	}
+	if c := ceilingCheck(r.Requests, r.Ceiling.Ceiling, length); c != r.Ceiling {
+		return fmt.Errorf("ceiling check recorded %+v; its requests give %+v", r.Ceiling, c)
+	}
+	if c := inputCheck(r.Requests, bound); c != r.InputBound {
+		return fmt.Errorf("input bound recorded %+v; its requests give %+v", r.InputBound, c)
+	}
+	return nil
 }
 
 // promptTokens is the stream's reported prompt token count: a

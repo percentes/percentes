@@ -408,6 +408,96 @@ func TestReleaseProbeFailures(t *testing.T) {
 	}
 }
 
+// Verify accepts each record the probe writes, read back from its file:
+// passed, failed at the ceiling, and blocked at the start gate. It
+// refuses a record whose recorded results its requests do not give: too
+// few requests, a failed request recorded as passed, a pass on a request
+// not answered 200, a request out of order or after the blocking one, a
+// blocking status in a record not blocked, and a summary or input bound
+// other than the re-derived one, including one at another bound.
+func TestReleaseRecordVerify(t *testing.T) {
+	noSpacing(t)
+	answer := "The customer was billed twice."
+	read := func(t *testing.T, rec *ReleaseRecord) *ReleaseRecord {
+		t.Helper()
+		b, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out ReleaseRecord
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatal(err)
+		}
+		return &out
+	}
+	cfg := releaseConfig(t, "http://"+startShaped(t, mock.Shape{Key: testKey, Answer: answer})+"/v1/chat/completions")
+	tg := &cfg.Target
+	in := ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap}
+	passed := releaseProbe(t, in)
+	cfg.Target.EndpointURL = "http://" + startShaped(t, mock.Shape{Key: testKey, ReasoningKey: "reasoning", ReasoningTokens: 510, Answer: answer}) + "/v1/chat/completions"
+	cfg.Target.ResponseShape = &config.ResponseShape{Reasoning: []string{"reasoning"}}
+	failed := releaseProbe(t, in)
+	cfg.Target.EndpointURL = "http://" + startShaped(t, mock.Shape{Key: "other-" + testKey, Answer: answer}) + "/v1/chat/completions"
+	blocked := releaseProbe(t, in)
+	if !passed.Ceiling.Pass || failed.Ceiling.Passed != 0 || !blocked.Start.Blocked || len(blocked.Requests) != 1 {
+		t.Fatalf("passed %+v, failed %+v, blocked %+v with %d requests", passed.Ceiling, failed.Ceiling, blocked.Start, len(blocked.Requests))
+	}
+	for name, rec := range map[string]*ReleaseRecord{"passed": passed, "failed": failed, "blocked": blocked} {
+		for _, gate := range []*config.Target{tg, nil} {
+			if err := read(t, rec).Verify(gate, LengthChatCompletions, 1200); err != nil {
+				t.Errorf("%s record, gate %v: %v", name, gate != nil, err)
+			}
+		}
+	}
+
+	for _, c := range []struct {
+		name string
+		rec  *ReleaseRecord
+		gate *config.Target
+		edit func(r *ReleaseRecord)
+		want string
+	}{
+		{"no requests", passed, tg, func(r *ReleaseRecord) { r.Requests = nil }, "0 requests, want 10"},
+		{"nine requests", passed, nil, func(r *ReleaseRecord) { r.Requests = r.Requests[:9] }, "9 requests, want 10"},
+		{"failed recorded as passed", failed, tg, func(r *ReleaseRecord) { r.Requests[0].Pass, r.Requests[0].Fail = true, "" },
+			`request 0 records pass true (""); its response gives false ("finish reason \"length\": stopped at the ceiling")`},
+		{"stopped at the ceiling", passed, tg, func(r *ReleaseRecord) { r.Requests[4].FinishReason = LengthChatCompletions }, "request 4 records pass true"},
+		{"no terminator", passed, tg, func(r *ReleaseRecord) { r.Requests[6].Shape.Done = false }, "request 6 records pass true"},
+		{"passed without status", passed, tg, func(r *ReleaseRecord) { r.Requests[3].Exchange.Status = 0 }, "request 3 passed with status 0, dispatched true"},
+		{"out of order", passed, tg, func(r *ReleaseRecord) { r.Requests[2], r.Requests[5] = r.Requests[5], r.Requests[2] }, "request 2 has index 5"},
+		{"after the block", blocked, tg, func(r *ReleaseRecord) {
+			q := passed.Requests[1]
+			r.Requests = append(r.Requests, q)
+		}, "request 1 follows the one the start gate blocks on"},
+		{"blocking status not blocked", blocked, tg, func(r *ReleaseRecord) { r.Start = Start{} }, "request 0's status 401 blocks the start; the record is not blocked"},
+		{"summary passed", failed, tg, func(r *ReleaseRecord) { r.Ceiling.Passed, r.Ceiling.Pass = 10, true }, "ceiling check recorded"},
+		{"summary at another length value", passed, tg, func(r *ReleaseRecord) { r.Ceiling.LengthValue = LengthMessages }, "ceiling check recorded"},
+		{"input bound at another bound", passed, tg, func(r *ReleaseRecord) { r.InputBound.BoundTokens = 8000 }, "input bound recorded {BoundTokens:8000"},
+		{"prompt over the bound", passed, tg, func(r *ReleaseRecord) { *r.Requests[1].PromptTokens = 1201 }, "input bound recorded"},
+		{"prompt unreported", passed, nil, func(r *ReleaseRecord) { r.Requests[8].PromptTokens = nil }, "input bound recorded"},
+	} {
+		r := read(t, c.rec)
+		c.edit(r)
+		if err := r.Verify(c.gate, LengthChatCompletions, 1200); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", c.name, err, c.want)
+		}
+	}
+
+	// The route's own gate applies its account-limit statuses; another
+	// host's applies the setup-defect statuses alone.
+	limited := read(t, blocked)
+	limited.Start = Start{}
+	limited.Requests[0].Exchange.Status, limited.Requests[0].Fail = http.StatusTooManyRequests, "status 429"
+	own := *tg
+	own.Probe = &config.TargetProbe{AccountLimitStatuses: []int{http.StatusTooManyRequests}}
+	if err := limited.Verify(&own, LengthChatCompletions, 1200); err == nil || !strings.Contains(err.Error(), "request 0's status 429 blocks the start") {
+		t.Errorf("an account-limit status under the route's gate: %v", err)
+	}
+	if err := limited.Verify(nil, LengthChatCompletions, 1200); err == nil || !strings.Contains(err.Error(), "1 requests, want 10") {
+		t.Errorf("an account-limit status under another host's gate: %v", err)
+	}
+}
+
 // Each request runs to the configured hard timeout, not the pilot
 // probe's.
 func TestReleaseProbeHardTimeout(t *testing.T) {

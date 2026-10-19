@@ -334,7 +334,9 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // readCeilingProbes reads the ceiling check's records of the route's
 // model, whose hosts are the target and release.other_hosts, and requires
 // their choice to run the model at the configured ceiling. Every host's
-// record carries the host's model and byteCap; this route's also carry
+// record carries the host's model and byteCap, and the results its
+// requests give at the pinned input bound (probe.ReleaseRecord.Verify,
+// through this route's start gate for its own); this route's also carry
 // its adapter, endpoint and expected model id and none of the values the
 // route withholds (probe.Exposed), the one at the configured ceiling its
 // body's hash, and together no reported model id that keeps the
@@ -383,6 +385,15 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.C
 		default:
 			if exposed := probe.Exposed(t, &rec); len(exposed) > 0 {
 				fault = "carries values the route withholds: " + strings.Join(exposed, ", ")
+			}
+		}
+		if fault == "" && host {
+			var gate *config.Target
+			if rec.Route == t.Name {
+				gate = t
+			}
+			if err := rec.Verify(gate, probe.LengthValue(rec.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+				fault = err.Error()
 			}
 		}
 		if fault != "" {
