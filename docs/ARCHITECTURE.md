@@ -1016,7 +1016,7 @@ comma and three after is left out, because it reads as a whole number
 grouped in threes (`12,500` for a value of 12.5). A form inside a longer
 number does not count (`12,000` for a value of 12), and runs of 32 or
 more hexadecimal digits, such as a SHA-256 hash or a commit identifier,
-and `YYYY-MM-DD` dates are skipped (`valueForms`, `carries`). A file
+and `YYYY-MM-DD` dates are skipped (`valueForms`, `Carries`). A file
 holding a second YAML document, or anything but whitespace after a
 document-end marker (`...` at the start of a line), is refused by
 `config.Decode` and by `Config.Published`. Both also refuse a YAML
