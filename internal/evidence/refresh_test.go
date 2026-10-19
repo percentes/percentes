@@ -58,9 +58,9 @@ func TestReadRefreshedLimits(t *testing.T) {
 }
 
 // A route's published refresh record carries the limits read, without a
-// confidential limit's value; a route with a confidential limit
-// publishes neither output stream and keeps the record as run, readable
-// by the owner only.
+// confidential limit's value or unavailable reason; a route with a
+// confidential limit publishes neither output stream and keeps the record
+// as run, readable by the owner only.
 func TestPublishedRefresh(t *testing.T) {
 	const out = `{"limits": [{"dimension": "requests_per_minute", "value": 1000}, {"dimension": "tokens_per_minute", "value": 300001}]}`
 	public := releaseCfg(t)
@@ -103,6 +103,34 @@ func TestPublishedRefresh(t *testing.T) {
 	}
 	if err := WriteRetainedRefresh(dir, rec); err == nil {
 		t.Fatal("a second retained record was written")
+	}
+
+	const reason = "console API 403; last seen Limit 250013.5"
+	unread := refreshRun(`{"limits": [{"dimension": "requests_per_minute", "unavailable": "console only"},
+		{"dimension": "tokens_per_minute", "unavailable": "` + reason + `"}]}`)
+	if read, err = ReadRefreshedLimits(unread, &public.Target); err != nil {
+		t.Fatal(err)
+	}
+	if pub = PublishedRefresh(unread, &public.Target, read); !reflect.DeepEqual(pub.Limits, read) || pub.Limits[1].Unavailable != reason {
+		t.Fatalf("public route's reasons: %+v", pub.Limits)
+	}
+	if read, err = ReadRefreshedLimits(unread, &cfg.Target); err != nil {
+		t.Fatal(err)
+	}
+	pub = PublishedRefresh(unread, &cfg.Target, read)
+	want = []RefreshedLimit{{Dimension: config.LimitRPM, Unavailable: "console only"}, {Dimension: config.LimitTPM, Confidential: true, Unavailable: config.RetainedHeaderValue}}
+	if !reflect.DeepEqual(pub.Limits, want) || read[1].Unavailable != reason {
+		t.Fatalf("confidential route's reasons: published %+v, read %+v", pub.Limits, read)
+	}
+	if b, err = json.Marshal(pub); err != nil || bytes.Contains(b, []byte("250013.5")) {
+		t.Fatalf("published record %s: %v", b, err)
+	}
+	dir = t.TempDir()
+	if err := WriteRetainedRefresh(dir, unread); err != nil {
+		t.Fatal(err)
+	}
+	if held, err = os.ReadFile(filepath.Join(dir, RefreshFile)); err != nil || !bytes.Contains(held, []byte(reason)) {
+		t.Fatalf("retained record %s: %v", held, err)
 	}
 }
 
