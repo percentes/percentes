@@ -402,18 +402,19 @@ func hostTargets(cfg *config.Config, hostCfgs []*config.Config, sched *schedule.
 // their choice to run the model at the configured ceiling. Every record
 // holds no field probe.ReleaseRecord does not define and is byte for byte
 // the probe.Encode encoding of the record it decodes to. Every host's
-// record carries the host's model and byteCap, was admitted in the ledger
-// whose open-line SHA-256 is ledger, and carries the results its
-// requests give at the pinned input bound (probe.ReleaseRecord.Verify,
-// through this route's start gate for its own); this route's also carry
-// its adapter, endpoint and expected model id, the hash of its body at the
-// record's ceiling (config.ReleaseBodyAt) and none of the values the route
-// withholds (probe.Exposed), and together no reported model id that keeps
-// the provider-model out (probe.ModelFault). Another host's records carry
-// none of the values the host's target in configs withholds
-// (probe.Exposed) or their snapshots' confidential markings withhold
-// (probe.ExposedByMarking), and another host whose records carry a model
-// fault is left out of the choice (probe.ChooseCeiling).
+// record is judged by the host's target, this route's own or the one in
+// configs: it carries the host's model and byteCap, was admitted in the
+// ledger whose open-line SHA-256 is ledger, carries the target's adapter
+// and endpoint and the hash of its body at the record's ceiling
+// (config.ReleaseBodyAt), none of the values the target withholds
+// (probe.Exposed), and the results its requests give at the pinned input
+// bound through the target's start gate (probe.ReleaseRecord.Verify).
+// This route's records also carry its expected model id, and together no
+// reported model id that keeps the provider-model out (probe.ModelFault).
+// Another host's records also carry none of the values their snapshots'
+// confidential markings withhold (probe.ExposedByMarking), and another
+// host whose records carry a model fault is left out of the choice
+// (probe.ChooseCeiling).
 func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, files []string, byteCap int, ledger string) (probe.CeilingChoice, map[string][]byte, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
@@ -424,14 +425,22 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 	for _, h := range cfg.Release.OtherHosts {
 		hosts, models[h.Route] = append(hosts, h.Route), h.Model
 	}
-	bodies := map[int]string{}
-	for _, c := range config.PinnedReleaseCeilings {
-		b, err := config.ReleaseBodyAt(t.Body, t.Adapter, c)
-		if err != nil {
-			return none, nil, fmt.Errorf("run: target.body at %d: %w", c, err)
+	targets := map[string]*config.Target{}
+	for route, ht := range configs {
+		targets[route] = ht
+	}
+	targets[t.Name] = t
+	bodies := map[string]map[int]string{}
+	for route, ht := range targets {
+		bodies[route] = map[int]string{}
+		for _, c := range config.PinnedReleaseCeilings {
+			b, err := config.ReleaseBodyAt(ht.Body, ht.Adapter, c)
+			if err != nil {
+				return none, nil, fmt.Errorf("run: route %s: target.body at %d: %w", route, c, err)
+			}
+			sum := sha256.Sum256([]byte(b))
+			bodies[route][c] = hex.EncodeToString(sum[:])
 		}
-		sum := sha256.Sum256([]byte(b))
-		bodies[c] = hex.EncodeToString(sum[:])
 	}
 	var recs, own []*probe.ReleaseRecord
 	copies := map[string][]byte{}
@@ -451,6 +460,7 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 		}
 		var fault string
 		model, host := models[rec.Route]
+		ht, body := targets[rec.Route], bodies[rec.Route][rec.Ceiling.Ceiling]
 		switch {
 		case !host:
 		case rec.RequestedModel != model:
@@ -459,37 +469,31 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 			fault = fmt.Sprintf("byte cap %d, want --byte-cap %d", rec.ByteCap, byteCap)
 		case rec.LedgerSHA256 != ledger:
 			fault = fmt.Sprintf("ledger open line sha256 %q; the schedule froze %s", rec.LedgerSHA256, ledger)
-		case rec.Route != t.Name && configs[rec.Route] == nil:
+		case ht == nil:
 			fault = "no configuration of the route"
-		case rec.Route != t.Name:
-			exposed := probe.Exposed(configs[rec.Route], &rec)
-			for _, e := range probe.ExposedByMarking(&rec) {
-				if !slices.Contains(exposed, e) {
-					exposed = append(exposed, e)
+		case ht == t && rec.Expected() != t.ExpectedModel():
+			fault = fmt.Sprintf("expected model %q, want %q", rec.Expected(), t.ExpectedModel())
+		case rec.Adapter != ht.Adapter:
+			fault = fmt.Sprintf("adapter %q, want %q", rec.Adapter, ht.Adapter)
+		case rec.EndpointURL != redact.URL(ht.EndpointURL):
+			fault = fmt.Sprintf("endpoint %s, want %s", rec.EndpointURL, redact.URL(ht.EndpointURL))
+		case rec.BodySHA256 != body:
+			fault = fmt.Sprintf("body sha256 %s, want %s (target.body at ceiling %d)", rec.BodySHA256, body, rec.Ceiling.Ceiling)
+		default:
+			exposed := probe.Exposed(ht, &rec)
+			if ht != t {
+				for _, e := range probe.ExposedByMarking(&rec) {
+					if !slices.Contains(exposed, e) {
+						exposed = append(exposed, e)
+					}
 				}
 			}
 			if len(exposed) > 0 {
 				fault = "carries values the route withholds: " + strings.Join(exposed, ", ")
 			}
-		case rec.Expected() != t.ExpectedModel():
-			fault = fmt.Sprintf("expected model %q, want %q", rec.Expected(), t.ExpectedModel())
-		case rec.Adapter != t.Adapter:
-			fault = fmt.Sprintf("adapter %q, want %q", rec.Adapter, t.Adapter)
-		case rec.EndpointURL != redact.URL(t.EndpointURL):
-			fault = fmt.Sprintf("endpoint %s, want %s", rec.EndpointURL, redact.URL(t.EndpointURL))
-		case rec.BodySHA256 != bodies[rec.Ceiling.Ceiling]:
-			fault = fmt.Sprintf("body sha256 %s, want %s (target.body at ceiling %d)", rec.BodySHA256, bodies[rec.Ceiling.Ceiling], rec.Ceiling.Ceiling)
-		default:
-			if exposed := probe.Exposed(t, &rec); len(exposed) > 0 {
-				fault = "carries values the route withholds: " + strings.Join(exposed, ", ")
-			}
 		}
 		if fault == "" && host {
-			var gate *config.Target
-			if rec.Route == t.Name {
-				gate = t
-			}
-			if err := rec.Verify(gate, probe.LengthValue(rec.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+			if err := rec.Verify(ht, probe.LengthValue(rec.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
 				fault = err.Error()
 			}
 		}

@@ -215,7 +215,7 @@ func ledgerSchedule(t *testing.T, path string, cfgs []*config.Config, routes ...
 }
 
 // hostConfigs are the configurations of cfg's release.other_hosts: cfg's
-// file with each host's route in place of cfg's.
+// file with each host's route in place of cfg's, at cfg's endpoint.
 func hostConfigs(t *testing.T, cfg *config.Config) []*config.Config {
 	t.Helper()
 	var out []*config.Config
@@ -234,6 +234,7 @@ func hostConfigs(t *testing.T, cfg *config.Config) []*config.Config {
 		if err != nil {
 			t.Fatal(err)
 		}
+		c.Target.EndpointURL = cfg.Target.EndpointURL
 		out = append(out, c)
 	}
 	return out
@@ -323,13 +324,13 @@ func passedCeiling(cfg *config.Config, byteCap int, ledger string) *probe.Releas
 
 // hostCeiling is host route's ceiling check record at ceiling, passed or
 // not, of cfg's model at byteCap in ledger: cfg's request with its body
-// at ceiling when route is cfg's, else route's model from
+// at ceiling, and when route is not cfg's, route's model from
 // release.other_hosts, expected as requested. One that did not pass has
 // its last request stopped at the ceiling.
 func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pass bool, ledger string) probe.ReleaseRecord {
 	rec := *passedCeiling(cfg, byteCap, ledger)
 	rec.Route, rec.Ceiling.Ceiling = route, ceiling
-	if body, err := config.ReleaseBodyAt(cfg.Target.Body, cfg.Target.Adapter, ceiling); err == nil && route == cfg.Target.Name {
+	if body, err := config.ReleaseBodyAt(cfg.Target.Body, cfg.Target.Adapter, ceiling); err == nil {
 		sum := sha256.Sum256([]byte(body))
 		rec.BodySHA256 = hex.EncodeToString(sum[:])
 	}

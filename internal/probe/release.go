@@ -400,10 +400,9 @@ func ceilingFail(status int, s *Shape, finish, length string) string {
 
 // Verify re-derives r's results from its requests: each request's pass
 // from its status, shape and finish reason; the start gate from each
-// status through Gate(t, status), t being nil for another host's record,
-// whose gate is then config.SetupDefectStatuses alone; the ceiling check
-// at r's ceiling with length, the adapter's LengthValue; and the input
-// bound at bound. It returns why r is refused: a count of requests other
+// status through Gate(t, status), or through config.SetupDefectStatuses
+// alone when t is nil; the ceiling check at r's ceiling with length, the
+// adapter's LengthValue; and the input bound at bound. It returns why r is refused: a count of requests other
 // than CeilingRequests in a record not blocked, a request after the one
 // the gate blocks on, a passed request not answered 200, or a recorded
 // result other than the re-derived one.

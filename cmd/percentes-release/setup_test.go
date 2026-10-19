@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -252,6 +253,7 @@ func TestNewRouteRefusals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			c.Target.EndpointURL = f.in.cfg.Target.EndpointURL
 			f.in.hostCfgs[0] = c
 			f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", frozenSchedule(t, f.in.ledgerPath, f.in.cfg, f.in.hostCfgs))
 			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
@@ -296,6 +298,28 @@ func TestNewRouteRefusals(t *testing.T) {
 		{"body", func(t *testing.T, f *fixture) {
 			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.BodySHA256 = strings.Repeat("0", 64) }), pass(f, "baseten", 512, true))
 		}, "route groq at 512: body sha256 0000000000000000000000000000000000000000000000000000000000000000, want "},
+		{"another host's adapter", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) { r.Adapter = config.AdapterMessages }))
+		}, `route baseten at 512: adapter "messages", want "chat_completions"`},
+		{"another host's endpoint", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
+				r.EndpointURL = "https://inference.baseten.example.test/v1/chat/completions"
+			}))
+		}, "route baseten at 512: endpoint https://inference.baseten.example.test/v1/chat/completions, want https://api.example.test/openai/v1/chat/completions"},
+		{"another host's endpoint in its configuration", func(t *testing.T, f *fixture) {
+			f.in.hostCfgs[0].Target.EndpointURL = "https://inference.baseten.example.test/v1/chat/completions"
+		}, "route baseten at 512: endpoint https://api.example.test/openai/v1/chat/completions, want https://inference.baseten.example.test/v1/chat/completions"},
+		{"another host's body", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) { r.BodySHA256 = strings.Repeat("0", 64) }))
+		}, "route baseten at 512: body sha256 0000000000000000000000000000000000000000000000000000000000000000, want "},
+		{"another host's start gate", func(t *testing.T, f *fixture) {
+			f.in.hostCfgs[0].Target.Probe = &config.TargetProbe{AccountLimitStatuses: []int{http.StatusTooManyRequests}}
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
+				q := &r.Requests[probe.CeilingRequests-1]
+				q.Exchange.Status, q.Pass, q.Fail = http.StatusTooManyRequests, false, "status 429"
+				r.Ceiling.Passed, r.Ceiling.Pass = probe.CeilingRequests-1, false
+			}))
+		}, "route baseten at 512: request 9's status 429 blocks the start; the record is not blocked"},
 		{"body of the fallback's 512 check", func(t *testing.T, f *fixture) {
 			fallback(t, f.in.cfg)
 			at512 := pass(f, "groq", 512, false)

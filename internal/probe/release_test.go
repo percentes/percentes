@@ -495,18 +495,18 @@ func TestReleaseRecordVerify(t *testing.T) {
 		}
 	}
 
-	// The route's own gate applies its account-limit statuses; another
-	// host's applies the setup-defect statuses alone.
+	// The target's gate applies its account-limit statuses; a nil target
+	// applies the setup-defect statuses alone.
 	limited := read(t, blocked)
 	limited.Start = Start{}
 	limited.Requests[0].Exchange.Status, limited.Requests[0].Fail = http.StatusTooManyRequests, "status 429"
 	own := *tg
 	own.Probe = &config.TargetProbe{AccountLimitStatuses: []int{http.StatusTooManyRequests}}
 	if err := limited.Verify(&own, LengthChatCompletions, 1200); err == nil || !strings.Contains(err.Error(), "request 0's status 429 blocks the start") {
-		t.Errorf("an account-limit status under the route's gate: %v", err)
+		t.Errorf("an account-limit status under the target's gate: %v", err)
 	}
 	if err := limited.Verify(nil, LengthChatCompletions, 1200); err == nil || !strings.Contains(err.Error(), "1 requests, want 10") {
-		t.Errorf("an account-limit status under another host's gate: %v", err)
+		t.Errorf("an account-limit status under a nil target: %v", err)
 	}
 }
 
