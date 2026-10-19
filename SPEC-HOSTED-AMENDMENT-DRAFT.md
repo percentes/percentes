@@ -1,94 +1,11 @@
 # SPEC-HOSTED amendment drafts
 
-HA1 and HA2 are hosted amendments 1 and 2. HA1 is adopted as modified by
-HA3 (SPEC-HOSTED.md amendment log, 2026-10-11); HA2 is drafted and not
-adopted. A draft is not normative until it is adopted with a date in the
-SPEC-HOSTED.md amendment log. Section numbers below are SPEC-HOSTED.md's
-unless prefixed SPEC.md.
-
-# HA1: the load axis
-
-Drafted 24 August 2026, revised 26 September 2026. It replaces the single
-pinned rate and the headroom rule of §3 with a ladder of rates and a
-ceiling rule. You need this text when reading SPEC-HOSTED.md §0 point 5,
-which adopts it with the changes listed there; a release runs under the
-adopted form, and the text below is the source it modifies.
-
-Adopted 2026-10-11 as modified by HA3 point 5 (SPEC-HOSTED.md §0), which
-governs where the two differ: the drain, the backoff and G2 evaluation at
-each drain's end, the ceiling rule and the idle pool.
-
-## §3 replacement: the offered-load ladder
-
-**Ladder.** Offered load is a ladder of pinned steps, open-loop Poisson
-arrivals at each step: 0.25, 0.5, 1, 2 and 4 requests per second, run in
-ascending order, each step an 8-minute measured window, after the §3 60 s
-warm-up run once at the first step. One ladder is one cell (§4).
-
-**Ceiling rule, replacing headroom.** Before a ladder runs, every numeric
-limit the provider publishes for the (provider, account, model) triple is
-recorded with URL (Uniform Resource Locator) and retrieval date: request
-ceilings per minute and per day, token ceilings per minute and per day, concurrency caps, and spend
-caps with the per-token prices they are computed from. A step's nominal
-demand is its rate times the pinned request shape over the window a
-ceiling states, token demand doubled as the allowance for the provider's
-tokenizer (§6), and spend at the recorded prices. A step is excluded
-before the run where its demand over 60 s reaches a recorded per-minute
-ceiling, where its rate times the pinned 30 s timeout reaches a recorded
-concurrency cap, or where its demand over 8 minutes, added to every lower
-step and to every other ladder scheduled for the triple on the same day,
-reaches a recorded per-day or spend ceiling, the day being the provider's
-documented quota window or, where none is documented, the UTC
-(Coordinated Universal Time) day. The exclusion publishes alongside the
-results with the binding ceiling named. A provider publishing no ceilings has no excluded
-steps for that reason, and the absence is published. The §3 balance and
-quota records stay as they are.
-
-**Backoff rule.** A step whose status_429 fraction (§5, the SPEC.md §3
-class status_429) over the step's scheduled requests exceeds 0.5
-terminates the ladder: higher steps are recorded as not attempted with the
-terminating step named. Statuses the provider documents as overload stay
-in status_other (§5) and do not count toward the fraction. The instrument
-never retries and never resumes above a terminated step within the cell.
-
-**What publishes per step.** The §5 outcome split (completed, errored with
-class, censored), the status_429 fraction as a headline, the
-completion-incidence curve, and the conditional latency quantiles, each
-labelled with the step's offered rate. "Under load" in any published
-sentence refers to this ladder and names the highest attempted step.
-
-**Client validity.** The SPEC.md §2 client-validity gate, G2 in §7,
-applies per step. A step failing it is withheld and the ladder stops
-there; a ladder stopped by a G2 failure does not count toward frame
-completeness, and its cell is re-run under §4 from the lowest step.
-
-## Consequential edits on adoption
-
-- §0: "under a fixed open-loop load" becomes "at each step of the pinned
-  ladder". §1: the question is asked at each ladder step.
-- §3: the rate, duration (60 s warm-up, then five 8-minute measured
-  windows), expected-sample-budget (rate times 480 s per step, 120 to
-  1,920 scheduled requests) and nominal-demand (per step) bullets are
-  restated; in the transport bullet, `load.connections` 32 is added to
-  the provision derived from the top step, two times 4 requests per second
-  times 30 s, so an idle pool of 272; the headroom paragraph is superseded
-  by the ceiling rule above.
-- §4: a cell is one ladder; the expected request count is 3,720 scheduled
-  requests per cell and 44,640 per characterization.
-- §5: the status_429 headline publishes per step, and its paragraph's
-  references to the headroom rule and to half the published rate are
-  restated against the ceiling rule.
-- §6: the ladder's rates and step duration join the pins this document
-  adds, and "the headroom rule" in that list becomes "the ceiling rule".
-- §7: G2 applies per step as above.
-- §8: every per-run figure publishes per step, labelled with the rate, and
-  pooled figures pool each step separately across the 12 cells.
-- §9: the required hosted profile carries the ladder steps and one
-  measured window per step in place of the single §3 rate, with the
-  connection provision derived from the top step; the required instrument
-  changes gain the stepped schedule with per-step windows, the pre-run
-  ceiling exclusion, the termination rule, and per-step G2 evaluation and
-  reporting.
+HA2 is hosted amendment 2. It is drafted and not adopted: a draft is not
+normative until it is adopted with a date in the SPEC-HOSTED.md amendment
+log. Hosted amendment 1 (HA1), the load axis, was adopted on 2026-10-19
+as modified by hosted amendment 3 (HA3); its text is in SPEC-HOSTED.md
+Appendix A, and the rules it set are in the body sections there. Section
+numbers below are SPEC-HOSTED.md's unless prefixed SPEC.md.
 
 # HA2: the descriptive pilot
 

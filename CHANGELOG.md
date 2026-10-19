@@ -2,7 +2,7 @@
 
 Every change to a measurement or reporting rule since first publication, newest first. Entries dated before 15 September 2026 were compiled on that date from the commit history of SPEC.md, which is the primary record; the commits are listed in the private register and can be re-derived with `git log -p -- SPEC.md`. Each entry states the rule as that change left it, so an entry a later change supersedes is history and the newest entry for a rule is the one in force. Wording, structure, status lines and code are in the git log.
 
-## 2026-10-11
+## 2026-10-19
 
 - §3, §6: a release under SPEC-HOSTED HA3 publishes pointwise interval bands on each route's completion curve and an index table of counts per offered-load step with no ranking; its rate, request shape, timeout and body follow HA1 and HA3, and hosted G6 counts completion within the amendment's 30 s deadline.
 

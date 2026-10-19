@@ -33,9 +33,9 @@ examples follow one request from its schedule to its line in the report:
 
 ## Overview
 
-This section says what the instrument measures, which rules the code
-enforces in every run, and which binary does what. Read it first; every
-later section assumes it.
+The instrument measures one replica loss, or one hosted endpoint under
+open-loop load, enforces four rules in every run, and ships as seven
+binaries. Read this section first; every later section assumes it.
 
 ### What is measured
 
@@ -70,9 +70,10 @@ A hosted run sits outside the §1 experiment: §6 lists what changes for it,
 [Gates](#gates-and-where-each-bites) shows the two gates it carries, and
 [Hosted runs](#hosted-runs-and-the-evidence-files) describes the pre-run
 probe, the admission ledger, the evidence files every hosted run writes,
-and the pilot of SPEC-HOSTED amendment HA2 that `cmd/percentes-pilot`
-runs. [The release runner](#the-release-runner) describes the public
-descriptive release of amendment HA3 that `cmd/percentes-release` runs:
+and the pilot of SPEC-HOSTED's drafted hosted amendment 2 (HA2) that
+`cmd/percentes-pilot` runs. [The release runner](#the-release-runner)
+describes the public descriptive release of hosted amendment 3 (HA3),
+written into SPEC-HOSTED's body, that `cmd/percentes-release` runs:
 one route per process and twelve cells per route, each a five-step
 ladder of offered load, with the ceiling rule, the per-step tables and
 the index.
@@ -80,20 +81,27 @@ the index.
 ### Design rules the code enforces
 
 Four rules hold in every run. A reader who knows them can predict most
-of the code's refusals.
+of the code's refusals. The README's third rule, the run-invalidating
+client checks, is gate G2 in
+[Gates and where each bites](#gates-and-where-each-bites).
 
 - **Open loop.** Every request's intended dispatch time t_i is fixed before
   the run, and the generator never waits for a response before sending the
   next request. A generator that waited would send less while the service
   is slow and under-sample the slow period; that bias is called coordinated
   omission (§2). Latency is measured from t_i.
-- **Three outcome states.** Every scheduled request ends completed,
-  errored or censored (§3). Only completions enter the latency histograms,
-  error and censored rates are reported per window, and the completion
-  curve is the Aalen-Johansen cumulative incidence, the estimated share of
+- **Three outcome states.** Every dispatched request ends completed,
+  errored or censored (§3). Scheduled requests left unsent are reported
+  separately. A request with no terminal event by the configured hard
+  timeout is censored: the pinned 30 s on the experiment, acceptance and
+  pilot profiles, measured from actual dispatch. The release profile uses
+  a 90 s hard timeout, measured from actual dispatch; its 30 s deadline,
+  measured from intended dispatch, divides completed requests into
+  in-time and late. Only completions enter the latency histograms, error
+  and censored rates are reported per window, and the completion curve
+  is the Aalen-Johansen cumulative incidence, the estimated share of
   scheduled requests completed by each time t after t_i. Errors are
-  competing events on that curve, and only a request with no terminal
-  event by the 30 s timeout is a censored observation.
+  competing events on that curve.
 - **Pinned numbers.** The configuration values SPEC pins are checked at
   load, and a configuration with a weakened value does not load
   (`internal/config`). The calibration rates lambda_max, the measured
@@ -115,18 +123,18 @@ hosted and release commands have their own sections below.
 | `cmd/percentes` | one run; against a hosted target it also writes the evidence files, and `--replay DIR` and `--check-release DIR` act on a finished hosted run ([Hosted runs](#hosted-runs-and-the-evidence-files)) | `report.json`, `report.txt`; a hosted run adds `attempts.jsonl`, `clock.json`, `status-start.json`, `status-end.json` and `manifest.json`, and the frame store under `--frames` | 0 valid, or the replayed pair matches byte for byte, or the release check passed; 2 a gate invalidated the run; 1 error, a replayed pair that differs, or a refused release |
 | `cmd/percentes-campaign` | N runs of one fault variant, gates per run, §7 aggregation; `--dry-kill` makes one process kill with no load | `run-N.json` and `run-N.txt` as each run ends; `campaign.json`, `campaign.txt`, partial after an error or a halt; under process kill `run-N-server.log`, `run-N-fingerprint-before.txt` and `run-N-fingerprint-after.txt`; `dry-kill.json` and `dry-kill-server.log` from `--dry-kill` | 0 every run valid, 2 at least one invalid run or a halted campaign, 1 error |
 | `cmd/percentes-calibrate` | the §10 capacity calibration and the §5 single-replica reference; `--check` validates a configuration and lists its placeholders | `calibration.json`, `calibration.txt` | 0 valid, 2 calibration invalid, 1 error |
-| `cmd/percentes-pilot` | the SPEC-HOSTED HA2 pilot: `ledger` (`create`, `price`, `hosting`, `show`), `probe`, `dev`, `session` and `check-cpu` | the ledger file; `probe-<UTC time>/<target>/probe.json`; `dev-1/` and `dev-2/` with `config.yaml`, `dev.json` and the targets' `attempts.jsonl` files; `<session>/session.json` and, per target, `<session>/<target>/` with the evidence files; the frame store under `--frames` | 0 done, every window client-valid, every probe unblocked and every endpoint through the development gate; 2 a window client-invalid or not started, a probe blocked, the second window late, or an endpoint failing the gate; 1 error or refusal |
-| `cmd/percentes-release` | a release (SPEC-HOSTED HA3): before the window, `schedule`, `ledger create`, `ledger price` and `ceiling-check`; `run` for one route's cells over the committed window; after the window, `dispatch` and `pages`; `rehearse`, the acceptance run against six mock routes ([The rehearsal](#the-rehearsal)); `check-cpu` ([The release runner](#the-release-runner)) | the committed schedule file; the release ledger; `ceiling-<UTC time>/<route>-<ceiling>/probe.json` from `ceiling-check`; per cell attempt, `<route>/<cell>-a<attempt>/`: `cell.json`, `clock.json`, `status-start.json`, `balance-start.json`, `probe.json`, `attempts.jsonl`, `dispatch.json`, the ceiling probe copies, `status-end.json`, `balance-end.json`, `manifest.json`, `report.json` and `report.txt`; the frame store under `--frames`; `dispatch-aggregate.json` at the output root, from `dispatch`; `index.md`, `index.json`, `routes/<route>.txt` and `routes/<route>.json` under `--pages`, from `pages`; from `rehearse`, under its `--out`: `inputs/`, each mock route's cell directory as above, and `rehearsal.json` | `run`: 0 every cell counts; 2 a cell does not count; 3 the route stopped (a ledger refusal, a documented billing refusal, a clock offset above the bound, a probe 401 or 403 that the route's previous probed cell also saw, or an operator abort). `ceiling-check`: 0 the ceiling and input-bound checks passed; 2 the check failed or was blocked. `rehearse`: 0 the rehearsal is green; 2 it is not. Every command: 1 error or refusal |
+| `cmd/percentes-pilot` | the SPEC-HOSTED HA2 pilot: `ledger` (`create`, `price`, `hosting`, `show`), `probe`, `dev`, `session` and `check-cpu` | the ledger file; `probe-<UTC time>/<target>/probe.json`, where UTC is Coordinated Universal Time; `dev-1/` and `dev-2/` with `config.yaml`, `dev.json` and the targets' `attempts.jsonl` files; `<session>/session.json` and, per target, `<session>/<target>/` with the evidence files; the frame store under `--frames` | 0 done, every window client-valid, every probe unblocked and every endpoint through the development gate; 2 a window client-invalid or not started, a probe blocked, the second window late, or an endpoint failing the gate; 1 error or refusal |
+| `cmd/percentes-release` | a release (SPEC-HOSTED HA3): before the window, `schedule`, `ledger create`, `ledger price` and `ceiling-check`; `run` for one route's cells over the committed window; after the window, `dispatch`, `pages` and `publish-check`; `rehearse`, the acceptance run against six mock routes ([The rehearsal](#the-rehearsal)); `check-cpu` ([The release runner](#the-release-runner)) | the committed schedule file; the release ledger; `ceiling-<UTC time>/<route>-<ceiling>/probe.json` from `ceiling-check`, with `probe-retained.json` under its `--frames` where the route withholds probe values; per cell attempt, `<route>/<cell>-a<attempt>/`: `cell.json`, `clock.json`, `status-start.json`, `refresh.json`, `balance-start.json`, `probe.json`, `attempts.jsonl`, `dispatch.json`, the ceiling probe copies, `status-end.json`, `balance-end.json`, `manifest.json`, `report.json` and `report.txt`; the frame store under `--frames`, with the cell's `probe-retained.json` beside its frames; `dispatch-aggregate.json` at the output root, from `dispatch`; `index.md`, `index.json`, `routes/<route>.txt` and `routes/<route>.json` under `--pages`, from `pages`; from `rehearse`, under its `--out`: `inputs/`, each mock route's cell directory as above, and `rehearsal.json` | `run`: 0 every cell counts; 2 a cell does not count; 3 the route stopped (a ledger refusal, a documented billing refusal, a clock offset above the bound, a probe 401 or 403 that the route's previous probed cell also saw, or an operator abort). `ceiling-check`: 0 the ceiling and input-bound checks passed; 2 the check failed or was blocked. `rehearse`: 0 the rehearsal is green; 2 it is not. `publish-check`: 0 the publication record is complete; 2 it is not. Every command: 1 error or refusal |
 | `cmd/mockserver` | the mock inference server in its Phase 0 form; the shaped hosted-provider form is built in Go only ([the mock's shaped form](#the-mocks-shaped-form)) | | |
 | `cmd/naivesweep` | a reconnaissance sweep of an OpenAI-compatible endpoint, outside the instrument: closed loop, no client-validity gates | | |
 
 ## A run on the clock
 
-This section covers the timeline of one self-hosted run and the report
-windows cut from it. You need it to read any `windows.*` field of a run
-report. A hosted run of `cmd/percentes` keeps these phases with no fault
-injected; a release cell replaces them with the ladder's steps
-([The ladder](#the-ladder)).
+A self-hosted run has four phases, and every report window is cut from
+them by intended dispatch time. You need this section to read any
+`windows.*` field of a run report. A hosted run of `cmd/percentes` keeps
+these phases with no fault injected; a release cell replaces them with
+the ladder's steps ([The ladder](#the-ladder)).
 
 A run has four phases, whose ends `internal/loadgen/loadgen.go` sets from
 the pinned durations: warm-up 60 s (discarded), baseline 300 s, the fault
@@ -169,9 +177,9 @@ detection](#recovery-detection).
 
 ## One request
 
-This section follows one request through the client: how its send time
-is fixed, how the send is kept on time, and how its ending is classed.
-You need it to read any latency or outcome figure.
+Every request's send time is fixed before the run, a pacer and a worker
+keep the send on time, and its ending is classed by the stage at which
+it fails. You need this section to read any latency or outcome figure.
 
 `loadgen.BuildSchedule` fixes every t_i before the run. The pacer spawns a
 worker 10 ms before t_i, and the worker dispatches at t_i. The
@@ -254,9 +262,9 @@ Every latency, rate and detector figure is computed from these records.
 
 ## Anatomy of a run
 
-This section lists what `cmd/percentes` does from setup to report, in
-code order, and how campaigns and calibration build on it. You need it
-to find where a step of a run happens.
+`cmd/percentes` runs one experiment from setup to report in the order
+below, and campaigns and calibration repeat that run. You need this
+section to find where a step of a run happens.
 
 The diagram follows one run of `cmd/percentes` from its setup to its report;
 the sections below expand each part.
@@ -330,9 +338,10 @@ entered in the configuration's `calibration` block.
 
 ## Recovery detection
 
-This section covers the detector that turns the goodput series into a
-time to recovery. You need it to read the `detector` and `decomposition`
-fields of a self-hosted report; hosted runs carry neither.
+The detector turns the goodput series into a time to recovery through
+an entry threshold, a hold and an exit threshold. You need this section
+to read the `detector` and `decomposition` fields of a self-hosted
+report; hosted runs carry neither.
 
 The detector (`internal/detect`) works on goodput over R = 10 s windows of
 1 s buckets, keyed by intended dispatch time. The window at time t covers
@@ -399,9 +408,8 @@ those, the code measures the probe and detector ones.
 
 ## Package map
 
-This section maps each Go package to its role, the SPEC clauses it
-serves and its entry points. You need it to find the code behind a
-figure.
+Each Go package serves named SPEC clauses through the entry points the
+table lists. You need this section to find the code behind a figure.
 
 ![Package dependencies, from go list](diagrams/package-layers.drawio.svg)
 
@@ -409,8 +417,8 @@ The diagram predates the hosted packages, which the table lists.
 
 | Group | Package | Role | SPEC | Entry points | Tests |
 |---|---|---|---|---|---|
-| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot; the release target's limits, unpublished-limit rulings, retained headers, not-applied parameters, naming record and documented statuses, errors and billing refusals | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Config.Validate`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
-| Load | `internal/loadgen` | schedule, pacer, SSE client with the HTTP/1.1 pin, outcome classification, per-request status, header, peer and protocol records, the credential header and literal body per target, the Messages stream adapter, retained header values kept apart from the record, the pilot and release tripwires, the release ladder with its drains and per-step verdicts, the dispatch and completion hooks, client gate, loopback canary | §2, §3; SPEC-HOSTED §3, §5, §9; HA3 points 2, 5, 15 and 16 | `BuildSchedule`, `BuildLadder`, `Run`, `NewTransport`, `StartCanary`, `SummarizeCanary`, `CPUMeasured` | request-body, stream-hardening, capture, ladder, hook and gate units; canary oracle; AC1 to AC2d |
+| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot; the release target's limits, unpublished-limit rulings, retained headers, not-applied parameters, naming record, documented statuses, errors and billing refusals, balance ruling and retention of model output, and the other hosts of its model | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Config.Validate`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
+| Load | `internal/loadgen` | schedule, pacer, SSE client with the Hypertext Transfer Protocol (HTTP) version 1.1 pin, outcome classification, per-request status, header, peer and protocol records, the credential header and literal body per target, the Messages stream adapter, retained header values kept apart from the record, the pilot and release tripwires, the release ladder with its drains and per-step verdicts, the dispatch and completion hooks, client gate, loopback canary | §2, §3; SPEC-HOSTED §3, §5, §9; HA3 points 2, 5, 15 and 16 | `BuildSchedule`, `BuildLadder`, `Run`, `NewTransport`, `StartCanary`, `SummarizeCanary`, `CPUMeasured` | request-body, stream-hardening, capture, ladder, hook and gate units; canary oracle; AC1 to AC2d |
 | | `internal/sse` | SSE framing for the client, the recovery probes and naivesweep | §3 | `SplitLines`, `Events` | a unit per grammar case |
 | | `internal/histo` | the pinned HdrHistogram wrapper; `RecordValue` only, and a test fails the suite if a correction API appears | §3 | `New`, `H.Record`, `H.Summarize` | the correction-API ban; AC1 oracles |
 | | `internal/mock`, `cmd/mockserver` | OpenAI-compatible SSE mock: five scriptable fault modes and a slow-reload startup setting; the shaped hosted-provider form ([the mock's shaped form](#the-mocks-shaped-form)) | §2; SPEC-HOSTED §2, §5 | `New`, `NewShaped`, `Server.Start`, `/admin/faults` | a behaviour test per mode, including a raw Transmission Control Protocol (TCP) silent-hang test; a test per shape mode |
@@ -426,9 +434,9 @@ The diagram predates the hosted packages, which the table lists.
 | | `internal/calibrate` | the §10 ramps and the §5 reference | §10, §5 | `RunRamp`, `Calibrate`, `Reference`, `LoadRunner` | a capacity-model fake runner; one step against the mock |
 | Output | `internal/report` | the report pairs for a run and a campaign; the hosted report without SLO fields; a hosted run's pair from its manifest and attempts file; the paired pilot report; the release cell report with G2 per step; the per-step tables with their intervals, finish-reason sub-lines, throughput, curves and quantile refusals, latency and token distributions, gap histograms and signals, the drift split of a frame, and the index table | §2 to §5, §7; SPEC-HOSTED §4, §7 to §9, HA2 §8, HA3 points 8, 12, 13 and 16 | `Generate`, `GenerateCampaign`, `FromRun`, `WriteHostedPair`, `GeneratePilot`, `NewStepTables`, `NewIndex`, `DocsOf` | renderer units; AC6 field assertions; byte-for-byte replay; hand-computed interval oracles; the forbidden-string test |
 | | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
-| Hosted | `internal/probe` | the pre-run probe: DNS, TLS, one request, the response shape, the start gate; the release ceiling check | SPEC-HOSTED §2, §5; HA3 point 7 | `Run`, `RunRelease`, `ChooseCeiling`, `Gate`, `Write` | an httptest server per shape and failure |
-| | `internal/admission` | the request and liability ledger, hash-chained; the release ceiling rule | SPEC-HOSTED HA2 §3; HA3 point 6 | `Create`, `Open`, `Ledger.Admit`, `Ledger.Settle`, `CeilingRule` | chain, cap and settlement units |
-| | `internal/evidence` | per-attempt records, the frame store, the clock, status and balance records, the operator file, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check | SPEC-HOSTED §9; HA3 points 9, 13, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `LoadOperator`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease` | round-trip, hash and refusal units |
+| Hosted | `internal/probe` | the pre-run probe: Domain Name System (DNS) resolution, the Transport Layer Security (TLS) handshake, one request, the response shape, the start gate; the release ceiling check, the ceiling choice across a model's hosts, and the values a probe record withholds | SPEC-HOSTED §2, §5; HA3 points 7 and 15 | `Run`, `RunRelease`, `ChooseCeiling`, `Gate`, `Write`, `Retains`, `Exposed`, `WriteRetained` | an httptest server per shape and failure |
+| | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound; the release ceiling rule | SPEC-HOSTED HA2 §3; HA3 point 6 | `Create`, `Open`, `Ledger.Admit`, `Ledger.Settle`, `CeilingRule`, `State.Covers`, `State.ReservationUSD` | chain, cap and settlement units |
+| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `LoadOperator`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
 | | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun` | a pinned derivation; window and refusal cases |
@@ -450,9 +458,9 @@ yet.
 
 ## Gates and where each bites
 
-This section lists every check that can refuse a configuration, end a
-run or label a cell, with its pinned number and the code that enforces
-it. You need it when a run exits 2 or a cell does not count.
+Every check that can refuse a configuration, end a run or label a cell
+carries a pinned number and one enforcing function. You need this
+section when a run exits 2 or a cell does not count.
 
 | Check | Pinned numbers | When | Consequence | Enforced in |
 |---|---|---|---|---|
@@ -506,7 +514,11 @@ hosted-G6 ([The release runner](#the-release-runner)):
 | Ceiling rule | each step's nominal demand at most half of every recorded rate, token, concurrency, daily and spend-window limit; the monthly cap and the route's ledger cap cover the twelve cells, re-runs and probes; the auto-reload threshold covers the costliest cell | route start | a step is excluded with its binding limit named; a route with no admitted step refuses to start | `admission.CeilingRule`, `newRoute` |
 | Open-file limit | soft limit at least 65,536 | route start | refusal to start | `checkOpenFiles` |
 | Balance command | one is given and parses | route start | refusal to start; a release manifest without its start balance record is refused | `ParseBalanceCommand`, `evidence.NewManifest` |
+| Ceiling records | one record per host of the route's model at 512, and at 1,024 when any host failed at 512, each bound to the request it checked | route start | refusal to start | `readCeilingProbes`, `probe.ChooseCeiling` |
+| Ledger prices | the ledger's highest price at the cell bounds and at the ceiling-check bounds covers the ceiling rule's verdict | route start | refusal to start | `State.Covers` |
 | Clock offset | at most 60 s | cell start | the route stops; the cell is retained and labelled | `runCell` |
+| Refresh | the refresh command exits 0 within 30 s, the operator file loads and covers the build, and every limits and eligibility record's file was rewritten after the command started | cell start | the cell is blocked before admission: no ledger line, no request | `cellOperator`, `Operator.Refreshed` |
+| Balance check | the balance command prints `{"amount_usd": "<decimal>"}` at or above the cell's reservation, or `{"unavailable": "<reason>"}` under a `target.balance_unavailable` ruling | cell start | the cell is blocked before admission | `evidence.CheckBalance`, `BalanceCheck.Blocks` |
 | Ledger admission | the route and global liability caps of the configuration | cell start | the route stops | `Ledger.Admit` |
 | Probe gate | a 400, 401, 403 or 404, or an operator-set limit status | cell start | the cell is blocked before its ladder | `probe.Gate` |
 | Credential or account fault | a probe 401 or 403 that the route's previous cell to send a probe also saw, on its probe or inside its ladder | cell start | the route stops; the cell is retained and labelled | `authFault` |
@@ -527,11 +539,11 @@ timing assertion before it fails. `make test-ac` fails on any skip unless
 
 ## Server-side sampling and the receive path
 
-This section covers what the client reads from the server's metrics
-endpoints and the two checks on its own receive path. You need it for
-the `server_side` and `receive_path` fields. A hosted target exposes no
-metrics endpoint to the instrument, so only the loopback canary applies
-to it.
+The client samples the server's metrics endpoints every second and
+checks its own receive path twice per window. You need this section
+for the `server_side` and `receive_path` fields. A hosted target exposes
+no metrics endpoint to the instrument, so only the loopback canary
+applies to it.
 
 ### The sampler
 
@@ -583,12 +595,13 @@ A window restricted to one replica carries no receive-path report.
 A self-hosted or mock request asks for the usage object
 (`stream_options.include_usage`); the hosted body the client generates
 does not, and a literal body carries whatever it says. The client
-records the completion token count from any chunk that carries usage at a
-path `target.response_shape.usage` names (`usage` by default), beside its
-own content-event count. Each window reports both counts as
-distributions (`content_events`, `completion_tokens`) and the §10 check
-over the completed requests that carried usage (`token_check`: sampled and
-matched).
+records the completion token count from a usage object at the path
+`target.response_shape.usage` names (`usage` by default) that carries a
+completion count, beside its own content-event count; a count the stream
+does not carry is absent, and an explicit 0 is a count. Each window
+reports both counts as distributions (`content_events`,
+`completion_tokens`) and the §10 check over the completed requests that
+carried a completion count (`token_check`: sampled and matched).
 
 | Case | Pooled ITL label in `report.txt` |
 |---|---|
@@ -600,8 +613,9 @@ matched).
 
 ## Fault modes
 
-This section covers the faults the mock can inject and the process-kill
-variant. You need it to read a Phase 0 run or a process-kill campaign.
+The mock injects five scheduled faults and a slow reload, and the
+process-kill variant kills a real container. You need this section to
+read a Phase 0 run or a process-kill campaign.
 
 The mock's modes stand in for the §1 variants in Phase 0: `stream_abort`
 reproduces the resets of a clean delete, and `silent_hang` the silent drops
@@ -650,9 +664,9 @@ helper container (`--kill-via docker-helper`).
 
 A hosted target (`target.hosted`) is a managed provider endpoint the
 project does not operate. SPEC-HOSTED.md is the pre-registered protocol
-for measuring one; this section describes the code that runs it. You
-need it to run or read a hosted run of `cmd/percentes` or the pilot, and
-to know what each evidence file holds; a release adds to it in
+for measuring one, and the code below runs it. You need this section to
+run or read a hosted run of `cmd/percentes` or the pilot, and to know
+what each evidence file holds; a release adds to it in
 [The release runner](#the-release-runner). Three
 commands drive hosted targets: `cmd/percentes` runs one hosted run through the
 experiment's phases with no fault injected, outside the SPEC-HOSTED §3
@@ -673,20 +687,28 @@ before any setup.
   affiliation. A record is a file beside the operator file, with the URL
   it was taken from and the retrieval date. `LoadOperator` reads and
   hashes every record before the run, and the manifest carries the
-  hashes. A binary that carries no version-control revision refuses to
-  run, and one built from a modified tree needs a `source_diff` record
-  (`CheckSource`).
+  hashes; a release route reads the file and its records again at each
+  cell's start, after its refresh command rewrote the limits and
+  eligibility records ([A cell, in order](#a-cell-in-order)). A binary
+  that carries no version-control revision refuses to run, and one built
+  from a modified tree needs a `source_diff` record (`CheckSource`).
 - **The admission ledger** (`--ledger`, `internal/admission`) is one
-  append-only JSON Lines (JSONL, one JSON object per line) file holding
-  every inference request sent to a route, the per-request prices and
-  hosting costs the operator entered, and, on its first line, the caps it
-  enforces. Each line carries its sequence number and the SHA-256
-  (256-bit Secure Hash Algorithm) digest of every byte before it; a ledger whose chain does not check admits
-  nothing. An admission reserves its requests before any is sent and is
-  settled with the count actually sent, so a run cut short still holds
-  its reservation. The pilot's caps are code constants (`PilotCaps`):
-  1,024 requests per route, 2,048 in all, and a projected liability of
-  US$40 at the highest per-request price recorded for each route.
+  append-only JSON Lines (JSONL, one JavaScript Object Notation (JSON)
+  object per line) file holding every inference request sent to a route,
+  the per-request prices the operator entered at each pair of input and
+  output token bounds the route sends requests at, the hosting costs,
+  and, on its first line, the caps it enforces. Each line carries its
+  sequence number and the SHA-256 (256-bit Secure Hash Algorithm) digest
+  of every byte before it; a ledger whose chain does not check admits
+  nothing. An admission names its requests' token bounds and is refused
+  where the route holds no price at exactly those bounds; it reserves
+  its requests before any is sent and is settled with the count actually
+  sent, so a run cut short still holds its reservation, and each request
+  is charged at the highest price recorded for the route at its own
+  bounds. The pilot's caps are code constants (`PilotCaps`): 1,024
+  requests per route, 2,048 in all, and a projected liability of US$40
+  at the highest per-request price recorded for each route at the
+  pilot's bounds, 2,000 input and 4,096 output tokens.
 - **The key.** `target.api_key_env` names an environment variable. The
   pilot command reads it from a file given with `--env` (`NAME=value`
   lines, readable by its owner only) and never from the inherited
@@ -733,12 +755,14 @@ before any setup.
 | File | Contents | Written by |
 |---|---|---|
 | `attempts.jsonl` | one JSON object per scheduled request, in index order: the times from the run epoch (intended, dispatch, first content event, terminal event), the outcome and error class, the protocol and HTTP status, the response headers `target.response_headers` allows and the first `Retry-After` among them (a header `target.retained_headers` names carries the stand-in `[retained]` here and its values in the frame store), the redacted error text, the peer address and whether the connection was reused, the content-event count, the usage object and completion token count where the stream carried them, the finish reason, the reported model and any mismatch, the system fingerprint, the first in-band error object, the unknown-event count, whether reasoning arrived, whether a refusal field carried text and its length where the shape names one, the scorer's verdict where the request had a label, and the run's invalid reasons repeated on every record. Outside the release profile a hosted record also carries the visible answer. | `evidence.WriteRun` |
-| `frames.jsonl` | per request, every read of a 200 body with its return time, up to 8 MiB per request, or the first 4,096 bytes of a non-200 body, read for at most 1 s after the status; the values of the retained headers; credentials masked | `evidence.WriteRunFrames`, into a directory named by the run epoch under `--frames` |
+| `frames.jsonl` | per request, every read of a 200 body with its return time, up to 8 MiB per request, or the first 4,096 bytes of a non-200 body, read for at most 1 s after the status; the values of the retained headers; credentials masked; under a release route whose `target.retention.model_output` is `none`, no read of a 200 body, its byte count added to `dropped_bytes` | `evidence.WriteRunFrames`, into a directory named by the run epoch under `--frames` |
 | `clock.json`, `status-start.json`, `status-end.json` | the command, its output verbatim, exit code and timing; for the clock, the parsed offset and its flag | `evidence.WriteClock`, `evidence.WriteStatus` |
-| `balance-start.json`, `balance-end.json` | release cells only: the operator's account balance or quota command, run like the status command, with its output verbatim, exit code and timing at the cell's start and at its end | `evidence.ReadBalance`, `evidence.WriteStatus` |
-| `probe.json` | the probe record: the exchange (DNS, connects, TLS, peer, protocol, status, allowed headers, a non-200 body), the response shape, the findings against the configured shape and the start decision | `probe.Write` |
+| `refresh.json` | release cells only: the operator-records refresh command's run at the cell's start, with its output verbatim, exit code and timing | `evidence.ReadStatus`, `evidence.WriteStatus` |
+| `balance-start.json`, `balance-end.json` | release cells only: the operator's account balance or quota command, run like the status command, with its output verbatim, exit code and timing at the cell's start and at its end; the start record adds `check`, the printed amount against the cell's reservation (`sufficient`, `insufficient`, `unavailable` or `check_failed`) | `evidence.ReadBalance`, `evidence.CheckBalance`, `evidence.WriteStatus` |
+| `probe.json` | the probe record: the exchange (DNS, connects, TLS, peer, protocol, status, allowed headers, a non-200 body), the response shape, the findings against the configured shape and the start decision; a header `target.retained_headers` names carries `[retained]`, and the limits body is a hash where `target.probe.limits_retained` is set | `probe.Write` |
+| `probe-retained.json` | what a probe or ceiling-check record withholds: the retained headers' values in each request and the limits read, and the limits body; beside a cell's frames, or under `ceiling-check --frames` | `probe.WriteRetained` |
 | `manifest.json` | the build revision and whether the tree was modified; the capture limits; the configuration file by hash; the endpoint as configured and as observed (requested and reported models, mismatches, protocols, the parameters recorded as not applied); the client host; the clock and status records, and under the release profile the balance records; the operator file and its records by hash; the ledger's hash and line count; every artifact and the frame store by hash; validity and its reasons; the G2 and G6 gates, per ladder step under the release profile; the release cell record ([The cell's files and report](#the-cells-files-and-report)); and the replay record the report pair needs, absent for a release cell, whose pair reads its cell record | `evidence.NewManifest` |
-| `operator.json`, `records/` | copies of the operator file and its records, beside the frame store | `Operator.WriteCopies` |
+| `operator.json`, `records/` | copies of the operator file and its records as read at the cell's start, beside the frame store | `Operator.WriteCopies` |
 
 ### The pilot
 
@@ -842,9 +866,15 @@ Messages stream instead, at `/v1/messages` and `/anthropic/v1/messages`:
 ### Following one request of a hosted run
 
 This is the first worked example: one request of a plain hosted run of
-`cmd/percentes`. [Following one release request](#following-one-release-request)
-is the second. A request goes through these steps, and each leaves a
-field a reader can check.
+`cmd/percentes`, which drives a hosted target under the `ac` or
+`experiment` profile with `target.hosted: true` through the experiment's
+phases with no fault. It runs outside the SPEC-HOSTED §3 pins: its body
+and its 30 s timeout are the protocol's superseded v0.1 values, and its
+figures are not release figures. A release request is the second
+example,
+[Following one release request](#following-one-release-request). A
+request goes through these steps, and each leaves a field a reader can
+check.
 
 1. **Schedule.** `loadgen.BuildSchedule` fixes the request's index i and
    its intended dispatch time t_i, as nanoseconds from the run epoch,
@@ -869,7 +899,10 @@ field a reader can check.
    undecodable event or an in-band error object is `malformed_stream`; a
    reset is `reset`; a failure before any status is `connect`; no
    terminal event by the timeout is `censored`. A non-200 status is
-   `status_429` or `status_other`.
+   `status_429` or `status_other`. On a hosted target the first in-band
+   error object ends the request at its arrival, as `malformed_stream`
+   with `done_ns` at that event; nothing after it is read, and the
+   fields read up to it stay.
 6. **Record.** The request is one line of `attempts.jsonl`, in index
    order, with every field above.
 7. **Report.** `collect.Collect` assigns the record to the window of
@@ -886,10 +919,8 @@ endpoint and one account tier. `cmd/percentes-release` runs one route as
 its own process; the routes of a release run concurrently on one client
 host, each at its own offset inside the slot, all writing under one
 `--out` directory. You need this section to run a release or to read a
-route page. It covers the profile's pins, the schedule, the commands
-that run before the first cell, a cell from its start to its files, the
-per-step tables and the index, the rehearsal, and ends with one request
-followed from the schedule to its row in the index.
+route page; it ends with one request followed from the schedule to its
+row in the index.
 
 ### The release profile
 
@@ -904,7 +935,8 @@ pins the numbers and refuses a file outside them:
 | `client.http_timeout_s` | 90, the hard timeout |
 | `load` | `poisson` arrivals, `ignore_eos` false, `unique_prefixes` true, `connections` 32; no rate, input length or `max_tokens` |
 | `release.caps` | `route_usd` and `global_usd`, positive decimals, the route's within the global |
-| `target` | `hosted` true, `name`, `model_name`, `api_key_env`, the complete `endpoint_url`, `adapter` (`chat_completions` or `messages`), `auth_header`, the literal `body`, at least one `limits` entry and a `naming` record; optional `response_headers`, `retained_headers`, `response_shape` (chat completions only), `probe`, `unpublished_limits`, `not_applied`, `status_docs`, `error_docs` and `billing_refusals` |
+| `release.other_hosts` | the release's other routes of the target's model, each a route name and the model identifier its requests carry; empty for a model with one host |
+| `target` | `hosted` true, `name`, `model_name`, `api_key_env`, the complete `endpoint_url`, `adapter` (`chat_completions` or `messages`), `auth_header`, the literal `body`, at least one `limits` entry, a `response_headers` list matching `Retry-After`, a `naming` record and a `retention` record; optional `retained_headers`, `response_shape` (chat completions only), `probe`, `unpublished_limits`, `not_applied`, `status_docs`, `error_docs`, `billing_refusals` and `balance_unavailable` |
 
 The literal body is checked as a JSON object with `stream` true and the
 case slot once; under the release profile it must also carry the
@@ -931,11 +963,22 @@ may not cover `Retry-After`, whose values the tables print. `not_applied`
 lists the body parameters of SPEC-HOSTED HA3 point 3 that the target
 rejects (`stream_options`, `reasoning_effort` or `reasoning_format` on a
 chat-completions target; `thinking` or `output_config` on a Messages
-target), which the body then omits and the manifest records.
-`configs/release.reference.yaml` is one route with placeholders for the
-system text, the limit snapshots and the caps. The transport's idle pool
-is two times the top step's rate times the hard timeout plus
-`load.connections`: 752 at the pins.
+target), which the body then omits and the manifest records. Three
+more fields carry the operator's rulings and readings. `balance_unavailable`
+(reason, the ruling's date and where it is kept) is the dated ruling a
+cell starts under when the balance command prints `unavailable`
+([A cell, in order](#a-cell-in-order)). `retention` records what the
+provider's terms say about keeping model output (`provision`), the
+customer's deletion duties under them (`deletion`), the terms page by
+`source`, `retrieved` date and `sha256`, and `model_output`:
+`protocol_period` keeps each 200 body in the frame store, `none` keeps
+only its byte count. `probe.limits_retained` keeps the limits read's
+body out of the probe record, as a hash, where the terms keep it
+unpublished. `configs/release.reference.yaml` is one route with
+placeholders for the system text, the limit snapshots, the balance
+ruling and the caps. The transport's idle pool is two times the top
+step's rate times the hard timeout plus `load.connections`: 752 at the
+pins.
 
 ### The schedule
 
@@ -974,10 +1017,10 @@ refuses to start on any of these.
 | the operator file fails to load, the build has no version-control revision, or the tree was modified and no `source_diff` record is given | `evidence.LoadOperator`, `evidence.CheckSource` |
 | the open-file soft limit is below 65,536 | `checkOpenFiles` |
 | the frame root is inside the source tree | `evidence.CheckFramesRoot` |
-| the clock-sync, status or balance command is missing or does not parse | `evidence.ParseClockCommand`, `ParseStatusCommand`, `ParseBalanceCommand` |
-| the ledger's caps differ from the configuration's, or the ledger holds no price line for the route | `State.CheckRelease`, `routePrice` |
+| the clock-sync, status, balance or refresh command is missing or does not parse | `evidence.ParseClockCommand`, `ParseStatusCommand`, `ParseBalanceCommand`, `ParseRefreshCommand` |
+| the ledger's caps differ from the configuration's, the ledger holds no price line for the route, or its prices do not cover the ceiling rule's verdict at the cell bounds and at the ceiling-check bounds | `State.CheckRelease`, `routePrice`, `State.Covers` |
 | the ceiling rule admits no step | `newRoute`, after `admission.CeilingRule` |
-| no `--ceiling-probe` record is given, or the records exclude the model, choose a ceiling other than the configuration's, or hold no record of this route | `readCeilingProbes`, `probe.ChooseCeiling` |
+| no `--ceiling-probe` record is given; a record is of a route outside the model's host group, carries another model or byte cap, or failed its input bound; a record of this route carries another adapter or endpoint, another body hash at the configured ceiling, or a value the route withholds; a host's record at a needed ceiling is missing; or the records exclude the model or choose a ceiling other than the configuration's | `readCeilingProbes`, `probe.ChooseCeiling`, `probe.Exposed` |
 | `--byte-cap` is missing, or `--account-created` is not a date | `newRoute` |
 | the env file does not set the key | `loadKey` |
 
@@ -987,46 +1030,64 @@ refuses to start on any of these.
   its name, and the `global_usd` that every route's file carries with
   the same value. A release ledger caps liability only. `ledger price
   --ledger FILE --config FILE --input USD --output USD --source URL
-  --retrieved DATE` records a route's list prices at its shape's input
-  bound and ceiling; the ledger then admits the route's requests at the
-  highest per-request price it holds for the route.
+  --retrieved DATE` records a route's list prices at two token bounds:
+  the shape's input bound with the configured ceiling, the cell bounds,
+  and with the 1,024-token ceiling, the bounds a ceiling check is
+  admitted at. The ledger admits a request only at a bound it holds a
+  price for and charges it at the highest per-request price it holds
+  for the route at that bound, and `run` refuses to start unless those
+  prices cover the ceiling rule's verdict (`State.Covers`).
 
-- **The ceiling rule** (`admission.CeilingRule`, HA3 point 6) tests each
-  step's nominal demand against every recorded limit, at the schedule's
-  exact seeded counts: requests per minute and per second; tokens per
-  minute under the limit's counting rule (input plus output, input only,
-  or input plus output times a burndown factor) at the 1,200-token input
-  bound plus the ceiling; concurrency as the step's rate times the 90 s
-  hard timeout; daily requests and tokens for six cells, one per slot,
-  at the largest cell's count;
-  and spend per rolling window at the per-request price. Each must be at
-  most half of its limit. The monthly spend cap and the route's ledger
-  cap must cover the edition (twelve cells, two re-runs and 100 probe
-  requests), and the auto-reload threshold the costliest cell. A step is
-  admitted when every test passes; an excluded step names its binding
-  limit. The verdict carries each demand as a fraction of its limit, and
-  the per-step tables print it.
+- **The ceiling rule** (`admission.CeilingRule`, HA3 point 6) tests
+  each step's nominal demand against every recorded limit, at the
+  schedule's exact seeded counts: requests per minute and per second;
+  tokens per minute under the limit's counting rule (input plus output,
+  input only, or input plus output times a burndown factor) at the
+  1,200-token input bound plus the ceiling; concurrency as the step's
+  rate times the 90 s hard timeout; daily requests and tokens at six
+  cells' demand, each at the largest cell's count (six is the most cells
+  one route runs in a UTC day, one per slot, so the test bounds any
+  day's scheduled cells); and spend per rolling window at the
+  per-request price. Each must be at most half of its limit. The monthly
+  spend cap and the route's ledger cap must cover the route's whole
+  frame with its re-runs and probes (twelve cells, two re-runs and 100
+  probe requests), and the auto-reload threshold the costliest cell. A
+  step is admitted when every test passes; an excluded step names its
+  binding limit. The verdict carries each demand as a fraction of its
+  limit, and the per-step tables print it.
 - **The ceiling check** (`probe.RunRelease` and `probe.ChooseCeiling`,
   HA3 point 7) sends ten requests at the configured ceiling, at least
   4 s apart, and passes when every one returned visible content with a
   finish reason other than the length value the instrument pins per
   adapter (`probe.LengthChatCompletions` "length",
-  `probe.LengthMessages` "max_tokens"). It also checks that every
-  reported prompt token count is at most the 1,200 input bound, records
+  `probe.LengthMessages` "max_tokens"). It also checks that every one of
+  the ten requests reported a prompt token count of at most the 1,200
+  input bound, so a target that reports none cannot establish the input
+  bound and is not characterized. It records
   each TCP connect's duration as a round trip, reads the limits URL where
   the target names one, and checks each limit's retained copy against its
-  recorded hash. `ChooseCeiling` runs a model at 512 when every record
-  given passed at 512, else at 1,024 when every record passed there, and
-  otherwise excludes it; the operator passes one record per host, and
-  their model is not compared. `percentes-release ceiling-check --config
-  FILE --env FILE --ledger FILE --out DIR --byte-cap N [--snapshots DIR]`
-  runs the check for one route at its configured ceiling: ten Shape S
-  texts, admitted in the ledger as a probe before the first is sent and
-  settled with the count sent, written to
-  `ceiling-<UTC time>/<route>-<ceiling>/probe.json` under `--out` also
-  when the check fails or is blocked. It exits 0 when the ceiling and
-  input-bound checks pass and 2 otherwise. The runner reads these records
-  from `--ceiling-probe` and copies them into each cell's directory.
+  recorded hash, and records the ticket byte cap the texts were cut at.
+  `ChooseCeiling` takes the model's host group, this route and its
+  configuration's `release.other_hosts`, and runs the model at 512 when
+  every host's record passed at 512, else at 1,024 when every host's
+  record passed there, and otherwise excludes it; it refuses a record of
+  a route outside the group, a record whose input bound did not pass,
+  and a missing record. `percentes-release ceiling-check --config FILE
+  --env FILE --ledger FILE --out DIR --byte-cap N [--frames DIR]
+  [--snapshots DIR]` runs the check for one route at its configured
+  ceiling: ten Shape S texts, admitted in the ledger at the input bound
+  and the 1,024-token ceiling before the first is sent and settled with
+  the count sent, written to `ceiling-<UTC time>/<route>-<ceiling>/probe.json`
+  under `--out` also when the check fails or is blocked; `--frames` is
+  required where the route withholds probe values, and the withheld
+  values go to `probe-retained.json` under it. It exits 0 when the
+  ceiling and input-bound checks pass and 2 otherwise. The runner reads
+  the records from `--ceiling-probe`, one flag per record of every host
+  of the model, binds each to the request it checked (its host's model
+  and the `--byte-cap`; for this route's records also its adapter and
+  redacted endpoint, and at the configured ceiling the hash of
+  `target.body`), refuses a record of this route that carries a value
+  the route withholds, and copies them into each cell's directory.
 - **Shape S** (`pilot.GenerateShapeS`): 100 synthetic tickets from a fixed
   seed, each cut at the byte cap. The user text of request i is
   `cs-<seed>-<i>` with a six-digit index, a space, and the tickets in
@@ -1036,9 +1097,23 @@ refuses to start on any of these.
 ### A cell, in order
 
 `runCell` (`cmd/percentes-release/cell.go`) writes `cell.json` as running
-and starts the cell's live dispatch series, then writes the clock record,
-the start status and the start balance (`--balance-cmd`, run like the
-status command with no shell); a clock offset above 60 s stops the route.
+and starts the cell's live dispatch series, then writes the clock record
+and the start status, runs the refresh command (`--refresh-cmd`, run
+like the status command with no shell) and writes its record, reads the
+operator file and its records again, and runs the balance command
+(`--balance-cmd`) and writes its record with the check of the printed
+amount against the cell's reservation, the probe request plus every
+scheduled request at the ledger's price. A clock offset above 60 s
+stops the route. The cell is blocked before admission, with no ledger
+line and no request, when the refresh command failed, timed out or
+printed past the limit, the operator file no longer loads or covers
+the build, or a limits or eligibility file was not rewritten after the
+command started; and when the balance check does not let it start: the
+command failed or printed anything but one JSON object holding
+`amount_usd` or `unavailable`, the amount is below the reservation, or
+the balance is unavailable and the configuration carries no
+`target.balance_unavailable` ruling. The manifest of a cell blocked for
+its records carries the records read when the route started.
 The ladder is cut at the top admitted step and the cell's seed set, and
 one user text per scheduled request comes from Shape S. The ledger admits
 one plus the scheduled count; a refusal stops the route. One probe
@@ -1046,18 +1121,20 @@ request is sent: a documented billing refusal stops the route, and a
 start-gate status blocks the cell, unless it is a 401 or 403 that the
 route's previous cell to send a probe also saw, on its probe or inside
 its ladder, which stops the route as independent evidence of a credential
-or account fault (`authFault`). After one lowest-step interval the ladder
-runs with the loopback canary, and each request's terminal state is
-checked for a documented billing refusal (the route stops) or an `EMFILE`
-error (the cell is client-invalid); the ladder's 401 and 403 counts go
-into the cell record. The outcome is then decided, and every finished
-cell is retained.
+or account fault (`authFault`). After a pause of one mean arrival
+interval at the lowest step's rate (4 s at 0.25 requests per second),
+counted from the probe request's send, the ladder runs with the loopback
+canary, and each request's terminal state is checked for a documented
+billing refusal (the route stops) or an `EMFILE` error (the cell is
+client-invalid); the ladder's 401 and 403 counts go into the cell
+record. The outcome is then decided, and every finished cell is
+retained.
 
 | Outcome | Meaning | Files |
 |---|---|---|
 | `counted` | the ladder ran to the top admitted step's drain, or the backoff rule ended it; G2 passed at every attempted step, no tripwire fired, no `EMFILE`, the clock unflagged; the cell enters the route's frame | the full set, with a manifest whose cell record carries the label |
 | `client_invalid` | `EMFILE`, a failed G2 at a step, a fired tripwire, a response over another protocol, a flagged clock, or a canary that did not start; re-run within the bound | the full set, labelled |
-| `blocked` | the probe's status blocked the start | the files reached, an empty attempts file and frame store, and a labelled manifest and report pair |
+| `blocked` | the refresh fault, the balance check or the probe's status blocked the start | the files reached, an empty attempts file and frame store, and a labelled manifest and report pair |
 | `stopped` | a route stop before or during the ladder; the process exits 3 | as blocked, with whatever the ladder sent |
 | `interrupted` | the process ended or failed during the cell | `cell.json` and the files reached at the time; when the process next reads the route's records, `labelCell` writes the empty attempts file, reads any start record the cell did not write, and adds the labelled manifest and report pair |
 | `missed` | the start was more than 15 minutes past when the process reached it | `cell.json`, then the labelled manifest and report pair from `labelCell`, with no end records and no concurrent runs |
@@ -1085,7 +1162,13 @@ The tripwires are per step: sends beyond the step's scheduled count, and
 requests in flight above two times the step's rate times the hard
 timeout. A completion whose whole answer arrived more than 30 s after
 intended dispatch is late; the hard timeout of 90 s from actual dispatch
-censors.
+censors. A stop of the run (a documented billing refusal or `EMFILE`
+through the completion hook, SIGINT or SIGTERM) leaves every request not
+yet dispatched unsent: the pacer spawns no worker after the stop, a
+worker in its final wait returns without sending, and a dispatch is
+stamped only while the run is open, so every sent request has its
+dispatch at or before the stop time; requests already sent drain under
+their own timeout.
 
 ### The cell's files and report
 
@@ -1140,11 +1223,13 @@ below lists what each step carries.
 | Hosted-G6 | the in-time count over scheduled, and beside it the same count over the requests that were not connect or reset errors |
 | Throughput | completions per second: the completions, in time or late, of the step's scheduled requests over the configured step window (`release.ladder.step_s`, pinned at 480 s); the provider-reported completion tokens per second over the completions whose records carry the count, with how many those are; pooled over the cells' windows summed, with the range of the cells' completions per second |
 | Completion-incidence curve | a point at each distinct completion time with its pointwise Wilson band, printed at 1, 2, 5, 10 and 20 s, at the deadline and at the last completion |
-| Incidence quantiles | the median and the 90th, 95th and 99th percentiles of the curve, reported where the curve crosses them inside the 90 s hard timeout and refused in the §3 form otherwise |
+| Incidence quantiles | the median and the 90th, 95th and 99th percentiles of the curve, reported where the curve crosses them inside the 90 s hard timeout and refused in the SPEC.md §3 form otherwise |
 | Failure timing | per error class with events, the median and 90th percentile of the time from intended dispatch to the failure signal |
-| Latency | the TTFT and whole-answer distributions over completions: the median and 90th percentile, and the 95th and 99th percentiles with their §7 order-statistic intervals where the ranks fall inside the sample; the median and 90th percentile again, split by dialled and reused connections; the §3 caveat to read them with the curve where errors and censored requests exceed 5 percent of scheduled |
-| Completion length | per completion, the content events, the provider-reported completion tokens and the reasoning tokens: minimum, median, 90th percentile and maximum, or not verifiable where no completion carried the count |
+| Latency | the TTFT and whole-answer distributions over completions: the median and 90th percentile, and the 95th and 99th percentiles with their SPEC.md §7 order-statistic intervals where the ranks fall inside the sample; the median and 90th percentile again, split by dialled and reused connections; the SPEC.md §3 caveat to read them with the curve where errors and censored requests exceed 5 percent of scheduled |
+| Completion length | per completion, the content events, the provider-reported completion tokens and the reasoning tokens: minimum, median, 90th percentile and maximum, or not verifiable where no completion carried the count; the content events of the step's errored requests and of its censored requests as their own distributions |
+| Prompt length | the provider-reported prompt tokens over the step's requests sent (a chat-completions `prompt_tokens`, or a Messages `input_tokens` plus its cache creation and cache read counts; a null or missing count is absent, an explicit 0 is a count), with how many of the requests carried it |
 | Inter-chunk gaps | the histogram of gaps between successive content events over the step's completions |
+| Naming lines | on a route page only: the route's `target.naming.lines`, printed verbatim under their heading |
 
 A complete frame of twelve counted cells pools each step over the cells
 that attempted it. A pooled line carries the count over the pooled
@@ -1152,8 +1237,10 @@ denominator, the range of the cell rates, the cells with events, and a
 Wilson interval on the effective sample size N / DEFF, where DEFF is the
 larger of 1 and the cluster-robust variance over the independent one
 (HA3 point 13). The drift rule (SPEC-HOSTED §4) then applies. Each
-counted cell's manifest records a documentation state: the account tier,
-and the limits and eligibility records by URL and hash (`report.DocsOf`).
+counted cell's manifest records a documentation state as read at the
+cell's start, after its refresh command rewrote the limits and
+eligibility records: the account tier, and those records by URL and
+hash (`report.DocsOf`).
 A change between consecutive cells in start order is named, with the
 entries removed and added. The frame then pools each side apart, as a
 `drift_parts` entry with its cells, dates and shared state, and carries
@@ -1187,6 +1274,29 @@ left out. It then writes `index.md` and `index.json`, and per route
 Nothing is written unless every route reads, and a route with cells
 under `--out` and no `--config` is refused.
 
+`percentes-release publish-check --out DIR --frames DIR --config FILE
+... --pages DIR --record FILE` checks the release publication record
+(`evidence.Publication`, SPEC-HOSTED HA3 point 14): a strictly decoded
+JSON file apart from the cell manifests that names, by path and
+SHA-256, every cell manifest and every page, and holds per route its
+notice (date, recipient, account identifier, evidence pack and the date
+its window closes), its responses (a verbatim one with its text and
+consent files, any other with its corrections), its naming permission
+and its replication pack; every email and form that described the work
+to a provider before the notices; every pre-release copy with the
+routes it withheld; and the weekdays the notice windows do not count.
+The command rebuilds the pages from the cells, takes each route's
+duties from its configuration (`naming.permission_required`; a
+replication pack where the endpoint host ends in `.amazonaws.com`) and
+refuses, exiting 2 with every problem named, unless the record matches
+the cells and the pages on disk, every route has its notice with at
+least four working days up to a window close that has passed, its
+responses, and its permission and pack where due, every disclosure
+predates the first notice, every pre-release copy withholds every
+replication-pack route, and every named file matches its hash. When the
+record is complete it prints the counts and the providers told before
+the notices, in date order. `pages` needs no record.
+
 ### What publishes and what stays retained
 
 Per cell, the manifest names every published file by hash: the
@@ -1200,9 +1310,16 @@ outcome and reasons reach the published set through the manifest's
 beside it, stays under `--frames`, named in the manifest by hash and
 retained unpublished (SPEC-HOSTED §9); it also holds the values of the
 headers `target.retained_headers` names, which the published record
-replaces with `[retained]`. The answer text of a release request is in the
-frame store and in no published file. `percentes --check-release` refuses
-a cell whose named files are missing or differ from their recorded hashes.
+replaces with `[retained]`; `probe.json` and the ceiling probe copies
+carry the same stand-in, and their withheld values, with the limits body
+where `target.probe.limits_retained` is set, are in `probe-retained.json`
+beside the cell's frames. The answer text of a release request is in the
+frame store and in no published file; under a route whose
+`target.retention.model_output` is `none`, the frame store keeps no 200
+body and counts its bytes in `dropped_bytes`, while non-200 bodies and
+the retained header values are kept either way. `percentes
+--check-release` refuses a cell whose named files are missing or differ
+from their recorded hashes.
 
 ### The end-to-end test
 
@@ -1227,9 +1344,11 @@ request is sent. You need this section to produce the acceptance run's
 evidence file or to read one.
 
 The command serves six shaped mocks on loopback in its own process, one
-per request form of the release (`releaseForms`). Each mock accepts a
-fresh random key in its form's credential header only; the key is set in
-the process's environment for the run and unset after it.
+per request form the instrument supports (`releaseForms`); the route
+names are labels, and each real route's form is fixed by its frozen
+configuration. Each mock accepts a fresh random key in its form's
+credential header only; the key is set in the process's environment for
+the run and unset after it.
 
 | Route | Form | Key header | Reasoning in the stream |
 |---|---|---|---|
@@ -1243,9 +1362,11 @@ the process's environment for the run and unset after it.
 At full length a mock's stream starts after 0.3 to 1.5 s and sends
 events 10 to 40 ms apart: 200 reasoning tokens on a form that reasons,
 then a 504-character answer in 4-character content events. Each route
-runs through `newRoute`, with the same input checks as `run` and `true`
-as its status and balance commands; the ceiling rule must admit the
-whole ladder. Every route then runs the schedule's first cell through
+runs through `newRoute`, with the same input checks as `run`: `true` as
+its status command, a balance command that prints the route's cap as
+its amount, and a refresh command that touches the note file every mock
+record names, so `--out` may hold no white space; the ceiling rule must
+admit the whole ladder. Every route then runs the schedule's first cell through
 `runCell`, all concurrently, each starting at its pinned offset after one
 common start, so a cell carries its probe, canary, ladder, ledger
 admission and settlement, and retained evidence as under `run`.
@@ -1266,7 +1387,7 @@ The command refuses to start, and writes nothing, on any of these:
 
 | Path under `--out` | Contents |
 |---|---|
-| `inputs/` | the operator file, whose required records all name one note file; the source diff, when given; the schedule over the current UTC date and the nine days after it, from `--master-seed`; the ledger with the six routes' caps and a mock price; a passed ceiling record at 512 per route, since no ceiling check is sent |
+| `inputs/` | the operator file, whose required records all name one note file; the source diff, when given; the schedule over the current UTC date and the nine days after it, from `--master-seed`; the ledger with the six routes' caps and a mock price at both bounds; a passed ceiling record at 512 per route, bound to the route's request with its input bound passed, since no ceiling check is sent; each mock route is the only host of its model |
 | `<route>/<cell>-a1/` | the cell's files, as under `run` |
 | `rehearsal.json` | the summary: whether the rehearsal is green, with the reasons where it is not; whether it ran at full length, the scale, and the ladder and mock settings as run; the master seed, the cell label, the build's revision and whether its tree was modified, the host's name, operating system, architecture, CPU count and open-file limit, the clock-sync command, and the start and end; per route, the form, the offset, the cell directory, the outcome, each step's rate, scheduled count and G2 report, the tripwires, the requests sent, the mock's answers by status, the completeness check's result and the manifest's SHA-256; and the host's aggregate dispatch series over every cell |
 
@@ -1300,11 +1421,14 @@ difference is given.
    carry `step` and `warmup`.
 2. **Admission.** When the route's process started, the ceiling rule
    admitted step k at the schedule's exact counts, or the request would
-   never be scheduled. At the cell's start, after the clock, status and
-   balance records, the ledger reserves one probe request plus every
-   scheduled request of the cell against the route's and the release's
-   liability caps; a refusal stops the route and the cell is retained
-   with that label.
+   never be scheduled. At the cell's start, after the clock and status
+   records, the refresh command rewrites the recorded limits and model
+   documentation and the balance command reads the account's balance;
+   a cell whose records were not rewritten, or whose balance is below
+   its reservation, is blocked here with no request sent. The ledger
+   then reserves one probe request plus every scheduled request of the
+   cell against the route's and the release's liability caps; a refusal
+   stops the route and the cell is retained with that label.
 3. **Body.** The user text is `cs-<seed>-<i>` with a six-digit index, a
    space, and a Shape S ticket; it replaces the case slot of the frozen
    body, whose hash the probe record carries, and the key goes in the
@@ -1421,6 +1545,12 @@ A release cell ([The release runner](#the-release-runner)):
 | `manifest.json`: `release` | `evidence.Cell`, filled by `cellEvidence` and `retain`; `admission` by `admission.CeilingRule`; `ceiling_choice` by `probe.ChooseCeiling`; `dispatch_aggregate` by `hostDispatch`; `inter_chunk_gaps` by `evidence.StepGaps` | HA3 points 6, 7, 9 and 15 |
 | `manifest.json`: `gates` (per step) | `evidence.releaseGates`: `validity.G2` per attempted step and over the ladder, `validity.ReleaseG6` per step | HA3 points 5 and 13 |
 | `manifest.json`: `balance_start`, `balance_end` | `evidence.ReadBalance`, named by `evidence.NewManifest` | SPEC-HOSTED §9 |
+| `balance-start.json`: `check` | `evidence.CheckBalance`, against `State.ReservationUSD` | SPEC-HOSTED §3 |
+| `refresh.json`, and the records' `retrieved` dates in the manifest | `evidence.ReadStatus`, `Operator.Refreshed` | SPEC-HOSTED §4 |
+| `probe-retained.json` | `probe.Withheld`, `probe.WriteRetained` | HA3 point 15 |
+| the publication record's check | `evidence.LoadPublication`, `Publication.Check`, through `publishCheckCmd` | HA3 point 14 |
+| `report.json`: `tables.cells[*].steps[*].signals.content_events_errored`, `content_events_censored`, `prompt_tokens` | `report.signals`, `promptTokens` | SPEC-HOSTED §8 |
+| `routes/<route>.json`: `naming` | `report.NewStepTables`, from `target.naming.lines` | HA3 point 14 |
 | `report.json`: `tables.limits` | `admission.CeilingRule`, with the `unpublished:` cover tests | HA3 point 6 |
 | `report.json`: `tables.cells[*].steps[*].lines`, `hosted_g6` | `report.stepTables`, `newRate` (Wilson); the finish-reason sub-lines by `finishLabel` | HA3 points 8 and 13 |
 | `report.json`: `tables.cells[*].steps[*].g2` | `report.stepG2`, from the manifest's per-step `gates`; the text line by `g2Text` | HA3 point 5 |
@@ -1436,9 +1566,9 @@ A release cell ([The release runner](#the-release-runner)):
 
 ## Changing things safely
 
-This section says where each kind of change lives and what must move
-with it. You need it before editing a pin, a metric, a fault mode or a
-diagram.
+Each kind of change lives in one place and moves with the items listed
+under it. You need this section before editing a pin, a metric, a fault
+mode or a diagram.
 
 - **A configuration pin** lives in one constant in
   `internal/config/config.go` (the pilot and release pins among them, as
@@ -1487,9 +1617,14 @@ diagram.
   against the mock.
 - **Attempts file**: `attempts.jsonl`, one record per scheduled request of
   a hosted run (SPEC-HOSTED §9).
+- **Balance check**: the comparison, at a release cell's start, of the
+  amount the balance command printed with the cell's reservation; a cell
+  starts only where the check is sufficient, or unavailable under the
+  route's `balance_unavailable` ruling; any other result blocks it before
+  admission.
 - **Balance record**: `balance-start.json` and `balance-end.json`, the
   output of the operator's account balance or quota command at a release
-  cell's start and end.
+  cell's start and end; the start record carries the balance check.
 - **Binding limit**: the recorded limit whose test a ladder step failed
   first, named where the step is excluded.
 - **Black-hole**: the §1 variant that partitions the victim's node for a
@@ -1553,6 +1688,9 @@ diagram.
   is recorded in, under one pinned configuration.
 - **Heal anchor**: the observed partition expiry, else fire anchor + 120 s
   (§5).
+- **Host group**: every route of a release that serves one model, the
+  route and its `release.other_hosts`; the ceiling check is decided
+  across the group, and `run` needs every host's records.
 - **Hosted target**: a managed provider endpoint the project does not
   operate (`target.hosted`, §6); a hosted run is measured under
   SPEC-HOSTED.md.
@@ -1600,6 +1738,18 @@ diagram.
   fires, so nothing depends on reaching the victim afterwards (§1).
 - **Probe**: the pre-run request from the client host that records a
   hosted endpoint's response shape and gates the start (SPEC-HOSTED §5).
+- **Publication record**: the file `percentes-release publish-check`
+  reads, apart from the cell manifests, holding each route's notice,
+  responses, consent, permission and replication pack, the earlier
+  disclosures and the pre-release copies (SPEC-HOSTED HA3 point 14).
+- **Refresh command**: the operator's command, run at each release
+  cell's start, that rewrites the files of the operator file's limits
+  and eligibility records with the pages as they stand (SPEC-HOSTED
+  §4).
+- **Retention**: `target.retention`, the route's reading of its
+  provider's terms on keeping model output, and whether the frame store
+  keeps each 200 body (`protocol_period`) or only its byte count
+  (`none`).
 - **Process kill**: the §1 variant that sends SIGKILL from the host to the
   vLLM API server process of one container, which the runtime's restart
   policy starts again in place.
@@ -1652,4 +1802,8 @@ diagram.
   published or shown value, recorded with the operator's dated ruling in
   `target.unpublished_limits`; each caps the route at 0.5 requests per
   second in the ceiling rule (SPEC-HOSTED HA3 point 6).
+- **Unsent**: a scheduled request of an attempted step that a stop left
+  undispatched; its own line in the per-step tables, outside the three
+  outcome states, and a censored observation at the horizon on the
+  curve.
 - **vLLM**: the open-source inference server the experiment targets.
