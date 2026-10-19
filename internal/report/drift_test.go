@@ -248,3 +248,90 @@ func TestIndexDrift(t *testing.T) {
 		t.Errorf("index JSON: %v\n%s", err, raw)
 	}
 }
+
+// windowCloseOf is route's window-close record at recorded, of the
+// account tier and the operator records docs gives.
+func windowCloseOf(route string, recorded time.Time, docs []DocRecord) *evidence.WindowClose {
+	w := &evidence.WindowClose{Route: route, RecordedUTC: recorded}
+	for _, d := range docs {
+		if d.Kind == DocTier {
+			w.AccountTier = d.Tier
+			continue
+		}
+		w.Records = append(w.Records, evidence.OperatorRecord{Kind: d.Kind, FileRef: evidence.FileRef{Name: d.Kind + ".txt", SHA256: d.SHA256, Bytes: 1}, URL: d.URL, Retrieved: "2026-10-21T00:00:00Z"},
+			evidence.OperatorRecord{Kind: evidence.RecordPrices, FileRef: evidence.FileRef{Name: "prices.txt", SHA256: "ff", Bytes: 1}, URL: "https://example.test/pricing", Retrieved: "2026-10-07"})
+	}
+	return w
+}
+
+// SPEC-HOSTED §4 window close: the record taken after the last cell is
+// compared with the last counted cell in start order. The route page
+// names a change found there and pools the frame as before, says when
+// the record shows none, and says when there is no record. A record of
+// another route, or taken before a cell's start, is refused.
+func TestWindowClose(t *testing.T) {
+	cfg, v := stepsConfig(t)
+	cells := driftCells()
+	at := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	route := cfg.Target.Name
+
+	st, err := NewStepTables(cfg, v, cells)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := st.Text(); !strings.Contains(text, "-- Window close: not recorded --\n") {
+		t.Errorf("text without a record:\n%s", text)
+	}
+
+	same, err := CompareWindowClose(route, cells, windowCloseOf(route, at, driftC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (&WindowClose{RecordedUTC: at, Docs: driftC, Cell: "cell-00"}); !reflect.DeepEqual(same, want) {
+		t.Errorf("no change:\n got %+v\nwant %+v", same, want)
+	}
+	st.WindowClose = same
+	if text := st.Text(); !strings.Contains(text, "-- Window close, recorded 2026-10-21: limits and documentation as at the last counted cell, cell-00 --\n") {
+		t.Errorf("text with no change:\n%s", text)
+	}
+
+	changed := slices.Clone(driftC)
+	changed[2].SHA256 = "c3"
+	c, err := CompareWindowClose(route, cells, windowCloseOf(route, at, changed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.Removed, []DocRecord{driftC[2]}) || !reflect.DeepEqual(c.Added, []DocRecord{changed[2]}) || c.Cell != "cell-00" {
+		t.Errorf("change: %+v", c)
+	}
+	st.WindowClose = c
+	text := st.Text()
+	frag := "-- Change of limits or documentation, first observed at the window-close record of 2026-10-21, after the last counted cell, cell-00; no cell follows it --\n" +
+		"  removed: limits https://example.test/limits sha256 b2\n  added: limits https://example.test/limits sha256 c3\n"
+	if !strings.Contains(text, frag) || !strings.Contains(text, "-- Part 3 of 3 under the drift rule: 4 cells started 2026-10-19 to 2026-10-20;") || strings.Contains(text, "Part 4") {
+		t.Errorf("text lacks %q, or splits again:\n%s", frag, text)
+	}
+	raw, err := json.Marshal(st)
+	if err != nil || !strings.Contains(string(raw), `"window_close":{"recorded_utc":"2026-10-21T00:00:00Z"`) {
+		t.Errorf("JSON: %v\n%s", err, raw)
+	}
+
+	none, err := CompareWindowClose(route, nil, windowCloseOf(route, at, driftC))
+	if err != nil || none.Cell != "" || none.Removed != nil || none.Added != nil {
+		t.Fatalf("no cell: %+v, %v", none, err)
+	}
+	st.WindowClose = none
+	if text := st.Text(); !strings.Contains(text, "-- Window close, recorded 2026-10-21: no counted cell to compare --\n") {
+		t.Errorf("text with no counted cell:\n%s", text)
+	}
+
+	for name, w := range map[string]*evidence.WindowClose{
+		`the record is route "other"'s`:      windowCloseOf("other", at, driftC),
+		`not after cell "cell-00"'s start`:   windowCloseOf(route, cells[0].Start, driftC),
+		`recorded 2026-10-17T00:00:00Z, not`: windowCloseOf(route, cells[11].Start, driftC),
+	} {
+		if _, err := CompareWindowClose(route, cells, w); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

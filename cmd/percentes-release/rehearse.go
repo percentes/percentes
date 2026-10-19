@@ -140,6 +140,18 @@ func mockBalanceCmd(cfg *config.Config) string {
 	return `echo {"amount_usd":"` + cfg.Release.Caps.RouteUSD + `"}`
 }
 
+// writeMockRefresh writes path, a mock route's refresh command: it
+// touches the file its argument names and prints each of cfg's recorded
+// limits at its recorded value.
+func writeMockRefresh(path string, cfg *config.Config) error {
+	limits := make([]string, len(cfg.Target.Limits))
+	for i, l := range cfg.Target.Limits {
+		limits[i] = `{"dimension":"` + l.Dimension + `","value":` + strconv.FormatFloat(l.Value, 'f', -1, 64) + `}`
+	}
+	script := "#!/bin/sh\ntouch \"$1\" && echo '{\"limits\":[" + strings.Join(limits, ",") + "]}'\n"
+	return os.WriteFile(path, []byte(script), 0o755)
+}
+
 // passedCeiling is a ceiling check record of cfg's request at its
 // configured ceiling, with texts cut at byteCap, that passed the ceiling
 // check and the input bound.
@@ -398,8 +410,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	// The mock routes' refresh command touches the note every record names.
-	refreshCmd := "touch " + filepath.Join(inputs, rehearsalNote)
+	note := filepath.Join(inputs, rehearsalNote)
 
 	n := len(releaseForms)
 	mocks := make([]*mock.Server, 0, n)
@@ -474,9 +485,13 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		if err := os.WriteFile(probePath, cp, 0o644); err != nil {
 			return exitError, err
 		}
+		refreshPath := filepath.Join(inputs, "refresh-"+name)
+		if err := writeMockRefresh(refreshPath, cfg); err != nil {
+			return exitError, err
+		}
 		r, err := newRoute(routeInput{
 			cfg: cfg, configName: name + ".yaml", schedulePath: schedulePath, out: in.out, ledgerPath: ledgerPath,
-			framesRoot: in.frames, clockSync: in.clockSync, statusCmd: "true", balanceCmd: mockBalanceCmd(cfg), refreshCmd: refreshCmd, opPath: opPath,
+			framesRoot: in.frames, clockSync: in.clockSync, statusCmd: "true", balanceCmd: mockBalanceCmd(cfg), refreshCmd: refreshPath + " " + note, opPath: opPath,
 			probeFiles: []string{probePath}, byteCap: in.byteCap, accountCreated: today, build: in.build,
 		})
 		if err != nil {

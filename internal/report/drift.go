@@ -51,8 +51,17 @@ func compareDocs(a, b DocRecord) int {
 // copy's file name are left out, so a re-recording of the same text is
 // no change.
 func DocsOf(m *evidence.Manifest) []DocRecord {
-	docs := []DocRecord{{Kind: DocTier, Tier: m.Endpoint.AccountTier}}
-	for _, r := range m.Records {
+	return docsOf(m.Endpoint.AccountTier, m.Records)
+}
+
+// WindowCloseDocs is the documentation state w records, as DocsOf.
+func WindowCloseDocs(w *evidence.WindowClose) []DocRecord {
+	return docsOf(w.AccountTier, w.Records)
+}
+
+func docsOf(tier string, records []evidence.OperatorRecord) []DocRecord {
+	docs := []DocRecord{{Kind: DocTier, Tier: tier}}
+	for _, r := range records {
 		if slices.Contains(driftKinds, r.Kind) {
 			docs = append(docs, DocRecord{Kind: r.Kind, URL: r.URL, SHA256: r.SHA256})
 		}
@@ -150,4 +159,43 @@ func docsLess(a, b []DocRecord) []DocRecord {
 		}
 	}
 	return out
+}
+
+// WindowClose is a route's window-close record against its last counted
+// cell in start order: the record's time and documentation state, the
+// cell, and the entries the record removed and added against the cell's
+// state. A change found there is first observed after every cell, so it
+// starts no part of a drift split.
+type WindowClose struct {
+	RecordedUTC time.Time   `json:"recorded_utc"`
+	Docs        []DocRecord `json:"documentation"`
+	Cell        string      `json:"cell,omitempty"`
+	Removed     []DocRecord `json:"removed,omitempty"`
+	Added       []DocRecord `json:"added,omitempty"`
+}
+
+// CompareWindowClose compares w, route's window-close record, with the
+// last of cells, the route's counted cells, in start order. It refuses a
+// record of another route and one taken before a cell's start.
+func CompareWindowClose(route string, cells []CellRecords, w *evidence.WindowClose) (*WindowClose, error) {
+	if w.Route != route {
+		return nil, fmt.Errorf("report: window close: the record is route %q's, not %q's", w.Route, route)
+	}
+	wc := &WindowClose{RecordedUTC: w.RecordedUTC.UTC(), Docs: WindowCloseDocs(w)}
+	var last *CellRecords
+	for i := range cells {
+		c := &cells[i]
+		if !c.Start.Before(w.RecordedUTC) {
+			return nil, fmt.Errorf("report: window close: recorded %s, not after cell %q's start", wc.RecordedUTC.Format(time.RFC3339), c.Cell)
+		}
+		if last == nil || c.Start.After(last.Start) {
+			last = c
+		}
+	}
+	if last == nil {
+		return wc, nil
+	}
+	docs := sortDocs(last.Docs)
+	wc.Cell, wc.Removed, wc.Added = last.Cell, docsLess(docs, wc.Docs), docsLess(wc.Docs, docs)
+	return wc, nil
 }

@@ -140,9 +140,13 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		refresh := filepath.Join(dir, "refresh-"+name)
+		if err := writeMockRefresh(refresh, cfg); err != nil {
+			t.Fatal(err)
+		}
 		r, err := newRoute(routeInput{
 			cfg: cfg, configName: name + ".yaml", schedulePath: schedulePath, out: out, ledgerPath: ledgerPath,
-			framesRoot: frames, clockSync: clockSync, statusCmd: "true", balanceCmd: mockBalanceCmd(cfg), refreshCmd: "touch " + filepath.Join(dir, "r.txt"), opPath: opPath,
+			framesRoot: frames, clockSync: clockSync, statusCmd: "true", balanceCmd: mockBalanceCmd(cfg), refreshCmd: refresh + " " + filepath.Join(dir, "r.txt"), opPath: opPath,
 			probeFiles: []string{writeFile(t, dir, "ceiling-"+name+".json", cp)}, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
 		})
 		if err != nil {

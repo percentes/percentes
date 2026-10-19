@@ -276,7 +276,9 @@ type PooledStep struct {
 // step. Pooled is nil for an incomplete frame. A change of limits or
 // documentation between cells (SPEC-HOSTED §4 drift rule) is listed in
 // DriftChanges, and a complete frame then pools each side apart in
-// DriftParts, with Pooled nil. Each attempted step
+// DriftParts, with Pooled nil. WindowClose is the route's window-close
+// record against its last counted cell (CompareWindowClose), which the
+// pages set; a route page without one says so. Each attempted step
 // carries its completion-incidence curve with pointwise bands and its
 // quantiles inside the hard timeout. LengthValue is the finish reason
 // the route's adapter reports when the output ceiling stopped the
@@ -297,6 +299,7 @@ type StepTables struct {
 	Pooled        []PooledStep     `json:"pooled,omitempty"`
 	DriftChanges  []DriftChange    `json:"drift_changes,omitempty"`
 	DriftParts    []DriftPart      `json:"drift_parts,omitempty"`
+	WindowClose   *WindowClose     `json:"window_close,omitempty"`
 }
 
 // CellRecords is one cell's label, the outcome and inter-chunk gap
@@ -836,6 +839,27 @@ func (t *StepTables) text(frame bool) string {
 	}
 	for _, c := range t.DriftChanges {
 		w("-- Change of limits or documentation, first observed at cell %s, started %s --", c.Cell, c.StartUTC.Format(time.DateOnly))
+		for _, d := range c.Removed {
+			w("  removed: %s", d)
+		}
+		for _, d := range c.Added {
+			w("  added: %s", d)
+		}
+		w("")
+	}
+	switch c := t.WindowClose; {
+	case c == nil:
+		w("-- Window close: not recorded --")
+		w("")
+	case c.Cell == "":
+		w("-- Window close, recorded %s: no counted cell to compare --", c.RecordedUTC.Format(time.DateOnly))
+		w("")
+	case len(c.Removed) == 0 && len(c.Added) == 0:
+		w("-- Window close, recorded %s: limits and documentation as at the last counted cell, %s --", c.RecordedUTC.Format(time.DateOnly), c.Cell)
+		w("")
+	default:
+		w("-- Change of limits or documentation, first observed at the window-close record of %s, after the last counted cell, %s; no cell follows it --",
+			c.RecordedUTC.Format(time.DateOnly), c.Cell)
 		for _, d := range c.Removed {
 			w("  removed: %s", d)
 		}

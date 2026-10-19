@@ -30,10 +30,12 @@ const (
 
 // routeRecords are one route's cells as the pages read them: the
 // ceiling rule's verdict every manifest carries, the counted cells'
-// records, and the attempts outside the frame.
+// records, the attempts outside the frame and the route's window-close
+// record, nil when it has none.
 type routeRecords struct {
 	verdict *admission.Verdict
 	cells   []report.CellRecords
+	close   *evidence.WindowClose
 	// labelled counts the attempts with a manifest that do not count;
 	// unrecorded the missed and interrupted attempts with no manifest,
 	// which keep their run record only.
@@ -119,10 +121,15 @@ func buildPages(out, framesRoot string, cfgs []*config.Config) (*releasePages, e
 	if rp.files[indexJSON], err = marshalPage(rp.index); err != nil {
 		return nil, err
 	}
-	for _, r := range rp.routes {
+	for i, r := range rp.routes {
 		st, err := report.NewStepTables(r.Config, r.Verdict, r.Cells)
 		if err != nil {
 			return nil, err
+		}
+		if c := rp.recs[i].close; c != nil {
+			if st.WindowClose, err = report.CompareWindowClose(r.Config.Target.Name, r.Cells, c); err != nil {
+				return nil, fmt.Errorf("pages: %w", err)
+			}
 		}
 		rp.files[r.Page] = []byte(st.Text())
 		if rp.files[path.Join(routesDir, r.Config.Target.Name+".json")], err = marshalPage(st); err != nil {
@@ -147,7 +154,8 @@ func marshalPage(v any) ([]byte, error) {
 // both count it, at most one attempt per scheduled cell; only a missed
 // or interrupted attempt may have its run record alone. Each counted
 // cell carries its scheduled start and the documentation state its
-// manifest records, which the drift rule compares.
+// manifest records, which the drift rule compares, and the route's
+// window-close record is read where it has one.
 func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, error) {
 	name := cfg.Target.Name
 	paths, err := filepath.Glob(filepath.Join(out, name, "*", cellFile))
@@ -212,6 +220,11 @@ func readRouteCells(out, framesRoot string, cfg *config.Config) (*routeRecords, 
 	}
 	if rr.verdict == nil {
 		return nil, fmt.Errorf("pages: route %s has no cell with a %s under %s", name, evidence.ManifestFile, out)
+	}
+	if p := filepath.Join(out, name, evidence.WindowCloseFile); fileExists(p) {
+		if rr.close, err = evidence.ReadWindowClose(p); err != nil {
+			return nil, fmt.Errorf("pages: %w", err)
+		}
 	}
 	return rr, nil
 }

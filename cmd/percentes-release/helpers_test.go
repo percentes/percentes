@@ -140,7 +140,7 @@ func testSchedule(t *testing.T, routes ...string) *schedule.Schedule {
 // "other", a ledger with the route's caps and price, an operator file, a
 // ceiling probe of each host of its model that passed at 512, a clock
 // reading of offset, a counting balance command and a refresh command
-// that touches the record file.
+// that touches the record file and prints cfg's recorded limits.
 func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	t.Helper()
 	dir := t.TempDir()
@@ -161,6 +161,10 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 		t.Fatal(err)
 	}
 	writeFile(t, dir, "r.txt", []byte("record"))
+	refresh := filepath.Join(dir, "refresh")
+	if err := writeMockRefresh(refresh, cfg); err != nil {
+		t.Fatal(err)
+	}
 	var probeFiles []string
 	for _, route := range append([]string{cfg.Target.Name}, otherHosts(cfg)...) {
 		probeFiles = append(probeFiles, writeCeiling(t, hostCeiling(cfg, 2000, route, 512, true)))
@@ -169,7 +173,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 		in: routeInput{
 			cfg: cfg, configName: "groq.yaml", schedulePath: writeFile(t, dir, "schedule.json", sb), out: t.TempDir(), ledgerPath: ledger,
 			framesRoot: t.TempDir(), clockSync: fakeSNTP(t, offset), statusCmd: "true", balanceCmd: fakeBalance(t), opPath: writeFile(t, dir, "operator.json", []byte(operatorJSON)),
-			refreshCmd: "touch " + filepath.Join(dir, "r.txt"), probeFiles: probeFiles, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
+			refreshCmd: refresh + " " + filepath.Join(dir, "r.txt"), probeFiles: probeFiles, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
 		},
 		ledger: ledger,
 	}

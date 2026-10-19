@@ -34,9 +34,11 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 
 // runCell runs one cell attempt (SPEC-HOSTED HA3 point 16) and returns its
 // record, also written to the cell's directory. A clock offset above the
-// pinned bound or a ledger refusal stops the route before any request;
-// operator records not refreshed at the cell's start (cellOperator), a
-// failed balance check, a balance below the cell's reservation, or a
+// pinned bound, limits read at the cell's start that no longer admit the
+// route's steps (limitsStop) or a ledger refusal stops the route before
+// any request; operator records or limits not refreshed at the cell's
+// start (cellOperator, evidence.ReadRefreshedLimits), a failed balance
+// check, a balance below the cell's reservation, or a
 // balance unavailable where the route records no balance_unavailable
 // ruling blocks the start before admission; a probe status that blocks
 // the start ends the cell before the ladder, unless it is a 401 or 403
@@ -83,14 +85,26 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		return rec, err
 	}
 	refresh := evidence.ReadStatus(ctx, r.refresh)
-	if ev.refreshPath, err = evidence.WriteStatus(dir, evidence.RefreshFile, refresh); err != nil {
+	op, oerr := r.cellOperator(refresh)
+	read, lerr := evidence.ReadRefreshedLimits(refresh, t)
+	if ev.refreshPath, err = evidence.WriteStatus(dir, evidence.RefreshFile, evidence.PublishedRefresh(refresh, t, read)); err != nil {
 		return rec, err
 	}
-	op, oerr := r.cellOperator(refresh)
-	var opFault string
+	if t.Confidential() {
+		ev.refreshHeld = refresh
+	}
+	var (
+		opFault   string
+		limitStop *routeStop
+	)
+	if oerr == nil {
+		oerr = lerr
+	}
 	if oerr != nil {
 		op = r.op
 		opFault = fmt.Sprintf("operator records not refreshed at the cell's start (SPEC-HOSTED §4): %v; the manifest carries the records read when the route started", oerr)
+	} else if limitStop, err = r.limitsStop(read); err != nil {
+		return rec, err
 	}
 	ev.op = op
 	offsets := loadgen.BuildSchedule(cfg)
@@ -110,6 +124,10 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	}
 	if c := ev.clock; c.AbsOffsetS != nil && *c.AbsOffsetS > config.PinnedClockOffsetMaxS {
 		finish(outcomeStopped, (&routeStop{c.Flag}).Error())
+		return rec, r.retain(ctx, ev, rec, nil)
+	}
+	if limitStop != nil {
+		finish(outcomeStopped, limitStop.Error())
 		return rec, r.retain(ctx, ev, rec, nil)
 	}
 	if opFault != "" {
@@ -232,7 +250,8 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 // retained: the running dispatch series, the clock record, the start
 // status, refresh record and balance, the operator records it read, the
 // ledger position and the probe record, with what it withholds, where
-// the cell reached them. A
+// the cell reached them; refreshHeld is the refresh record as run, kept
+// in the retained store for a route with a confidential limit. A
 // missed or interrupted cell that labelCell labels has no running
 // series: own is its series as last written, lastUTC the latest time its
 // records show it running, and dispatched whether it sent a ladder
@@ -245,6 +264,7 @@ type cellFiles struct {
 	clock                  *evidence.ClockRecord
 	clockPath, statusStart string
 	refreshPath            string
+	refreshHeld            *evidence.StatusRecord
 	balanceStart           string
 	op                     *evidence.Operator
 	ledger                 *evidence.LedgerRef
@@ -258,8 +278,9 @@ type cellFiles struct {
 
 // retain writes a finished cell's evidence: the final dispatch series,
 // the end status and balance, the frame store, the probe's withheld
-// values, the operator copies and the configuration as loaded where it
-// differs from the file as published, the
+// values, the operator copies, the refresh record as run where it is
+// held and the configuration as loaded where it differs from the file
+// as published, the
 // attempts file, the manifest carrying the cell's label, the host's
 // aggregate dispatch series and the inter-chunk gap histograms, and the
 // report pair. A nil res is a cell with no ladder result: its attempts
@@ -306,6 +327,9 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	}
 	if ferr == nil && ev.probe != nil {
 		_, ferr = probe.WriteRetained(filepath.Dir(framesPath), ev.probe)
+	}
+	if ferr == nil && ev.refreshHeld != nil {
+		ferr = evidence.WriteRetainedRefresh(filepath.Dir(framesPath), ev.refreshHeld)
 	}
 	invalid := slices.Clone(rec.Reasons)
 	if rec.Outcome == outcomeCounted {

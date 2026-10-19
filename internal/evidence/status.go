@@ -49,6 +49,10 @@ type StatusRecord struct {
 	// Check is a release cell's start balance read against the cell's
 	// reservation, and absent from every other record.
 	Check *BalanceCheck `json:"check,omitempty"`
+	// Limits are the limits a release route's refresh command printed
+	// (ReadRefreshedLimits), as they publish, and absent from every other
+	// record.
+	Limits []RefreshedLimit `json:"limits,omitempty"`
 }
 
 // ParseStatusCommand splits s on white space into the endpoint-status

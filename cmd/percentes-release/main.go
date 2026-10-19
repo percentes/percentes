@@ -2,9 +2,11 @@
 // committed window (SPEC-HOSTED HA3). At each scheduled start, at the
 // route's offset inside the slot, it records the clock offset and the
 // endpoint status, runs the route's refresh command and reads the
-// operator file and its records again, records the account balance or
-// quota, blocks the cell where the limits and model documentation were
-// not refreshed or the balance check does not let it start, admits the
+// operator file, its records and the limits the command prints again,
+// records the account balance or quota, stops the route where those
+// limits no longer admit its steps, blocks the cell where the limits and
+// model documentation were not refreshed or the balance check does not
+// let it start, admits the
 // cell in the ledger, sends a one-request probe and runs the ladder up
 // to the route's top admitted step with the loopback canary, then writes
 // the cell's evidence with a labelled manifest and report pair, also for
@@ -12,7 +14,9 @@
 // whose process ended or failed during it, gets its labelled pair from
 // what its directory holds when the process next reads the route's
 // records. A cell that does not count is re-run on its attempt 2 date
-// within the route's two re-runs.
+// within the route's two re-runs. After the last cell the refresh command
+// runs once more and the records read after it are the route's
+// window-close record.
 // Each route of a release runs as its own process on one client host, all
 // writing under one --out directory. The key comes from the env file
 // named with --env, never from the inherited environment, and is never
@@ -63,7 +67,8 @@
 // the ceiling check passed with the input bound; 2 = the runs are over
 // and a cell does not count, or the ceiling check failed or was blocked;
 // 3 = the route stopped (a ledger refusal, a documented billing refusal,
-// a clock offset above the pinned bound, a probe 401 or 403 the route's
+// a clock offset above the pinned bound, limits read at a cell's start
+// that no longer admit the route's steps, a probe 401 or 403 the route's
 // previous probed cell also saw, or an operator abort); 1 = execution
 // error or refusal to start. rehearse exits 0 when the rehearsal is
 // green and 2 when it is not; publish-check exits 0 when the publication

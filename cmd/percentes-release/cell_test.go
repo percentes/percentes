@@ -1029,9 +1029,9 @@ func TestLabelMissedAndInterrupted(t *testing.T) {
 }
 
 // refreshFixture gives f's operator file a limits record of its own,
-// limits.txt, and a refresh command that copies page over it and
-// touches the file of the other records, and returns the operator file's
-// directory.
+// limits.txt, and a refresh command that copies page over it, touches
+// the file of the other records and prints the recorded limits, and
+// returns the operator file's directory.
 func refreshFixture(t *testing.T, f *fixture, page string) string {
 	t.Helper()
 	dir := filepath.Dir(f.in.opPath)
@@ -1041,8 +1041,12 @@ func refreshFixture(t *testing.T, f *fixture, page string) string {
 	}
 	writeFile(t, dir, "operator.json", []byte(strings.Replace(operatorJSON, old, `{"kind": "limits", "path": "limits.txt"`, 1)))
 	writeFile(t, dir, "limits.txt", []byte("limits at the freeze"))
+	limits := filepath.Join(t.TempDir(), "limits")
+	if err := writeMockRefresh(limits, f.in.cfg); err != nil {
+		t.Fatal(err)
+	}
 	script := filepath.Join(t.TempDir(), "refresh")
-	body := "#!/bin/sh\ncat '" + page + "' > '" + filepath.Join(dir, "limits.txt") + "' && touch '" + filepath.Join(dir, "r.txt") + "'\n"
+	body := "#!/bin/sh\ncat '" + page + "' > '" + filepath.Join(dir, "limits.txt") + "' && '" + limits + "' '" + filepath.Join(dir, "r.txt") + "'\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1161,8 +1165,8 @@ func TestCellOperatorRefreshed(t *testing.T) {
 }
 
 // A refresh command that fails, one that leaves a limits or eligibility
-// file unwritten, and one that leaves the operator file unreadable each
-// block the cell before admission: no ledger line, no request, and a
+// file unwritten, one that leaves the operator file unreadable and one
+// that prints no limits each block the cell before admission: no ledger line, no request, and a
 // manifest carrying the records read when the route started. The
 // endpoint answers 401, so a cell let through ends at its probe.
 func TestCellRefreshBlocks(t *testing.T) {
@@ -1174,6 +1178,8 @@ func TestCellRefreshBlocks(t *testing.T) {
 		{"command fails", func(string) string { return "exit 4" }, "refresh command: exit status 4"},
 		{"records not rewritten", func(string) string { return "exit 0" }, "not rewritten since"},
 		{"operator file unreadable", func(op string) string { return "echo '{' > '" + op + "'" }, "evidence: operator file"},
+		{"no limits printed", func(op string) string { return "touch '" + filepath.Join(filepath.Dir(op), "r.txt") + "'" },
+			"refreshed limits: the output is not one JSON object with limits"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })

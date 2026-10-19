@@ -17,8 +17,9 @@ import (
 
 // clockRoute is a route over testSchedule with a fake clock that each
 // wait moves to its target, a fake cell that records the outcome
-// outcomes gives a run and appends the run to ran, and a fake label that
-// writes an empty manifest and appends the run to r.labelled.
+// outcomes gives a run and appends the run to ran, a fake label that
+// writes an empty manifest and appends the run to labelled, and a fake
+// window close that appends the number of runs ran to closedAfter.
 func clockRoute(t *testing.T, start time.Time, outcomes func(schedule.Run) string, ran *[]schedule.Run) *route {
 	t.Helper()
 	sched := testSchedule(t, "groq", "other")
@@ -51,8 +52,17 @@ func clockRoute(t *testing.T, start time.Time, outcomes func(schedule.Run) strin
 		labelled = append(labelled, rec.Run)
 		return os.WriteFile(filepath.Join(r.cellDir(rec.Run), evidence.ManifestFile), []byte("{}"), 0o600)
 	}
+	closedAfter = nil
+	r.close = func(context.Context, *routeState) error {
+		closedAfter = append(closedAfter, len(*ran))
+		return nil
+	}
 	return r
 }
+
+// closedAfter are the numbers of runs clockRoute's routes had run when
+// its fake window close was called, in order.
+var closedAfter []int
 
 // labelled are the runs clockRoute's fake label was given, in order.
 var labelled []schedule.Run
@@ -60,7 +70,9 @@ var labelled []schedule.Run
 func counted(schedule.Run) string { return outcomeCounted }
 
 // Every attempt 1 runs once, in start order, at its start; the route ends
-// with every cell counted.
+// with every cell counted, and the window-close record is written once,
+// after the last cell. A window close that fails ends the process with an
+// error.
 func TestLoopRunsEveryCell(t *testing.T) {
 	var ran []schedule.Run
 	r := clockRoute(t, time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC), counted, &ran)
@@ -70,6 +82,13 @@ func TestLoopRunsEveryCell(t *testing.T) {
 	}
 	if !slices.Equal(ran, r.runs) || len(ran) != 12 {
 		t.Fatalf("ran %d runs, want the 12 attempt 1 runs in order", len(ran))
+	}
+	if !slices.Equal(closedAfter, []int{12}) {
+		t.Fatalf("window close after %v runs, want once after 12", closedAfter)
+	}
+	r.close = func(context.Context, *routeState) error { return errors.New("refresh failed") }
+	if code, err := r.loop(context.Background()); code != exitError || err == nil || err.Error() != "refresh failed" {
+		t.Fatalf("failed window close: %d, %v", code, err)
 	}
 }
 
@@ -188,12 +207,12 @@ func TestLoopStopAndRestart(t *testing.T) {
 	r := clockRoute(t, time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC), outcomes, &ran)
 	stopAt = r.runs[1].Label
 	code, err := r.loop(context.Background())
-	if err != nil || code != exitStopped || len(ran) != 2 {
-		t.Fatalf("loop: %d, %v, ran %d", code, err, len(ran))
+	if err != nil || code != exitStopped || len(ran) != 2 || closedAfter != nil {
+		t.Fatalf("loop: %d, %v, ran %d, window close after %v", code, err, len(ran), closedAfter)
 	}
 	code, err = r.loop(context.Background())
-	if err != nil || code != exitOK || len(ran) != 13 {
-		t.Fatalf("restart: %d, %v, ran %d", code, err, len(ran))
+	if err != nil || code != exitOK || len(ran) != 13 || !slices.Equal(closedAfter, []int{13}) {
+		t.Fatalf("restart: %d, %v, ran %d, window close after %v", code, err, len(ran), closedAfter)
 	}
 
 	r2 := clockRoute(t, time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC), counted, new([]schedule.Run))
