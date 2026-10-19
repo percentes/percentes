@@ -18,7 +18,9 @@ import (
 // point 14) against the cell manifests and the window-close records under
 // --out, the pages the cells generate under the schedule file given,
 // which must be the pages under --pages, and the files the record names.
-// A route with a page needs its window-close record. When the record is
+// A route with a page needs its window-close record. Each notice's pack
+// must be the route's pack as pack builds it from the same cells, and a
+// replication pack must carry that pack's files. When the record is
 // complete it prints the providers told of the measurement before the
 // notices. pages runs without a record.
 func publishCheckCmd(args []string) (int, error) {
@@ -67,13 +69,17 @@ func publishCheckCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	packs, err := routePacks(rp, manifests)
+	if err != nil {
+		return exitError, err
+	}
 	routes := make([]evidence.RouteDuties, len(cfgs))
 	for i, cfg := range cfgs {
 		n := cfg.Target.Naming
 		routes[i] = evidence.RouteDuties{Name: cfg.Target.Name, Permission: n != nil && n.PermissionRequired, ReplicationPack: replicationRoute(cfg),
 			WindowClose: rp.recs[i].verdict != nil}
 	}
-	state := evidence.PublicationState{Manifests: manifests, WindowCloses: closes, Pages: rp.files, PagesDir: *pages, Routes: routes, Now: time.Now()}
+	state := evidence.PublicationState{Manifests: manifests, WindowCloses: closes, Pages: rp.files, PagesDir: *pages, Packs: packs, Routes: routes, Now: time.Now()}
 	if err := pub.Check(state); err != nil {
 		fmt.Printf("NOT READY to publish: %v\n", err)
 		return exitAdverse, nil

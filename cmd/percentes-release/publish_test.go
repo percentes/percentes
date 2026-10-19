@@ -56,14 +56,35 @@ func published(t *testing.T, dir, path string) *evidence.PublishedFile {
 	return &evidence.PublishedFile{Path: path, SHA256: hex.EncodeToString(sum[:])}
 }
 
+// packOf runs pack for route with the release flags args and returns the
+// pack it wrote.
+func packOf(t *testing.T, args []string, route string) []byte {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), route+".tar")
+	stdoutOf(t, func() {
+		if code, err := packCmd(append([]string{"--route", route, "--pack", p}, args...)); code != exitOK || err != nil {
+			t.Errorf("pack %s: exit %d: %v", route, code, err)
+		}
+	})
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 // publication writes the record of a release whose one route, groq,
 // needs its naming permission: the manifests and window-close records
 // under out and the pages under pages by hash, a notice of 1 September 2026 whose window closed
-// on 7 September, no response, and one disclosure before it.
-func publication(t *testing.T, out, pages string, edit func(*evidence.Publication)) string {
+// on 7 September carrying packs["groq"], no response, and one disclosure
+// before it. Each pack in packs is written beside the record as
+// <route>-pack.tar.
+func publication(t *testing.T, out, pages string, packs map[string][]byte, edit func(*evidence.Publication)) string {
 	t.Helper()
 	dir := t.TempDir()
-	writeFile(t, dir, "groq-pack.tar", []byte("tables and evidence"))
+	for route, b := range packs {
+		writeFile(t, dir, route+"-pack.tar", b)
+	}
 	writeFile(t, dir, "permission.eml", []byte("written permission"))
 	p := evidence.Publication{
 		Routes: []evidence.RoutePublication{{Route: "groq",
@@ -108,11 +129,13 @@ func publication(t *testing.T, out, pages string, edit func(*evidence.Publicatio
 // refuses, exiting 2, a paged route with no window-close record, a
 // record that lacks the naming permission the configuration requires,
 // misses responses, has an open window, misses a later cell's manifest
-// or window-close record, or a page or window-close record edited after
-// the record named it. It exits 1 on a window-close record of a refresh
-// that failed, with an edited retained copy, or taken before the route's
-// last cell ended, and with no record, an absent one, no schedule, or a
-// schedule other than the one the cells ran under.
+// or window-close record, carries a notice pack other than the one pack
+// builds (other text, or a pack built before a later cell), or a page or
+// window-close record edited after the record named it. It exits 1 on a
+// window-close record of a refresh that failed, with an edited retained
+// copy, or taken before the route's last cell ended, and with no record,
+// an absent one, no schedule, or a schedule other than the one the cells
+// ran under.
 func TestPublishCheck(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	path := routeConfigFile(t, "groq", e.url(), "10")
@@ -144,6 +167,8 @@ func TestPublishCheck(t *testing.T) {
 	}
 	pages := t.TempDir()
 	base := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--pages", pages}
+	release := base[: len(base)-2 : len(base)-2]
+	groqPack := func() map[string][]byte { return map[string][]byte{"groq": packOf(t, release, "groq")} }
 	if code, err := pagesCmd(base); code != exitOK || err != nil {
 		t.Fatalf("pages with no record: exit %d: %v", code, err)
 	}
@@ -158,7 +183,7 @@ func TestPublishCheck(t *testing.T) {
 		return code, text
 	}
 
-	if code, text := check(publication(t, groq.out, pages, nil)); code != exitAdverse ||
+	if code, text := check(publication(t, groq.out, pages, groqPack(), nil)); code != exitAdverse ||
 		!strings.Contains(text, "NOT READY to publish: evidence: publication refused: route groq: window close: no window-close.json; a route with a page needs its window-close record\n") {
 		t.Fatalf("no window-close record: exit %d:\n%s", code, text)
 	}
@@ -180,13 +205,16 @@ func TestPublishCheck(t *testing.T) {
 	closeRoute()
 
 	var code int
-	complete := publication(t, groq.out, pages, nil)
+	complete := publication(t, groq.out, pages, groqPack(), nil)
 	text := stdoutOf(t, func() { code = dispatch(append([]string{"publish-check", "--record", complete}, base...)) })
 	if code != exitOK || !strings.Contains(text, "publication record complete: 2 manifests, 4 pages, 1 routes\n") ||
 		!strings.HasSuffix(text, "told of the measurement before the notices:\n  Groq, by email, 2026-08-20\n") {
 		t.Fatalf("complete record: exit %d:\n%s", code, text)
 	}
-	release := base[: len(base)-2 : len(base)-2]
+	if code, text := check(publication(t, groq.out, pages, map[string][]byte{"groq": []byte("tables and evidence")}, nil)); code != exitAdverse ||
+		!strings.HasSuffix(text, "NOT READY to publish: evidence: publication refused: route groq: notice.pack: groq-pack.tar is not the evidence pack the route's pages and manifests give (percentes-release pack)\n") {
+		t.Fatalf("pack of other text: exit %d:\n%s", code, text)
+	}
 	var packs [2][]byte
 	for i := range packs {
 		p := filepath.Join(t.TempDir(), "groq.tar")
@@ -246,7 +274,7 @@ func TestPublishCheck(t *testing.T) {
 			p.Routes[0].Notice.Sent, p.Routes[0].Notice.WindowCloses = "2099-01-05", "2099-01-09"
 		}, "route groq: notice: the window is open until the end of 2099-01-09 UTC"},
 	} {
-		if code, text := check(publication(t, groq.out, pages, c.edit)); code != exitAdverse || !strings.Contains(text, "NOT READY to publish: ") || !strings.Contains(text, c.want) {
+		if code, text := check(publication(t, groq.out, pages, groqPack(), c.edit)); code != exitAdverse || !strings.Contains(text, "NOT READY to publish: ") || !strings.Contains(text, c.want) {
 			t.Errorf("%s: exit %d, want %q:\n%s", c.name, code, c.want, text)
 		}
 	}
@@ -301,7 +329,8 @@ func TestPublishCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	record := publication(t, groq.out, pages, nil)
+	before := groqPack()
+	record := publication(t, groq.out, pages, before, nil)
 	if err := os.WriteFile(filepath.Join(pages, "routes", "groq.txt"), []byte("edited\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -328,8 +357,15 @@ func TestPublishCheck(t *testing.T) {
 	}
 	closeRoute()
 	if code, text := check(record); code != exitAdverse || !strings.Contains(text, "manifests: groq/"+cellLabel(groq.runs[2])+"/manifest.json is not in the record") ||
-		!strings.Contains(text, "window_closes: groq/window-close.json has SHA-256 ") {
+		!strings.Contains(text, "window_closes: groq/window-close.json has SHA-256 ") || !strings.Contains(text, "route groq: notice.pack: groq-pack.tar is not the evidence pack") {
 		t.Errorf("later cell: exit %d:\n%s", code, text)
+	}
+	if code, text := check(publication(t, groq.out, pages, before, nil)); code != exitAdverse ||
+		!strings.HasSuffix(text, "NOT READY to publish: evidence: publication refused: route groq: notice.pack: groq-pack.tar is not the evidence pack the route's pages and manifests give (percentes-release pack)\n") {
+		t.Errorf("pack from before the later cell: exit %d:\n%s", code, text)
+	}
+	if code, text := check(publication(t, groq.out, pages, groqPack(), nil)); code != exitOK || !strings.Contains(text, "publication record complete: 3 manifests, 4 pages, 1 routes\n") {
+		t.Errorf("pack after the later cell: exit %d:\n%s", code, text)
 	}
 
 	raw, err := os.ReadFile(f.in.schedulePath)

@@ -590,9 +590,10 @@ func TestPagesHostGroup(t *testing.T) {
 	}
 }
 
-// A host whose attempts are all missed or interrupted gets no page, needs
-// no window-close record, and leaves its sibling's pages and publication
-// record to pass while its configuration runs at the sibling's ceiling;
+// A host whose attempts are all missed or interrupted gets no page and a
+// pack whose inventory names no file, needs no window-close record, and
+// leaves its sibling's pages and publication record to pass while its
+// configuration runs at the sibling's ceiling;
 // at another ceiling pages and publish-check refuse it, writing nothing.
 func TestPagesMissedHost(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
@@ -630,9 +631,15 @@ func TestPagesMissedHost(t *testing.T) {
 	if index := string(files[indexPage]); len(files) != 4 || files["routes/groq.txt"] == nil || !strings.Contains(index, "| Groq | groq |") || strings.Contains(index, "| Groq | baseten |") {
 		t.Fatalf("files %v:\n%s", keys(files), index)
 	}
-	record := publication(t, groq.out, pages, func(p *evidence.Publication) {
+	packs := map[string][]byte{"groq": packOf(t, args[:len(args)-2], "groq"), "baseten": packOf(t, args[:len(args)-2], "baseten")}
+	if packed, err := evidence.ReadPack(packs["baseten"]); err != nil || len(packed) != 1 || !strings.Contains(string(packed[evidence.PackInventoryFile]), `"files": []`) {
+		t.Fatalf("baseten's pack: %v: %q", err, packed)
+	}
+	record := publication(t, groq.out, pages, packs, func(p *evidence.Publication) {
 		r := p.Routes[0]
-		r.Route, r.Permission = "baseten", nil
+		n := *r.Notice
+		n.Pack = &evidence.PublishedFile{Path: "baseten-pack.tar", SHA256: sha(string(packs["baseten"]))}
+		r.Route, r.Notice, r.Permission = "baseten", &n, nil
 		p.Routes = append(p.Routes, r)
 	})
 	text = stdoutOf(t, func() { code, err = publishCheckCmd(append(args[:len(args):len(args)], "--record", record)) })

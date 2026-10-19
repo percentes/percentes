@@ -16,7 +16,8 @@ import (
 // azure needing its naming permission, bedrock its replication pack and
 // groq, the route with a page, its window-close record, with every file
 // the record names written under dir and the pages under the state's
-// PagesDir.
+// PagesDir. Each notice carries its route's pack and bedrock's
+// replication pack carries its pack's files and one more.
 type publicationFixture struct {
 	dir string
 	p   Publication
@@ -63,8 +64,20 @@ func newPublicationFixture(t *testing.T) *publicationFixture {
 	for name, b := range f.s.WindowCloses {
 		f.p.WindowCloses = append(f.p.WindowCloses, PublishedFile{Path: name, SHA256: shaOf(b)})
 	}
+	f.s.Packs = map[string][]byte{}
+	for _, r := range f.s.Routes {
+		f.s.Packs[r.Name] = packOf(t, r.Name, f.s)
+	}
 	notice := func(route string) *Notice {
-		return &Notice{Sent: "2026-10-27", Recipient: route + " support", Account: route + "-account", Pack: put(t, f.dir, "packs/"+route+".tar", route+" pack"), WindowCloses: "2026-11-02"}
+		return &Notice{Sent: "2026-10-27", Recipient: route + " support", Account: route + "-account", Pack: put(t, f.dir, "packs/"+route+".tar", string(f.s.Packs[route])), WindowCloses: "2026-11-02"}
+	}
+	replication := [][2]string{{"replication/README", "how to run it"}}
+	packed, err := ReadPack(f.s.Packs["bedrock"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range sortedKeys(packed) {
+		replication = append(replication, [2]string{name, string(packed[name])})
 	}
 	f.p.Routes = []RoutePublication{
 		{Route: "groq", Notice: notice("groq"), Responses: []Response{
@@ -73,7 +86,7 @@ func newPublicationFixture(t *testing.T) *publicationFixture {
 		{Route: "azure", Notice: notice("azure"), Responses: []Response{{Received: "2026-10-30", Corrections: []string{"2026-10-31: model version spelt as documented"}}},
 			Permission: put(t, f.dir, "naming/openai-permission.eml", "permission")},
 		{Route: "bedrock", Notice: notice("bedrock"), Responses: []Response{},
-			ReplicationPack: &Send{Sent: "2026-10-27", Recipient: "aws benchmarks", Pack: put(t, f.dir, "packs/aws-replication.tar", "replication")}},
+			ReplicationPack: &Send{Sent: "2026-10-27", Recipient: "aws benchmarks", Pack: put(t, f.dir, "packs/aws-replication.tar", string(tarOf(t, replication...)))}},
 	}
 	f.p.Disclosures = []Disclosure{
 		{Provider: "OpenAI", How: DisclosureEmail, Date: "2026-10-07", Recipient: "permissions"},
@@ -83,6 +96,27 @@ func newPublicationFixture(t *testing.T) *publicationFixture {
 	f.p.Prerelease = []Prerelease{{Date: "2026-10-30", Recipients: "named recipients", Copy: put(t, f.dir, "prerelease.pdf", "copy"), Withheld: []string{"bedrock"}}}
 	f.p.NonWorkingDays = []string{}
 	return f
+}
+
+// packOf builds route's pack from its pages and manifests in s.
+func packOf(t *testing.T, route string, s PublicationState) []byte {
+	t.Helper()
+	files := map[string][]byte{}
+	for name, b := range s.Pages {
+		if strings.HasPrefix(name, "routes/"+route+".") {
+			files["pages/"+name] = b
+		}
+	}
+	for name, b := range s.Manifests {
+		if strings.HasPrefix(name, route+"/") {
+			files["out/"+name] = b
+		}
+	}
+	b, err := BuildPack(route, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // check writes the record as JSON, loads it and checks it.
@@ -193,6 +227,14 @@ func TestPublicationRefuses(t *testing.T) {
 			}
 		}, "route groq: notice.pack: packs/groq.tar is missing"},
 		{"pack outside", func(_ *testing.T, f *publicationFixture) { route(f, "groq").Notice.Pack.Path = "../groq.tar" }, `notice.pack.path: "../groq.tar" is not a path inside`},
+		{"pack of other text", func(t *testing.T, f *publicationFixture) {
+			route(f, "groq").Notice.Pack = put(t, f.dir, "packs/groq.tar", "tables and evidence")
+		}, "route groq: notice.pack: packs/groq.tar is not the evidence pack the route's pages and manifests give (percentes-release pack)"},
+		{"pack before a later cell", func(t *testing.T, f *publicationFixture) {
+			f.s.Manifests["groq/c02-a1/manifest.json"] = []byte("m2")
+			f.p.Manifests = append(f.p.Manifests, PublishedFile{Path: "groq/c02-a1/manifest.json", SHA256: shaOf([]byte("m2"))})
+			f.s.Packs["groq"] = packOf(t, "groq", f.s)
+		}, "route groq: notice.pack: packs/groq.tar is not the evidence pack"},
 		{"pack hash form", func(_ *testing.T, f *publicationFixture) { route(f, "groq").Notice.Pack.SHA256 = "ABC" }, `notice.pack.sha256: "ABC" is not a lowercase hex SHA-256`},
 		{"bad date", func(_ *testing.T, f *publicationFixture) { route(f, "groq").Notice.Sent = "27/10/2026" }, `route groq: notice.sent: "27/10/2026" is not a date`},
 		{"short window", func(_ *testing.T, f *publicationFixture) { route(f, "groq").Notice.WindowCloses = "2026-10-30" },
@@ -222,6 +264,17 @@ func TestPublicationRefuses(t *testing.T) {
 			"route bedrock: replication_pack.sent: 2026-10-28, after the notice of 2026-10-27"},
 		{"replication pack changed", func(t *testing.T, f *publicationFixture) { put(t, f.dir, "packs/aws-replication.tar", "other") },
 			"route bedrock: replication_pack.pack: packs/aws-replication.tar has SHA-256"},
+		{"replication pack inventory differs", func(t *testing.T, f *publicationFixture) {
+			other := f.s
+			other.Manifests = map[string][]byte{"bedrock/c01-a1/manifest.json": []byte("m-bedrock, earlier")}
+			route(f, "bedrock").ReplicationPack.Pack = put(t, f.dir, "packs/aws-replication.tar", string(packOf(t, "bedrock", other)))
+		}, "route bedrock: replication_pack.pack: packs/aws-replication.tar: evidence: pack: [inventory.json out/bedrock/c01-a1/manifest.json] differ from the route's evidence pack"},
+		{"replication pack of other text", func(t *testing.T, f *publicationFixture) {
+			route(f, "bedrock").ReplicationPack.Pack = put(t, f.dir, "packs/aws-replication.tar", "replication")
+		}, "route bedrock: replication_pack.pack: packs/aws-replication.tar: evidence: pack: "},
+		{"replication pack without the inventory", func(t *testing.T, f *publicationFixture) {
+			route(f, "bedrock").ReplicationPack.Pack = put(t, f.dir, "packs/aws-replication.tar", string(tarOf(t, [2]string{"replication/README", "how to run it"})))
+		}, "route bedrock: replication_pack.pack: packs/aws-replication.tar: evidence: pack: holds no [inventory.json out/bedrock/c01-a1/manifest.json] of the route's evidence pack"},
 		{"no disclosures", func(_ *testing.T, f *publicationFixture) { f.p.Disclosures = nil }, "disclosures: required"},
 		{"disclosure after the notices", func(_ *testing.T, f *publicationFixture) { f.p.Disclosures[0].Date = "2026-10-27" },
 			"disclosures[0].date: 2026-10-27, not before the first notice of 2026-10-27"},

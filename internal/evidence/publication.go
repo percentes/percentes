@@ -60,8 +60,8 @@ type RoutePublication struct {
 }
 
 // Notice is the notice sent to a route's provider: the date, the
-// recipient, the account identifier it gave, the evidence pack with the
-// route's tables, and the date its factual-accuracy window closes.
+// recipient, the account identifier it gave, the route's evidence pack
+// (BuildPack), and the date its factual-accuracy window closes.
 type Notice struct {
 	Sent         string         `json:"sent"`
 	Recipient    string         `json:"recipient"`
@@ -122,12 +122,15 @@ type RouteDuties struct {
 // PublicationState is the release as it stands: each cell manifest's
 // and each window-close record's bytes by its slash path under the
 // release output directory, each page the cells generate by its slash
-// path under PagesDir, the routes, and the time of the check.
+// path under PagesDir, each route's evidence pack as BuildPack builds it
+// from those pages and manifests, by route, the routes, and the time of
+// the check.
 type PublicationState struct {
 	Manifests    map[string][]byte
 	WindowCloses map[string][]byte
 	Pages        map[string][]byte
 	PagesDir     string
+	Packs        map[string][]byte
 	Routes       []RouteDuties
 	Now          time.Time
 }
@@ -158,9 +161,11 @@ func LoadPublication(path string) (*Publication, error) {
 // its bytes, and each page is on disk with those bytes; every route with
 // the WindowClose duty has its record at <route>/WindowCloseFile; every
 // route has one entry, with a notice whose window of at least
-// NoticeWorkingDays working days closed before s.Now, its responses,
-// its naming permission where required and its replication pack, sent
-// no later than the notice, where required; every disclosure predates
+// NoticeWorkingDays working days closed before s.Now and whose pack is
+// the route's pack in s.Packs byte for byte, its responses, its naming
+// permission where required and its replication pack, sent no later than
+// the notice and carrying every file of the route's pack (PackCarries),
+// where required; every disclosure predates
 // the first notice; every pre-release copy withholds the routes that need
 // a replication pack; and every file the record names has the SHA-256 it
 // records. Otherwise it returns an error naming every missing item and
@@ -227,7 +232,9 @@ func (p *Publication) Check(s PublicationState) error {
 		} else {
 			text(field+": notice.recipient", n.Recipient)
 			text(field+": notice.account", n.Account)
-			p.file(field+": notice.pack", n.Pack, fail)
+			if b := p.file(field+": notice.pack", n.Pack, fail); b != nil && !bytes.Equal(b, s.Packs[r.Route]) {
+				fail("%s: notice.pack: %s is not the evidence pack the route's pages and manifests give (percentes-release pack)", field, n.Pack.Path)
+			}
 			var okSent, okClose bool
 			var closes time.Time
 			sent, okSent = date(field+": notice.sent", n.Sent)
@@ -271,7 +278,11 @@ func (p *Publication) Check(s PublicationState) error {
 		switch rp := r.ReplicationPack; {
 		case rp != nil:
 			text(field+": replication_pack.recipient", rp.Recipient)
-			p.file(field+": replication_pack.pack", rp.Pack, fail)
+			if b := p.file(field+": replication_pack.pack", rp.Pack, fail); b != nil {
+				if err := PackCarries(b, s.Packs[r.Route]); err != nil {
+					fail("%s: replication_pack.pack: %s: %v", field, rp.Pack.Path, err)
+				}
+			}
 			if got, ok := date(field+": replication_pack.sent", rp.Sent); ok && !sent.IsZero() && got.After(sent) {
 				fail("%s: replication_pack.sent: %s, after the notice of %s", field, rp.Sent, r.Notice.Sent)
 			}
@@ -373,20 +384,21 @@ func (p *Publication) fileSet(field string, recorded []PublishedFile, have map[s
 }
 
 // file checks that f is given and names a file under the record's
-// directory with the SHA-256 it records.
-func (p *Publication) file(field string, f *PublishedFile, fail func(string, ...any)) {
+// directory with the SHA-256 it records, and returns the file's bytes
+// when it does.
+func (p *Publication) file(field string, f *PublishedFile, fail func(string, ...any)) []byte {
 	if f == nil {
 		fail("%s: required", field)
-		return
+		return nil
 	}
 	name := filepath.FromSlash(f.Path)
 	switch {
 	case f.Path == "" || !filepath.IsLocal(name):
 		fail("%s.path: %q is not a path inside the record's directory", field, f.Path)
-		return
+		return nil
 	case !sha256Hex.MatchString(f.SHA256):
 		fail("%s.sha256: %q is not a lowercase hex SHA-256", field, f.SHA256)
-		return
+		return nil
 	}
 	b, err := os.ReadFile(filepath.Join(p.dir, name))
 	switch {
@@ -396,7 +408,10 @@ func (p *Publication) file(field string, f *PublishedFile, fail func(string, ...
 		fail("%s: %v", field, err)
 	case refOf(f.Path, b).SHA256 != f.SHA256:
 		fail("%s: %s has SHA-256 %s, the record %s", field, f.Path, refOf(f.Path, b).SHA256, f.SHA256)
+	default:
+		return b
 	}
+	return nil
 }
 
 // workingDays counts the weekdays after from up to and including to
