@@ -8,6 +8,9 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
+	"strings"
+	"time"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -46,8 +49,8 @@ func RetainedError(text string) string {
 // RetainedLimitValue, every other byte as written. Without such a limit
 // it is Raw. It refuses a confidential value that is not a plain scalar
 // written in target.limits itself, a comment inside that limit, and a
-// comment or string scalar anywhere in the file that carries the value's
-// text.
+// comment or string scalar anywhere in the file that carries one of the
+// value's forms (valueForms) outside a hex run or a date.
 func (c *Config) Published() ([]byte, error) {
 	if !c.Target.Confidential() {
 		return c.Raw, nil
@@ -110,15 +113,15 @@ func (c *Config) Published() ([]byte, error) {
 		if at < 0 || !bytes.HasPrefix(c.Raw[at:], []byte(v.Value)) {
 			return fail("%s.value: not found at line %d, column %d", field, v.Line, v.Column)
 		}
-		word := regexp.MustCompile(`(^|[^0-9.])` + regexp.QuoteMeta(v.Value) + `($|[^0-9.])`)
+		forms := valueForms(v.Value, l.Value)
 		for _, cm := range comments {
-			if word.MatchString(cm) {
-				return fail("%s.value: a comment in the file carries %s", field, v.Value)
+			if form, ok := carries(cm, forms); ok {
+				return fail("%s.value: a comment in the file carries %s", field, form)
 			}
 		}
 		for _, s := range strs {
-			if word.MatchString(s) {
-				return fail("%s.value: a string in the file carries %s", field, v.Value)
+			if form, ok := carries(s, forms); ok {
+				return fail("%s.value: a string in the file carries %s", field, form)
 			}
 		}
 		edits = append(edits, span{at, at + len(v.Value)})
@@ -146,6 +149,74 @@ func (c *Config) Published() ([]byte, error) {
 		return nil, errors.New("config: published: the file as published differs from the file beyond the confidential values")
 	}
 	return out, nil
+}
+
+// thousandsSeparators group the whole part of a number in threes.
+var thousandsSeparators = []string{",", " ", "\u00a0", "\u2009", "\u202f"}
+
+// valueForms are the texts that write a value: lit as written and the
+// value in decimal, each also with its whole part grouped by each of
+// thousandsSeparators.
+func valueForms(lit string, value float64) []string {
+	var forms []string
+	for _, s := range []string{lit, strconv.FormatFloat(value, 'f', -1, 64)} {
+		forms = append(forms, s)
+		whole, frac, dot := strings.Cut(s, ".")
+		if len(whole) <= 3 || strings.Trim(whole, "0123456789") != "" {
+			continue
+		}
+		for _, sep := range thousandsSeparators {
+			g := whole[:(len(whole)-1)%3+1]
+			for i := len(g); i < len(whole); i += 3 {
+				g += sep + whole[i:i+3]
+			}
+			if dot {
+				g += "." + frac
+			}
+			forms = append(forms, g)
+		}
+	}
+	slices.Sort(forms)
+	return slices.Compact(forms)
+}
+
+var (
+	hexRun  = regexp.MustCompile(`[0-9A-Fa-f]{32,}`)
+	dateRun = regexp.MustCompile(`[0-9]{4}-[0-9]{2}-[0-9]{2}`)
+)
+
+// carries returns the first of forms that text holds as a number of its
+// own: not within a longer number, a run of 32 or more hex digits or a
+// YYYY-MM-DD date.
+func carries(text string, forms []string) (string, bool) {
+	text = hexRun.ReplaceAllLiteralString(text, " ")
+	b := []byte(text)
+	for _, m := range dateRun.FindAllStringIndex(text, -1) {
+		if _, err := time.Parse(time.DateOnly, text[m[0]:m[1]]); err == nil && !digitAt(text, m[0]-1) && !digitAt(text, m[1]) {
+			copy(b[m[0]:m[1]], strings.Repeat(" ", m[1]-m[0]))
+		}
+	}
+	text = string(b)
+	for _, f := range forms {
+		for at := 0; at < len(text); {
+			i := strings.Index(text[at:], f)
+			if i < 0 {
+				break
+			}
+			from, to := at+i, at+i+len(f)
+			before := digitAt(text, from-1) || from > 0 && (text[from-1] == '.' || text[from-1] == ',' && digitAt(text, from-2))
+			after := digitAt(text, to) || to < len(text) && (text[to] == '.' || text[to] == ',') && digitAt(text, to+1)
+			if !before && !after {
+				return f, true
+			}
+			at = from + 1
+		}
+	}
+	return "", false
+}
+
+func digitAt(s string, i int) bool {
+	return i >= 0 && i < len(s) && s[i] >= '0' && s[i] <= '9'
 }
 
 // mapValue is the value node of key in mapping n, or nil.

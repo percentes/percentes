@@ -135,3 +135,75 @@ func TestRetainedError(t *testing.T) {
 		}
 	}
 }
+
+// The value is found with its whole part grouped in threes and in its
+// decimal form.
+func TestPublishedForms(t *testing.T) {
+	plain := "      value: " + secretValue + "\n"
+	naming := "      - Groq is a trademark"
+	for _, tc := range []struct {
+		name  string
+		edits [][2]string
+		want  string
+	}{
+		{"commas in a naming line", [][2]string{{naming, "      - The console showed 9,876,543.25 tokens\n" + naming}}, "a string in the file carries 9,876,543.25"},
+		{"commas in a comment", [][2]string{{"schema_version: 1\n", "schema_version: 1  # the console showed 9,876,543.25\n"}}, "a comment in the file carries 9,876,543.25"},
+		{"narrow spaces in the body", [][2]string{{"System text: placeholder", "System text: at most 9 876 543.25 tokens"}}, "a string in the file carries 9 876 543.25"},
+		{"before a full stop", [][2]string{{naming, "      - The console showed " + secretValue + ".\n" + naming}}, "a string in the file carries " + secretValue},
+		{"a trailing zero in the limit", [][2]string{{plain, "      value: " + secretValue + "0\n"}, {naming, "      - The console showed " + secretValue + " tokens\n" + naming}}, "a string in the file carries " + secretValue},
+	} {
+		raw := confidentialRef(t, confidentialTPM)
+		for _, e := range tc.edits {
+			if !bytes.Contains(raw, []byte(e[0])) {
+				t.Fatalf("%s: the edit did not apply", tc.name)
+			}
+			raw = bytes.Replace(raw, []byte(e[0]), []byte(e[1]), 1)
+		}
+		c, err := Parse(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if b, err := c.Published(); err == nil || !strings.Contains(err.Error(), "target.limits[1].value: "+tc.want) {
+			t.Errorf("%s: must fail naming %q, got %v and\n%s", tc.name, tc.want, err, b)
+		}
+	}
+}
+
+// The value's digits inside a hash or a date, or inside a larger number,
+// are not refused.
+func TestPublishedSkips(t *testing.T) {
+	const small = "12"
+	plain := "      value: " + secretValue + "\n"
+	limitHash := `"abababababababababababababababababababababababababababababababab"`
+	naming := "      - Groq is a trademark"
+	for _, tc := range []struct {
+		name string
+		from string
+		to   string
+	}{
+		{"none", naming, naming},
+		{"the limit's sha256", limitHash, `"ab12abababababababababababababababababababababababababababababab"`},
+		{"a quoted date", "      source: groq-console-limits.png\n      retrieved: 2026-10-07\n", "      source: groq-console-limits.png\n      retrieved: \"2026-10-12\"\n"},
+		{"a date in a comment", "schema_version: 1\n", "schema_version: 1  # retrieved 2026-10-12\n"},
+		{"a commit hash in a naming line", naming, "      - Build 12d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f.\n" + naming},
+		{"a larger grouped number", naming, "      - Groq serves 12,000 requests.\n" + naming},
+	} {
+		raw := bytes.Replace(confidentialRef(t, confidentialTPM), []byte(plain), []byte("      value: "+small+"\n"), 1)
+		if !bytes.Contains(raw, []byte(tc.from)) {
+			t.Fatalf("%s: the edit did not apply", tc.name)
+		}
+		raw = bytes.Replace(raw, []byte(tc.from), []byte(tc.to), 1)
+		c, err := Parse(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		b, err := c.Published()
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if want := bytes.Replace(raw, []byte("value: "+small+"\n"), []byte(`value: "[retained]"`+"\n"), 1); !bytes.Equal(b, want) {
+			t.Errorf("%s: the file as published:\n%s", tc.name, b)
+		}
+	}
+}
