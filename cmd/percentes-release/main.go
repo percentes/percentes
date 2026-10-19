@@ -111,6 +111,7 @@ import (
 	"syscall"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 )
 
@@ -261,11 +262,7 @@ func replaceFile(path string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return evidence.ReplaceFile(path, b)
 }
 
 // checkCPUCmd samples host CPU through the loadgen monitor and prints

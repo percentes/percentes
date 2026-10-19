@@ -139,7 +139,7 @@ func WriteClock(dir string, rec *ClockRecord) (string, error) {
 		return "", fmt.Errorf("evidence: %w", err)
 	}
 	path := filepath.Join(dir, ClockFile)
-	if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
+	if err := ReplaceFile(path, append(b, '\n')); err != nil {
 		return "", fmt.Errorf("evidence: %w", err)
 	}
 	return path, nil

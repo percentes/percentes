@@ -380,7 +380,7 @@ func WriteRun(dir string, cfg *config.Config, res *loadgen.Result, opt Options) 
 		return "", fmt.Errorf("evidence: %w", err)
 	}
 	path := filepath.Join(dir, AttemptsFile)
-	if err := os.WriteFile(path, b.Bytes(), 0o644); err != nil {
+	if err := ReplaceFile(path, b.Bytes()); err != nil {
 		return "", fmt.Errorf("evidence: %w", err)
 	}
 	return path, nil

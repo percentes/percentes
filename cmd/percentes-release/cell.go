@@ -202,8 +202,12 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if pr, err = probe.Run(ctx, probe.Input{Target: t, CaseText: r.shape.UserText(run.Seed, len(offsets)), Timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second, Key: r.key}); err != nil {
 		return rec, err
 	}
-	probePath, err := probe.Write(dir, pr)
+	pb, err := probe.Encode(pr)
 	if err != nil {
+		return rec, err
+	}
+	probePath := filepath.Join(dir, probe.File)
+	if err := replaceFile(probePath, pb); err != nil {
 		return rec, err
 	}
 	ev.probePath, ev.probe = probePath, pr
@@ -703,7 +707,7 @@ func (r *route) cellEvidence(dir string, run schedule.Run, rec *cellRecord) (*ev
 	sort.Strings(names)
 	for _, n := range names {
 		p := filepath.Join(dir, n)
-		if err := os.WriteFile(p, r.ceilingProbes[n], 0o644); err != nil {
+		if err := replaceFile(p, r.ceilingProbes[n]); err != nil {
 			return nil, err
 		}
 		ref, err := evidence.HashFile(p, n)

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -650,5 +651,45 @@ func TestManifestSingleTargetAndFailedRun(t *testing.T) {
 	in.ClockPath = filepath.Join(t.TempDir(), "none")
 	if _, err := NewManifest(in); err == nil {
 		t.Error("missing clock file accepted")
+	}
+}
+
+// The clock and status writers replace a record whole through ReplaceFile
+// and leave no temporary file, and a failed rename removes it.
+func TestReplaceFile(t *testing.T) {
+	dir := t.TempDir()
+	for _, text := range []string{"a longer first record", "short"} {
+		if _, err := WriteStatus(dir, StatusStartFile, &StatusRecord{Error: text}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := WriteClock(dir, &ClockRecord{Error: text}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !reflect.DeepEqual(names, []string{ClockFile, StatusStartFile}) {
+		t.Fatalf("files %q", names)
+	}
+	var st StatusRecord
+	if b, err := os.ReadFile(filepath.Join(dir, StatusStartFile)); err != nil || json.Unmarshal(b, &st) != nil || st.Error != "short" {
+		t.Fatalf("status record %+v: %v", st, err)
+	}
+
+	path := filepath.Join(dir, "held")
+	if err := os.MkdirAll(filepath.Join(path, "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceFile(path, []byte("x")); err == nil {
+		t.Fatal("a non-empty directory replaced")
+	}
+	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file after a failed rename: %v", err)
 	}
 }

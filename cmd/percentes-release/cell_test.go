@@ -108,6 +108,21 @@ func checkRetained(t *testing.T, r *route, run schedule.Run) (*evidence.Manifest
 	return m, text
 }
 
+// noTempFiles fails t when a file under any of roots ends in ".tmp".
+func noTempFiles(t *testing.T, roots ...string) {
+	t.Helper()
+	for _, root := range roots {
+		if err := filepath.Walk(root, func(p string, _ os.FileInfo, err error) error {
+			if err == nil && strings.HasSuffix(p, ".tmp") {
+				t.Errorf("temporary file left: %s", p)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func ledgerState(t *testing.T, path string) *admission.State {
 	t.Helper()
 	l, err := admission.Open(path)
@@ -126,7 +141,7 @@ func ledgerState(t *testing.T, path string) *admission.State {
 // the attempts without answer text, the probe, the final dispatch
 // series, a manifest carrying the cell record, its label, the host's
 // aggregate dispatch series and the inter-chunk gap histograms, and the
-// report pair.
+// report pair, with no temporary file left.
 func TestCellRunsAdmittedSteps(t *testing.T) {
 	e := newEndpoint(t, always200)
 	r, f := newTestRoute(t, releaseConfig(t, e.url()), "+0.005032")
@@ -160,6 +175,7 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 			t.Error(err)
 		}
 	}
+	noTempFiles(t, r.out, r.framesRoot)
 
 	b, err := os.ReadFile(filepath.Join(dir, evidence.AttemptsFile))
 	if err != nil {

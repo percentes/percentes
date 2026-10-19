@@ -1390,10 +1390,13 @@ retained.
 | `interrupted` | the process ended or failed during the cell | `cell.json` and the files reached at the time; when the process next reads the route's records, `labelCell` writes the empty attempts file, reads any start record the cell did not write, and adds the labelled manifest and report pair |
 | `missed` | the start was more than 15 minutes past when the process reached it | `cell.json`, then the labelled manifest and report pair from `labelCell`, with no end records and no concurrent runs |
 
-A restarted process resumes from the cell records, marking one left
-running as interrupted, and labels each missed or interrupted cell before
-the next run. Every cell record carries the SHA-256 of the schedule file
-the cell ran under (`schedule_sha256`). A schedule written again from the
+Each file a cell writes in its directory goes to a temporary file there
+that is synced and renamed into place (`evidence.ReplaceFile`), so a
+crash leaves the old file or the new one. A restarted process resumes
+from the cell records, marking one left running as interrupted, and
+labels each missed or interrupted cell before the next run. Every cell
+record carries the SHA-256 of the schedule file the cell ran under
+(`schedule_sha256`). A schedule written again from the
 same inputs at a later ledger position is another file with another
 hash: `run` refuses to start while the route's directory holds a record
 written under another schedule file, and the running process stops with
@@ -1563,8 +1566,8 @@ the latest end of any of the route's attempts (each `cell.json`'s
 `end_utc`; for an interrupted cell with none, the latest time its
 records carry: `start_utc`, the dispatch series to the end of each second
 it counts a request in, the clock, status, balance and refresh records
-(one that does not decode, as when a crash cut it short, gives the time
-its file was last written) and each attempt's times from `epoch_utc`;
+(one that does not decode gives the time its file was last written) and
+each attempt's times from `epoch_utc`;
 for any other cell with none, its `start_utc`); the refresh exited 0
 and its published limits are the ones its output gives, read on a route
 with a confidential limit from the refresh record as run kept beside the

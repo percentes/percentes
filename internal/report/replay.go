@@ -144,7 +144,7 @@ func WriteHostedPair(dir string, cfgRaw []byte, m *evidence.Manifest) (jsonPath,
 	}
 	jsonPath, txtPath = filepath.Join(dir, JSONFile), filepath.Join(dir, TextFile)
 	for path, b := range map[string][]byte{jsonPath: raw, txtPath: []byte(text)} {
-		if err := os.WriteFile(path, b, 0o644); err != nil {
+		if err := evidence.ReplaceFile(path, b); err != nil {
 			return "", "", "", fmt.Errorf("report: %w", err)
 		}
 	}
