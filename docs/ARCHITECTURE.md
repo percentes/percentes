@@ -122,7 +122,7 @@ hosted and release commands have their own sections below.
 | `cmd/percentes-campaign` | N runs of one fault variant against a self-hosted target, gates per run, §7 aggregation; it refuses a hosted target, as `cmd/percentes` does; `--dry-kill` makes one process kill with no load | `run-N.json` and `run-N.txt` as each run ends; `campaign.json`, `campaign.txt`, partial after an error or a halt; under process kill `run-N-server.log`, `run-N-fingerprint-before.txt` and `run-N-fingerprint-after.txt`; `dry-kill.json` and `dry-kill-server.log` from `--dry-kill` | 0 every run valid, 2 at least one invalid run or a halted campaign, 1 error or a refused hosted target |
 | `cmd/percentes-calibrate` | the §10 capacity calibration and the §5 single-replica reference; `--check` validates a configuration and lists its placeholders | `calibration.json`, `calibration.txt` | 0 valid, 2 calibration invalid, 1 error |
 | `cmd/percentes-pilot` | the SPEC-HOSTED HA2 pilot: `ledger` (`create`, `price`, `hosting`, `show`), `probe`, `dev`, `session` and `check-cpu` | the ledger file; `probe-<UTC time>/<target>/probe.json`, where UTC is Coordinated Universal Time; `dev-1/` and `dev-2/` with `config.yaml`, `dev.json` and the targets' `attempts.jsonl` files; `<session>/session.json` and, per target, `<session>/<target>/` with the evidence files; the frame store under `--frames` | 0 done, every window client-valid, every probe unblocked and every endpoint through the development gate; 2 a window client-invalid or not started, a probe blocked, the second window late, or an endpoint failing the gate; 1 error or refusal |
-| `cmd/percentes-release` | a release (SPEC-HOSTED HA3): before the window, `key create`, `key sum`, `ledger create`, `ledger price`, `ceiling-check`, `schedule` and `public-config`; `run` for one route's cells over the committed window; after the window, `dispatch`, `pages`, `pack` and `publish-check`; `rehearse`, the acceptance run against six mock routes ([The rehearsal](#the-rehearsal)); `check-cpu` ([The release runner](#the-release-runner)) | the release key file, from `key create`; the committed schedule file; the release ledger; `ceiling-<UTC time>/<route>-<ceiling>/probe.json` from `ceiling-check`, with `probe-retained.json` under its `--frames` where the route withholds probe values; per cell attempt, `<route>/<cell>-a<attempt>/`: `cell.json`, `clock.json`, `status-start.json`, `refresh.json`, `balance-start.json`, `probe.json`, `attempts.jsonl`, `dispatch.json`, the ceiling probe copies, `status-end.json`, `balance-end.json`, `manifest.json`, `report.json` and `report.txt`; the frame store under `--frames`, with the cell's `probe-retained.json` beside its frames, and for a route with a confidential limit `config.yaml` and the refresh record as run; after the route's last cell, `<route>/window-close.json`, with its record copies under `--frames` in `window-close/<route>/<UTC time>/`; from `public-config`, the configuration as published; `dispatch-aggregate.json` at the output root, from `dispatch`; `index.md`, `index.json`, `routes/<route>.txt` and `routes/<route>.json` under `--pages`, from `pages`; a route's evidence pack at `--pack`, from `pack`; from `rehearse`, under its `--out`: `inputs/`, each mock route's cell directory as above, and `rehearsal.json` | `run`: 0 every cell counts; 2 a cell does not count; 3 the route stopped (a ledger refusal, a documented billing refusal, a clock offset above the bound, limits read at a cell's start that no longer admit the route's steps, a probe 401 or 403 that the route's previous probed cell also saw, or an operator abort). `ceiling-check`: 0 the ceiling and input-bound checks passed and `run` accepts the model identifiers the record reports; 2 the check failed or was blocked, or the record reports a model identifier on which `run` refuses the route. `rehearse`: 0 the rehearsal is green; 2 it is not. `publish-check`: 0 the publication record is complete; 2 it is not. Every command: 1 error or refusal |
+| `cmd/percentes-release` | a release (SPEC-HOSTED HA3): before the window, `key create`, `key sum`, `ledger create`, `ledger price`, `ceiling-check`, `schedule` and `public-config`; `run` for one route's cells over the committed window; after the window, `dispatch`, `pages`, `pack` and `publish-check`; `rehearse`, the acceptance run against six mock routes ([The rehearsal](#the-rehearsal)); `check-cpu` ([The release runner](#the-release-runner)) | the release key file, from `key create`; the committed schedule file; the release ledger; `ceiling-<UTC time>/<route>-<ceiling>/probe.json` from `ceiling-check`, with `probe-retained.json` under its `--frames` where the route withholds probe values; per cell attempt, `<route>/<cell>-a<attempt>/`: `cell.json`, `clock.json`, `status-start.json`, `refresh.json`, `balance-start.json`, `probe.json`, `attempts.jsonl`, `dispatch.json`, the ceiling probe copies, `status-end.json`, `balance-end.json`, `manifest.json`, `report.json` and `report.txt`; the frame store under `--frames`, with the cell's `probe-retained.json` beside its frames, and for a route with a confidential limit `config.yaml` and the refresh record as run; after the route's last cell, `<route>/window-close.json`, with its record copies under `--frames` in `window-close/<route>/<UTC time>/`; from `public-config`, the configuration as published; `dispatch-aggregate.json` at the output root, from `dispatch`; `index.md`, `index.json`, `routes/<route>.txt` and `routes/<route>.json` under `--pages`, from `pages`; a route's evidence pack at `--pack`, from `pack`; `publication.md` and `publication.json` under `--pages`, from `publish-check --write-page`; from `rehearse`, under its `--out`: `inputs/`, each mock route's cell directory as above, and `rehearsal.json` | `run`: 0 every cell counts; 2 a cell does not count; 3 the route stopped (a ledger refusal, a documented billing refusal, a clock offset above the bound, limits read at a cell's start that no longer admit the route's steps, a probe 401 or 403 that the route's previous probed cell also saw, or an operator abort). `ceiling-check`: 0 the ceiling and input-bound checks passed and `run` accepts the model identifiers the record reports; 2 the check failed or was blocked, or the record reports a model identifier on which `run` refuses the route. `rehearse`: 0 the rehearsal is green; 2 it is not. `publish-check`: 0 the publication record is complete and the publication page under `--pages` is the one it gives; 2 either is not. Every command: 1 error or refusal |
 | `cmd/mockserver` | the mock inference server in its Phase 0 form; the shaped hosted-provider form is built in Go only ([the mock's shaped form](#the-mocks-shaped-form)) | | |
 | `cmd/naivesweep` | a reconnaissance sweep of an OpenAI-compatible endpoint, outside the instrument: closed loop, no client-validity gates, no ledger admission | | |
 
@@ -433,7 +433,7 @@ The diagram predates the hosted packages, which the table lists.
 | | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
 | Hosted | `internal/probe` | the pre-run probe: Domain Name System (DNS) resolution, the Transport Layer Security (TLS) handshake, one request, the response shape, the start gate; the release ceiling check, a record's results re-derived from its requests, the ceiling choice across a model's hosts with a host left out on its records' reported-model fault, the values a probe record withholds, and the reported-model fault of a route's own records | SPEC-HOSTED §2, §5; HA3 points 7 and 15 | `Run`, `RunRelease`, `ReleaseRecord.Verify`, `ChooseCeiling`, `ModelFault`, `ReleaseRecord.Expected`, `LengthValue`, `Gate`, `Write`, `Retains`, `Exposed`, `ExposedByMarking`, `WriteRetained` | an httptest server per shape and failure |
 | | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound, bound to one open line once `Bind` is called; the release ceiling rule, and the check of a published verdict against the configuration's limits | SPEC-HOSTED HA2 §3; HA3 points 6 and 15 | `Create`, `Open`, `Ledger.Bind`, `Ledger.Admit`, `Ledger.AdmitAt`, `Ledger.Settle`, `CeilingRule`, `CheckPublished`, `State.Covers`, `State.ReservationUSD`, `State.PriceRevision` | chain, cap and settlement units |
-| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the evidence pack, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadRetainedRefresh`, `ReadWindowClose`, `WindowClose.Verify`, `LoadOperator`, `Operator.Withhold`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `BuildPack`, `ReadPack`, `PackCarries`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
+| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the evidence pack, the release publication record and the publication page built from it | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadRetainedRefresh`, `ReadWindowClose`, `WindowClose.Verify`, `LoadOperator`, `Operator.Withhold`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `BuildPack`, `ReadPack`, `PackCarries`, `LoadPublication`, `Publication.Check`, `Publication.Page` | round-trip, hash and refusal units |
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
 | | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file with each route's frozen configuration hashes (as published, and keyed as loaded) and host group, the ledger's open-line hash and its position (line count and the hash of its bytes) | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun`, `Schedule.Config` | a pinned derivation; window and refusal cases |
@@ -1561,7 +1561,8 @@ modification time, so the same cells give the same bytes. A route with
 no page has no manifest, and its inventory names no file.
 
 `percentes-release publish-check --out DIR --frames DIR --config FILE
-... --schedule FILE --pages DIR --record FILE [--release-key FILE]`
+... --schedule FILE --pages DIR --record FILE [--write-page]
+[--release-key FILE]`
 checks the release publication record (`evidence.Publication`,
 SPEC-HOSTED HA3 point 14):
 a strictly decoded JSON file apart from the cell manifests that names,
@@ -1588,9 +1589,28 @@ from the cells as they stand, each replication pack holds that pack's
 `inventory.json` and every file it names with the same bytes, and may
 hold other files (`evidence.PackCarries`), every disclosure
 predates the first notice, every pre-release copy withholds every
-replication-pack route, and every named file matches its hash. When the
-record is complete it prints the counts and the providers told before
-the notices, in date order. `pages` needs no record.
+replication-pack route, and every named file matches its hash. The
+check also refuses a verbatim response's text that is not UTF-8 (the
+Unicode text encoding), and a correction or a disclosure's provider that
+runs over more than one line.
+
+When the record is complete the command builds the publication page
+from it (`Publication.Page`): `publication.md` and `publication.json`,
+holding per route the notice date, the date its window closed and
+whether the record carries a naming permission; each response's date
+received with its corrections, and its text only where it is marked
+verbatim with its consent file; the corrections log, by route and
+response date; the providers told before the notices, with how and the
+date; and the fixed lines on naming, the accounts' ordinary paid status
+and the absence of provider funding (`evidence.PublicationStatements`).
+Recipients, account identifiers and the paths of the files the record
+keeps stay out of it. A verbatim text prints in a fenced block longer
+than any run of backticks in it. With `--write-page` the command writes
+both files under `--pages`; without it, it exits 2 unless both are there
+with the bytes it built. The record does not name the publication
+page. It then prints the counts and the providers told before the
+notices, in date order. `pages` runs without a record and writes no
+publication page.
 
 ### What publishes and what stays retained
 
@@ -1883,6 +1903,7 @@ A release cell ([The release runner](#the-release-runner)):
 | `probe-retained.json` | `probe.Withheld`, `probe.WriteRetained` | HA3 point 15 |
 | `manifest.json`: `frames`, `records` (`sha256` and `bytes`, or `hmac_sha256`) | `evidence.NewManifest` through `refOf`, `keyedRefOf` and `Operator.records`; checked by `readRef` in `evidence.CheckRelease` | SPEC-HOSTED §9; HA3 point 15 |
 | the publication record's check | `evidence.LoadPublication`, `Publication.Check`, through `publishCheckCmd` | HA3 point 14 |
+| `publication.md`, `publication.json` | `Publication.Page`, `PublicationPage.Markdown`, through `publishCheckCmd` | SPEC-HOSTED §9; HA3 point 14 |
 | `report.json`: `tables.cells[*].steps[*].signals.content_events_errored`, `content_events_censored`, `prompt_tokens` | `report.signals`, `promptTokens` | SPEC-HOSTED §8 |
 | `routes/<route>.json`: `naming` | `report.NewStepTables`, from `target.naming.lines` | HA3 point 14 |
 | `report.json`: `tables.limits` | `admission.CeilingRule`, with the `unpublished:` cover tests; a confidential limit's source and `hmac_sha256` in place of its value, checked by `admission.CheckPublished` | HA3 points 6 and 15 |
@@ -2097,6 +2118,11 @@ mode or a diagram.
   fires, so nothing depends on reaching the victim afterwards (§1).
 - **Probe**: the pre-run request from the client host that records a
   hosted endpoint's response shape and gates the start (SPEC-HOSTED §5).
+- **Publication page**: `publication.md` and `publication.json` under
+  `--pages`, built by `percentes-release publish-check` from the
+  publication record: the notice and window dates, the responses as the
+  consent rule allows, the corrections log and the earlier disclosures
+  (SPEC-HOSTED §9).
 - **Publication record**: the file `percentes-release publish-check`
   reads, apart from the cell manifests, holding each route's notice,
   responses, consent, permission and replication pack, the earlier
