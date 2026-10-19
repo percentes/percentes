@@ -81,7 +81,7 @@ func TestCellLimitsStop(t *testing.T) {
 				want = "route stop: the limits read at the cell's start, at the price retrieved 2026-10-06, no longer admit step 3 (1 rps) of the 3 the route runs: " +
 					"tokens_per_minute confidential (" + l.Source + ", sha256 " + l.SHA256 + "): nominal demand 102720 above half of it; the route keeps its steps (SPEC-HOSTED §4)"
 			}
-			before, err := ledgerEntries(f.ledger)
+			before, err := ledgerEntries(f.ledger, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -103,7 +103,7 @@ func TestCellLimitsStop(t *testing.T) {
 			if n := e.hits.Load(); n != 0 || rec.Sent != (admission.Counts{}) {
 				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
 			}
-			if after, err := ledgerEntries(f.ledger); err != nil || len(after) != len(before) {
+			if after, err := ledgerEntries(f.ledger, ""); err != nil || len(after) != len(before) {
 				t.Fatalf("ledger lines %d, were %d: %v", len(after), len(before), err)
 			}
 			if m.Counted() || m.Release.Outcome != outcomeStopped || m.Release.Reasons[0] != want || m.Artifact(evidence.RefreshFile) == nil {
@@ -199,7 +199,7 @@ func TestCellPriceStop(t *testing.T) {
 			if _, err := recordPrice(l, r.rule.cfg, tc.in, tc.out, "https://example.test/pricing", "2026-10-08"); err != nil {
 				t.Fatal(err)
 			}
-			before, err := ledgerEntries(f.ledger)
+			before, err := ledgerEntries(f.ledger, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -219,7 +219,7 @@ func TestCellPriceStop(t *testing.T) {
 			if n := e.hits.Load(); n != 0 || rec.Sent != (admission.Counts{}) {
 				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
 			}
-			if after, err := ledgerEntries(f.ledger); err != nil || len(after) != len(before) {
+			if after, err := ledgerEntries(f.ledger, ""); err != nil || len(after) != len(before) {
 				t.Fatalf("ledger lines %d, were %d: %v", len(after), len(before), err)
 			}
 		})

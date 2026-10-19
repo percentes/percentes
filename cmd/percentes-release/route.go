@@ -263,10 +263,11 @@ func newRoute(in routeInput) (*route, error) {
 	if err := checkLedger(st, sched); err != nil {
 		return nil, err
 	}
+	r.ledger.Bind(sched.Input.LedgerSHA256)
 	if err := st.CheckRelease(cfg); err != nil {
 		return nil, err
 	}
-	entries, err := ledgerEntries(in.ledgerPath)
+	entries, err := ledgerEntries(in.ledgerPath, sched.Input.LedgerSHA256)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +300,7 @@ func newRoute(in routeInput) (*route, error) {
 	if in.byteCap <= 0 {
 		return nil, fmt.Errorf("run: --byte-cap %d: the Shape S ticket byte cap is required", in.byteCap)
 	}
-	if r.ceiling, r.ceilingProbes, err = readCeilingProbes(cfg, in.probeFiles, in.byteCap); err != nil {
+	if r.ceiling, r.ceilingProbes, err = readCeilingProbes(cfg, in.probeFiles, in.byteCap, sched.Input.LedgerSHA256); err != nil {
 		return nil, err
 	}
 	if r.shape, err = pilot.GenerateShapeS(pilot.ShapeSSeed, in.byteCap); err != nil {
@@ -339,7 +340,8 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // readCeilingProbes reads the ceiling check's records of the route's
 // model, whose hosts are the target and release.other_hosts, and requires
 // their choice to run the model at the configured ceiling. Every host's
-// record carries the host's model and byteCap, and the results its
+// record carries the host's model and byteCap, was admitted in the ledger
+// whose open-line SHA-256 is ledger, and carries the results its
 // requests give at the pinned input bound (probe.ReleaseRecord.Verify,
 // through this route's start gate for its own); this route's also carry
 // its adapter, endpoint and expected model id, the hash of its body at the
@@ -349,7 +351,7 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // none of the values their snapshots' confidential markings withhold
 // (probe.ExposedByMarking), and another host whose records carry a model
 // fault is left out of the choice (probe.ChooseCeiling).
-func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.CeilingChoice, map[string][]byte, error) {
+func readCeilingProbes(cfg *config.Config, files []string, byteCap int, ledger string) (probe.CeilingChoice, map[string][]byte, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
 		return none, nil, errors.New("run: --ceiling-probe is required: the ceiling check's probe records")
@@ -387,6 +389,8 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.C
 			fault = fmt.Sprintf("model %q, want %q", rec.RequestedModel, model)
 		case rec.ByteCap != byteCap:
 			fault = fmt.Sprintf("byte cap %d, want --byte-cap %d", rec.ByteCap, byteCap)
+		case rec.LedgerSHA256 != ledger:
+			fault = fmt.Sprintf("ledger open line sha256 %q; the schedule froze %s", rec.LedgerSHA256, ledger)
 		case rec.Route != t.Name:
 			if exposed := probe.ExposedByMarking(&rec); len(exposed) > 0 {
 				fault = "carries values its confidential markings withhold: " + strings.Join(exposed, ", ")

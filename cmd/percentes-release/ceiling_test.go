@@ -144,6 +144,10 @@ func TestCeilingCheckCmd(t *testing.T) {
 	if !rec.Ceiling.Pass || rec.Ceiling.Sent != probe.CeilingRequests || !rec.InputBound.Pass || rec.Start.Blocked || rec.ByteCap != 2000 {
 		t.Fatalf("check %+v, input bound %+v, start %+v, byte cap %d", rec.Ceiling, rec.InputBound, rec.Start, rec.ByteCap)
 	}
+	open := ledgerOpenSHA256(t, f.ledger)
+	if rec.LedgerSHA256 != open {
+		t.Fatalf("ledger sha256 %q, want %s", rec.LedgerSHA256, open)
+	}
 	for i, r := range rec.Requests {
 		if !r.Pass || r.Index != i || r.FinishReason != "stop" {
 			t.Fatalf("request %d: %+v", i, r)
@@ -160,13 +164,58 @@ func TestCeilingCheckCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true))
-	choice, copies, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000)
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true, ledgerOpenSHA256(t, f.ledger)))
+	choice, copies, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000, ledgerOpenSHA256(t, f.ledger))
 	if err != nil || choice.Ceiling != 512 || len(copies) != 2 {
 		t.Fatalf("run reads the record: %+v, %d copies, %v", choice, len(copies), err)
 	}
-	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 1800); err == nil || !strings.Contains(err.Error(), "byte cap 2000, want --byte-cap 1800") {
+	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 1800, ledgerOpenSHA256(t, f.ledger)); err == nil || !strings.Contains(err.Error(), "byte cap 2000, want --byte-cap 1800") {
 		t.Fatalf("another byte cap: %v", err)
+	}
+	frozen := strings.Repeat("0", 64)
+	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000, frozen); err == nil ||
+		!strings.Contains(err.Error(), fmt.Sprintf("route groq at 512: ledger open line sha256 %q; the schedule froze %s", open, frozen)) {
+		t.Fatalf("another ledger: %v", err)
+	}
+}
+
+// ceiling-check settles in the ledger whose open line it read first: with
+// another ledger moved to its path during the check, the settle is
+// refused and that ledger is left as it was.
+func TestCeilingCheckLedgerSwapped(t *testing.T) {
+	var f *ceilingFixture
+	var other string
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			if err := os.Rename(other, f.ledger); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	f = newCeilingFixture(t, srv.URL+"/v1/chat/completions", testKey)
+	open := ledgerOpenSHA256(t, f.ledger)
+	other = priced512(t, f.cfg)
+	swapped := ledgerOpenSHA256(t, other)
+	if swapped == open {
+		t.Fatalf("two ledgers open with sha256 %s", open)
+	}
+	before, err := os.ReadFile(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := ceilingCheckCmd(context.Background(), f.args())
+	if want := "admission: ledger open line sha256 " + swapped + "; bound to " + open; err == nil || code != exitError || !strings.Contains(err.Error(), want) {
+		t.Fatalf("ceiling-check: %d, %v; want %q", code, err, want)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("%d requests sent", n)
+	}
+	if after, err := os.ReadFile(f.ledger); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("the other ledger changed: %v", err)
 	}
 }
 
@@ -253,13 +302,13 @@ func TestCeilingCheckWithholds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true))
-	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000); err == nil || !strings.Contains(err.Error(), "probe: route groq: the probe was blocked") {
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true, ledgerOpenSHA256(t, f.ledger)))
+	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000, ledgerOpenSHA256(t, f.ledger)); err == nil || !strings.Contains(err.Error(), "probe: route groq: the probe was blocked") {
 		t.Fatalf("run reads the record: %v", err)
 	}
 	rec.Requests[0].Exchange.Headers["X-Ratelimit-Remaining-Requests"] = []string{"qz7919"}
 	leaked := writeCeiling(t, *rec)
-	if _, _, err := readCeilingProbes(cfgs[0], []string{leaked, baseten}, 2000); err == nil ||
+	if _, _, err := readCeilingProbes(cfgs[0], []string{leaked, baseten}, 2000, ledgerOpenSHA256(t, f.ledger)); err == nil ||
 		!strings.Contains(err.Error(), "route groq at 512: carries values the route withholds: X-Ratelimit-Remaining-Requests") {
 		t.Fatalf("a record carrying a retained value: %v", err)
 	}
@@ -304,13 +353,13 @@ func TestCeilingCheckConfidential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true))
-	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000); err != nil {
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true, ledgerOpenSHA256(t, f.ledger)))
+	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000, ledgerOpenSHA256(t, f.ledger)); err != nil {
 		t.Fatalf("run reads the record: %v", err)
 	}
 	rec.Snapshots[1].Value = 250013.5
 	leaked := writeCeiling(t, *rec)
-	if _, _, err := readCeilingProbes(cfgs[0], []string{leaked, baseten}, 2000); err == nil ||
+	if _, _, err := readCeilingProbes(cfgs[0], []string{leaked, baseten}, 2000, ledgerOpenSHA256(t, f.ledger)); err == nil ||
 		!strings.Contains(err.Error(), "route groq at 512: carries values the route withholds: snapshot 1 value") {
 		t.Fatalf("a record carrying the confidential value: %v", err)
 	}
@@ -347,8 +396,8 @@ func TestCeilingCheckReportedModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true))
-	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000); err == nil || err.Error() != "run: route groq is not characterized (SPEC-HOSTED §2): "+fault {
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true, ledgerOpenSHA256(t, f.ledger)))
+	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000, ledgerOpenSHA256(t, f.ledger)); err == nil || err.Error() != "run: route groq is not characterized (SPEC-HOSTED §2): "+fault {
 		t.Fatalf("run reads the record: %v", err)
 	}
 }
@@ -360,7 +409,7 @@ func TestModelRefusal(t *testing.T) {
 	cfg := releaseConfig(t, "https://api.example.test/openai/v1/chat/completions")
 	tg := &cfg.Target
 	rec := func(models ...string) *probe.ReleaseRecord {
-		r := hostCeiling(cfg, 2000, "groq", 512, true)
+		r := hostCeiling(cfg, 2000, "groq", 512, true, "")
 		reports(models...)(&r)
 		return &r
 	}

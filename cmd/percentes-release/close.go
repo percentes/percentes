@@ -30,7 +30,7 @@ func (r *route) limitsStop(read []evidence.RefreshedLimit) (*routeStop, error) {
 			c.Target.Limits[i].Value = l.Value
 		}
 	}
-	entries, err := ledgerEntries(r.ledgerPath)
+	entries, err := ledgerEntries(r.ledgerPath, r.ledger.Bound())
 	if err != nil {
 		return nil, err
 	}

@@ -31,7 +31,7 @@ func TestNewRouteRefusals(t *testing.T) {
 		}
 	}
 	pass := func(f *fixture, route string, c int, ok bool) probe.ReleaseRecord {
-		return hostCeiling(f.in.cfg, f.in.byteCap, route, c, ok)
+		return hostCeiling(f.in.cfg, f.in.byteCap, route, c, ok, f.open)
 	}
 	// with is route's passed record at 512 changed by edit.
 	with := func(f *fixture, route string, edit func(r *probe.ReleaseRecord)) probe.ReleaseRecord {
@@ -144,6 +144,12 @@ func TestNewRouteRefusals(t *testing.T) {
 				r.InputBound = probe.InputCheck{BoundTokens: 1200, Reported: 8, MaxPromptTokens: 1000}
 			}))
 		}, "route baseten: the input bound failed at ceiling 512: 8 of 10 requests reported"},
+		{"own check in another ledger", func(t *testing.T, f *fixture) {
+			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.LedgerSHA256 = strings.Repeat("0", 64) }), pass(f, "baseten", 512, true))
+		}, `route groq at 512: ledger open line sha256 "` + strings.Repeat("0", 64) + `"; the schedule froze `},
+		{"another host's check in another ledger", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) { r.LedgerSHA256 = "" }))
+		}, `route baseten at 512: ledger open line sha256 ""; the schedule froze `},
 		{"own record without requests", func(t *testing.T, f *fixture) {
 			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.Requests = nil }), pass(f, "baseten", 512, true))
 		}, "route groq at 512: 0 requests, want 10"},
@@ -275,9 +281,9 @@ func reports(models ...string) func(r *probe.ReleaseRecord) {
 func TestNewRouteReportedModel(t *testing.T) {
 	enoughOpenFiles(t)
 	f := newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
-	own := hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true)
+	own := hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true, f.open)
 	reports("openai/gpt-oss-120b", "openai/gpt-oss-120b")(&own)
-	other := hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, false)
+	other := hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, false, f.open)
 	reports("openai/gpt-oss-120b-v2")(&other)
 	f.in.probeFiles = []string{writeCeiling(t, own), writeCeiling(t, other)}
 	r, err := newRoute(f.in)
@@ -297,9 +303,9 @@ func TestNewRouteReportedModel(t *testing.T) {
 
 	f = newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
 	f.in.cfg.Target.ReportedModel = &config.ReportedModel{Name: "openai/gpt-oss-120b-2026", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
-	own = hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true)
+	own = hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true, f.open)
 	reports("openai/gpt-oss-120b-2026")(&own)
-	f.in.probeFiles = []string{writeCeiling(t, own), writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true))}
+	f.in.probeFiles = []string{writeCeiling(t, own), writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true, f.open))}
 	if _, err := newRoute(f.in); err != nil {
 		t.Fatalf("recorded model reported: %v", err)
 	}
@@ -343,10 +349,10 @@ func TestNewRouteCeilingRecords(t *testing.T) {
 	}
 
 	f = newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
-	at512 := hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, false)
+	at512 := hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, false, f.open)
 	fallback(t, f.in.cfg)
-	f.in.probeFiles = []string{writeCeiling(t, at512), writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "groq", 1024, true)),
-		writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true)), writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 1024, true))}
+	f.in.probeFiles = []string{writeCeiling(t, at512), writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "groq", 1024, true, f.open)),
+		writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true, f.open)), writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 1024, true, f.open))}
 	if r, err = newRoute(f.in); err != nil {
 		t.Fatal(err)
 	}
@@ -355,10 +361,10 @@ func TestNewRouteCeilingRecords(t *testing.T) {
 	}
 
 	f = newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
-	other := hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true)
+	other := hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true, f.open)
 	other.Snapshots = []probe.Snapshot{{Limit: config.Limit{Dimension: config.LimitTPM, Value: 250000, Marking: config.MarkingPublic}}}
 	other.Requests[0].Exchange.Headers = map[string][]string{"X-Ratelimit-Limit-Tokens": {"250000"}}
-	f.in.probeFiles = []string{writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true)), writeCeiling(t, other)}
+	f.in.probeFiles = []string{writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true, f.open)), writeCeiling(t, other)}
 	if r, err = newRoute(f.in); err != nil || len(r.ceilingProbes) != 2 {
 		t.Fatalf("another host's public values: %v", err)
 	}
@@ -541,7 +547,7 @@ func TestLedgerReads(t *testing.T) {
 	if err := l.Settle(a, admission.Counts{Probe: 7}); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := ledgerEntries(f.ledger)
+	entries, err := ledgerEntries(f.ledger, "")
 	if err != nil {
 		t.Fatal(err)
 	}

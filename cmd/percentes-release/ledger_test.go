@@ -53,7 +53,7 @@ func TestLedgerCmd(t *testing.T) {
 	if code, err := ledgerCmd(price); err != nil || code != exitOK {
 		t.Fatalf("price: %d, %v", code, err)
 	}
-	entries, err := ledgerEntries(path)
+	entries, err := ledgerEntries(path, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestLedgerCmdRefusals(t *testing.T) {
 			}
 		})
 	}
-	entries, err := ledgerEntries(path)
+	entries, err := ledgerEntries(path, "")
 	if err != nil {
 		t.Fatal(err)
 	}

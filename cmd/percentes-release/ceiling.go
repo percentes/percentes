@@ -18,15 +18,18 @@ import (
 // ceilingCheckCmd sends the route's ceiling check (SPEC-HOSTED HA3 point
 // 7) at its configured ceiling: probe.CeilingRequests requests of Shape S
 // text, admitted in the release ledger before the first is sent and
-// settled with the requests sent. It writes the record run reads with
-// --ceiling-probe, also when the check fails or is blocked, and what the
-// record withholds under --frames. A record reporting a model id on which
-// run refuses the route (probe.ModelFault) is refused here too.
+// settled with the requests sent, both in the file whose open line the
+// command read first. It writes the record run reads with --ceiling-probe,
+// also when the check fails or is blocked, and what the record withholds
+// under --frames. The record names the ledger by its open-line SHA-256;
+// run refuses it unless the schedule froze that ledger. A record
+// reporting a model id on which run refuses the route (probe.ModelFault)
+// is refused here too.
 func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	fs := flag.NewFlagSet("ceiling-check", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "the route's release configuration at the ceiling checked (required)")
 	envFile := fs.String("env", "", "env file holding the target's api_key_env (required)")
-	ledgerPath := fs.String("ledger", "", "the release admission ledger, holding the route's price (required)")
+	ledgerPath := fs.String("ledger", "", "the release admission ledger the schedule freezes, holding the route's price (required)")
 	out := fs.String("out", "", "output directory; the check writes ceiling-<UTC time>/<route>-<ceiling>/"+probe.File+" under it (required)")
 	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
 	snapshots := fs.String("snapshots", "", "directory of the retained limit copies the configuration names by file name")
@@ -67,6 +70,7 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	ledger.Bind(st.OpenSHA256)
 	if err := st.CheckRelease(cfg); err != nil {
 		return exitError, err
 	}
@@ -114,7 +118,8 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 }
 
 // sendCeiling admits cfg's ceiling check in ledger, sends it with
-// shape's texts cut at byteCap, and settles the requests sent. The
+// shape's texts cut at byteCap, settles the requests sent, and records
+// the open line ledger is bound to (admission.Ledger.Bind). The
 // ceiling is the texts' request-reference seed, so the checks at the two
 // ceilings send different texts.
 func sendCeiling(ctx context.Context, ledger *admission.Ledger, cfg *config.Config, shape *pilot.ShapeS, snapshots string, byteCap int) (*probe.ReleaseRecord, error) {
@@ -129,7 +134,7 @@ func sendCeiling(ctx context.Context, ledger *admission.Ledger, cfg *config.Conf
 	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: snapshots, ByteCap: byteCap})
 	sent := 0
 	if rec != nil {
-		sent = rec.Sent()
+		sent, rec.LedgerSHA256 = rec.Sent(), ledger.Bound()
 	}
 	if serr := ledger.Settle(a, admission.Counts{Probe: sent}); serr != nil {
 		return nil, errors.Join(err, serr)

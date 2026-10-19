@@ -443,6 +443,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	l.Bind(st.OpenSHA256)
 	frozen := make([]schedule.RouteConfig, n)
 	for i, cfg := range cfgs {
 		if frozen[i], err = frozenConfig(cfg); err != nil {

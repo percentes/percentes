@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
@@ -474,7 +475,7 @@ func TestPagesHostGroup(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	extra := func(f *fixture) {
 		for _, h := range []string{"baseten", "groq"} {
-			f.in.probeFiles = append(f.in.probeFiles, writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, h, 1024, true)))
+			f.in.probeFiles = append(f.in.probeFiles, writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, h, 1024, true, f.open)))
 		}
 	}
 	for _, c := range []struct {
@@ -490,8 +491,42 @@ func TestPagesHostGroup(t *testing.T) {
 		}, "pages: routes groq and baseten, hosts of one model, ran at different ceiling choices"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			groq, groqCfg := pagesRoute(t, "groq", e.url(), "", "")
-			baseten, basetenCfg := pagesRoute(t, "baseten", e.url(), groq.out, groq.framesRoot, c.edit)
+			var cfgs []*config.Config
+			for _, h := range []string{"groq", "baseten"} {
+				cfg, err := config.LoadFile(routeConfigFile(t, h, e.url(), "10"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfgs = append(cfgs, cfg)
+			}
+			caps, err := admission.ReleaseCaps(cfgs...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger := filepath.Join(t.TempDir(), "ledger.jsonl")
+			l, err := admission.Create(ledger, caps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, cfg := range cfgs {
+				if _, err := recordPrice(l, cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			open := ledgerOpenSHA256(t, ledger)
+			// share runs the fixture's route on one ledger capping and
+			// pricing both hosts, with its records admitted there.
+			share := func(f *fixture) {
+				name := f.in.cfg.Target.Name
+				f.ledger, f.open, f.in.ledgerPath = ledger, open, ledger
+				f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", ledgerSchedule(t, ledger, []*config.Config{f.in.cfg}, name, "other"))
+				f.in.probeFiles = nil
+				for _, h := range append([]string{name}, otherHosts(f.in.cfg)...) {
+					f.in.probeFiles = append(f.in.probeFiles, writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, h, 512, true, open)))
+				}
+			}
+			groq, groqCfg := pagesRoute(t, "groq", e.url(), "", "", share)
+			baseten, basetenCfg := pagesRoute(t, "baseten", e.url(), groq.out, groq.framesRoot, share, c.edit)
 			for _, r := range []*route{groq, baseten} {
 				shortLadder(r)
 				if rec := runCellOK(t, r, r.runs[0]); rec.Outcome != outcomeBlocked {

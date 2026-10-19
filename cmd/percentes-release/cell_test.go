@@ -851,7 +851,7 @@ func TestCellBalanceGate(t *testing.T) {
 				t.Fatal(err)
 			}
 			r.balance = tc.balance(need)
-			before, err := ledgerEntries(f.ledger)
+			before, err := ledgerEntries(f.ledger, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -870,7 +870,7 @@ func TestCellBalanceGate(t *testing.T) {
 			if n := e.hits.Load(); n != int64(probes) || rec.Sent != (admission.Counts{Probe: probes}) {
 				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
 			}
-			after, err := ledgerEntries(f.ledger)
+			after, err := ledgerEntries(f.ledger, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1281,7 +1281,7 @@ func TestCellRefreshBlocks(t *testing.T) {
 			if err := os.Chtimes(filepath.Join(filepath.Dir(f.in.opPath), "r.txt"), old, old); err != nil {
 				t.Fatal(err)
 			}
-			before, err := ledgerEntries(f.ledger)
+			before, err := ledgerEntries(f.ledger, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1297,7 +1297,7 @@ func TestCellRefreshBlocks(t *testing.T) {
 			if n := e.hits.Load(); n != 0 || rec.Sent != (admission.Counts{}) {
 				t.Fatalf("server saw %d requests; sent %+v", n, rec.Sent)
 			}
-			if after, err := ledgerEntries(f.ledger); err != nil || len(after) != len(before) {
+			if after, err := ledgerEntries(f.ledger, ""); err != nil || len(after) != len(before) {
 				t.Fatalf("ledger lines %d, were %d: %v", len(after), len(before), err)
 			}
 			m, _ := checkRetained(t, r, run)
@@ -1312,6 +1312,64 @@ func TestCellRefreshBlocks(t *testing.T) {
 			}
 			if m.Artifact(evidence.RefreshFile) == nil {
 				t.Fatalf("artifacts %+v", m.Artifacts)
+			}
+		})
+	}
+}
+
+// A cell whose ledger path holds another ledger than the one the route
+// started on ends in an error before any request, appending nothing to
+// that file: at the limits re-check, and at the reservation's read where
+// the refresh failed and the re-check does not run.
+func TestCellLedgerSwapped(t *testing.T) {
+	for _, tc := range []struct {
+		name, script, want string
+	}{
+		{"refreshed", "", "ledger: open line sha256 %s; the route is bound to %s"},
+		{"not refreshed", "exit 4", "admission: ledger open line sha256 %s; bound to %s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+			enoughOpenFiles(t)
+			f := newFixture(t, releaseConfig(t, e.url()), "+0.005")
+			if tc.script != "" {
+				f.in.refreshCmd = writeFile(t, t.TempDir(), "refresh", []byte("#!/bin/sh\n"+tc.script+"\n"))
+				if err := os.Chmod(f.in.refreshCmd, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r, err := newRoute(f.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := filepath.Join(t.TempDir(), "ledger.jsonl")
+			l, err := admission.Create(other, mustCaps(t, f.in.cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := recordPrice(l, f.in.cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
+				t.Fatal(err)
+			}
+			swapped := ledgerOpenSHA256(t, other)
+			if swapped == f.open {
+				t.Fatalf("two ledgers open with sha256 %s", swapped)
+			}
+			if err := os.Rename(other, f.ledger); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(f.ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, err := r.runCell(context.Background(), r.runs[0])
+			if want := fmt.Sprintf(tc.want, swapped, f.open); err == nil || !strings.Contains(err.Error(), want) || rec.Outcome != outcomeInterrupted {
+				t.Fatalf("outcome %s: %v; want interrupted, %q", rec.Outcome, err, want)
+			}
+			if n := e.hits.Load(); n != 0 {
+				t.Fatalf("server saw %d requests", n)
+			}
+			if after, err := os.ReadFile(f.ledger); err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("the other ledger changed: %v", err)
 			}
 		})
 	}

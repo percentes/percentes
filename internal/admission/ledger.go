@@ -407,6 +407,9 @@ func (r *Refusal) Error() string {
 type Ledger struct {
 	path string
 	now  func() time.Time
+	// open, once Bind sets it, is the open-line SHA-256 every operation
+	// requires of the file.
+	open string
 }
 
 // Create starts a new ledger at path under caps; the file must not
@@ -439,6 +442,25 @@ func Open(path string) (*Ledger, error) {
 	return l, nil
 }
 
+// Bind makes every later operation on l refuse the file at its path
+// unless its open line's SHA-256 (State.OpenSHA256) is open.
+func (l *Ledger) Bind(open string) { l.open = open }
+
+// Bound is the open-line SHA-256 Bind set, or "".
+func (l *Ledger) Bound() string { return l.open }
+
+// parse checks b, the whole file, and the open line Bind set.
+func (l *Ledger) parse(b []byte) (*State, error) {
+	st, err := Parse(b)
+	if err != nil {
+		return nil, err
+	}
+	if l.open != "" && st.OpenSHA256 != l.open {
+		return nil, fmt.Errorf("admission: ledger open line sha256 %s; bound to %s", st.OpenSHA256, l.open)
+	}
+	return st, nil
+}
+
 // State reads and checks the ledger.
 func (l *Ledger) State() (*State, error) {
 	f, err := os.Open(l.path)
@@ -453,7 +475,7 @@ func (l *Ledger) State() (*State, error) {
 	if err != nil {
 		return nil, fmt.Errorf("admission: ledger: %w", err)
 	}
-	return Parse(b)
+	return l.parse(b)
 }
 
 // update runs fn on the checked ledger under an exclusive lock and appends
@@ -472,7 +494,7 @@ func (l *Ledger) update(fn func(*State) (*Entry, error)) (*Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("admission: ledger: %w", err)
 	}
-	st, err := Parse(b)
+	st, err := l.parse(b)
 	if err != nil {
 		return nil, err
 	}

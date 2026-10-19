@@ -17,8 +17,9 @@ import (
 )
 
 // ledgerEntries reads the ledger at path under a shared lock, as other
-// routes' processes append to it, checks it and returns its lines.
-func ledgerEntries(path string) ([]admission.Entry, error) {
+// routes' processes append to it, checks it and returns its lines. Where
+// open is set, a file whose open-line SHA-256 differs is refused.
+func ledgerEntries(path, open string) ([]admission.Entry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("ledger: %w", err)
@@ -31,8 +32,12 @@ func ledgerEntries(path string) ([]admission.Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ledger: %w", err)
 	}
-	if _, err := admission.Parse(b); err != nil {
+	st, err := admission.Parse(b)
+	if err != nil {
 		return nil, err
+	}
+	if open != "" && st.OpenSHA256 != open {
+		return nil, fmt.Errorf("ledger: open line sha256 %s; the route is bound to %s", st.OpenSHA256, open)
 	}
 	var out []admission.Entry
 	sc := bufio.NewScanner(bytes.NewReader(b))

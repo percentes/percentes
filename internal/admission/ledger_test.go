@@ -139,6 +139,51 @@ func TestCreateAndOpen(t *testing.T) {
 	}
 }
 
+// A bound ledger refuses every operation while the file at its path has
+// another open line, appending nothing to it, and accepts the bound file
+// again once it is back.
+func TestBind(t *testing.T) {
+	l, path := newLedger(t)
+	must(t, l.RecordPrice(groq, groqPrice))
+	a := admit(t, l, groq, PurposeProbe, 1)
+	bound := state(t, l).OpenSHA256
+	l.Bind(bound)
+	if l.Bound() != bound {
+		t.Fatalf("bound %q, want %q", l.Bound(), bound)
+	}
+	other, otherPath := newLedger(t)
+	must(t, other.RecordPrice(groq, groqPrice))
+	swapped := state(t, other).OpenSHA256
+	if swapped == bound {
+		t.Fatalf("two ledgers open with sha256 %s", bound)
+	}
+	kept := filepath.Join(t.TempDir(), "kept.jsonl")
+	must(t, os.Rename(path, kept))
+	must(t, os.Rename(otherPath, path))
+	before, err := os.ReadFile(path)
+	must(t, err)
+	want := "admission: ledger open line sha256 " + swapped + "; bound to " + bound
+	_, serr := l.State()
+	_, aerr := l.Admit(groq, PurposeProbe, 1, PilotTokens)
+	for name, err := range map[string]error{
+		"State": serr, "Admit": aerr, "Settle": l.Settle(a, Counts{Probe: 1}),
+		"RecordPrice": l.RecordPrice(groq, groqPrice), "RecordHosting": l.RecordHosting("1", "hosting"),
+	} {
+		var r *Refusal
+		if err == nil || err.Error() != want || errors.As(err, &r) {
+			t.Errorf("%s on another ledger: %v, want %q", name, err, want)
+		}
+	}
+	if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("the other ledger changed: %v", err)
+	}
+	must(t, os.Rename(kept, path))
+	must(t, l.Settle(a, Counts{Probe: 1}))
+	if u := state(t, l).Routes[groq]; u.Probe != 1 || u.Reserved != 0 {
+		t.Fatalf("usage %+v", u)
+	}
+}
+
 // The ledger plus the reservation may reach 1,024 for a route and no
 // further.
 func TestRouteRequestCap(t *testing.T) {

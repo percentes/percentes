@@ -132,7 +132,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		if _, err := recordPrice(l, cfg, "0.15", "0.60", "https://example.test/pricing", "2026-10-06"); err != nil {
 			t.Fatal(err)
 		}
-		cp, err := json.Marshal(passedCeiling(cfg, 2000))
+		cp, err := json.Marshal(passedCeiling(cfg, 2000, ledgerOpenSHA256(t, ledgerPath)))
 		if err != nil {
 			t.Fatal(err)
 		}

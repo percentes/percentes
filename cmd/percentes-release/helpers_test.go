@@ -43,10 +43,11 @@ const operatorJSON = `{
   ]
 }`
 
-// fixture is a route's input files in temporary directories.
+// fixture is a route's input files in temporary directories; open is
+// its ledger's open-line SHA-256.
 type fixture struct {
-	in     routeInput
-	ledger string
+	in           routeInput
+	ledger, open string
 }
 
 // writeFile writes b to name in dir and returns its path.
@@ -205,6 +206,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 		t.Fatal(err)
 	}
 	sb := ledgerSchedule(t, ledger, []*config.Config{cfg}, cfg.Target.Name, "other")
+	open := ledgerOpenSHA256(t, ledger)
 	writeFile(t, dir, "r.txt", []byte("record"))
 	refresh := filepath.Join(dir, "refresh")
 	if err := writeMockRefresh(refresh, cfg); err != nil {
@@ -212,7 +214,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 	}
 	var probeFiles []string
 	for _, route := range append([]string{cfg.Target.Name}, otherHosts(cfg)...) {
-		probeFiles = append(probeFiles, writeCeiling(t, hostCeiling(cfg, 2000, route, 512, true)))
+		probeFiles = append(probeFiles, writeCeiling(t, hostCeiling(cfg, 2000, route, 512, true, open)))
 	}
 	return &fixture{
 		in: routeInput{
@@ -220,7 +222,7 @@ func newFixture(t *testing.T, cfg *config.Config, offset string) *fixture {
 			framesRoot: t.TempDir(), clockSync: fakeSNTP(t, offset), statusCmd: "true", balanceCmd: fakeBalance(t), opPath: writeFile(t, dir, "operator.json", []byte(operatorJSON)),
 			refreshCmd: refresh + " " + filepath.Join(dir, "r.txt"), probeFiles: probeFiles, byteCap: 2000, accountCreated: "2026-09-15", build: testBuild,
 		},
-		ledger: ledger,
+		ledger: ledger, open: open,
 	}
 }
 
@@ -234,17 +236,18 @@ func otherHosts(cfg *config.Config) []string {
 }
 
 // passedCeiling is a ceiling check record of cfg's request at its
-// configured ceiling, with texts cut at byteCap: ten requests answered 200
-// with visible content, finish reason "stop" and 1,000 prompt tokens,
-// which pass the ceiling check and the input bound.
-func passedCeiling(cfg *config.Config, byteCap int) *probe.ReleaseRecord {
+// configured ceiling, with texts cut at byteCap, admitted in the ledger
+// whose open-line SHA-256 is ledger: ten requests answered 200 with
+// visible content, finish reason "stop" and 1,000 prompt tokens, which
+// pass the ceiling check and the input bound.
+func passedCeiling(cfg *config.Config, byteCap int, ledger string) *probe.ReleaseRecord {
 	t := &cfg.Target
 	sum := sha256.Sum256([]byte(t.Body))
 	rec := &probe.ReleaseRecord{SchemaVersion: 1, Route: t.Name, Adapter: t.Adapter, EndpointURL: redact.URL(t.EndpointURL),
 		RequestedModel: t.ModelName, ExpectedModel: t.ExpectedModel(), BodySHA256: hex.EncodeToString(sum[:]), ByteCap: byteCap,
 		Ceiling: probe.CeilingCheck{Ceiling: cfg.Release.Shape.CeilingTokens, LengthValue: probe.LengthValue(t.Adapter), Sent: probe.CeilingRequests,
 			Passed: probe.CeilingRequests, Pass: true},
-		InputBound: probe.InputCheck{BoundTokens: cfg.Release.Shape.InputBoundTokens, Reported: probe.CeilingRequests, MaxPromptTokens: 1000, Pass: true}}
+		InputBound: probe.InputCheck{BoundTokens: cfg.Release.Shape.InputBoundTokens, Reported: probe.CeilingRequests, MaxPromptTokens: 1000, Pass: true}, LedgerSHA256: ledger}
 	at := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
 	for i := 0; i < probe.CeilingRequests; i++ {
 		n := 1000
@@ -255,12 +258,12 @@ func passedCeiling(cfg *config.Config, byteCap int) *probe.ReleaseRecord {
 }
 
 // hostCeiling is host route's ceiling check record at ceiling, passed or
-// not, of cfg's model at byteCap: cfg's request with its body at ceiling
-// when route is cfg's, else route's model from release.other_hosts,
-// expected as requested. One that did not pass has its last request
-// stopped at the ceiling.
-func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pass bool) probe.ReleaseRecord {
-	rec := *passedCeiling(cfg, byteCap)
+// not, of cfg's model at byteCap in ledger: cfg's request with its body
+// at ceiling when route is cfg's, else route's model from
+// release.other_hosts, expected as requested. One that did not pass has
+// its last request stopped at the ceiling.
+func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pass bool, ledger string) probe.ReleaseRecord {
+	rec := *passedCeiling(cfg, byteCap, ledger)
 	rec.Route, rec.Ceiling.Ceiling = route, ceiling
 	if body, err := config.ReleaseBodyAt(cfg.Target.Body, cfg.Target.Adapter, ceiling); err == nil && route == cfg.Target.Name {
 		sum := sha256.Sum256([]byte(body))

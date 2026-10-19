@@ -79,6 +79,9 @@ type ReleaseRecord struct {
 	Requests   []CheckRequest `json:"requests"`
 	Ceiling    CeilingCheck   `json:"ceiling_check"`
 	InputBound InputCheck     `json:"input_bound_check"`
+	// LedgerSHA256 is the open-line SHA-256 of the admission ledger the
+	// check was admitted and settled in.
+	LedgerSHA256 string `json:"ledger_sha256"`
 	// RTTNs are the durations of the inference requests' successful TCP
 	// connects, each one round trip to the endpoint.
 	RTTNs  []int64   `json:"rtt_ns"`
