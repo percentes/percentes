@@ -624,6 +624,28 @@ func confidentialConfig(t *testing.T, endpoint string) *config.Config {
 	return cfg
 }
 
+// rulingConfig is releaseConfig with a postpaid balance_unavailable
+// ruling and the spend_per_month_usd limit that covers it, in the file as
+// loaded.
+func rulingConfig(t *testing.T, endpoint string) *config.Config {
+	t.Helper()
+	raw := releaseConfig(t, endpoint).Raw
+	const limits, naming = "  limits:\n", "  naming:\n"
+	if bytes.Count(raw, []byte(limits)) != 1 || bytes.Count(raw, []byte(naming)) != 1 {
+		t.Fatal("reference no longer carries the lines this test edits")
+	}
+	limit := "    - dimension: spend_per_month_usd\n      value: 10\n      marking: public\n      operator_set: true\n" +
+		"      source: spend-limit.png\n      retrieved: 2026-10-07\n      sha256: \"" + strings.Repeat("0", 64) + "\"\n"
+	ruling := "  balance_unavailable:\n    kind: postpaid\n    reason: postpaid account\n    ruled: 2026-10-07\n    ruling: rulings.md\n"
+	raw = bytes.Replace(raw, []byte(limits), []byte(limits+limit), 1)
+	cfg, err := config.Parse(bytes.Replace(raw, []byte(naming), []byte(ruling+naming), 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Target.EndpointURL = endpoint
+	return cfg
+}
+
 // A cell of a route with a confidential limit publishes no file that
 // carries the value, which the endpoint echoes in a rate-limit header:
 // its manifest names the file as published, its verdict and report pair
@@ -819,8 +841,8 @@ func TestCellBalanceGate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
 			cfg := releaseConfig(t, e.url())
-			if !tc.ruling {
-				cfg.Target.BalanceUnavailable = nil
+			if tc.ruling {
+				cfg = rulingConfig(t, e.url())
 			}
 			r, f := newTestRoute(t, cfg, "+0.005")
 			run := r.runs[0]

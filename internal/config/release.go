@@ -173,6 +173,9 @@ type UnpublishedLimit struct {
 // BalanceUnavailable is the operator's dated ruling that the route's
 // balance cannot be read at each cell.
 type BalanceUnavailable struct {
+	// Kind is one of the Balance* values; the route's target.limits must
+	// record the limit it names.
+	Kind string `yaml:"kind" json:"kind"`
 	// Reason says why: a postpaid account, or a balance shown only in the
 	// provider's console.
 	Reason string `yaml:"reason" json:"reason"`
@@ -181,6 +184,18 @@ type BalanceUnavailable struct {
 	Ruled  string `yaml:"ruled" json:"ruled"`
 	Ruling string `yaml:"ruling" json:"ruling"`
 }
+
+// Values of a balance_unavailable ruling's kind.
+const (
+	// BalancePrepaid is a prepaid balance with auto-reload, covered by an
+	// auto_reload_threshold_usd limit.
+	BalancePrepaid = "prepaid"
+	// BalancePostpaid is a postpaid account, covered by a
+	// spend_per_month_usd limit.
+	BalancePostpaid = "postpaid"
+)
+
+var balanceKinds = []string{BalancePrepaid, BalancePostpaid}
 
 // Retention is the route's retention of model output in the frame store
 // and the terms record it rests on (SPEC-HOSTED HA3 point 15).
@@ -507,7 +522,7 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 		validateUnpublishedLimit(v, fmt.Sprintf("%s.unpublished_limits[%d]", field, i), &t.UnpublishedLimits[i], dims)
 	}
 	if b := t.BalanceUnavailable; b != nil {
-		validateBalanceUnavailable(v, field+".balance_unavailable", b)
+		validateBalanceUnavailable(v, field+".balance_unavailable", b, dims)
 	}
 	if t.Naming == nil {
 		v.errf("%s.naming: required under the release profile", field)
@@ -681,9 +696,21 @@ func validateUnpublishedLimit(v *validator, field string, u *UnpublishedLimit, s
 	}
 }
 
-// validateBalanceUnavailable requires a reason, a ruling date and where
-// the ruling is kept.
-func validateBalanceUnavailable(v *validator, field string, b *BalanceUnavailable) {
+// validateBalanceUnavailable requires a kind whose covering limit dims
+// records, a reason, a ruling date and where the ruling is kept.
+func validateBalanceUnavailable(v *validator, field string, b *BalanceUnavailable, dims map[string]bool) {
+	switch b.Kind {
+	case BalancePrepaid:
+		if !dims[LimitReloadThreshold] {
+			v.errf("%s.kind: %s needs target.limits to record %s", field, BalancePrepaid, LimitReloadThreshold)
+		}
+	case BalancePostpaid:
+		if !dims[LimitSpendMonth] {
+			v.errf("%s.kind: %s needs target.limits to record %s", field, BalancePostpaid, LimitSpendMonth)
+		}
+	default:
+		v.errf("%s.kind: must be one of %q, got %q", field, balanceKinds, b.Kind)
+	}
 	if strings.TrimSpace(b.Reason) == "" {
 		v.errf("%s.reason: required (why the balance cannot be read at each cell)", field)
 	}

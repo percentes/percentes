@@ -1,8 +1,8 @@
 # Percentes release reference configuration (SPEC-HOSTED amendment HA3).
 # One file is one route: the Groq route of openai/gpt-oss-120b, sent its
 # literal request body (Shape S) up the five-step ladder. The system text,
-# the limits block, the balance ruling and the caps are placeholders
-# showing the form; each route's frozen configuration records its own.
+# the limits block and the caps are placeholders showing the form; each
+# route's frozen configuration records its own.
 # The file holds no keys: api_key_env names the environment variable
 # that holds the key.
 schema_version: 1
@@ -90,13 +90,12 @@ target:
       source: groq-rate-limits-page.png
       retrieved: 2026-10-07
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
-  # The ruling a cell starts under when the balance command prints
-  # {"unavailable": "<reason>"}; a route whose command prints an amount
+  # A route whose balance command prints {"unavailable": "<reason>"}
+  # records balance_unavailable, the ruling its cells start under: kind,
+  # reason, ruled and ruling. Kind prepaid needs an
+  # auto_reload_threshold_usd limit in limits, postpaid a
+  # spend_per_month_usd limit. A route whose command prints an amount
   # needs none.
-  balance_unavailable:
-    reason: placeholder until the freeze
-    ruled: 2026-10-07
-    ruling: placeholder until the freeze
   naming:
     provider: Groq
     lines:

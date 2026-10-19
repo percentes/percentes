@@ -23,9 +23,6 @@ func TestReleaseReferenceLoads(t *testing.T) {
 	if got := c.Target.Limits[0].Retrieved; got != "2026-10-07" {
 		t.Errorf("retrieved %q", got)
 	}
-	if b := c.Target.BalanceUnavailable; b == nil || b.Reason == "" || b.Ruled != "2026-10-07" || b.Ruling == "" {
-		t.Errorf("balance ruling %+v", b)
-	}
 	if got := c.ReleaseConnectionProvision(); got != 752 {
 		t.Errorf("connection provision %d, want 2 x 4 rps x 90 s + 32 = 752", got)
 	}
@@ -51,6 +48,11 @@ func TestReleaseRefusals(t *testing.T) {
 	unpub := func(c *Config) *UnpublishedLimit {
 		c.Target.UnpublishedLimits = []UnpublishedLimit{{Dimension: "acceleration", Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64), Ruled: "2026-10-08", Ruling: "rulings.md"}}
 		return &c.Target.UnpublishedLimits[0]
+	}
+	bal := func(c *Config) *BalanceUnavailable {
+		c.Target.Limits = append(c.Target.Limits, Limit{Dimension: LimitSpendMonth, Value: 10, OperatorSet: true, Marking: MarkingPublic, Source: "spend-limit.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)})
+		c.Target.BalanceUnavailable = &BalanceUnavailable{Kind: BalancePostpaid, Reason: "postpaid account", Ruled: "2026-10-07", Ruling: "rulings.md"}
+		return c.Target.BalanceUnavailable
 	}
 	bill := func(c *Config) *BillingRefusal {
 		c.Target.BillingRefusals = []BillingRefusal{{Status: 400, BodyContains: "blocked_api_access", Meaning: "spend limit reached", Source: "errors.png", Retrieved: "2026-10-07"}}
@@ -228,9 +230,15 @@ func TestReleaseRefusals(t *testing.T) {
 		{"billing meaning", func(c *Config) { bill(c).Meaning = "" }, "target.billing_refusals[0].meaning: required"},
 		{"billing source", func(c *Config) { bill(c).Source = "" }, "target.billing_refusals[0].source: required"},
 		{"billing date", func(c *Config) { bill(c).Retrieved = "2026-10" }, "target.billing_refusals[0].retrieved: a date as YYYY-MM-DD"},
-		{"balance reason", func(c *Config) { c.Target.BalanceUnavailable.Reason = " " }, "target.balance_unavailable.reason: required"},
-		{"balance ruled", func(c *Config) { c.Target.BalanceUnavailable.Ruled = "7 October 2026" }, "target.balance_unavailable.ruled: a date as YYYY-MM-DD required, got \"7 October 2026\""},
-		{"balance ruling", func(c *Config) { c.Target.BalanceUnavailable.Ruling = "" }, "target.balance_unavailable.ruling: required"},
+		{"balance kind", func(c *Config) { bal(c).Kind = "console_only" }, "target.balance_unavailable.kind: must be one of [\"prepaid\" \"postpaid\"], got \"console_only\""},
+		{"balance postpaid uncovered", func(c *Config) {
+			bal(c)
+			c.Target.Limits = c.Target.Limits[:len(c.Target.Limits)-1]
+		}, "target.balance_unavailable.kind: postpaid needs target.limits to record spend_per_month_usd"},
+		{"balance prepaid uncovered", func(c *Config) { bal(c).Kind = BalancePrepaid }, "target.balance_unavailable.kind: prepaid needs target.limits to record auto_reload_threshold_usd"},
+		{"balance reason", func(c *Config) { bal(c).Reason = " " }, "target.balance_unavailable.reason: required"},
+		{"balance ruled", func(c *Config) { bal(c).Ruled = "7 October 2026" }, "target.balance_unavailable.ruled: a date as YYYY-MM-DD required, got \"7 October 2026\""},
+		{"balance ruling", func(c *Config) { bal(c).Ruling = "" }, "target.balance_unavailable.ruling: required"},
 	} {
 		c := loadRef(t, releaseRef)
 		tc.mutate(c)
@@ -295,6 +303,52 @@ func TestReleaseLimitsRetained(t *testing.T) {
 		switch {
 		case tc.want == "" && (err != nil || c.Target.Probe == nil || !c.Target.Probe.LimitsRetained):
 			t.Errorf("%s: must load with limits_retained set, got %v", tc.name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: must fail naming %q, got: %v", tc.name, tc.want, err)
+		}
+	}
+}
+
+// withBalanceRuling is the release reference with a limit of dimension
+// added and a balance_unavailable ruling of kind, its kind line left out
+// where kind is empty.
+func withBalanceRuling(t *testing.T, kind, dimension string) string {
+	t.Helper()
+	raw, err := os.ReadFile(releaseRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const limits, naming = "  limits:\n", "  naming:\n"
+	if strings.Count(string(raw), limits) != 1 || strings.Count(string(raw), naming) != 1 {
+		t.Fatal("reference no longer carries the limits and naming lines this test edits")
+	}
+	limit := "    - dimension: " + dimension + "\n      value: 10\n      marking: public\n      operator_set: true\n" +
+		"      source: spend-limit.png\n      retrieved: 2026-10-07\n      sha256: \"" + strings.Repeat("0", 64) + "\"\n"
+	ruling := "  balance_unavailable:\n"
+	if kind != "" {
+		ruling += "    kind: " + kind + "\n"
+	}
+	ruling += "    reason: shown in the console only\n    ruled: 2026-10-07\n    ruling: rulings.md\n"
+	edited := strings.Replace(string(raw), limits, limits+limit, 1)
+	return strings.Replace(edited, naming, ruling+naming, 1)
+}
+
+// A balance_unavailable ruling loads from YAML beside the limit its kind
+// names, and is refused beside the other kind's limit or without a kind.
+func TestReleaseBalanceRuling(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, dimension, want string
+	}{
+		{"postpaid with a monthly spend limit", BalancePostpaid, LimitSpendMonth, ""},
+		{"prepaid with an auto-reload threshold", BalancePrepaid, LimitReloadThreshold, ""},
+		{"postpaid with an auto-reload threshold", BalancePostpaid, LimitReloadThreshold, "target.balance_unavailable.kind: postpaid needs target.limits to record spend_per_month_usd"},
+		{"prepaid with a monthly spend limit", BalancePrepaid, LimitSpendMonth, "target.balance_unavailable.kind: prepaid needs target.limits to record auto_reload_threshold_usd"},
+		{"no kind", "", LimitSpendMonth, "target.balance_unavailable.kind: must be one of [\"prepaid\" \"postpaid\"], got \"\""},
+	} {
+		c, err := Parse([]byte(withBalanceRuling(t, tc.kind, tc.dimension)))
+		switch {
+		case tc.want == "" && (err != nil || c.Target.BalanceUnavailable == nil || c.Target.BalanceUnavailable.Kind != tc.kind):
+			t.Errorf("%s: must load with kind %q, got %v", tc.name, tc.kind, err)
 		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
 			t.Errorf("%s: must fail naming %q, got: %v", tc.name, tc.want, err)
 		}
@@ -624,7 +678,9 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 		func(t *Target) {
 			t.BillingRefusals = []BillingRefusal{{Status: 402, Meaning: "balance exhausted", Source: "errors.png", Retrieved: "2026-10-07"}}
 		},
-		func(t *Target) { t.BalanceUnavailable = rel.Target.BalanceUnavailable },
+		func(t *Target) {
+			t.BalanceUnavailable = &BalanceUnavailable{Kind: BalancePostpaid, Reason: "postpaid account", Ruled: "2026-10-07", Ruling: "rulings.md"}
+		},
 		func(t *Target) { t.Retention = rel.Target.Retention },
 		func(t *Target) {
 			t.ReportedModel = &ReportedModel{Name: "m-2026-10-01", Source: "models.html", Retrieved: "2026-10-12", SHA256: strings.Repeat("0", 64)}
@@ -647,13 +703,10 @@ func TestReleaseFieldsRefusedElsewhere(t *testing.T) {
 
 // A typo in a release field never silently drops the pin.
 func TestReleaseUnknownFieldRejected(t *testing.T) {
-	raw, err := os.ReadFile(releaseRef)
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := withBalanceRuling(t, BalancePostpaid, LimitSpendMonth)
 	for _, from := range []string{"    drain_s: 90", "    deadline_s: 30", "    route_usd: \"10\"", "      retrieved: 2026-10-07", "    ruled: 2026-10-07"} {
-		bad := strings.Replace(string(raw), from, from+"\n"+strings.Repeat(" ", len(from)-len(strings.TrimLeft(from, " ")))+"drain_ss: 90", 1)
-		if bad == string(raw) {
+		bad := strings.Replace(raw, from, from+"\n"+strings.Repeat(" ", len(from)-len(strings.TrimLeft(from, " ")))+"drain_ss: 90", 1)
+		if bad == raw {
 			t.Fatalf("%q not in the reference", from)
 		}
 		if _, err := Parse([]byte(bad)); err == nil || !strings.Contains(err.Error(), "drain_ss") {
