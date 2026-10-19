@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -50,10 +51,10 @@ func RetainedError(text string) string {
 // it is Raw. It refuses a confidential value that is not a plain scalar
 // written in target.limits itself, a comment inside that limit, and a
 // comment or string scalar anywhere in the file that carries one of the
-// value's forms (valueForms) outside a hex run or a date. It refuses a
-// file of more than one YAML document or with text after its
-// document-end marker, and a file with a YAML directive or a tag outside
-// coreTags.
+// value's forms (valueForms) outside a hex run, a date or the text of a
+// fixed identifier (fixedIdentifiers). It refuses a file of more than
+// one YAML document or with text after its document-end marker, and a
+// file with a YAML directive or a tag outside coreTags.
 func (c *Config) Published() ([]byte, error) {
 	if !c.Target.Confidential() {
 		return c.Raw, nil
@@ -78,11 +79,12 @@ func (c *Config) Published() ([]byte, error) {
 	for i := 1; i < len(lines); i++ {
 		starts[i] = starts[i-1] + len(lines[i-1])
 	}
+	fixed, ids := c.fixedIdentifiers(root)
 	var comments, strs []string
 	walk(&doc, func(n *yaml.Node) {
-		comments = append(comments, n.HeadComment, n.LineComment, n.FootComment)
-		if n.Kind == yaml.ScalarNode && n.ShortTag() == "!!str" {
-			strs = append(strs, n.Value)
+		comments = append(comments, unfixed(n.HeadComment, ids), unfixed(n.LineComment, ids), unfixed(n.FootComment, ids))
+		if n.Kind == yaml.ScalarNode && n.ShortTag() == "!!str" && !slices.Contains(fixed, n) {
+			strs = append(strs, unfixed(n.Value, ids))
 		}
 	})
 
@@ -152,6 +154,54 @@ func (c *Config) Published() ([]byte, error) {
 		return nil, errors.New("config: published: the file as published differs from the file beyond the confidential values")
 	}
 	return out, nil
+}
+
+// fixedIdentifiers are the scalars of root, the file's top-level mapping,
+// that hold an identifier the provider fixes and the route publishes:
+// target.model_name, target.reported_model.name, target.endpoint_url and
+// each release.other_hosts[].model. ids are the texts of those
+// identifiers that hold a letter other than e and E, which no value form
+// holds, longest first.
+func (c *Config) fixedIdentifiers(root *yaml.Node) (fixed []*yaml.Node, ids []string) {
+	target := mapValue(root, "target")
+	fixed = []*yaml.Node{mapValue(target, "model_name"), mapValue(mapValue(target, "reported_model"), "name"), mapValue(target, "endpoint_url")}
+	ids = []string{c.Target.ModelName, c.Target.EndpointURL}
+	if r := c.Target.ReportedModel; r != nil {
+		ids = append(ids, r.Name)
+	}
+	if hosts := mapValue(mapValue(root, "release"), "other_hosts"); hosts != nil && hosts.Kind == yaml.SequenceNode {
+		for _, h := range hosts.Content {
+			fixed = append(fixed, mapValue(h, "model"))
+		}
+	}
+	if r := c.Release; r != nil {
+		for _, h := range r.OtherHosts {
+			ids = append(ids, h.Model)
+		}
+	}
+	ids = slices.DeleteFunc(ids, func(id string) bool {
+		return !strings.ContainsFunc(id, func(r rune) bool { return unicode.IsLetter(r) && r != 'e' && r != 'E' })
+	})
+	slices.SortFunc(ids, func(a, b string) int { return len(b) - len(a) })
+	return slices.DeleteFunc(fixed, func(n *yaml.Node) bool { return n == nil || n.Kind != yaml.ScalarNode }), ids
+}
+
+// unfixed is s with each occurrence of ids that no digit adjoins replaced
+// by a space.
+func unfixed(s string, ids []string) string {
+	for _, id := range ids {
+		for at := 0; ; at++ {
+			i := strings.Index(s[at:], id)
+			if i < 0 {
+				break
+			}
+			at += i
+			if !digitAt(s, at-1) && !digitAt(s, at+len(id)) {
+				s = s[:at] + " " + s[at+len(id):]
+			}
+		}
+	}
+	return s
 }
 
 // thousandsSeparators group the whole part of a number in threes.

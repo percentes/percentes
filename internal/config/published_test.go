@@ -374,3 +374,78 @@ func TestPublishedSkips(t *testing.T) {
 		}
 	}
 }
+
+// A small confidential value inside an identifier the provider fixes, in
+// that identifier's own field or as its text in the body, does not stop
+// the file loading and publishing; a naming line or a comment carrying the
+// value is still refused, and so is the value written on from the
+// identifier's last digits.
+func TestPublishedFixedIdentifiers(t *testing.T) {
+	const (
+		model    = "openai/gpt-oss-120b"
+		naming   = "      - Groq is a trademark"
+		version  = "schema_version: 1\n"
+		provider = `section 1: "Outputs are Customer Data"`
+		reported = "  reported_model:\n    name: meta/llama-3.3-70b-versatile\n    source: https://example.test/models\n    retrieved: 2026-10-07\n    sha256: \"0000000000000000000000000000000000000000000000000000000000000000\"\n  limits:\n"
+	)
+	limit := func(v string) string {
+		return `    - dimension: tokens_per_minute
+      value: 250000
+      marking: public
+      counting: input_and_output
+      source: groq-rate-limits-page.png
+      retrieved: 2026-10-07
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    - dimension: concurrent_requests
+      value: ` + v + `
+      marking: confidential
+      source: groq-console-limits.png
+      retrieved: 2026-10-07
+      hmac_sha256: "abababababababababababababababababababababababababababababababab"
+`
+	}
+	for _, tc := range []struct {
+		name, value, line string
+		edits             [][2]string
+	}{
+		{"4 in gpt-4o-mini", "4", "Groq allows 4 requests at once.", [][2]string{{model, "gpt-4o-mini"}}},
+		{"1 in an endpoint with /v1/", "1", "Groq allows 1 request at once.", [][2]string{{provider, `section one: "Outputs are Customer Data"`}}},
+		{"70 in llama-3.3-70b-versatile", "70", "Groq allows 70 requests at once.", [][2]string{{model, "llama-3.3-70b-versatile"}, {"  limits:\n", reported}}},
+		{"3225 beside qwen3-32", "3225", "Served as qwen3-3225.", [][2]string{{model, "qwen3-32"}}},
+	} {
+		raw := confidentialRef(t, limit(tc.value))
+		for _, e := range tc.edits {
+			if !bytes.Contains(raw, []byte(e[0])) {
+				t.Fatalf("%s: the edit did not apply", tc.name)
+			}
+			raw = bytes.ReplaceAll(raw, []byte(e[0]), []byte(e[1]))
+		}
+		c, err := Parse(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		b, err := c.Published()
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+		} else if want := bytes.Replace(raw, []byte("      value: "+tc.value+"\n"), []byte(`      value: "[retained]"`+"\n"), 1); !bytes.Equal(b, want) {
+			t.Errorf("%s: the file as published:\n%s", tc.name, b)
+		}
+		for _, e := range [][2]string{
+			{naming, "      - " + tc.line + "\n" + naming},
+			{naming, "      - Served as " + c.Target.ModelName + " with " + tc.value + " at once.\n" + naming},
+			{version, "schema_version: 1  # " + tc.value + " at once\n"},
+		} {
+			c, err := Parse(bytes.Replace(raw, []byte(e[0]), []byte(e[1]), 1))
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			want := "target.limits[2].value: a string in the file carries " + tc.value
+			if e[0] == version {
+				want = "target.limits[2].value: a comment in the file carries " + tc.value
+			}
+			if b, err := c.Published(); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: %q must fail naming %q, got %v and\n%s", tc.name, e[1], want, err, b)
+			}
+		}
+	}
+}

@@ -855,6 +855,34 @@ func TestOperatorPublicationRecords(t *testing.T) {
 	}
 }
 
+// CheckConfidential does not search the account tier, which the
+// provider fixes, and still refuses a note that carries the value.
+func TestCheckConfidentialAccountTier(t *testing.T) {
+	target := &config.Target{Limits: []config.Limit{{Dimension: config.LimitConcurrency, Value: 4, Marking: config.MarkingConfidential}}}
+	tier := strings.Replace(operatorJSON, `"account_tier": "Basic"`, `"account_tier": "Tier 4"`, 1)
+	if tier == operatorJSON {
+		t.Fatal("fixture edit did not apply")
+	}
+	op, err := LoadOperator(writeOperator(t, tier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := op.CheckConfidential(target); err != nil {
+		t.Errorf("account tier: %v", err)
+	}
+	note := strings.Replace(tier, `"note": "T&C of 15 Sep 2026"`, `"note": "4 requests at once"`, 1)
+	if note == tier {
+		t.Fatal("fixture edit did not apply")
+	}
+	if op, err = LoadOperator(writeOperator(t, note)); err != nil {
+		t.Fatal(err)
+	}
+	want := "a confidential limit's value is in records[3].note (concurrent_requests)"
+	if err := op.CheckConfidential(target); err == nil || err.Error() != "evidence: operator file: "+want {
+		t.Errorf("note: %v; want %q", err, want)
+	}
+}
+
 func mustRead(t *testing.T, path string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(path)

@@ -245,16 +245,17 @@ func (op *Operator) Withhold(read []RefreshedLimit) {
 // CheckConfidential refuses op for t where a confidential limit's value,
 // as t records it or as a refresh command read it (Withhold), is a number
 // of its own (config.Carries) in the operator file's path or in a text op
-// publishes: the provider, account tier, client host, cell or a role, or
-// a record's path, URL or note. The value is searched in each form
-// config.ValueForms gives: decimal, also with trailing zeros and with its
-// whole part grouped in threes by a comma or a space character, and as
-// strconv.FormatFloat prints it in format 'e' or 'E' (%g and %G print
-// that or the decimal). The refusal names each field and the limit's
-// dimension, and neither the value nor the file's name.
+// publishes: the provider, client host, cell or a role, or a record's
+// path, URL or note. The account tier, which the provider fixes, is not
+// searched. The value is searched in each form config.ValueForms gives:
+// decimal, also with trailing zeros and with its whole part grouped in
+// threes by a comma or a space character, and as strconv.FormatFloat
+// prints it in format 'e' or 'E' (%g and %G print that or the decimal).
+// The refusal names each field and the limit's dimension, and neither
+// the value nor the file's name.
 func (op *Operator) CheckConfidential(t *config.Target) error {
 	type text struct{ field, s string }
-	texts := []text{{"file path", op.path}, {"provider", op.Provider}, {"account_tier", op.AccountTier}, {"client_host", op.ClientHost}, {"cell", op.Cell}}
+	texts := []text{{"file path", op.path}, {"provider", op.Provider}, {"client_host", op.ClientHost}, {"cell", op.Cell}}
 	if r := op.Roles; r != nil {
 		texts = append(texts, text{"roles.task", r.Task}, text{"roles.cases_labels", r.CasesLabels}, text{"roles.rubric", r.Rubric}, text{"roles.pair_interest", r.PairInterest})
 	}

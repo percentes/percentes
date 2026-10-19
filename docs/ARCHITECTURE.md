@@ -697,25 +697,26 @@ before any setup.
   release route with a confidential limit, `Operator.CheckConfidential`
   refuses the file where the limit's value is a number of its own
   (outside a longer number, a run of 32 or more hexadecimal digits and a
-  date, `config.Carries`) in the file's own path, the provider, account
-  tier, client host, cell, a role, or a record's path, URL or note. It
-  searches for the value as loaded and for each value the route's refresh
-  command read (`Operator.Withhold`), in each form `public-config`
-  searches (`config.ValueForms`): in decimal, also with trailing zeros
-  and with its whole part grouped in threes by a comma or a space
-  character, each with a fractional part also with a decimal comma
-  (`250.013,5`), and in scientific notation with a lowercase or
-  uppercase exponent mark, as `strconv.FormatFloat` prints it in format
-  `e` or `E` (`%g` and `%G` print that or the decimal). The route keeps
-  the values read in memory; a process that starts after earlier cells
-  takes them from the refresh records as run beside those cells' frames
-  (`retainedReads`, `evidence.ReadRetainedRefresh`). The refusal names
-  the field and the limit's dimension, and neither the value nor the
-  file's name. `run` refuses to start on such a file; read at a cell's
-  start, it blocks the cell, whose manifest carries the records read when
-  the route started; read after the route's last cell, it stops the
-  window-close record being written. `NewManifest` and `NewWindowClose`
-  refuse it too.
+  date, `config.Carries`) in the file's own path, the provider, client
+  host, cell, a role, or a record's path, URL or note. The account tier,
+  which the provider fixes, is not searched, so a tier named `Tier 4`
+  passes with a limit of 4. It searches for the value as loaded and for
+  each value the route's refresh command read (`Operator.Withhold`), in
+  each form `public-config` searches (`config.ValueForms`): in decimal,
+  also with trailing zeros and with its whole part grouped in threes by
+  a comma or a space character, each with a fractional part also with a
+  decimal comma (`250.013,5`), and in scientific notation with a
+  lowercase or uppercase exponent mark, as `strconv.FormatFloat` prints
+  it in format `e` or `E` (`%g` and `%G` print that or the decimal). The
+  route keeps the values read in memory; a process that starts after
+  earlier cells takes them from the refresh records as run beside those
+  cells' frames (`retainedReads`, `evidence.ReadRetainedRefresh`). The
+  refusal names the field and the limit's dimension, and neither the
+  value nor the file's name. `run` refuses to start on such a file; read
+  at a cell's start, it blocks the cell, whose manifest carries the
+  records read when the route started; read after the route's last cell,
+  it stops the window-close record being written. `NewManifest` and
+  `NewWindowClose` refuse it too.
 - **The admission ledger** (`--ledger`, `internal/admission`) is one
   append-only JSON Lines (JSONL, one JavaScript Object Notation (JSON)
   object per line) file holding every inference request sent to a route,
@@ -994,32 +995,38 @@ limit's value replaced by the quoted string `"[retained]"` and every
 other byte as written. It refuses a value that is not a plain scalar
 written in `target.limits`, a comment inside that limit, and a comment
 or string anywhere in the file, a key among them, that carries the
-value as a number of its own. The forms looked for are the value as
-written and in decimal, the decimal also with zeros added after its last
-digit up to 17 digits in all (`9876543.2500`), each also with its whole
-part grouped in threes by a comma, a space, a no-break space, a thin
-space or a narrow no-break space (`9,876,543.25`), each with a
-fractional part also with a decimal comma, ungrouped (`9876543,25`) or
-grouped by a full stop or one of those space characters
-(`9.876.543,25`), and the value in scientific notation as
-`strconv.FormatFloat` prints it in format `e` or `E`
-(`9.87654325E+06`). An ungrouped decimal comma form with at most three
-digits before the comma and three after is left out, because it reads
-as a whole number grouped in threes (`12,500` for a value of 12.5). A
-form inside a longer number does not count (`12,000` for a value of
-12), and runs of 32 or more hexadecimal digits,
-such as a SHA-256 hash or a commit identifier, and `YYYY-MM-DD` dates
-are skipped (`valueForms`, `carries`). A file holding a second YAML
-document, or anything but whitespace after a document-end marker (`...`
-at the start of a line), is refused by `config.Decode` and by
-`Config.Published`. Both also refuse a YAML directive (a line starting
-with `%`, such as `%TAG`) and a tag other than the core types yaml.v3
-gives an untagged node (`!!str`, `!!int`, `!!float`, `!!bool`, `!!null`,
-`!!timestamp`, `!!merge`, `!!seq` and `!!map`), such as
-`!<tag:example.com,2000:x>` or `!x`. yaml.v3 keeps neither a directive
-nor a tag in a comment or a string, where the scans above look. The
-file must be UTF-8 (8-bit Unicode Transformation Format), the encoding
-the directive check reads.
+value as a number of its own. The identifiers the provider fixes are
+left out of that search: `target.model_name`,
+`target.reported_model.name`, `target.endpoint_url` and each
+`release.other_hosts[].model` in their own fields, and their text inside
+any other string or comment where no digit adjoins it and the
+identifier holds a letter other than `e` and `E`. A limit of 4 on the
+model `gpt-4o-mini` therefore publishes, and `qwen3-3225` in a note
+still refuses a limit of 3225 on `qwen3-32`. The forms looked for are
+the value as written and in decimal, the decimal also with zeros added
+after its last digit up to 17 digits in all (`9876543.2500`), each also
+with its whole part grouped in threes by a comma, a space, a no-break
+space, a thin space or a narrow no-break space (`9,876,543.25`), each
+with a fractional part also with a decimal comma, ungrouped
+(`9876543,25`) or grouped by a full stop or one of those space
+characters (`9.876.543,25`), and the value in scientific notation as
+`strconv.FormatFloat` prints it in format `e` or `E` (`9.87654325E+06`).
+An ungrouped decimal comma form with at most three digits before the
+comma and three after is left out, because it reads as a whole number
+grouped in threes (`12,500` for a value of 12.5). A form inside a longer
+number does not count (`12,000` for a value of 12), and runs of 32 or
+more hexadecimal digits, such as a SHA-256 hash or a commit identifier,
+and `YYYY-MM-DD` dates are skipped (`valueForms`, `carries`). A file
+holding a second YAML document, or anything but whitespace after a
+document-end marker (`...` at the start of a line), is refused by
+`config.Decode` and by `Config.Published`. Both also refuse a YAML
+directive (a line starting with `%`, such as `%TAG`) and a tag other
+than the core types yaml.v3 gives an untagged node (`!!str`, `!!int`,
+`!!float`, `!!bool`, `!!null`, `!!timestamp`, `!!merge`, `!!seq` and
+`!!map`), such as `!<tag:example.com,2000:x>` or `!x`. yaml.v3 keeps
+neither a directive nor a tag in a comment or a string, where the scans
+above look. The file must be UTF-8 (8-bit Unicode Transformation
+Format), the encoding the directive check reads.
 The freeze commits that file; every command reads the file
 as loaded. `configs/release.reference.yaml` is one route with
 placeholders for the system text, the limit snapshots and the caps; its
