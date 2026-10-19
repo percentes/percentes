@@ -160,10 +160,11 @@ func TestLoadOperatorRefusals(t *testing.T) {
 }
 
 // On a target with a confidential limit, an operator file that holds the
-// limit's value as loaded, in any printed form, in a published text is
-// refused with an error that names the field and the limit's dimension
-// and carries no value; a window-close record of it is refused too. A
-// public target accepts the same file.
+// limit's value as loaded, in any printed form, in its own name or a
+// published text is refused with an error that names the field and the
+// limit's dimension and carries no value; a window-close record of it is
+// refused too. A public target accepts the same file, and the
+// confidential target accepts the digits inside a longer number.
 func TestOperatorConfidential(t *testing.T) {
 	cfg, public := confidentialCfg(t), releaseCfg(t)
 	key, err := releasekey.New()
@@ -184,15 +185,29 @@ func TestOperatorConfidential(t *testing.T) {
 		// tpm, where set, is the confidential limit's value in place of
 		// the configuration's.
 		tpm float64
+		// file, where set, is the operator file's name.
+		file string
 	}{
-		{"note", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 300001 per console"`), "records[3].note", "300001", 0},
-		{"path", edit(`"path": "quota.txt"`, `"path": "tpm-300001/../quota.txt"`), "records[2].path", "300001", 0},
-		{"url", edit(`"url": "https://docs.example/limits"`, `"url": "https://docs.example/limits?tpm=300001"`), "records[0].url", "300001", 0},
-		{"client host", edit(`"client_host": "one Mac, London"`, `"client_host": "one Mac, 300001"`), "client_host", "300001", 0},
-		{"e form", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 3.00001e+05"`), "records[3].note", "3.00001e+05", 0},
-		{"%g form", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 3.00001e+06"`), "records[3].note", "3.00001e+06", 3000010},
+		{"note", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 300001 per console"`), "records[3].note", "300001", 0, ""},
+		{"path", edit(`"path": "quota.txt"`, `"path": "tpm-300001/../quota.txt"`), "records[2].path", "300001", 0, ""},
+		{"url", edit(`"url": "https://docs.example/limits"`, `"url": "https://docs.example/limits?tpm=300001"`), "records[0].url", "300001", 0, ""},
+		{"client host", edit(`"client_host": "one Mac, London"`, `"client_host": "one Mac, 300001"`), "client_host", "300001", 0, ""},
+		{"e form", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 3.00001e+05"`), "records[3].note", "3.00001e+05", 0, ""},
+		{"%g form", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 3.00001e+06"`), "records[3].note", "3.00001e+06", 3000010, ""},
+		{"comma", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 300,001 per console"`), "records[3].note", "300,001", 0, ""},
+		{"narrow space", edit(`"note": "T&C of 15 Sep 2026"`, "\"note\": \"TPM 300\u202f001\""), "records[3].note", "300\u202f001", 0, ""},
+		{"grouped decimal", edit(`"note": "T&C of 15 Sep 2026"`, `"note": "TPM 3,000,010"`), "records[3].note", "3,000,010", 3000010, ""},
+		{"file name", operatorJSON, "file path", "300001", 0, "operator-tpm-300001.json"},
 	} {
-		op, err := LoadOperator(writeOperator(t, tc.body))
+		path := writeOperator(t, tc.body)
+		if tc.file != "" {
+			named := filepath.Join(filepath.Dir(path), tc.file)
+			if err := os.Rename(path, named); err != nil {
+				t.Fatal(err)
+			}
+			path = named
+		}
+		op, err := LoadOperator(path)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -213,6 +228,15 @@ func TestOperatorConfidential(t *testing.T) {
 		}
 		if _, err := NewWindowClose(&target, time.Now(), refreshRun(`{"limits": []}`), op, key); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: window-close record: %v", tc.name, err)
+		}
+	}
+	for _, note := range []string{"ticket 13000017", "build 3000012", "v1.300001"} {
+		op, err := LoadOperator(writeOperator(t, edit(`"note": "T&C of 15 Sep 2026"`, `"note": "`+note+`"`)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := op.CheckConfidential(&cfg.Target); err != nil {
+			t.Errorf("%q: %v", note, err)
 		}
 	}
 }

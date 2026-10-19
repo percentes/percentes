@@ -117,12 +117,12 @@ func (c *Config) Published() ([]byte, error) {
 		}
 		forms := valueForms(v.Value, l.Value)
 		for _, cm := range comments {
-			if form, ok := carries(cm, forms); ok {
+			if form, ok := Carries(cm, forms); ok {
 				return fail("%s.value: a comment in the file carries %s", field, form)
 			}
 		}
 		for _, s := range strs {
-			if form, ok := carries(s, forms); ok {
+			if form, ok := Carries(s, forms); ok {
 				return fail("%s.value: a string in the file carries %s", field, form)
 			}
 		}
@@ -156,6 +156,12 @@ func (c *Config) Published() ([]byte, error) {
 // thousandsSeparators group the whole part of a number in threes.
 var thousandsSeparators = []string{",", " ", "\u00a0", "\u2009", "\u202f"}
 
+// ValueForms are the texts that write value in decimal, also with its
+// whole part grouped by each of thousandsSeparators.
+func ValueForms(value float64) []string {
+	return valueForms(strconv.FormatFloat(value, 'f', -1, 64), value)
+}
+
 // valueForms are the texts that write a value: lit as written and the
 // value in decimal, each also with its whole part grouped by each of
 // thousandsSeparators.
@@ -187,10 +193,10 @@ var (
 	dateRun = regexp.MustCompile(`[0-9]{4}-[0-9]{2}-[0-9]{2}`)
 )
 
-// carries returns the first of forms that text holds as a number of its
+// Carries returns the first of forms that text holds as a number of its
 // own: not within a longer number, a run of 32 or more hex digits or a
 // YYYY-MM-DD date.
-func carries(text string, forms []string) (string, bool) {
+func Carries(text string, forms []string) (string, bool) {
 	text = hexRun.ReplaceAllLiteralString(text, " ")
 	b := []byte(text)
 	for _, m := range dateRun.FindAllStringIndex(text, -1) {

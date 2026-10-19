@@ -414,7 +414,7 @@ The diagram predates the hosted packages, which the table lists.
 
 | Group | Package | Role | SPEC | Entry points | Tests |
 |---|---|---|---|---|---|
-| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode of a file holding one YAML document and only whitespace after its end marker, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot; the release target's limits, unpublished-limit rulings, retained headers, not-applied parameters, naming record, documented statuses, errors and billing refusals, balance ruling and retention of model output, the other hosts of its model and the identifier its responses carry; each limit's marking, the retained headers and limits body a confidential limit requires, and the configuration as published with each confidential value withheld; the stand-in for a withheld in-band error object; the request-identifier header names a confidential route may publish; the body with its ceiling key set to another ceiling | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Decode`, `Config.Validate`, `Config.Published`, `RetainedError`, `RequestIDHeader`, `Target.ExpectedModel`, `ReleaseBodyAt`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
+| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode of a file holding one YAML document and only whitespace after its end marker, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot; the release target's limits, unpublished-limit rulings, retained headers, not-applied parameters, naming record, documented statuses, errors and billing refusals, balance ruling and retention of model output, the other hosts of its model and the identifier its responses carry; each limit's marking, the retained headers and limits body a confidential limit requires, and the configuration as published with each confidential value withheld, and the forms of a value searched for in a text; the stand-in for a withheld in-band error object; the request-identifier header names a confidential route may publish; the body with its ceiling key set to another ceiling | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Decode`, `Config.Validate`, `Config.Published`, `ValueForms`, `Carries`, `RetainedError`, `RequestIDHeader`, `Target.ExpectedModel`, `ReleaseBodyAt`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
 | Load | `internal/loadgen` | schedule, pacer, SSE client with the Hypertext Transfer Protocol (HTTP) version 1.1 pin, outcome classification, per-request status, header, peer and protocol records, the credential header and literal body per target, the Messages stream adapter, retained header values kept apart from the record, the pilot and release tripwires, the release ladder with its drains and per-step verdicts, the dispatch and completion hooks, client gate, loopback canary | §2, §3; SPEC-HOSTED §3, §5, §9; HA3 points 2, 5, 15 and 16 | `BuildSchedule`, `BuildLadder`, `Run`, `NewTransport`, `StartCanary`, `SummarizeCanary`, `CPUMeasured` | request-body, stream-hardening, capture, ladder, hook and gate units; canary oracle; AC1 to AC2d |
 | | `internal/sse` | SSE framing for the client, the recovery probes and naivesweep | §3 | `SplitLines`, `Events` | a unit per grammar case |
 | | `internal/histo` | the pinned HdrHistogram wrapper; `RecordValue` only, and a test fails the suite if a correction API appears | §3 | `New`, `H.Record`, `H.Summarize` | the correction-API ban; AC1 oracles |
@@ -695,11 +695,16 @@ before any setup.
   that carries no version-control revision refuses to run, and one built
   from a modified tree needs a `source_diff` record (`CheckSource`). On a
   release route with a confidential limit, `Operator.CheckConfidential`
-  refuses the file where the provider, account tier, client host, cell,
-  a role, or a record's path, URL or note holds that limit's value as
-  loaded, written as `strconv.FormatFloat` prints it in format `f` or `e`
-  (`%g` prints one of the two). The refusal names the field and the
-  limit's dimension. `run` refuses to start on such a file; read at a
+  refuses the file where its own path, the provider, account tier, client
+  host, cell, a role, or a record's path, URL or note holds that limit's
+  value as loaded as a number of its own, outside a longer number, a run
+  of 32 or more hexadecimal digits and a date (`config.Carries`). The
+  value is searched in decimal, also with its whole part grouped in
+  threes by a comma or a space character (`config.ValueForms`, the forms
+  `public-config` searches), and as `strconv.FormatFloat` prints it in
+  format `e` (`%g` prints that or the decimal). The refusal names the
+  field and the limit's dimension, and neither the value nor the file's
+  name. `run` refuses to start on such a file; read at a
   cell's start, it blocks the cell, whose manifest carries the records
   read when the route started; read after the route's last cell, it
   stops the window-close record being written. `NewManifest` and

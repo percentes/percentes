@@ -69,6 +69,8 @@ type Operator struct {
 	Records     []OperatorRecord
 	// File is the operator file itself.
 	File FileRef
+	// path is the operator file's path as LoadOperator was given it.
+	path string
 	raw  []byte
 }
 
@@ -149,7 +151,7 @@ func LoadOperator(path string) (*Operator, error) {
 	if r := f.Roles; r != nil && (r.Task == "" || r.CasesLabels == "" || r.Rubric == "" || r.PairInterest == "") {
 		return fail("roles: task, cases_labels, rubric and pair_interest are each required")
 	}
-	op := &Operator{Provider: f.Provider, AccountTier: f.AccountTier, ClientHost: f.ClientHost, Cell: f.Cell, Roles: f.Roles, File: refOf(filepath.Base(path), raw), raw: raw}
+	op := &Operator{Provider: f.Provider, AccountTier: f.AccountTier, ClientHost: f.ClientHost, Cell: f.Cell, Roles: f.Roles, File: refOf(filepath.Base(path), raw), path: path, raw: raw}
 	dir := filepath.Dir(path)
 	for i, in := range f.Records {
 		field := fmt.Sprintf("records[%d]", i)
@@ -221,14 +223,17 @@ func (op *Operator) Refreshed(since time.Time) error {
 }
 
 // CheckConfidential refuses op for t where t records a confidential limit
-// whose value, as loaded and printed by strconv.FormatFloat in format 'f'
-// or 'e' at precision -1 (%g prints one of the two), appears in a text op
-// publishes: the provider, account tier, client host, cell or a role, or a
-// record's path, URL or note. The refusal names each field and the
-// limit's dimension.
+// whose value, as loaded, is a number of its own (config.Carries) in the
+// operator file's path or in a text op publishes: the provider, account
+// tier, client host, cell or a role, or a record's path, URL or note. The
+// value is searched in decimal, with its whole part also grouped in
+// threes by a comma or a space character (config.ValueForms), and as
+// strconv.FormatFloat prints it in format 'e' (%g prints that or the
+// decimal). The refusal names each field and the limit's dimension, and
+// neither the value nor the file's name.
 func (op *Operator) CheckConfidential(t *config.Target) error {
 	type text struct{ field, s string }
-	texts := []text{{"provider", op.Provider}, {"account_tier", op.AccountTier}, {"client_host", op.ClientHost}, {"cell", op.Cell}}
+	texts := []text{{"file path", op.path}, {"provider", op.Provider}, {"account_tier", op.AccountTier}, {"client_host", op.ClientHost}, {"cell", op.Cell}}
 	if r := op.Roles; r != nil {
 		texts = append(texts, text{"roles.task", r.Task}, text{"roles.cases_labels", r.CasesLabels}, text{"roles.rubric", r.Rubric}, text{"roles.pair_interest", r.PairInterest})
 	}
@@ -241,16 +246,16 @@ func (op *Operator) CheckConfidential(t *config.Target) error {
 		if l.Marking != config.MarkingConfidential || !(l.Value > 0) {
 			continue
 		}
-		forms := []string{strconv.FormatFloat(l.Value, 'f', -1, 64), strconv.FormatFloat(l.Value, 'e', -1, 64)}
+		forms := append(config.ValueForms(l.Value), strconv.FormatFloat(l.Value, 'e', -1, 64))
 		for _, x := range texts {
 			hit := fmt.Sprintf("%s (%s)", x.field, l.Dimension)
-			if !slices.Contains(found, hit) && slices.ContainsFunc(forms, func(v string) bool { return strings.Contains(x.s, v) }) {
+			if _, ok := config.Carries(x.s, forms); ok && !slices.Contains(found, hit) {
 				found = append(found, hit)
 			}
 		}
 	}
 	if len(found) > 0 {
-		return fmt.Errorf("evidence: operator file %s: a confidential limit's value is in %s", op.File.Name, strings.Join(found, ", "))
+		return fmt.Errorf("evidence: operator file: a confidential limit's value is in %s", strings.Join(found, ", "))
 	}
 	return nil
 }

@@ -1567,10 +1567,11 @@ func TestCellRefreshBlocks(t *testing.T) {
 }
 
 // On a route with a confidential limit, run refuses an operator file
-// that holds the limit's value in a note, a record's path or a URL, and
-// a cell whose refresh rewrites the file with the value in a note is
-// blocked before admission. No refusal and no published file carries the
-// value. A route with the limit public accepts the same files.
+// that holds the limit's value in a note, a record's path, a URL or its
+// own name, and a cell whose refresh rewrites the file with the value in
+// a note is blocked before admission. No refusal and no published file
+// carries the value. A route with the limit public accepts the same
+// files.
 func TestOperatorConfidentialValue(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
 	enoughOpenFiles(t)
@@ -1581,7 +1582,7 @@ func TestOperatorConfidentialValue(t *testing.T) {
 		}
 		return []byte(strings.Replace(operatorJSON, old, new, 1))
 	}
-	values := []string{"250013.5", "2.500135e+05"}
+	values := []string{"250013.5", "2.500135e+05", "250,013.5"}
 	carries := func(b []byte) bool {
 		return slices.ContainsFunc(values, func(v string) bool { return bytes.Contains(b, []byte(v)) })
 	}
@@ -1592,15 +1593,28 @@ func TestOperatorConfidentialValue(t *testing.T) {
 		{"note", "records[2].note", edit(quota, `{"kind": "quota", "path": "r.txt", "retrieved": "2026-10-07", "note": "TPM 250013.5"}`)},
 		{"path", "records[2].path", edit(quota, `{"kind": "quota", "path": "tpm-250013.5/../r.txt", "retrieved": "2026-10-07"}`)},
 		{"url", "records[0].url", edit("https://example.test/limits", "https://example.test/limits?tpm=250013.5")},
+		{"grouped note", "records[2].note", edit(quota, `{"kind": "quota", "path": "r.txt", "retrieved": "2026-10-07", "note": "TPM 250,013.5"}`)},
+		{"file name", "file path", nil},
 	} {
+		place := func(f *fixture) {
+			if tc.body != nil {
+				writeFile(t, filepath.Dir(f.in.opPath), "operator.json", tc.body)
+				return
+			}
+			named := filepath.Join(filepath.Dir(f.in.opPath), "operator-tpm-250013.5.json")
+			if err := os.Rename(f.in.opPath, named); err != nil {
+				t.Fatal(err)
+			}
+			f.in.opPath = named
+		}
 		f := newFixture(t, confidentialConfig(t, e.url()), "+0.005")
-		writeFile(t, filepath.Dir(f.in.opPath), "operator.json", tc.body)
+		place(f)
 		want := "a confidential limit's value is in " + tc.field + " (tokens_per_minute)"
 		if _, err := newRoute(f.in); err == nil || !strings.Contains(err.Error(), want) || carries([]byte(err.Error())) {
 			t.Errorf("%s: %v; want %q", tc.name, err, want)
 		}
 		f = newFixture(t, releaseConfig(t, e.url()), "+0.005")
-		writeFile(t, filepath.Dir(f.in.opPath), "operator.json", tc.body)
+		place(f)
 		if _, err := newRoute(f.in); err != nil {
 			t.Errorf("%s: public route: %v", tc.name, err)
 		}
