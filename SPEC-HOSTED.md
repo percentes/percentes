@@ -4,7 +4,7 @@
 
 ## Read this first
 
-The normative text starts at §0; this part adds nothing to it and changes nothing in it.
+This part is informative; the normative text starts at §0.
 
 **What is measured.** One large language model (LLM) behind one provider's hosted application programming interface (API), reached from one client machine through one ordinary paid account. The protocol calls that combination a route. For every request it sends to a route it records which of three states the request ended in: completed (split into within the 30 s deadline and late), errored (failed, with the failure classed), or still unanswered at 90 s, which the protocol calls censored. A scheduled request a stop left unsent is counted on its own line. It also records how long each completion took to start and to finish.
 
