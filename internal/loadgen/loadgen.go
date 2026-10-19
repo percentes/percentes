@@ -81,9 +81,9 @@ type Request struct {
 	CompletionTokens int    `json:"completion_tokens,omitempty"`
 	UsageSeen        bool   `json:"usage_seen,omitempty"`
 	Replica          string `json:"replica,omitempty"`
-	// Usage is the last usage object the stream carried, at any path
-	// target.response_shape names; on a Messages target, message_start's
-	// usage with each later usage object's non-null fields laid over it.
+	// Usage is the stream's usage objects merged, each one's non-null
+	// fields laid over the earlier ones: at any path target.response_shape
+	// names, or on a Messages target message_start's and message_delta's.
 	Usage json.RawMessage `json:"usage,omitempty"`
 	// FinishReason is the last finish_reason of the first choice, or the
 	// last Messages stop_reason; ReportedModel is the first model id a

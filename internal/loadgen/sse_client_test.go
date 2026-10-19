@@ -276,9 +276,9 @@ func TestUsageTokens(t *testing.T) {
 	}
 }
 
-// A later usage object without a completion count replaces the raw usage
-// and keeps the earlier count; a stream whose only usage object lacks the
-// count records none.
+// A later usage object lays its non-null fields over the earlier ones, so
+// a count one object carried survives a later object without it; a stream
+// whose only usage object lacks the completion count records none.
 func TestUsageWithoutCompletionCount(t *testing.T) {
 	usage := func(u string) string { return `data: {"choices":[],"usage":` + u + "}\n\n" }
 	for _, c := range []struct {
@@ -288,12 +288,15 @@ func TestUsageWithoutCompletionCount(t *testing.T) {
 		n      int
 		raw    string
 	}{
-		{"prompt only after a count", []string{usage(`{"completion_tokens":7}`), usage(`{"prompt_tokens":12}`)}, true, 7, `{"prompt_tokens":12}`},
-		{"null after a count", []string{usage(`{"completion_tokens":7}`), usage(`{"completion_tokens":null}`)}, true, 7, `{"completion_tokens":null}`},
+		{"prompt only after a count", []string{usage(`{"completion_tokens":7}`), usage(`{"prompt_tokens":12}`)}, true, 7, `{"completion_tokens":7,"prompt_tokens":12}`},
+		{"count after prompt only", []string{usage(`{"prompt_tokens":12}`), usage(`{"completion_tokens":7}`)}, true, 7, `{"completion_tokens":7,"prompt_tokens":12}`},
+		{"null after a count", []string{usage(`{"completion_tokens":7}`), usage(`{"completion_tokens":null}`)}, true, 7, `{"completion_tokens":7}`},
+		{"null prompt after a count", []string{usage(`{"prompt_tokens":12,"completion_tokens":7}`), usage(`{"prompt_tokens":null,"completion_tokens":8}`)}, true, 8, `{"completion_tokens":8,"prompt_tokens":12}`},
 		{"zero after a count", []string{usage(`{"completion_tokens":7}`), usage(`{"completion_tokens":0}`)}, true, 0, `{"completion_tokens":0}`},
 		{"prompt only", []string{usage(`{"prompt_tokens":12}`)}, false, 0, `{"prompt_tokens":12}`},
 		{"empty", []string{usage(`{}`)}, false, 0, `{}`},
-		{"null count", []string{usage(`{"prompt_tokens":3,"completion_tokens":null}`)}, false, 0, `{"prompt_tokens":3,"completion_tokens":null}`},
+		{"null count", []string{usage(`{"prompt_tokens":3,"completion_tokens":null}`)}, false, 0, `{"prompt_tokens":3}`},
+		{"not an object", []string{usage(`{"prompt_tokens":3}`), usage(`5`)}, false, 0, `5`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			frames := append(append([]string{answerFrame, stopFrame}, c.frames...), doneFrame)

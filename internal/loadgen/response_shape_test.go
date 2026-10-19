@@ -70,7 +70,7 @@ func TestMultilineEventsKeepEveryField(t *testing.T) {
 		t.Fatalf("finish %q model %q usage %v/%d", r.FinishReason, r.ReportedModel, r.UsageSeen, r.CompletionTokens)
 	}
 	b, _ := json.Marshal(r)
-	if !strings.Contains(string(b), `"usage":{"prompt_tokens":5,"completion_tokens":9}`) {
+	if !strings.Contains(string(b), `"usage":{"completion_tokens":9,"prompt_tokens":5}`) {
 		t.Fatalf("usage not kept compact in JSON: %s", b)
 	}
 	if strings.Contains(string(b), "billing") || strings.Contains(string(b), "think") {
@@ -363,9 +363,9 @@ func TestInBandErrorEndsHostedRequest(t *testing.T) {
 		stream     string
 		usage      string
 	}{
-		{"reset", chatGen, chatHead, "", syscall.ECONNRESET, `{"message":"cut"}`, `{"prompt_tokens":5,"completion_tokens":1}`},
-		{"timeout", chatGen, chatHead, "", context.DeadlineExceeded, `{"message":"cut"}`, `{"prompt_tokens":5,"completion_tokens":1}`},
-		{"terminator", chatGen, chatHead, doneFrame, io.EOF, `{"message":"cut"}`, `{"prompt_tokens":5,"completion_tokens":1}`},
+		{"reset", chatGen, chatHead, "", syscall.ECONNRESET, `{"message":"cut"}`, `{"completion_tokens":1,"prompt_tokens":5}`},
+		{"timeout", chatGen, chatHead, "", context.DeadlineExceeded, `{"message":"cut"}`, `{"completion_tokens":1,"prompt_tokens":5}`},
+		{"terminator", chatGen, chatHead, doneFrame, io.EOF, `{"message":"cut"}`, `{"completion_tokens":1,"prompt_tokens":5}`},
 		{"messages reset", msgGen, msgHead, "", syscall.ECONNRESET,
 			`{"type":"overloaded_error","message":"Overloaded"}`, `{"input_tokens":25,"output_tokens":1}`},
 		{"messages terminator", msgGen, msgHead, msgStop, io.EOF,

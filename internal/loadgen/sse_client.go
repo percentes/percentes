@@ -257,12 +257,9 @@ func (g *gen) recordChunk(r *Request, c *chunk, secrets []string) {
 	if !c.known {
 		r.UnknownEvents++
 	}
-	switch {
-	case c.usage != nil && c.mergeUsage:
+	if c.usage != nil {
 		r.Usage = mergeUsage(r.Usage, c.usage)
-	case c.usage != nil:
-		r.Usage = c.usage
-		if n, ok := completionTokens(c.usage); ok {
+		if n, ok := completionTokens(c.usage); ok && !c.messages {
 			r.CompletionTokens, r.UsageSeen = n, true
 		}
 	}
@@ -319,10 +316,9 @@ type chunk struct {
 	known bool
 	// end: the stream's terminator.
 	end bool
-	// mergeUsage: usage is a Messages usage object, laid over the
-	// request's earlier one. outputTokens is a message_delta's
-	// output_tokens, when outputSeen.
-	mergeUsage   bool
+	// messages: usage is a Messages usage object, whose completion count
+	// is outputTokens, a message_delta's output_tokens, when outputSeen.
+	messages     bool
 	outputTokens int
 	outputSeen   bool
 }
@@ -409,7 +405,7 @@ func parseMessagesEvent(payload []byte) (c chunk, ok bool) {
 		if !ok || m == nil || !stringField(m["model"], &c.model) {
 			return c, false
 		}
-		c.usage, c.mergeUsage = lookup(m, "usage"), true
+		c.usage, c.messages = lookup(m, "usage"), true
 		_, ok = object(c.usage)
 		return c, ok
 	case "content_block_start":
@@ -438,7 +434,7 @@ func parseMessagesEvent(payload []byte) (c chunk, ok bool) {
 		if !ok || !stringField(d["stop_reason"], &c.finish) {
 			return c, false
 		}
-		c.usage, c.mergeUsage = lookup(root, "usage"), true
+		c.usage, c.messages = lookup(root, "usage"), true
 		u, ok := object(c.usage)
 		if !ok {
 			return c, false
@@ -468,11 +464,14 @@ func object(raw json.RawMessage) (m map[string]json.RawMessage, ok bool) {
 	return m, json.Unmarshal(orNull(raw), &m) == nil
 }
 
-// mergeUsage lays next's non-null fields over prev; both are JSON objects
-// or nil.
+// mergeUsage lays next's non-null fields over prev, a JSON object or nil;
+// a next that is not a JSON object replaces prev.
 func mergeUsage(prev, next json.RawMessage) json.RawMessage {
+	n, ok := object(next)
+	if !ok {
+		return next
+	}
 	m, _ := object(prev)
-	n, _ := object(next)
 	if m == nil {
 		m = map[string]json.RawMessage{}
 	}
