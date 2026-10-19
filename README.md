@@ -296,7 +296,7 @@ that does not count is kept as a record outside the route's frame.
 | `percentes --replay`, `percentes --check-release` | any time after a cell | render a cell's report pair again and compare it byte for byte; refuse a cell whose files, the unpublished frame store among them, are missing or differ from their recorded hashes |
 
 Use one live ledger for all release traffic; do not run an independent
-copy or restore an earlier active history. Reconcile any recovery
+copy or restore an older copy of the ledger file. Reconcile any recovery
 against the complete retained admission history before resuming.
 
 ```
