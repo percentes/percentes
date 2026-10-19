@@ -817,6 +817,35 @@ func TestReleaseProbeConfidentialSnapshot(t *testing.T) {
 	}
 }
 
+// A record whose snapshots mark a limit confidential exposes each raw
+// rate-limit header value, a kept limits body and the confidential
+// value; one with no such marking exposes none of them.
+func TestExposedByMarking(t *testing.T) {
+	body := `{"tokens_per_minute": 250013.5}`
+	raw := map[string][]string{"X-Ratelimit-Limit-Tokens": {"250013.5"}, "X-Request-Id": {"req-1"}}
+	rec := ReleaseRecord{
+		Requests:         []CheckRequest{{Exchange: Exchange{Headers: raw}}},
+		RateLimitHeaders: map[string][]string{"X-Ratelimit-Remaining-Tokens": {"9"}},
+		Limits:           &Exchange{Headers: map[string][]string{"X-Ratelimit-Reset": {"1s"}}, Body: &Body{Text: &body}},
+		Snapshots:        []Snapshot{{Limit: config.Limit{Dimension: config.LimitTPM, Value: 250013.5, Marking: config.MarkingPublic}}},
+	}
+	if e := ExposedByMarking(&rec); e != nil {
+		t.Errorf("public: exposed %q", e)
+	}
+	rec.Snapshots[0].Marking = config.MarkingConfidential
+	if e := ExposedByMarking(&rec); fmt.Sprint(e) != "[X-Ratelimit-Limit-Tokens X-Ratelimit-Remaining-Tokens X-Ratelimit-Reset limits body snapshot 0 value]" {
+		t.Errorf("confidential: exposed %q", e)
+	}
+	stand := []string{config.RetainedHeaderValue}
+	rec.Requests[0].Exchange.Headers = map[string][]string{"X-Ratelimit-Limit-Tokens": stand, "X-Request-Id": {"req-1"}}
+	rec.RateLimitHeaders = map[string][]string{"X-Ratelimit-Remaining-Tokens": stand}
+	rec.Limits = &Exchange{Headers: map[string][]string{"X-Ratelimit-Reset": stand}, Body: &Body{Retained: true, SHA256: strings.Repeat("0", 64)}}
+	rec.Snapshots[0].Value = 0
+	if e := ExposedByMarking(&rec); e != nil {
+		t.Errorf("withheld: exposed %q", e)
+	}
+}
+
 // A refusal field is recorded at its path; unconfigured, it is a finding.
 func TestReleaseProbeRefusalField(t *testing.T) {
 	noSpacing(t)

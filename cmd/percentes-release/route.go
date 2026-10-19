@@ -343,8 +343,10 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // its adapter, endpoint and expected model id and none of the values the
 // route withholds (probe.Exposed), the one at the configured ceiling its
 // body's hash, and together no reported model id that keeps the
-// provider-model out (probe.ModelFault). Another host whose records carry
-// such a fault is left out of the choice (probe.ChooseCeiling).
+// provider-model out (probe.ModelFault). Another host's records carry none
+// of the values their snapshots' confidential markings withhold
+// (probe.ExposedByMarking), and another host whose records carry a model
+// fault is left out of the choice (probe.ChooseCeiling).
 func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.CeilingChoice, map[string][]byte, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
@@ -377,6 +379,9 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.C
 		case rec.ByteCap != byteCap:
 			fault = fmt.Sprintf("byte cap %d, want --byte-cap %d", rec.ByteCap, byteCap)
 		case rec.Route != t.Name:
+			if exposed := probe.ExposedByMarking(&rec); len(exposed) > 0 {
+				fault = "carries values its confidential markings withhold: " + strings.Join(exposed, ", ")
+			}
 		case rec.Expected() != t.ExpectedModel():
 			fault = fmt.Sprintf("expected model %q, want %q", rec.Expected(), t.ExpectedModel())
 		case rec.Adapter != t.Adapter:

@@ -540,6 +540,31 @@ func Exposed(t *config.Target, rec *ReleaseRecord) []string {
 	return out
 }
 
+// ExposedByMarking is Exposed for a probe of a route whose configuration
+// is not at hand, from the markings its snapshots record: under a
+// snapshot marked config.MarkingConfidential, every header whose name
+// contains "ratelimit" and the limits body are withheld, as the
+// configuration check requires of that route (SPEC-HOSTED HA3 point 15).
+func ExposedByMarking(rec *ReleaseRecord) []string {
+	t := &config.Target{}
+	if slices.ContainsFunc(rec.Snapshots, func(s Snapshot) bool { return s.Marking == config.MarkingConfidential }) {
+		t.Probe = &config.TargetProbe{LimitsRetained: true}
+		names := func(h map[string][]string) {
+			for name := range rateLimitHeaders(h) {
+				t.RetainedHeaders = append(t.RetainedHeaders, name)
+			}
+		}
+		for _, r := range rec.Requests {
+			names(r.Exchange.Headers)
+		}
+		names(rec.RateLimitHeaders)
+		if rec.Limits != nil {
+			names(rec.Limits.Headers)
+		}
+	}
+	return Exposed(t, rec)
+}
+
 // snapshot is l as published, with a file source's retained copy in dir
 // checked against its recorded hash.
 func snapshot(l config.Limit, dir string) Snapshot {

@@ -130,6 +130,17 @@ func TestNewRouteRefusals(t *testing.T) {
 		{"another host's record without requests", func(t *testing.T, f *fixture) {
 			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) { r.Requests = nil }))
 		}, "route baseten at 512: 0 requests, want 10"},
+		{"another host's raw rate-limit value under a confidential marking", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
+				r.Snapshots = []probe.Snapshot{{Limit: config.Limit{Dimension: config.LimitTPM, Marking: config.MarkingConfidential}}}
+				r.Requests[0].Exchange.Headers = map[string][]string{"X-Ratelimit-Limit-Tokens": {"250013.5"}}
+			}))
+		}, "route baseten at 512: carries values its confidential markings withhold: X-Ratelimit-Limit-Tokens"},
+		{"another host's confidential snapshot value", func(t *testing.T, f *fixture) {
+			ceiling(t, f, pass(f, "groq", 512, true), with(f, "baseten", func(r *probe.ReleaseRecord) {
+				r.Snapshots = []probe.Snapshot{{Limit: config.Limit{Dimension: config.LimitTPM, Value: 250013.5, Marking: config.MarkingConfidential}}}
+			}))
+		}, "route baseten at 512: carries values its confidential markings withhold: snapshot 0 value"},
 		{"failed request recorded as passed", func(t *testing.T, f *fixture) {
 			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.Requests[4].FinishReason = "length" }), pass(f, "baseten", 512, true))
 		}, `route groq at 512: request 4 records pass true (""); its response gives false ("finish reason \"length\": stopped at the ceiling")`},
@@ -290,7 +301,9 @@ func mustCaps(t *testing.T, cfg *config.Config) admission.Caps {
 
 // run reads a record of every host of the model: at 512 when every host
 // passed there, and for the fallback at both ceilings, the route's 512
-// check carrying the 512 body.
+// check carrying the 512 body. Another host's record is copied with the
+// rate-limit values of a public limit, and with the stand-in for those
+// of a confidential one.
 func TestNewRouteCeilingRecords(t *testing.T) {
 	enoughOpenFiles(t)
 	f := newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
@@ -313,6 +326,21 @@ func TestNewRouteCeilingRecords(t *testing.T) {
 	}
 	if !reflect.DeepEqual(r.ceiling, probe.CeilingChoice{Ceiling: 1024, Reason: "groq failed at 512; every host passed at 1024"}) || len(r.ceilingProbes) != 4 {
 		t.Fatalf("fallback: %+v, copies %d", r.ceiling, len(r.ceilingProbes))
+	}
+
+	f = newFixture(t, releaseConfig(t, "https://api.example.test/openai/v1/chat/completions"), "+0.005")
+	other := hostCeiling(f.in.cfg, f.in.byteCap, "baseten", 512, true)
+	other.Snapshots = []probe.Snapshot{{Limit: config.Limit{Dimension: config.LimitTPM, Value: 250000, Marking: config.MarkingPublic}}}
+	other.Requests[0].Exchange.Headers = map[string][]string{"X-Ratelimit-Limit-Tokens": {"250000"}}
+	f.in.probeFiles = []string{writeCeiling(t, hostCeiling(f.in.cfg, f.in.byteCap, "groq", 512, true)), writeCeiling(t, other)}
+	if r, err = newRoute(f.in); err != nil || len(r.ceilingProbes) != 2 {
+		t.Fatalf("another host's public values: %v", err)
+	}
+	other.Snapshots[0].Value, other.Snapshots[0].Marking = 0, config.MarkingConfidential
+	other.Requests[0].Exchange.Headers["X-Ratelimit-Limit-Tokens"] = []string{config.RetainedHeaderValue}
+	f.in.probeFiles[1] = writeCeiling(t, other)
+	if r, err = newRoute(f.in); err != nil || len(r.ceilingProbes) != 2 {
+		t.Fatalf("another host's withheld values: %v", err)
 	}
 }
 
