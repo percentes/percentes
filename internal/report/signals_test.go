@@ -64,8 +64,8 @@ func TestCompareRetryAfter(t *testing.T) {
 	}
 }
 
-// The status_429 context reads the largest fraction among the half
-// tests only.
+// The status_429 context reads the largest fraction among the public
+// half tests only, and states the bound of the confidential ones.
 func TestRetryAfterContext(t *testing.T) {
 	var lines []string
 	w := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
@@ -75,10 +75,17 @@ func TestRetryAfterContext(t *testing.T) {
 		{Dimension: "tokens_per_minute", Fraction: 0.3, Half: true},
 	}}
 	retryAfterText(w, &Signals{}, lim)
-	lim.Demands = lim.Demands[1:2]
+	confidential := admission.Demand{Dimension: "tokens_per_day", Half: true, Confidential: true}
+	lim.Demands = append(lim.Demands, confidential)
+	retryAfterText(w, &Signals{}, lim)
+	lim.Demands = []admission.Demand{lim.Demands[1], confidential}
+	retryAfterText(w, &Signals{}, lim)
+	lim.Demands = lim.Demands[:1]
 	retryAfterText(w, &Signals{}, lim)
 	want := []string{
 		"    nominal demand at most 30.0% of each half-tested recorded limit; no cause inferred",
+		"    nominal demand at most 30.0% of each public half-tested recorded limit and at most half of each confidential one; no cause inferred",
+		"    nominal demand at most half of each half-tested recorded limit, each confidential; no cause inferred",
 		"    no half-tested limit recorded; no cause inferred",
 	}
 	if !slices.Equal(lines, want) {

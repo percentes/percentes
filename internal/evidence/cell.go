@@ -178,6 +178,10 @@ func checkCell(cfg *config.Config, t *config.Target, c *Cell) error {
 		fail("admission: no verdict")
 	case v.Route != t.Name || v.CeilingTokens != ceiling:
 		fail("admission verdict is route %q at %d, want %q at %d", v.Route, v.CeilingTokens, t.Name, ceiling)
+	default:
+		if err := admission.CheckPublished(cfg, v); err != nil {
+			fail("%v", err)
+		}
 	}
 	if _, err := time.Parse(time.DateOnly, c.AccountCreated); err != nil {
 		fail("account_created %q is not a date (2006-01-02)", c.AccountCreated)

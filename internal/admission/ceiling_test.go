@@ -14,7 +14,7 @@ import (
 const releaseRef = "../../configs/release.reference.yaml"
 
 func lim(dim string, value float64) config.Limit {
-	l := config.Limit{Dimension: dim, Value: value, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)}
+	l := config.Limit{Dimension: dim, Value: value, Marking: config.MarkingPublic, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)}
 	if dim == config.LimitTPM || dim == config.LimitTPD {
 		l.Counting = config.CountingInputOutput
 	}
@@ -400,6 +400,115 @@ func TestCeilingRuleRefuses(t *testing.T) {
 	} {
 		if err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// confidential is l marked confidential, its retained snapshot hashed as
+// sha.
+func confidential(l config.Limit, sha string) config.Limit {
+	l.Marking, l.Source, l.SHA256 = config.MarkingConfidential, "console-limits.png", sha
+	return l
+}
+
+// A demand against a confidential limit carries the limit's dimension,
+// source and hash and the test's result, and no value or fraction; the
+// binding limit is named the same way, and public limits keep their
+// values.
+func TestCeilingRuleConfidential(t *testing.T) {
+	sha := strings.Repeat("ab", 32)
+	cfg := releaseConfig(t, "groq", 512, "10", lim(config.LimitRPM, 1000),
+		confidential(lim(config.LimitTPM, 300001), sha), confidential(lim(config.LimitSpendMonth, 2501), sha))
+	v := rule(t, cfg, price("0.15", "0.60"))
+	if !slices.Equal(v.Admitted(), []float64{0.25, 0.5, 1}) {
+		t.Fatalf("admitted %v, want up to 1 rps (205,440 tokens a minute at 2 rps is above half of 300,001)", v.Admitted())
+	}
+	for _, s := range v.Steps {
+		if d := demandOf(t, &s, config.LimitRPM); d.Confidential || d.Value != 1000 || d.Source != "" {
+			t.Errorf("step %g: public demand %+v", s.RPS, d)
+		}
+		for _, dim := range []string{config.LimitTPM, config.LimitSpendMonth} {
+			d := demandOf(t, &s, dim)
+			if !d.Confidential || d.Value != 0 || d.Fraction != 0 || d.Source != "console-limits.png" || d.SHA256 != sha || d.Demand == 0 {
+				t.Errorf("step %g: confidential demand %+v", s.RPS, d)
+			}
+		}
+		if tpm := demandOf(t, &s, config.LimitTPM); tpm.Pass != (s.RPS <= 1) || !tpm.Half {
+			t.Errorf("step %g: tokens per minute pass %t, half %t", s.RPS, tpm.Pass, tpm.Half)
+		}
+		if month := demandOf(t, &s, config.LimitSpendMonth); !month.Pass || month.Half {
+			t.Errorf("step %g: monthly cap pass %t, half %t", s.RPS, month.Pass, month.Half)
+		}
+	}
+	if b := stepAt(t, v, 2).Binding; b == nil || b.Dimension != config.LimitTPM || !b.Confidential || b.Source != "console-limits.png" || b.SHA256 != sha || b.Value != 0 {
+		t.Errorf("binding limit at 2 rps %+v", b)
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"300001", "2501", "3.00001e+0", "2.501e+0"} {
+		if strings.Contains(string(raw), s) {
+			t.Errorf("the verdict as published carries %s", s)
+		}
+	}
+	var back struct {
+		Steps []struct {
+			Demands []map[string]any `json:"demands"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	for k, s := range back.Steps {
+		for _, d := range s.Demands {
+			_, value := d["value"]
+			_, fraction := d["fraction"]
+			if d["confidential"] == true && (value || fraction) || d["confidential"] != true && (!value || !fraction) {
+				t.Errorf("step %d: demand as published %v", k+1, d)
+			}
+		}
+	}
+	if err := CheckPublished(cfg, v); err != nil {
+		t.Errorf("the rule's own verdict: %v", err)
+	}
+}
+
+// CheckPublished refuses a verdict that disagrees with the recorded
+// limits: a confidential value or fraction published, a pass the
+// recorded value does not give, another source or hash, a marking that
+// differs, a public value that differs, another dimension or test, and a
+// limit index outside target.limits, in a demand or a binding limit.
+func TestCheckPublished(t *testing.T) {
+	sha := strings.Repeat("ab", 32)
+	cfg := releaseConfig(t, "groq", 512, "10", lim(config.LimitRPM, 1000), confidential(lim(config.LimitTPM, 300001), sha))
+	tpm := func(v *Verdict) *Demand { return &stepAt(t, v, 1).Demands[1] }
+	for _, tc := range []struct {
+		name   string
+		mutate func(v *Verdict)
+		want   string
+	}{
+		{"value", func(v *Verdict) { tpm(v).Value = 300001 }, "step 3, tokens_per_minute: a confidential limit published with its value or fraction"},
+		{"fraction", func(v *Verdict) { tpm(v).Fraction = 0.34 }, "step 3, tokens_per_minute: a confidential limit published with its value or fraction"},
+		{"pass", func(v *Verdict) { tpm(v).Pass = false }, "step 3, tokens_per_minute: pass true against the recorded value, published false"},
+		{"source", func(v *Verdict) { tpm(v).Source = "other.png" }, `step 3, tokens_per_minute: source "other.png"`},
+		{"hash", func(v *Verdict) { tpm(v).SHA256 = strings.Repeat("0", 64) }, "step 3, tokens_per_minute: source"},
+		{"unmarked", func(v *Verdict) { tpm(v).Confidential = false }, "step 3, tokens_per_minute: confidential false, target.limits[1] is marked confidential"},
+		{"public value", func(v *Verdict) { stepAt(t, v, 1).Demands[0].Value = 999 }, "step 3, requests_per_minute: value 999"},
+		{"marked public", func(v *Verdict) { stepAt(t, v, 1).Demands[0].Confidential = true }, "step 3, requests_per_minute: confidential true, target.limits[0] is marked public"},
+		{"dimension", func(v *Verdict) { tpm(v).Dimension = config.LimitRPD }, "step 3, requests_per_day: target.limits[1] is tokens_per_minute with a half test"},
+		{"test", func(v *Verdict) { tpm(v).Half = false }, "step 3, tokens_per_minute: target.limits[1] is tokens_per_minute with a half test"},
+		{"index", func(v *Verdict) { tpm(v).Limit = 2 }, "step 3, tokens_per_minute: limit 2 is not in target.limits"},
+		{"binding", func(v *Verdict) {
+			b := *stepAt(t, v, 2).Binding
+			b.Pass = true
+			stepAt(t, v, 2).Binding = &b
+		}, "step 4, tokens_per_minute: pass false against the recorded value, published true"},
+	} {
+		v := rule(t, cfg, price("0.15", "0.60"))
+		tc.mutate(v)
+		if err := CheckPublished(cfg, v); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: must fail naming %q, got %v", tc.name, tc.want, err)
 		}
 	}
 }

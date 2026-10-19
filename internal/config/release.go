@@ -79,8 +79,12 @@ const MessagesVersion = "2023-06-01"
 // account console or a limits API shows, or the operator set.
 type Limit struct {
 	// Dimension is one of the Limit* values.
-	Dimension string  `yaml:"dimension" json:"dimension"`
-	Value     float64 `yaml:"value" json:"value"`
+	Dimension string `yaml:"dimension" json:"dimension"`
+	// Value is absent from a published record of a limit marked
+	// MarkingConfidential.
+	Value float64 `yaml:"value" json:"value,omitempty"`
+	// Marking is one of the Marking* values.
+	Marking string `yaml:"marking" json:"marking"`
 	// WindowS is the rolling window of a LimitSpendWindow, and absent for
 	// every other dimension.
 	WindowS     float64 `yaml:"window_s,omitempty" json:"window_s,omitempty"`
@@ -98,6 +102,20 @@ type Limit struct {
 	// SHA256 is the hash of the retained copy, in lowercase hex.
 	SHA256 string `yaml:"sha256" json:"sha256"`
 }
+
+// Values of a limit's marking.
+const (
+	// MarkingPublic is a value taken from a public documentation page; it
+	// publishes in full.
+	MarkingPublic = "public"
+	// MarkingConfidential is a value shown only in the account console,
+	// where the provider's terms make it confidential. The value is kept
+	// in the retained store; a published record names the limit by its
+	// dimension, source and SHA-256 (SPEC-HOSTED HA3 point 15).
+	MarkingConfidential = "confidential"
+)
+
+var markings = []string{MarkingPublic, MarkingConfidential}
 
 // Values of a limit's dimension. Spend values are in US dollars.
 const (
@@ -562,6 +580,9 @@ func validateLimit(v *validator, field string, l *Limit) {
 	}
 	if l.Value <= 0 {
 		v.errf("%s.value: must be > 0, got %g", field, l.Value)
+	}
+	if !slices.Contains(markings, l.Marking) {
+		v.errf("%s.marking: must be one of %q, got %q", field, markings, l.Marking)
 	}
 	switch {
 	case l.Dimension == LimitSpendWindow && l.WindowS <= 0:

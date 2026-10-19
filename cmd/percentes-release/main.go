@@ -21,9 +21,12 @@
 // Before the window, schedule writes the committed schedule of the routes
 // whose configurations it is given, ledger create starts the release
 // ledger with their caps, ledger price records a route's prices at the
-// token bounds of its cells and of its ceiling check, and ceiling-check
+// token bounds of its cells and of its ceiling check, ceiling-check
 // sends a route's ceiling check, admitted in the ledger, and writes the
-// record run reads with --ceiling-probe. After
+// record run reads with --ceiling-probe, and public-config writes a
+// route's configuration as published, the file the freeze commits, with
+// each confidential limit's value withheld. Every command reads the
+// configuration as loaded. After
 // the window, pages writes the index page and each route's page from the
 // cells' records, and publish-check checks the release publication
 // record against the cells, the pages and the files it names.
@@ -41,6 +44,7 @@
 //	    --output USD --source URL --retrieved DATE
 //	percentes-release ceiling-check --config FILE --env FILE --ledger FILE
 //	    --out DIR --byte-cap N [--frames DIR] [--snapshots DIR]
+//	percentes-release public-config --config FILE --out FILE
 //	percentes-release run --config FILE --env FILE --ledger FILE
 //	    --schedule FILE --out DIR --frames DIR --clock-sync CMD
 //	    --status-cmd CMD --balance-cmd CMD --refresh-cmd CMD
@@ -96,6 +100,7 @@ commands:
   ledger create   start the release ledger with the routes' caps
   ledger price    record a route's prices for its cells and ceiling check
   ceiling-check   send a route's ceiling check and write its record
+  public-config   write a route's configuration as published
   run             run one route's cells over the committed window
   dispatch        sum every cell's dispatch series under --out
   pages           write the index page and each route's page
@@ -128,6 +133,8 @@ func dispatch(args []string) int {
 		code, err = ledgerCmd(args[1:])
 	case "ceiling-check":
 		code, err = ceilingCheckCmd(ctx, args[1:])
+	case "public-config":
+		code, err = publicConfigCmd(args[1:])
 	case "run":
 		code, err = runCmd(ctx, args[1:])
 	case "dispatch":

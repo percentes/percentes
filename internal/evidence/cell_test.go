@@ -286,6 +286,7 @@ func TestManifestCellRefusals(t *testing.T) {
 		"no verdict":                 func(c *Cell) { c.Admission = nil },
 		"verdict of another route":   func(c *Cell) { c.Admission.Route = "baseten" },
 		"verdict at another ceiling": func(c *Cell) { c.Admission.CeilingTokens = 1024 },
+		"verdict off the limits":     func(c *Cell) { c.Admission.Steps[3].Demands[0].Value = 1 },
 		"account date":               func(c *Cell) { c.AccountCreated = "15 Sep 2026" },
 		"negative volume":            func(c *Cell) { c.PreWindowRequests = -1 },
 		"no dispatch aggregate":      func(c *Cell) { c.Dispatch = nil },
@@ -713,4 +714,157 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// confidentialCfg is the reference configuration with its
+// tokens_per_minute limit at 300,001 marked confidential.
+func confidentialCfg(t *testing.T) *config.Config {
+	t.Helper()
+	raw, err := os.ReadFile("../../configs/release.reference.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const public = "      value: 250000\n      marking: public\n"
+	if !bytes.Contains(raw, []byte(public)) {
+		t.Fatal("reference no longer carries the tokens_per_minute lines this test edits")
+	}
+	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: 300001\n      marking: confidential\n"), 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// confidentialCell is releaseCell's record with its tokens_per_minute
+// demands as published against cfg's confidential limit.
+func confidentialCell(cfg *config.Config) *Cell {
+	c := releaseCell(cfg)
+	l := cfg.Target.Limits[1]
+	hide := func(d *admission.Demand) {
+		d.Value, d.Fraction, d.Confidential, d.Source, d.SHA256 = 0, 0, true, l.Source, l.SHA256
+	}
+	for k := range c.Admission.Steps {
+		s := &c.Admission.Steps[k]
+		for i := range s.Demands {
+			hide(&s.Demands[i])
+		}
+		if s.Binding != nil {
+			b := *s.Binding
+			hide(&b)
+			s.Binding = &b
+		}
+	}
+	return c
+}
+
+// A configuration with a confidential limit is named in the manifest by
+// the file as published; the run's frame directory keeps the file as
+// loaded; the completeness check reads the file as loaded and refuses a
+// manifest naming another file, a missing or different copy, and a
+// verdict that publishes the value.
+func TestConfidentialConfig(t *testing.T) {
+	cfg := confidentialCfg(t)
+	published, err := cfg.Published()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, out := manifestRun(t)
+	releaseInput(&in, cfg)
+	in.ConfigName = "groq.yaml"
+	in.Release = confidentialCell(cfg)
+	m, err := NewManifest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Config != refOf("groq.yaml", published) || m.Config == refOf("groq.yaml", cfg.Raw) {
+		t.Fatalf("manifest config %+v, want the file as published", m.Config)
+	}
+	path, err := WriteManifest(out, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := mustRead(t, path); bytes.Contains(b, []byte("300001")) || !bytes.Contains(b, []byte(`"confidential": true`)) {
+		t.Errorf("manifest carries the value or no confidential demand:\n%s", b)
+	}
+	in.Release.Admission.Steps[3].Demands[0].Value = 300001
+	if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "a confidential limit published with its value") {
+		t.Errorf("verdict with the value: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := WriteConfigCopy(dir, releaseCfg(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ConfigCopyFile)); err == nil {
+		t.Error("a configuration with public limits only wrote a copy")
+	}
+	if err := WriteConfigCopy(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(filepath.Join(dir, ConfigCopyFile)); err != nil || st.Mode().Perm() != 0o600 || !bytes.Equal(mustRead(t, filepath.Join(dir, ConfigCopyFile)), cfg.Raw) {
+		t.Errorf("config copy: %v, %v", st, err)
+	}
+	if err := WriteConfigCopy(dir, cfg); err == nil {
+		t.Error("an existing config copy was written again")
+	}
+
+	// run is a complete release run of cfg, its copy kept unless noCopy.
+	run := func(t *testing.T, noCopy bool) *releaseRun {
+		r := newReleaseRun(t, config.ProfileRelease)
+		recs, err := ReadRecords(bytes.NewReader(mustRead(t, filepath.Join(r.dir, AttemptsFile))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range recs {
+			recs[i].Answer, recs[i].Score = nil, nil
+		}
+		var b bytes.Buffer
+		if err := Write(&b, recs); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(r.dir, AttemptsFile), b.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.m.Artifacts[0] = refOf(AttemptsFile, b.Bytes())
+		r.cfg, r.m.Config = cfg.Raw, refOf("groq.yaml", published)
+		r.m.Release = confidentialCell(cfg)
+		r.m.Gates = []validity.Gate{validity.G2(0, &loadgen.GateReport{Pass: true})}
+		r.write(t)
+		if !noCopy {
+			if err := WriteConfigCopy(r.runDir, cfg); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return r
+	}
+	if _, err := run(t, false).check(); err != nil {
+		t.Fatalf("complete run: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, r *releaseRun)
+		want string
+	}{
+		{"the file as loaded named", func(t *testing.T, r *releaseRun) { r.m.Config = refOf("groq.yaml", cfg.Raw); r.write(t) }, "config: not groq.yaml"},
+		{"the file as published given", func(t *testing.T, r *releaseRun) { r.cfg = published }, "config: parse:"},
+		{"no copy", func(t *testing.T, r *releaseRun) { os.Remove(filepath.Join(r.runDir, ConfigCopyFile)) }, "config copy: " + ConfigCopyFile + " is missing"},
+		{"another copy", func(t *testing.T, r *releaseRun) {
+			if err := os.WriteFile(filepath.Join(r.runDir, ConfigCopyFile), published, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "config copy: " + ConfigCopyFile + " is not the configuration given"},
+		{"value published", func(t *testing.T, r *releaseRun) {
+			r.m.Release.Admission.Steps[3].Demands[0].Value = 300001
+			r.write(t)
+		},
+			"cell record: admission: published verdict: step 4, tokens_per_minute: a confidential limit published with its value or fraction"},
+		{"pass off the value", func(t *testing.T, r *releaseRun) { r.m.Release.Admission.Steps[3].Demands[0].Pass = true; r.write(t) },
+			"step 4, tokens_per_minute: pass false against the recorded value, published true"},
+	} {
+		r := run(t, false)
+		tc.edit(t, r)
+		if _, err := r.check(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: must fail naming %q, got %v", tc.name, tc.want, err)
+		}
+	}
 }

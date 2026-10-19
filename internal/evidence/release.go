@@ -2,8 +2,6 @@ package evidence
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 )
 
@@ -22,6 +21,25 @@ type Release struct {
 	Config     []byte
 	FramesRoot string
 	Pair       [2]string
+}
+
+// ConfigCopyFile is the configuration file as loaded, kept in a release
+// run's frame directory when a limit marked config.MarkingConfidential
+// makes it differ from the file as published.
+const ConfigCopyFile = "config.yaml"
+
+// WriteConfigCopy writes cfg's file as loaded to ConfigCopyFile in dir,
+// readable by the owner only, when it differs from the file as published
+// (config.Config.Published). It refuses an existing file.
+func WriteConfigCopy(dir string, cfg *config.Config) error {
+	published, err := cfg.Published()
+	if err != nil {
+		return fmt.Errorf("evidence: %w", err)
+	}
+	if bytes.Equal(published, cfg.Raw) {
+		return nil
+	}
+	return writeNew(filepath.Join(dir, ConfigCopyFile), cfg.Raw)
 }
 
 // CheckRelease reads the manifest in r.Dir and returns it when the run
@@ -42,8 +60,12 @@ type Release struct {
 // records: the config, the attempts file, the report pair and the clock,
 // status and balance records in r.Dir, a release run's start balance
 // among them, and the frame store and the operator copies in the run's
-// frame directory. Otherwise it returns an error naming every missing
-// item and every mismatch.
+// frame directory. r.Config is the file as loaded: the manifest names
+// the file as published (config.Config.Published), a release cell's
+// ceiling-rule verdict must be the one published from r.Config's limits
+// (admission.CheckPublished), and where the two files differ the run's
+// frame directory keeps r.Config as ConfigCopyFile. Otherwise it returns
+// an error naming every missing item and every mismatch.
 func CheckRelease(r Release) (*Manifest, error) {
 	m, err := ReadManifest(filepath.Join(r.Dir, ManifestFile))
 	if err != nil {
@@ -65,7 +87,16 @@ func CheckRelease(r Release) (*Manifest, error) {
 	if m.Source.Modified && m.Source.Diff == nil {
 		fail("commit: built from a modified tree and the manifest names no source diff")
 	}
-	if sum := sha256.Sum256(r.Config); hex.EncodeToString(sum[:]) != m.Config.SHA256 || int64(len(r.Config)) != m.Config.Bytes {
+	cfg, err := config.Decode(r.Config)
+	var published []byte
+	if err == nil {
+		published, err = cfg.Published()
+	}
+	switch {
+	case err != nil:
+		cfg = nil
+		fail("config: %v", err)
+	case refOf(m.Config.Name, published) != m.Config:
 		fail("config: not %s, the file the manifest names", m.Config.Name)
 	}
 
@@ -134,6 +165,14 @@ func CheckRelease(r Release) (*Manifest, error) {
 			if err := c.checkLabel(m.RunValid, m.InvalidReasons, m.Gates); err != nil {
 				fail("cell record: %v", err)
 			}
+			switch {
+			case c.Admission == nil:
+				fail("cell record: admission: no verdict")
+			case cfg != nil:
+				if err := admission.CheckPublished(cfg, c.Admission); err != nil {
+					fail("cell record: %v", err)
+				}
+			}
 			if !c.LadderStarted && len(recs) > 0 {
 				fail("%s: %d attempts in a cell whose ladder never started", AttemptsFile, len(recs))
 			}
@@ -194,6 +233,16 @@ func CheckRelease(r Release) (*Manifest, error) {
 		}
 		if d := m.Source.Diff; d != nil && !diffChecked {
 			check(copies, *d, "commit: source diff copy")
+		}
+		if cfg != nil && !bytes.Equal(published, r.Config) {
+			switch b, err := os.ReadFile(filepath.Join(runDir, ConfigCopyFile)); {
+			case errors.Is(err, os.ErrNotExist):
+				fail("config copy: %s is missing", ConfigCopyFile)
+			case err != nil:
+				fail("config copy: %v", err)
+			case !bytes.Equal(b, r.Config):
+				fail("config copy: %s is not the configuration given", ConfigCopyFile)
+			}
 		}
 	}
 

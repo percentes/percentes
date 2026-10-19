@@ -230,8 +230,8 @@ type Config struct {
 	// under that profile and absent otherwise.
 	Release *Release `yaml:"release,omitempty" json:"release,omitempty"`
 
-	// Raw holds the configuration file bytes as parsed, so the report's
-	// config hash covers the published file.
+	// Raw holds the configuration file bytes as parsed. The report's
+	// config hash covers the file as published (Published).
 	Raw []byte `yaml:"-" json:"-"`
 }
 

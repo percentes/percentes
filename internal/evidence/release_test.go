@@ -26,10 +26,14 @@ const releaseRunDir = "20261010T200000.000000000Z"
 var releasePair = [2]string{"report.json", "report.txt"}
 
 // newReleaseRun writes a complete run of three attempts: one warm-up and
-// two measured, every measured attempt scored.
+// two measured, every measured attempt scored. A release run's
+// configuration is the reference's, whose limits a cell's verdict names.
 func newReleaseRun(t *testing.T, profile config.Profile) *releaseRun {
 	t.Helper()
 	r := &releaseRun{dir: t.TempDir(), root: t.TempDir(), cfg: []byte("profile: " + string(profile) + "\n")}
+	if profile == config.ProfileRelease {
+		r.cfg = releaseCfg(t).Raw
+	}
 	r.runDir = filepath.Join(r.root, releaseRunDir)
 	measured := int64(config.PinnedPilotWarmupS) * int64(time.Second)
 	answer := `{"route":"billing"}`

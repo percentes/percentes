@@ -27,28 +27,34 @@ const (
 
 // FromRun renders the report pair of the hosted run whose manifest and
 // attempts file are in dir, from those two files and cfgRaw, the
-// configuration file the manifest names. Every count the manifest and the
-// attempts file both state is checked against the requests: undispatched
-// requests, reported models and mismatches, protocols, run validity, the
-// invalid reasons on the manifest and on every record, and the G2 and G6
-// gates. A release cell's pair is its CellReport, checked for protocols,
-// the invalid reasons on every record, the hosted-G6 results and the
-// steps its G2 results cover.
+// configuration file as loaded, whose file as published
+// (config.Config.Published) the manifest names. Every count the manifest
+// and the attempts file both state is checked against the requests:
+// undispatched requests, reported models and mismatches, protocols, run
+// validity, the invalid reasons on the manifest and on every record, and
+// the G2 and G6 gates. A release cell's pair is its CellReport, checked
+// for protocols, the invalid reasons on every record, the hosted-G6
+// results, the steps its G2 results cover and the ceiling-rule verdict
+// against cfgRaw's limits (admission.CheckPublished).
 func FromRun(dir string, cfgRaw []byte) ([]byte, string, error) {
 	m, err := evidence.ReadManifest(filepath.Join(dir, evidence.ManifestFile))
 	if err != nil {
 		return nil, "", err
 	}
-	if sum := sha256.Sum256(cfgRaw); hex.EncodeToString(sum[:]) != m.Config.SHA256 {
+	cfg, err := config.Parse(cfgRaw)
+	if err != nil {
+		return nil, "", fmt.Errorf("report: %w", err)
+	}
+	published, err := cfg.Published()
+	if err != nil {
+		return nil, "", fmt.Errorf("report: %w", err)
+	}
+	if sum := sha256.Sum256(published); hex.EncodeToString(sum[:]) != m.Config.SHA256 {
 		return nil, "", fmt.Errorf("report: the config is not %s, the file the manifest names", m.Config.Name)
 	}
 	release := m.Profile == config.ProfileRelease
 	if m.Replay == nil && !release {
 		return nil, "", errors.New("report: the manifest has no replay record (the run ended in an error)")
-	}
-	cfg, err := config.Parse(cfgRaw)
-	if err != nil {
-		return nil, "", fmt.Errorf("report: %w", err)
 	}
 	ref := m.Artifact(evidence.AttemptsFile)
 	if ref == nil {

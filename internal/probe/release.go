@@ -121,7 +121,8 @@ type InputCheck struct {
 	Pass            bool `json:"pass"`
 }
 
-// Snapshot is one target.limits record. Retained is the hash check of the
+// Snapshot is one target.limits record, without the value of a limit
+// marked config.MarkingConfidential. Retained is the hash check of the
 // retained copy in ReleaseInput.SnapshotDir: absent when the source is a
 // URL or no directory was given.
 type Snapshot struct {
@@ -365,7 +366,9 @@ func Retains(t *config.Target) bool {
 // Exposed lists what rec, a probe of t's route, carries that t withholds:
 // each header target.retained_headers names with a value other than
 // config.RetainedHeaderValue, then "limits body" when
-// target.probe.limits_retained is set and the limits body is kept.
+// target.probe.limits_retained is set and the limits body is kept, then
+// "snapshot <i> value" for each snapshot with a value of a limit marked
+// config.MarkingConfidential in rec or at index i of target.limits.
 func Exposed(t *config.Target, rec *ReleaseRecord) []string {
 	var out []string
 	note := func(h map[string][]string) {
@@ -392,12 +395,21 @@ func Exposed(t *config.Target, rec *ReleaseRecord) []string {
 	if b := rec.Limits; t.Probe != nil && t.Probe.LimitsRetained && b != nil && b.Body != nil && (b.Body.Text != nil || b.Body.Base64 != "") {
 		out = append(out, "limits body")
 	}
+	for i, sn := range rec.Snapshots {
+		marked := sn.Marking == config.MarkingConfidential || i < len(t.Limits) && t.Limits[i].Marking == config.MarkingConfidential
+		if marked && sn.Value != 0 {
+			out = append(out, fmt.Sprintf("snapshot %d value", i))
+		}
+	}
 	return out
 }
 
-// snapshot checks a file source's retained copy in dir against its
-// recorded hash.
+// snapshot is l as published, with a file source's retained copy in dir
+// checked against its recorded hash.
 func snapshot(l config.Limit, dir string) Snapshot {
+	if l.Marking == config.MarkingConfidential {
+		l.Value = 0
+	}
 	s := Snapshot{Limit: l}
 	if dir == "" || strings.Contains(l.Source, "://") {
 		return s

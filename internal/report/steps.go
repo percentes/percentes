@@ -270,7 +270,8 @@ type PooledStep struct {
 
 // StepTables is one route's per-step tables (SPEC-HOSTED HA3 point 13):
 // the ceiling rule's verdict per step with the step's nominal demand as
-// a fraction of each recorded limit, one table per cell, and, for a
+// a fraction of each public recorded limit and against each confidential
+// one, named by its source and hash, one table per cell, and, for a
 // complete frame of admission.ReleaseCells cells, the cells pooled per
 // step. Pooled is nil for an incomplete frame. A change of limits or
 // documentation between cells (SPEC-HOSTED §4 drift rule) is listed in
@@ -407,6 +408,9 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 		return nil, fmt.Errorf("report: step tables: verdict has %d steps, the ladder %d", len(v.Steps), len(steps))
 	case !(rel.Ladder.StepS > 0):
 		return nil, fmt.Errorf("report: step tables: a step window of %g s", rel.Ladder.StepS)
+	}
+	if err := admission.CheckPublished(cfg, v); err != nil {
+		return nil, fmt.Errorf("report: step tables: %w", err)
 	}
 	for k := range steps {
 		switch s := v.Steps[k]; {
@@ -775,11 +779,18 @@ func (t *StepTables) text(frame bool) string {
 			if !d.Half {
 				test = "cover test"
 			}
+			if d.Confidential {
+				parts = append(parts, fmt.Sprintf("%s %s (%s: %s)", d.Dimension, confidentialText(d), test, passText(d.Pass)))
+				continue
+			}
 			parts = append(parts, fmt.Sprintf("%s %.1f%% of %g (%s: %s)", d.Dimension, 100*d.Fraction, d.Value, test, passText(d.Pass)))
 		}
 		state := "admitted"
 		if !s.Admitted {
 			state = "excluded, binding limit " + s.Binding.Dimension
+			if s.Binding.Confidential {
+				state += fmt.Sprintf(", confidential (%s, sha256 %s)", s.Binding.Source, s.Binding.SHA256)
+			}
 		}
 		w("step %d, %g rps: %s; %s", k+1, s.RPS, state, strings.Join(parts, "; "))
 	}
@@ -897,6 +908,21 @@ func g2Text(w func(string, ...any), g *G2) {
 		return
 	}
 	w("  G2 (client validity at the step's drain end): %s; %s (run-failing)", passText(g.Pass), g.Detail)
+}
+
+// confidentialText states a demand against a confidential limit without
+// its value: the limit's source and hash, and whether the demand was
+// within the test's bound.
+func confidentialText(d admission.Demand) string {
+	bound := "half of it"
+	if !d.Half {
+		bound = "it"
+	}
+	within := "at most"
+	if !d.Pass {
+		within = "above"
+	}
+	return fmt.Sprintf("confidential (%s, sha256 %s): nominal demand %s %s", d.Source, d.SHA256, within, bound)
 }
 
 func passText(pass bool) string {

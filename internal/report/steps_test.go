@@ -645,6 +645,49 @@ func TestStepTablesRefusals(t *testing.T) {
 	}
 }
 
+// A confidential limit prints with its source and hash and whether each
+// step's nominal demand was within the test's bound, never with its value
+// or the fraction; the binding limit and the status_429 context say the
+// same, and a verdict that disagrees with the recorded value is refused.
+func TestStepTablesConfidential(t *testing.T) {
+	cfg, _ := stepsConfig(t)
+	tpm := &cfg.Target.Limits[1]
+	tpm.Value, tpm.Marking, tpm.Source, tpm.SHA256 = 300001, config.MarkingConfidential, "console.png", strings.Repeat("ab", 32)
+	v, err := admission.CeilingRule(cfg, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test/pricing", Retrieved: "2026-10-07"}, admission.ExpectedPlan(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cell := cellOf("weekday-00", outcome{1, LineInTime, 0, 100}, outcome{1, loadgen.ErrStatus429, 0, 2})
+	st, err := NewStepTables(cfg, v, []CellRecords{cell})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := strings.Repeat("ab", 32)
+	text := st.Text()
+	for _, frag := range []string{
+		"step 1, 0.25 rps: admitted; requests_per_minute 1.5% of 1000 (half test: pass); tokens_per_minute confidential (console.png, sha256 " + hash +
+			"): nominal demand at most half of it (half test: pass); route_cap_usd ",
+		"step 4, 2 rps: excluded, binding limit tokens_per_minute, confidential (console.png, sha256 " + hash + "); requests_per_minute 12.0% of 1000 (half test: pass); " +
+			"tokens_per_minute confidential (console.png, sha256 " + hash + "): nominal demand above half of it (half test: FAIL)",
+		"    nominal demand at most 1.5% of each public half-tested recorded limit and at most half of each confidential one; no cause inferred",
+	} {
+		if !strings.Contains(text, frag) {
+			t.Errorf("text lacks %q:\n%s", frag, text)
+		}
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text, "300001") || strings.Contains(string(raw), "300001") || strings.Contains(string(raw), "3.00001e+05") {
+		t.Errorf("the tables carry the confidential value")
+	}
+	v.Steps[0].Demands[1].Value = 300001
+	if _, err := NewStepTables(cfg, v, []CellRecords{cell}); err == nil || !strings.Contains(err.Error(), "report: step tables: admission: published verdict: step 1, tokens_per_minute") {
+		t.Errorf("verdict with the value: %v", err)
+	}
+}
+
 // A route's page prints its naming lines verbatim under the heading; a
 // cell's report carries none.
 func TestStepTablesNaming(t *testing.T) {

@@ -605,6 +605,85 @@ func TestCellProbeWithholds(t *testing.T) {
 	}
 }
 
+// confidentialConfig is releaseConfig with its tokens_per_minute limit
+// at 250,013.5, marked confidential in the file as loaded.
+func confidentialConfig(t *testing.T, endpoint string) *config.Config {
+	t.Helper()
+	raw := releaseConfig(t, endpoint).Raw
+	const public = "      value: 250000\n      marking: public\n"
+	if !bytes.Contains(raw, []byte(public)) {
+		t.Fatal("reference no longer carries the tokens_per_minute lines this test edits")
+	}
+	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n"), 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Target.EndpointURL = endpoint
+	return cfg
+}
+
+// A cell of a route with a confidential limit publishes no file that
+// carries the value: its manifest names the file as published, its
+// verdict and report pair name the limit by source and hash, and the
+// run's frame directory keeps the file as loaded, from which the
+// completeness check and the replay work.
+func TestCellConfidentialLimit(t *testing.T) {
+	e := newEndpoint(t, always200)
+	cfg := confidentialConfig(t, e.url())
+	r, f := newTestRoute(t, cfg, "+0.005032")
+	if got := r.verdict.Admitted(); len(got) != 3 {
+		t.Fatalf("admitted %v", got)
+	}
+	shortLadder(r)
+	run := r.runs[0]
+	rec, err := r.runCell(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Outcome != outcomeCounted {
+		t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
+	}
+	m, text := checkRetained(t, r, run)
+	published, err := cfg.Published()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := sha256.Sum256(published); m.Config.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Errorf("manifest config %+v, not the file as published", m.Config)
+	}
+	l := cfg.Target.Limits[1]
+	if want := "tokens_per_minute confidential (" + l.Source + ", sha256 " + l.SHA256 + "): nominal demand at most half of it (half test: pass)"; !strings.Contains(text, want) {
+		t.Errorf("report lacks %q:\n%s", want, text)
+	}
+	if b := m.Release.Admission.Steps[3].Binding; b == nil || !b.Confidential || b.Value != 0 || b.SHA256 != l.SHA256 {
+		t.Errorf("binding limit %+v", b)
+	}
+	files := 0
+	if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		files++
+		if bytes.Contains(b, []byte("250013.5")) || bytes.Contains(b, []byte("2.500135e+05")) {
+			t.Errorf("%s carries the confidential value", p)
+		}
+		return nil
+	}); err != nil || files == 0 {
+		t.Fatalf("walk: %d files, %v", files, err)
+	}
+	held := filepath.Join(r.framesRoot, filepath.Dir(m.Frames.Name), evidence.ConfigCopyFile)
+	if b, err := os.ReadFile(held); err != nil || !bytes.Equal(b, cfg.Raw) {
+		t.Fatalf("config copy: %v", err)
+	}
+	if fi, err := os.Stat(held); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("config copy mode %v, %v", fi, err)
+	}
+}
+
 // A route whose retention keeps no model output runs its cell with a
 // frame store that counts each answer's bytes and keeps none of them.
 func TestCellRetainsNoModelOutput(t *testing.T) {

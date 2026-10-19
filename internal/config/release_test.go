@@ -141,6 +141,8 @@ func TestReleaseRefusals(t *testing.T) {
 		{"no limits", func(c *Config) { c.Target.Limits = nil }, "target.limits: required"},
 		{"limit dimension", func(c *Config) { limit(c).Dimension = "rpm" }, "target.limits[0].dimension: must be one of"},
 		{"limit value", func(c *Config) { limit(c).Value = 0 }, "target.limits[0].value: must be > 0"},
+		{"limit with no marking", func(c *Config) { limit(c).Marking = "" }, "target.limits[0].marking: must be one of [\"public\" \"confidential\"], got \"\""},
+		{"limit marking", func(c *Config) { limit(c).Marking = "private" }, "target.limits[0].marking: must be one of"},
 		{"limit window off a window dimension", func(c *Config) { limit(c).WindowS = 600 }, "target.limits[0].window_s: set for \"spend_per_window_usd\" only"},
 		{"spend window without window", func(c *Config) { limit(c).Dimension = LimitSpendWindow }, "target.limits[0].window_s: must be > 0"},
 		{"token limit without counting", func(c *Config) { tpm(c).Counting = "" }, "target.limits[1].counting: must be one of"},
@@ -245,10 +247,10 @@ func TestReleaseRefusals(t *testing.T) {
 func TestReleaseLimitAndNamingForms(t *testing.T) {
 	c := loadRef(t, releaseRef)
 	c.Target.Limits = append(c.Target.Limits,
-		Limit{Dimension: LimitSpendWindow, Value: 10, WindowS: 600, Source: "https://ai.google.dev/gemini-api/docs/rate-limits", Retrieved: "2026-10-07", SHA256: strings.Repeat("ab", 32)},
-		Limit{Dimension: LimitSpendMonth, Value: 10, OperatorSet: true, Source: "spend-limit.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
-		Limit{Dimension: LimitTPD, Value: 7e8, Counting: CountingOutputBurndown, OutputBurndown: 15, Source: "quotas.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
-		Limit{Dimension: LimitTPM, Value: 1e6, Counting: CountingInput, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
+		Limit{Dimension: LimitSpendWindow, Value: 10, WindowS: 600, Marking: MarkingPublic, Source: "https://ai.google.dev/gemini-api/docs/rate-limits", Retrieved: "2026-10-07", SHA256: strings.Repeat("ab", 32)},
+		Limit{Dimension: LimitSpendMonth, Value: 10, OperatorSet: true, Marking: MarkingPublic, Source: "spend-limit.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
+		Limit{Dimension: LimitTPD, Value: 7e8, Marking: MarkingPublic, Counting: CountingOutputBurndown, OutputBurndown: 15, Source: "quotas.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
+		Limit{Dimension: LimitTPM, Value: 1e6, Marking: MarkingConfidential, Counting: CountingInput, Source: "limits.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
 	)
 	c.Target.Naming.PermissionRequired, c.Target.Naming.PermissionRecord = true, "manifest: written permission"
 	c.Target.StatusDocs = []StatusDoc{

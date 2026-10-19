@@ -634,7 +634,7 @@ func TestReleaseProbeSnapshots(t *testing.T) {
 	bad := strings.Repeat("0", 64)
 	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
 	lim := func(src, sha string) config.Limit {
-		return config.Limit{Dimension: config.LimitRPM, Value: 1000, Source: src, Retrieved: "2026-10-07", SHA256: sha}
+		return config.Limit{Dimension: config.LimitRPM, Value: 1000, Marking: config.MarkingPublic, Source: src, Retrieved: "2026-10-07", SHA256: sha}
 	}
 	cfg.Target.Limits = []config.Limit{lim("limits.png", good), lim("limits.png", bad), lim("missing.png", good),
 		lim("https://console.example.test/limits", good), lim("../limits.png", good)}
@@ -668,6 +668,61 @@ func TestReleaseProbeSnapshots(t *testing.T) {
 	}
 	if fmt.Sprint(rec.Findings) != "[no usage object in the stream]" {
 		t.Errorf("no directory: findings %q", rec.Findings)
+	}
+}
+
+// A confidential limit's snapshot carries its dimension, source and hash
+// and the retained copy's hash check, and no value; a snapshot that
+// carries one is exposed.
+func TestReleaseProbeConfidentialSnapshot(t *testing.T) {
+	noSpacing(t)
+	srv := httptest.NewServer(sseHandler(answerFrame, stopFrame, doneFrame))
+	defer srv.Close()
+	dir := t.TempDir()
+	shot := []byte("console limits screenshot")
+	if err := os.WriteFile(filepath.Join(dir, "console.png"), shot, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(shot)
+	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
+	tpm := config.Limit{Dimension: config.LimitTPM, Value: 9876543.25, Marking: config.MarkingConfidential, Counting: config.CountingInputOutput,
+		Source: "console.png", Retrieved: "2026-10-07", SHA256: hex.EncodeToString(sum[:])}
+	cfg.Target.Limits = []config.Limit{cfg.Target.Limits[0], tpm}
+
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, SnapshotDir: dir})
+	want := tpm
+	want.Value = 0
+	if s := rec.Snapshots[1]; s.Limit != want || s.Retained == nil || !*s.Retained {
+		t.Fatalf("confidential snapshot %+v", s)
+	}
+	if s := rec.Snapshots[0]; s.Limit != cfg.Target.Limits[0] {
+		t.Errorf("public snapshot %+v", s)
+	}
+	path, err := Write(t.TempDir(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "9876543") || strings.Count(string(b), `"value": `) != 1 || !strings.Contains(string(b), `"marking": "confidential"`) {
+		t.Errorf("%s carries the value or no marking:\n%s", File, b)
+	}
+	if e := Exposed(&cfg.Target, rec); e != nil {
+		t.Errorf("exposed %q", e)
+	}
+
+	exposed := *rec
+	exposed.Snapshots = append([]Snapshot(nil), rec.Snapshots...)
+	exposed.Snapshots[1].Value = 9876543.25
+	if e := Exposed(&cfg.Target, &exposed); fmt.Sprint(e) != "[snapshot 1 value]" {
+		t.Errorf("value restored: exposed %q", e)
+	}
+	public := cfg.Target
+	public.Limits = []config.Limit{cfg.Target.Limits[0]}
+	if e := Exposed(&public, &exposed); fmt.Sprint(e) != "[snapshot 1 value]" {
+		t.Errorf("a snapshot marked confidential beyond target.limits: exposed %q", e)
 	}
 }
 

@@ -258,7 +258,8 @@ type cellFiles struct {
 
 // retain writes a finished cell's evidence: the final dispatch series,
 // the end status and balance, the frame store, the probe's withheld
-// values and the operator copies, the
+// values, the operator copies and the configuration as loaded where it
+// differs from the file as published, the
 // attempts file, the manifest carrying the cell's label, the host's
 // aggregate dispatch series and the inter-chunk gap histograms, and the
 // report pair. A nil res is a cell with no ladder result: its attempts
@@ -299,6 +300,9 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	framesPath, ferr := evidence.WriteRunFrames(r.framesRoot, &ev.cfg.Target, res)
 	if ferr == nil {
 		ferr = ev.op.WriteCopies(filepath.Dir(framesPath))
+	}
+	if ferr == nil {
+		ferr = evidence.WriteConfigCopy(filepath.Dir(framesPath), ev.cfg)
 	}
 	if ferr == nil && ev.probe != nil {
 		_, ferr = probe.WriteRetained(filepath.Dir(framesPath), ev.probe)

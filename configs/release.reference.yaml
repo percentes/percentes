@@ -72,16 +72,22 @@ target:
      "max_completion_tokens": 512,
      "reasoning_effort": "low", "reasoning_format": "parsed"}
   response_headers: [Retry-After, x-ratelimit-*]
+  # Each limit's marking: public where a public documentation page gives
+  # the value, which publishes; confidential where only the account
+  # console shows it under terms that keep it confidential, and the file
+  # as published carries "[retained]" in place of the value.
   limits:
     - dimension: requests_per_minute
       value: 1000
-      source: groq-console-limits.png
+      marking: public
+      source: groq-rate-limits-page.png
       retrieved: 2026-10-07
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
     - dimension: tokens_per_minute
       value: 250000
+      marking: public
       counting: input_and_output
-      source: groq-console-limits.png
+      source: groq-rate-limits-page.png
       retrieved: 2026-10-07
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
   # The ruling a cell starts under when the balance command prints

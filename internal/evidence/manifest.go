@@ -64,7 +64,8 @@ type Manifest struct {
 	Capture loadgen.Capture `json:"capture"`
 	// Release is a release run's cell record.
 	Release *Cell `json:"release,omitempty"`
-	// Config is the configuration file as loaded, verbatim.
+	// Config is the configuration file as published, verbatim
+	// (config.Config.Published).
 	Config   FileRef  `json:"config"`
 	Endpoint Endpoint `json:"endpoint"`
 	Client   Client   `json:"client"`
@@ -286,6 +287,10 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 			return nil, fmt.Errorf("evidence: an interrupted release cell has %d requests", len(res.Requests))
 		}
 	}
+	published, err := cfg.Published()
+	if err != nil {
+		return nil, fmt.Errorf("evidence: %w", err)
+	}
 	m := &Manifest{
 		SchemaVersion:  1,
 		StartUTC:       res.EpochWall.UTC(),
@@ -296,7 +301,7 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		Source:         SourceOf(in.Build),
 		Capture:        loadgen.CaptureLimits(),
 		Release:        in.Release,
-		Config:         refOf(in.ConfigName, cfg.Raw),
+		Config:         refOf(in.ConfigName, published),
 		Operator:       op.File,
 		Roles:          op.Roles,
 		Records:        op.Records,
@@ -341,7 +346,6 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 			}
 		}
 	}
-	var err error
 	if m.Clock.File, err = HashFile(in.ClockPath, filepath.Base(in.ClockPath)); err != nil {
 		return nil, err
 	}

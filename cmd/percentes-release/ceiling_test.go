@@ -265,6 +265,55 @@ func TestCeilingCheckWithholds(t *testing.T) {
 	}
 }
 
+// markConfidential rewrites the configuration at path with its
+// tokens_per_minute limit at 250,013.5, marked confidential.
+func markConfidential(t *testing.T, path string) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const public = "      value: 250000\n      marking: public\n"
+	if !bytes.Contains(b, []byte(public)) {
+		t.Fatal("configuration: the tokens_per_minute lines this test edits not found")
+	}
+	if err := os.WriteFile(path, bytes.Replace(b, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n"), 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A confidential limit's snapshot in the check's record carries no value,
+// and run refuses a record of the route whose snapshot carries one.
+func TestCeilingCheckConfidential(t *testing.T) {
+	f := newCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), testKey)
+	markConfidential(t, f.cfg)
+	if code, err := ceilingCheckCmd(context.Background(), f.args()); err != nil || code != exitOK {
+		t.Fatalf("ceiling-check: %d, %v", code, err)
+	}
+	path, rec := f.record(t)
+	raw, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(raw, []byte("250013.5")) || bytes.Contains(raw, []byte("2.500135e+05")) {
+		t.Fatalf("%s carries the confidential value (%v)", path, err)
+	}
+	if s := rec.Snapshots[1]; s.Marking != config.MarkingConfidential || s.Value != 0 || s.Dimension != config.LimitTPM {
+		t.Fatalf("snapshot %+v", s)
+	}
+	cfgs, err := loadReleases([]string{f.cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true))
+	if _, _, err := readCeilingProbes(cfgs[0], []string{path, baseten}, 2000); err != nil {
+		t.Fatalf("run reads the record: %v", err)
+	}
+	rec.Snapshots[1].Value = 250013.5
+	leaked := writeCeiling(t, *rec)
+	if _, _, err := readCeilingProbes(cfgs[0], []string{leaked, baseten}, 2000); err == nil ||
+		!strings.Contains(err.Error(), "route groq at 512: carries values the route withholds: snapshot 1 value") {
+		t.Fatalf("a record carrying the confidential value: %v", err)
+	}
+}
+
 // A check the start gate blocks ends at its first request, is settled at
 // one request, is recorded, and exits adverse.
 func TestCeilingCheckCmdBlocked(t *testing.T) {

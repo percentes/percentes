@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"strings"
 
 	"github.com/percentes/percentes/internal/config"
 )
@@ -64,13 +65,20 @@ type Demand struct {
 	Dimension string `json:"dimension"`
 	// Limit indexes target.limits, or target.unpublished_limits where
 	// Unpublished is set; -1 is release.caps.route_usd.
-	Limit       int     `json:"limit"`
-	Unpublished bool    `json:"unpublished,omitempty"`
-	Value       float64 `json:"value"`
-	Demand      float64 `json:"demand"`
-	Fraction    float64 `json:"fraction"`
-	Half        bool    `json:"half"`
-	Pass        bool    `json:"pass"`
+	Limit       int  `json:"limit"`
+	Unpublished bool `json:"unpublished,omitempty"`
+	// Confidential is set against a limit marked
+	// config.MarkingConfidential: Value and Fraction are absent, and
+	// Source and SHA256 are the limit's source and the SHA-256 of its
+	// retained snapshot.
+	Confidential bool    `json:"confidential,omitempty"`
+	Source       string  `json:"source,omitempty"`
+	SHA256       string  `json:"sha256,omitempty"`
+	Value        float64 `json:"value,omitempty"`
+	Demand       float64 `json:"demand"`
+	Fraction     float64 `json:"fraction,omitempty"`
+	Half         bool    `json:"half"`
+	Pass         bool    `json:"pass"`
 }
 
 // Step is one ladder step's verdict. An excluded step names its binding
@@ -158,7 +166,9 @@ func (s *State) Covers(cfg *config.Config, v *Verdict) error {
 // threshold the costliest cell. Each unpublished limit caps the step's
 // rate at config.PinnedReleaseUnpublishedCapRPS. A step is admitted when
 // it passes every test; every demand rises with the step, so the
-// admitted steps are the ladder up to the top step. cfg must validate.
+// admitted steps are the ladder up to the top step. A demand against a
+// confidential limit carries the test's result without the value or the
+// fraction. cfg must validate.
 func CeilingRule(cfg *config.Config, p Price, plan Plan) (*Verdict, error) {
 	if cfg.Profile != config.ProfileRelease || cfg.Release == nil {
 		return nil, errors.New("admission: ceiling rule: not a release configuration")
@@ -200,7 +210,12 @@ func CeilingRule(cfg *config.Config, p Price, plan Plan) (*Verdict, error) {
 		for i := range cfg.Target.Limits {
 			l := &cfg.Target.Limits[i]
 			d, half := limitDemand(l, r, cell, plan.DayCells, in, ceiling, c, cfg.Client.HTTPTimeoutS, cellUSD, editionUSD)
-			s.Demands = append(s.Demands, demand(l.Dimension, i, rat(l.Value), d, half))
+			dm := demand(l.Dimension, i, rat(l.Value), d, half)
+			if l.Marking == config.MarkingConfidential {
+				dm.Value, dm.Fraction = 0, 0
+				dm.Confidential, dm.Source, dm.SHA256 = true, l.Source, l.SHA256
+			}
+			s.Demands = append(s.Demands, dm)
 		}
 		for i, u := range cfg.Target.UnpublishedLimits {
 			d := demand(UnpublishedPrefix+u.Dimension, i, rat(config.PinnedReleaseUnpublishedCapRPS), r, false)
@@ -219,6 +234,68 @@ func CeilingRule(cfg *config.Config, p Price, plan Plan) (*Verdict, error) {
 		v.Steps = append(v.Steps, s)
 	}
 	return v, nil
+}
+
+// CheckPublished reports every way v, a ceiling-rule verdict as
+// published, disagrees with cfg's recorded limits. Each demand against
+// target.limits, binding limits included, names the limit's dimension
+// and its test; one against a confidential limit carries the limit's
+// source and hash, no value and no fraction, and a pass that its demand
+// against the value cfg records gives; one against a public limit
+// carries the value cfg records.
+func CheckPublished(cfg *config.Config, v *Verdict) error {
+	var problems []string
+	check := func(k int, d *Demand) {
+		if d.Unpublished || d.Limit == -1 && d.Dimension == RouteCapDimension {
+			return
+		}
+		fail := func(format string, a ...any) {
+			problems = append(problems, fmt.Sprintf("step %d, %s: ", k+1, d.Dimension)+fmt.Sprintf(format, a...))
+		}
+		if d.Limit < 0 || d.Limit >= len(cfg.Target.Limits) {
+			fail("limit %d is not in target.limits", d.Limit)
+			return
+		}
+		l := &cfg.Target.Limits[d.Limit]
+		cover := l.Dimension == config.LimitSpendMonth || l.Dimension == config.LimitReloadThreshold
+		test := "half"
+		if cover {
+			test = "cover"
+		}
+		switch confidential := l.Marking == config.MarkingConfidential; {
+		case d.Dimension != l.Dimension || d.Half == cover:
+			fail("target.limits[%d] is %s with a %s test", d.Limit, l.Dimension, test)
+		case d.Confidential != confidential:
+			fail("confidential %t, target.limits[%d] is marked %s", d.Confidential, d.Limit, l.Marking)
+		case confidential && (d.Value != 0 || d.Fraction != 0):
+			fail("a confidential limit published with its value or fraction")
+		case confidential && (d.Source != l.Source || d.SHA256 != l.SHA256):
+			fail("source %q and sha256 %s, target.limits[%d] has %q and %s", d.Source, d.SHA256, d.Limit, l.Source, l.SHA256)
+		case !confidential && (d.Value != l.Value || d.Source != "" || d.SHA256 != ""):
+			fail("value %g with source %q, target.limits[%d] records %g and is public", d.Value, d.Source, d.Limit, l.Value)
+		case confidential:
+			bound := rat(l.Value)
+			if d.Half {
+				bound.Quo(bound, big.NewRat(2, 1))
+			}
+			if pass := rat(d.Demand).Cmp(bound) <= 0; pass != d.Pass {
+				fail("pass %t against the recorded value, published %t", pass, d.Pass)
+			}
+		}
+	}
+	for k := range v.Steps {
+		s := &v.Steps[k]
+		for i := range s.Demands {
+			check(k, &s.Demands[i])
+		}
+		if s.Binding != nil {
+			check(k, s.Binding)
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New("admission: published verdict: " + strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // limitDemand is a step's nominal demand against l at rate r, with cell

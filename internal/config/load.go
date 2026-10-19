@@ -25,14 +25,23 @@ func LoadFile(path string) (*Config, error) {
 
 // Parse strictly decodes and validates a run configuration.
 func Parse(raw []byte) (*Config, error) {
+	cfg, err := Decode(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Decode strictly decodes a run configuration without validating it.
+func Decode(raw []byte) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 	var cfg Config
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, err
 	}
 	cfg.Raw = raw
 	return &cfg, nil
