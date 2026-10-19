@@ -642,7 +642,9 @@ func TestPagesMissedHost(t *testing.T) {
 		r.Route, r.Notice, r.Permission = "baseten", &n, nil
 		p.Routes = append(p.Routes, r)
 	})
-	text = stdoutOf(t, func() { code, err = publishCheckCmd(append(args[:len(args):len(args)], "--record", record)) })
+	text = stdoutOf(t, func() {
+		code, err = publishCheckCmd(append(args[:len(args):len(args)], "--write-page", "--record", record))
+	})
 	if code != exitOK || err != nil || !strings.Contains(text, "publication record complete: 1 manifests, 4 pages, 2 routes\n") {
 		t.Fatalf("publish-check: exit %d: %v:\n%s", code, err, text)
 	}

@@ -45,7 +45,8 @@
 // of probe records, pack writes a route's evidence pack, its page files
 // and cell manifests with an inventory of their SHA-256 hashes, and
 // publish-check checks the release publication record against the
-// cells, the pages and the files it names.
+// cells, the pages and the files it names, and the publication page it
+// gives against the one under --pages.
 //
 // Before the freeze, rehearse runs the acceptance run: one cell of each
 // of six mock routes, served on loopback by this process in the
@@ -77,7 +78,7 @@
 //	    --schedule FILE --route NAME --pack FILE [--release-key FILE]
 //	percentes-release publish-check --out DIR --frames DIR
 //	    --config FILE ... --schedule FILE --pages DIR --record FILE
-//	    [--release-key FILE]
+//	    [--write-page] [--release-key FILE]
 //	percentes-release rehearse --out DIR --frames DIR --clock-sync CMD
 //	    --byte-cap N [--scale N] [--master-seed SEED] [--source-diff FILE]
 //	percentes-release check-cpu
@@ -94,7 +95,8 @@
 // previous probed cell also saw, or an operator abort); 1 = execution
 // error or refusal to start. rehearse exits 0 when the rehearsal is
 // green and 2 when it is not; publish-check exits 0 when the publication
-// record is complete and 2 when it is not.
+// record is complete and the publication page under --pages is the one
+// it gives, and 2 when either is not.
 package main
 
 import (

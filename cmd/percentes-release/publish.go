@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,12 @@ import (
 	"github.com/percentes/percentes/internal/evidence"
 )
 
+// The publication page's files under --pages.
+const (
+	publicationPage = "publication.md"
+	publicationJSON = "publication.json"
+)
+
 // publishCheckCmd checks the release publication record (SPEC-HOSTED HA3
 // point 14) against the cell manifests and the window-close records under
 // --out, the pages the cells generate under the schedule file given,
@@ -21,8 +28,10 @@ import (
 // A route with a page needs its window-close record. Each notice's pack
 // must be the route's pack as pack builds it from the same cells, and a
 // replication pack must carry that pack's files. When the record is
-// complete it prints the providers told of the measurement before the
-// notices. pages runs without a record.
+// complete it builds the publication page from it, which must be under
+// --pages byte for byte, or which --write-page writes there, and prints
+// the providers told of the measurement before the notices. pages runs
+// without a record.
 func publishCheckCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("publish-check", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -33,6 +42,7 @@ func publishCheckCmd(args []string) (int, error) {
 	record := fs.String("record", "", "the release publication record; the files it names are relative to its directory (required)")
 	schedulePath := fs.String("schedule", "", "the committed schedule file the cells ran under (required)")
 	keyPath := fs.String("release-key", "", "the release key file (required where a route has a confidential limit)")
+	writePage := fs.Bool("write-page", false, "write the publication page under --pages once the record is complete")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
@@ -84,7 +94,40 @@ func publishCheckCmd(args []string) (int, error) {
 		fmt.Printf("NOT READY to publish: %v\n", err)
 		return exitAdverse, nil
 	}
+	pg, err := pub.Page()
+	if err != nil {
+		return exitError, err
+	}
+	page := map[string][]byte{publicationPage: []byte(pg.Markdown())}
+	if page[publicationJSON], err = marshalPage(pg); err != nil {
+		return exitError, err
+	}
+	var problems []string
+	for _, name := range []string{publicationPage, publicationJSON} {
+		p := filepath.Join(*pages, name)
+		if *writePage {
+			if err := replaceFile(p, page[name]); err != nil {
+				return exitError, err
+			}
+			continue
+		}
+		switch b, err := os.ReadFile(p); {
+		case errors.Is(err, os.ErrNotExist):
+			problems = append(problems, fmt.Sprintf("%s is missing under %s (publish-check --write-page writes it)", name, *pages))
+		case err != nil:
+			return exitError, err
+		case !bytes.Equal(b, page[name]):
+			problems = append(problems, fmt.Sprintf("%s under %s is not the page the record gives", name, *pages))
+		}
+	}
+	if len(problems) > 0 {
+		fmt.Printf("NOT READY to publish: publication page: %s\n", strings.Join(problems, "; "))
+		return exitAdverse, nil
+	}
 	fmt.Printf("publication record complete: %d manifests, %d pages, %d routes\n", len(manifests), len(rp.files), len(routes))
+	if *writePage {
+		fmt.Printf("publication page written: %s, %s\n", filepath.Join(*pages, publicationPage), filepath.Join(*pages, publicationJSON))
+	}
 	fmt.Println("told of the measurement before the notices:")
 	for _, l := range pub.ToldBefore() {
 		fmt.Printf("  %s\n", l)

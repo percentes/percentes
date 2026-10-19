@@ -75,7 +75,8 @@ func packOf(t *testing.T, args []string, route string) []byte {
 
 // publication writes the record of a release whose one route, groq,
 // needs its naming permission: the manifests and window-close records
-// under out and the pages under pages by hash, a notice of 1 September 2026 whose window closed
+// under out and the pages under pages by hash, the publication page's
+// files left out, a notice of 1 September 2026 whose window closed
 // on 7 September carrying packs["groq"], no response, and one disclosure
 // before it. Each pack in packs is written beside the record as
 // <route>-pack.tar.
@@ -110,7 +111,9 @@ func publication(t *testing.T, out, pages string, packs map[string][]byte, edit 
 		p.WindowCloses = append(p.WindowCloses, *published(t, out, name))
 	}
 	for name := range readPages(t, pages) {
-		p.Pages = append(p.Pages, *published(t, pages, name))
+		if name != publicationPage && name != publicationJSON {
+			p.Pages = append(p.Pages, *published(t, pages, name))
+		}
 	}
 	if edit != nil {
 		edit(&p)
@@ -122,8 +125,12 @@ func publication(t *testing.T, out, pages string, packs map[string][]byte, edit 
 	return writeFile(t, dir, "publication.json", b)
 }
 
-// publish-check passes a complete record and prints the providers told
-// before the notices; pack writes groq's page files and manifests with
+// publish-check refuses a complete record while the publication page
+// under --pages is missing, writes it with --write-page, holding the
+// notice and window-close dates and the earlier disclosure and no
+// recipient or account identifier, then passes and prints the providers
+// told before the notices, and refuses the page edited or a record with
+// a response the page lacks; pack writes groq's page files and manifests with
 // their inventory, the same bytes twice, and refuses an unknown route;
 // pages runs with no record and no window-close record; and the check
 // refuses, exiting 2, a paged route with no window-close record, a
@@ -206,10 +213,72 @@ func TestPublishCheck(t *testing.T) {
 
 	var code int
 	complete := publication(t, groq.out, pages, groqPack(), nil)
-	text := stdoutOf(t, func() { code = dispatch(append([]string{"publish-check", "--record", complete}, base...)) })
-	if code != exitOK || !strings.Contains(text, "publication record complete: 2 manifests, 4 pages, 1 routes\n") ||
+	if code, text := check(complete); code != exitAdverse || text != "NOT READY to publish: publication page: publication.md is missing under "+pages+
+		" (publish-check --write-page writes it); publication.json is missing under "+pages+" (publish-check --write-page writes it)\n" {
+		t.Fatalf("no publication page: exit %d:\n%s", code, text)
+	}
+	text := stdoutOf(t, func() {
+		code = dispatch(append([]string{"publish-check", "--write-page", "--record", complete}, base...))
+	})
+	if code != exitOK || !strings.Contains(text, "publication record complete: 2 manifests, 4 pages, 1 routes\npublication page written: "+
+		filepath.Join(pages, publicationPage)+", "+filepath.Join(pages, publicationJSON)+"\n") ||
 		!strings.HasSuffix(text, "told of the measurement before the notices:\n  Groq, by email, 2026-08-20\n") {
-		t.Fatalf("complete record: exit %d:\n%s", code, text)
+		t.Fatalf("complete record, page written: exit %d:\n%s", code, text)
+	}
+	md, err := os.ReadFile(filepath.Join(pages, publicationPage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageJSON, err := os.ReadFile(filepath.Join(pages, publicationJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"| groq | 2026-09-01 | 2026-09-07 | yes |\n", "### groq\n\nNo response.\n", "- Groq, by email, 2026-08-20\n", "No provider funded the measurement.\n"} {
+		if !strings.Contains(string(md), s) {
+			t.Errorf("publication page lacks %q:\n%s", s, md)
+		}
+	}
+	if !strings.Contains(string(pageJSON), `"notice_sent": "2026-09-01",`) || !strings.Contains(string(pageJSON), `"window_closes": "2026-09-07",`) {
+		t.Errorf("publication page JSON:\n%s", pageJSON)
+	}
+	for _, s := range []string{"groq support", "org-1", "permission.eml", "pack.tar"} {
+		if strings.Contains(string(md), s) || strings.Contains(string(pageJSON), s) {
+			t.Errorf("publication page carries %q", s)
+		}
+	}
+	text = stdoutOf(t, func() { code = dispatch(append([]string{"publish-check", "--record", complete}, base...)) })
+	if code != exitOK || strings.Contains(text, "publication page written") ||
+		!strings.HasSuffix(text, "told of the measurement before the notices:\n  Groq, by email, 2026-08-20\n") {
+		t.Fatalf("complete record and its page: exit %d:\n%s", code, text)
+	}
+	if err := os.WriteFile(filepath.Join(pages, publicationPage), append(md, "Edited.\n"...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, text := check(complete); code != exitAdverse || text != "NOT READY to publish: publication page: publication.md under "+pages+" is not the page the record gives\n" {
+		t.Errorf("edited publication page: exit %d:\n%s", code, text)
+	}
+	if err := os.WriteFile(filepath.Join(pages, publicationPage), md, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	responded := publication(t, groq.out, pages, groqPack(), func(p *evidence.Publication) {
+		p.Routes[0].Responses = []evidence.Response{{Received: "2026-09-03", Corrections: []string{"model name spelt as documented"}}}
+	})
+	if code, text := check(responded); code != exitAdverse || !strings.Contains(text, "publication.md under "+pages+" is not the page the record gives; publication.json under ") {
+		t.Errorf("record with a response, page without: exit %d:\n%s", code, text)
+	}
+	text = stdoutOf(t, func() {
+		code = dispatch(append([]string{"publish-check", "--write-page", "--record", responded}, base...))
+	})
+	if b, _ := os.ReadFile(filepath.Join(pages, publicationPage)); code != exitOK ||
+		!strings.Contains(string(b), "### groq\n\nReceived 2026-09-03; corrections made: 1, in the corrections log.\n") ||
+		!strings.Contains(string(b), "- groq, response of 2026-09-03: model name spelt as documented\n") {
+		t.Errorf("record with a response, page written: exit %d:\n%s\n%s", code, text, b)
+	}
+	stdoutOf(t, func() {
+		code = dispatch(append([]string{"publish-check", "--write-page", "--record", complete}, base...))
+	})
+	if code != exitOK {
+		t.Fatalf("page written again: exit %d", code)
 	}
 	if code, text := check(publication(t, groq.out, pages, map[string][]byte{"groq": []byte("tables and evidence")}, nil)); code != exitAdverse ||
 		!strings.HasSuffix(text, "NOT READY to publish: evidence: publication refused: route groq: notice.pack: groq-pack.tar is not the evidence pack the route's pages and manifests give (percentes-release pack)\n") {
