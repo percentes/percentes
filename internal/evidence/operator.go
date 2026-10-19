@@ -55,7 +55,7 @@ var (
 const (
 	OperatorCopyFile = "operator.json"
 	RecordsCopyDir   = "records"
-	// OperatorErrorFile is a cell's held operator records or refreshed limits error.
+	// OperatorErrorFile is a held operator records or refreshed limits error.
 	OperatorErrorFile = "operator-error.txt"
 )
 

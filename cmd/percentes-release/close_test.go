@@ -604,3 +604,85 @@ func TestWindowCloseCompares(t *testing.T) {
 		t.Fatalf("printed %q, want %q", changed, want)
 	}
 }
+
+// On a route with a confidential limit, a window close whose refresh
+// command prints limits that do not parse, with the limit's value
+// negative, in a dimension string or in a number past float64's range,
+// writes no record and keeps the error, which quotes the printed text,
+// in the frame store's window-close directory for the attempt; neither
+// what the process prints nor any file under the release output
+// directory carries the value. A route with the limit public gives the
+// error itself.
+func TestWindowCloseErrorHeld(t *testing.T) {
+	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
+	enoughOpenFiles(t)
+	values := []string{"250013.5", "250,013.5", "2.500135e+05"}
+	closed := time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC)
+	start := func(cfg *config.Config, out string) (*fixture, *route, *routeState) {
+		t.Helper()
+		f := newFixture(t, cfg, "+0.005")
+		limitsRefresh(t, f, tpmRefresh(`"value":300000`))
+		r, err := newRoute(f.in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec := runCellOK(t, r, r.runs[0]); rec.Outcome != outcomeBlocked {
+			t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
+		}
+		st, err := r.state()
+		if err != nil {
+			t.Fatal(err)
+		}
+		limitsRefresh(t, f, out)
+		r.refresh = []string{f.in.refreshCmd}
+		r.now = func() time.Time { return closed }
+		return f, r, st
+	}
+	for _, tc := range []struct{ name, out, want string }{
+		{"negative value", tpmRefresh(`"value":-250013.5`), "refreshed limits: limits[1]: value -250013.5 is not a positive number"},
+		{"dimension", `{"limits":[{"dimension":"requests_per_minute","value":1000},{"dimension":"tokens_per_minute 250013.5","value":1}]}`, `refreshed limits: limits[1] is "tokens_per_minute 250013.5"`},
+		{"overflow", tpmRefresh(`"value":250013.5e400`), "250013.5e400"},
+	} {
+		f, r, st := start(confidentialConfig(t, e.url()), tc.out)
+		var err error
+		printed := stdoutOf(t, func() { err = r.windowClose(context.Background(), st) })
+		held := evidence.WindowCloseDir(r.framesRoot, "groq", closed)
+		if want := "groq: window close: the records were not refreshed (SPEC-HOSTED §4): " + windowCloseErrorHeld + " in " + held; err == nil || err.Error() != want {
+			t.Fatalf("%s: %v; want %q", tc.name, err, want)
+		}
+		journal := printed + fmt.Sprintf("percentes-release: %v\n", err)
+		if slices.ContainsFunc(values, func(v string) bool { return strings.Contains(journal, v) }) {
+			t.Errorf("%s: the process prints %q", tc.name, journal)
+		}
+		p := filepath.Join(held, evidence.OperatorErrorFile)
+		if b, err := os.ReadFile(p); err != nil || !strings.Contains(string(b), tc.want) {
+			t.Fatalf("%s: %s: %q, %v; want %q", tc.name, p, b, err, tc.want)
+		}
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("%s: %v %v", tc.name, fi, err)
+		}
+		if fileExists(filepath.Join(r.dir, evidence.WindowCloseFile)) {
+			t.Fatalf("%s: a record was written", tc.name)
+		}
+		if err := filepath.WalkDir(f.in.out, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err == nil && slices.ContainsFunc(values, func(v string) bool { return bytes.Contains(b, []byte(v)) }) {
+				t.Errorf("%s: %s carries the confidential value", tc.name, p)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		_, r, st = start(releaseConfig(t, e.url()), tc.out)
+		if err := r.windowClose(context.Background(), st); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: public route: %v; want %q", tc.name, err, tc.want)
+		}
+		if fileExists(filepath.Join(r.framesRoot, "window-close")) {
+			t.Fatalf("%s: public route: the error was kept", tc.name)
+		}
+	}
+}

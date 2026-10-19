@@ -788,7 +788,7 @@ before any setup.
 | `probe-retained.json` | what a probe or ceiling-check record withholds: the retained headers' values in each request and the limits read, the limits body, and on a target with a confidential limit each non-200 body and in-band error object (`stream_error`); beside a cell's frames, or under `ceiling-check --frames` | `probe.WriteRetained` |
 | `manifest.json` | the build revision and whether the tree was modified; the capture limits; the configuration file by hash, the file as published under the release profile; the endpoint as configured and as observed (requested, expected and reported models, mismatches, protocols, the parameters recorded as not applied); the client host; the clock and status records, and under the release profile the balance records; the operator file and its records by hash; the ledger's hash and line count; every artifact and the frame store by hash; each hash a SHA-256 with the size in bytes (`sha256`, `bytes`), except that on a target with a confidential limit the frame store, the operator file and its records carry only their HMAC-SHA256 under the release key (`hmac_sha256`); validity and its reasons; the G2 and G6 gates, per ladder step under the release profile; the release cell record ([The cell's files and report](#the-cells-files-and-report)); and the replay record the report pair needs, absent for a release cell, whose pair reads its cell record | `evidence.NewManifest` |
 | `operator.json`, `records/` | copies of the operator file and its records as read at the cell's start, beside the frame store | `Operator.WriteCopies` |
-| `operator-error.txt` | release cells of a route with a confidential limit whose operator records or refreshed limits failed at the cell's start, or whose operator records failed when the cell was labelled: the error, beside the cell's frames, readable by its owner only | `evidence.WriteOperatorError` |
+| `operator-error.txt` | release cells of a route with a confidential limit whose operator records or refreshed limits failed at the cell's start, or whose operator records failed when the cell was labelled: the error, beside the cell's frames, readable by its owner only; for such a route whose operator records or refreshed limits failed at window close, the error in the attempt's `window-close/<route>/<UTC time>/` directory under `--frames` | `evidence.WriteOperatorError` |
 | `config.yaml` | release cells of a route with a confidential limit: the configuration as loaded, beside the cell's frames, readable by its owner only | `evidence.WriteConfigCopy` |
 | `window-close.json` | per release route, in `<route>/` under `--out`, after its last cell: the refresh record as it publishes, the account tier, and the operator file and its records as read after it, keyed as in the manifest; their copies under `--frames` in `window-close/<route>/<UTC time>/` | `windowClose`, `evidence.NewWindowClose` |
 
@@ -1406,8 +1406,13 @@ under `--out`: it runs the refresh command once more, reads the operator
 file and its records as at a cell's start, compares them with the last
 counted cell by scheduled start (`report.CompareWindowClose`), keeps the
 copies under `--frames` in `window-close/<route>/<UTC time>/` and prints
-whether anything changed. A refresh fault writes nothing and ends the
-process with exit 1, so its next run tries again.
+whether anything changed. A refresh fault writes no record and ends the
+process with exit 1, so its next run tries again. On a route with a
+confidential limit the fault's text can quote the operator file or the
+refresh output, so it goes to `operator-error.txt` in the attempt's
+`window-close/<route>/<UTC time>/` directory under `--frames`, readable by
+its owner only, and the error the process prints names that directory in
+place of the text.
 
 ### The ladder
 

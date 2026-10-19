@@ -68,13 +68,19 @@ func bindingText(limits []config.Limit, b *admission.Demand, read []evidence.Ref
 		strconv.FormatFloat(l.Value, 'f', -1, 64), strconv.FormatFloat(read[b.Limit].Value, 'f', -1, 64), demand, bound)
 }
 
+// windowCloseErrorHeld stands in a window-close error, on a route with a
+// confidential limit, for an operator records or refreshed limits error.
+const windowCloseErrorHeld = "the error is kept in " + evidence.OperatorErrorFile
+
 // windowClose writes the route's window-close record once its last cell
 // is done (SPEC-HOSTED §4 drift inside the window), unless one exists:
 // the refresh command runs once more and the operator file and every
 // record are read again as at a cell's start (cellOperator), the copies
 // are kept under the frame store, and the record is compared with the
 // last counted cell's manifest. A refresh fault writes no record and is
-// returned, so the process's next run tries again.
+// returned, so the process's next run tries again; on a route with a
+// confidential limit its text is kept in the attempt's window-close
+// directory under the frame store (windowCloseErrorHeld).
 func (r *route) windowClose(ctx context.Context, st *routeState) error {
 	path := filepath.Join(r.dir, evidence.WindowCloseFile)
 	if fileExists(path) {
@@ -89,7 +95,14 @@ func (r *route) windowClose(ctx context.Context, st *routeState) error {
 		oerr = lerr
 	}
 	if oerr != nil {
-		return fmt.Errorf("%s: window close: the records were not refreshed (SPEC-HOSTED §4): %w", t.Name, oerr)
+		if !t.Confidential() {
+			return fmt.Errorf("%s: window close: the records were not refreshed (SPEC-HOSTED §4): %w", t.Name, oerr)
+		}
+		dir := evidence.WindowCloseDir(r.framesRoot, t.Name, r.now())
+		if err := evidence.WriteOperatorError(dir, oerr); err != nil {
+			return fmt.Errorf("%s: window close: the records were not refreshed (SPEC-HOSTED §4): the error was not kept: %w", t.Name, err)
+		}
+		return fmt.Errorf("%s: window close: the records were not refreshed (SPEC-HOSTED §4): %s in %s", t.Name, windowCloseErrorHeld, dir)
 	}
 	w, err := evidence.NewWindowClose(t, r.now(), evidence.PublishedRefresh(refresh, t, read), op, r.key)
 	if err != nil {
