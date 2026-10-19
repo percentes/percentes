@@ -120,7 +120,7 @@ hosted and release commands have their own sections below.
 | Binary | What it does | Output | Exit codes |
 |---|---|---|---|
 | `cmd/percentes` | one self-hosted run; it refuses a hosted target, which runs under `cmd/percentes-pilot` or `cmd/percentes-release`; `--replay DIR` and `--check-release DIR` act on a finished release cell ([Replay and the completeness check](#replay-and-the-completeness-check)) | `report.json`, `report.txt` and `attempts.jsonl` | 0 valid, or the replayed pair matches byte for byte, or the release check passed; 2 a gate invalidated the run; 1 error, a refused hosted target, a replayed pair that differs, or a refused release |
-| `cmd/percentes-campaign` | N runs of one fault variant, gates per run, §7 aggregation; `--dry-kill` makes one process kill with no load | `run-N.json` and `run-N.txt` as each run ends; `campaign.json`, `campaign.txt`, partial after an error or a halt; under process kill `run-N-server.log`, `run-N-fingerprint-before.txt` and `run-N-fingerprint-after.txt`; `dry-kill.json` and `dry-kill-server.log` from `--dry-kill` | 0 every run valid, 2 at least one invalid run or a halted campaign, 1 error |
+| `cmd/percentes-campaign` | N runs of one fault variant against a self-hosted target, gates per run, §7 aggregation; it refuses a hosted target, as `cmd/percentes` does; `--dry-kill` makes one process kill with no load | `run-N.json` and `run-N.txt` as each run ends; `campaign.json`, `campaign.txt`, partial after an error or a halt; under process kill `run-N-server.log`, `run-N-fingerprint-before.txt` and `run-N-fingerprint-after.txt`; `dry-kill.json` and `dry-kill-server.log` from `--dry-kill` | 0 every run valid, 2 at least one invalid run or a halted campaign, 1 error or a refused hosted target |
 | `cmd/percentes-calibrate` | the §10 capacity calibration and the §5 single-replica reference; `--check` validates a configuration and lists its placeholders | `calibration.json`, `calibration.txt` | 0 valid, 2 calibration invalid, 1 error |
 | `cmd/percentes-pilot` | the SPEC-HOSTED HA2 pilot: `ledger` (`create`, `price`, `hosting`, `show`), `probe`, `dev`, `session` and `check-cpu` | the ledger file; `probe-<UTC time>/<target>/probe.json`, where UTC is Coordinated Universal Time; `dev-1/` and `dev-2/` with `config.yaml`, `dev.json` and the targets' `attempts.jsonl` files; `<session>/session.json` and, per target, `<session>/<target>/` with the evidence files; the frame store under `--frames` | 0 done, every window client-valid, every probe unblocked and every endpoint through the development gate; 2 a window client-invalid or not started, a probe blocked, the second window late, or an endpoint failing the gate; 1 error or refusal |
 | `cmd/percentes-release` | a release (SPEC-HOSTED HA3): before the window, `ledger create`, `ledger price`, `ceiling-check`, `schedule` and `public-config`; `run` for one route's cells over the committed window; after the window, `dispatch`, `pages` and `publish-check`; `rehearse`, the acceptance run against six mock routes ([The rehearsal](#the-rehearsal)); `check-cpu` ([The release runner](#the-release-runner)) | the committed schedule file; the release ledger; `ceiling-<UTC time>/<route>-<ceiling>/probe.json` from `ceiling-check`, with `probe-retained.json` under its `--frames` where the route withholds probe values; per cell attempt, `<route>/<cell>-a<attempt>/`: `cell.json`, `clock.json`, `status-start.json`, `refresh.json`, `balance-start.json`, `probe.json`, `attempts.jsonl`, `dispatch.json`, the ceiling probe copies, `status-end.json`, `balance-end.json`, `manifest.json`, `report.json` and `report.txt`; the frame store under `--frames`, with the cell's `probe-retained.json` beside its frames, and for a route with a confidential limit `config.yaml` and the refresh record as run; after the route's last cell, `<route>/window-close.json`, with its record copies under `--frames` in `window-close/<route>/<UTC time>/`; from `public-config`, the configuration as published; `dispatch-aggregate.json` at the output root, from `dispatch`; `index.md`, `index.json`, `routes/<route>.txt` and `routes/<route>.json` under `--pages`, from `pages`; from `rehearse`, under its `--out`: `inputs/`, each mock route's cell directory as above, and `rehearsal.json` | `run`: 0 every cell counts; 2 a cell does not count; 3 the route stopped (a ledger refusal, a documented billing refusal, a clock offset above the bound, limits read at a cell's start that no longer admit the route's steps, a probe 401 or 403 that the route's previous probed cell also saw, or an operator abort). `ceiling-check`: 0 the ceiling and input-bound checks passed and `run` accepts the model identifiers the record reports; 2 the check failed or was blocked, or the record reports a model identifier on which `run` refuses the route. `rehearse`: 0 the rehearsal is green; 2 it is not. `publish-check`: 0 the publication record is complete; 2 it is not. Every command: 1 error or refusal |
@@ -415,7 +415,7 @@ The diagram predates the hosted packages, which the table lists.
 
 | Group | Package | Role | SPEC | Entry points | Tests |
 |---|---|---|---|---|---|
-| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot; the release target's limits, unpublished-limit rulings, retained headers, not-applied parameters, naming record, documented statuses, errors and billing refusals, balance ruling and retention of model output, the other hosts of its model and the identifier its responses carry; each limit's marking, the retained headers and limits body a confidential limit requires, and the configuration as published with each confidential value withheld; the body with its ceiling key set to another ceiling | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Decode`, `Config.Validate`, `Config.Published`, `Target.ExpectedModel`, `ReleaseBodyAt`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
+| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot; the release target's limits, unpublished-limit rulings, retained headers, not-applied parameters, naming record, documented statuses, errors and billing refusals, balance ruling and retention of model output, the other hosts of its model and the identifier its responses carry; each limit's marking, the retained headers and limits body a confidential limit requires, and the configuration as published with each confidential value withheld; the stand-in for a withheld in-band error object; the request-identifier header names a confidential route may publish; the body with its ceiling key set to another ceiling | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Decode`, `Config.Validate`, `Config.Published`, `RetainedError`, `RequestIDHeader`, `Target.ExpectedModel`, `ReleaseBodyAt`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
 | Load | `internal/loadgen` | schedule, pacer, SSE client with the Hypertext Transfer Protocol (HTTP) version 1.1 pin, outcome classification, per-request status, header, peer and protocol records, the credential header and literal body per target, the Messages stream adapter, retained header values kept apart from the record, the pilot and release tripwires, the release ladder with its drains and per-step verdicts, the dispatch and completion hooks, client gate, loopback canary | §2, §3; SPEC-HOSTED §3, §5, §9; HA3 points 2, 5, 15 and 16 | `BuildSchedule`, `BuildLadder`, `Run`, `NewTransport`, `StartCanary`, `SummarizeCanary`, `CPUMeasured` | request-body, stream-hardening, capture, ladder, hook and gate units; canary oracle; AC1 to AC2d |
 | | `internal/sse` | SSE framing for the client, the recovery probes and naivesweep | §3 | `SplitLines`, `Events` | a unit per grammar case |
 | | `internal/histo` | the pinned HdrHistogram wrapper; `RecordValue` only, and a test fails the suite if a correction API appears | §3 | `New`, `H.Record`, `H.Summarize` | the correction-API ban; AC1 oracles |
@@ -433,7 +433,7 @@ The diagram predates the hosted packages, which the table lists.
 | Output | `internal/report` | the report pairs for a run and a campaign; the hosted report without SLO fields; a hosted run's pair from its manifest and attempts file; the paired pilot report; the release cell report with G2 per step; the per-step tables with their intervals, finish-reason sub-lines, throughput, curves and quantile refusals, latency and token distributions, gap histograms and signals, the drift split of a frame, the window-close comparison, a route page's `model_mismatch` lines, and the index table | §2 to §5, §7; SPEC-HOSTED §4, §7 to §9, HA2 §8, HA3 points 8, 12, 13 and 16 | `Generate`, `GenerateCampaign`, `FromRun`, `WriteHostedPair`, `GeneratePilot`, `NewStepTables`, `NewIndex`, `DocsOf`, `CompareWindowClose` | renderer units; AC6 field assertions; byte-for-byte replay; hand-computed interval oracles; the forbidden-string test |
 | | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
 | Hosted | `internal/probe` | the pre-run probe: Domain Name System (DNS) resolution, the Transport Layer Security (TLS) handshake, one request, the response shape, the start gate; the release ceiling check, a record's results re-derived from its requests, the ceiling choice across a model's hosts with a host left out on its records' reported-model fault, the values a probe record withholds, and the reported-model fault of a route's own records | SPEC-HOSTED §2, §5; HA3 points 7 and 15 | `Run`, `RunRelease`, `ReleaseRecord.Verify`, `ChooseCeiling`, `ModelFault`, `ReleaseRecord.Expected`, `LengthValue`, `Gate`, `Write`, `Retains`, `Exposed`, `ExposedByMarking`, `WriteRetained` | an httptest server per shape and failure |
-| | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound; the release ceiling rule, and the check of a published verdict against the configuration's limits | SPEC-HOSTED HA2 §3; HA3 points 6 and 15 | `Create`, `Open`, `Ledger.Admit`, `Ledger.Settle`, `CeilingRule`, `CheckPublished`, `State.Covers`, `State.ReservationUSD` | chain, cap and settlement units |
+| | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound, bound to one open line once `Bind` is called; the release ceiling rule, and the check of a published verdict against the configuration's limits | SPEC-HOSTED HA2 §3; HA3 points 6 and 15 | `Create`, `Open`, `Ledger.Bind`, `Ledger.Admit`, `Ledger.Settle`, `CeilingRule`, `CheckPublished`, `State.Covers`, `State.ReservationUSD` | chain, cap and settlement units |
 | | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the release publication record | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadWindowClose`, `LoadOperator`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `LoadPublication`, `Publication.Check` | round-trip, hash and refusal units |
 | | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
 | | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
@@ -512,8 +512,8 @@ hosted-G6 ([The release runner](#the-release-runner)):
 | Ceiling rule | each step's nominal demand at most half of every recorded rate, token, concurrency, daily and spend-window limit; the monthly cap and the route's ledger cap cover the twelve cells, re-runs and probes; the auto-reload threshold covers the costliest cell | route start | a step is excluded with its binding limit named; a route with no admitted step refuses to start | `admission.CeilingRule`, `newRoute` |
 | Open-file limit | soft limit at least 65,536 | route start | refusal to start | `checkOpenFiles` |
 | Balance command | one is given and parses | route start | refusal to start; a release manifest without its start balance record is refused | `ParseBalanceCommand`, `evidence.NewManifest` |
-| Frozen inputs | the schedule froze this route's configuration file and host group, and this ledger, by their SHA-256 (256-bit Secure Hash Algorithm) hashes | route start | refusal to start | `checkFrozen`, `checkLedger` |
-| Ceiling records | one record per host of the route's model at 512, and at 1,024 when any host failed at 512, each bound to the request it checked, with its results re-derived from its requests; another host whose records carry a reported-model fault is left out of the choice, and its records are then neither required at a ceiling nor checked for the start gate or the input bound | route start | refusal to start | `readCeilingProbes`, `ReleaseRecord.Verify`, `probe.ChooseCeiling` |
+| Frozen inputs | the schedule froze this route's configuration as published and host group, and this ledger, by their SHA-256 (256-bit Secure Hash Algorithm) hashes, and at each cell the ledger still has the frozen open line, its first | route start; each cell's ledger reads | refusal to start; at a cell, the cell is labelled interrupted and `run` exits 1 | `checkFrozen`, `checkLedger`, `Ledger.Bind`, `ledgerEntries` |
+| Ceiling records | one record per host of the route's model at 512, and at 1,024 when any host failed at 512, each bound to the request it checked and admitted in the ledger the schedule froze, with its results re-derived from its requests; another host whose records carry a reported-model fault is left out of the choice, and its records are then neither required at a ceiling nor checked for the start gate or the input bound | route start | refusal to start | `readCeilingProbes`, `ReleaseRecord.Verify`, `probe.ChooseCeiling` |
 | Reported model at the check | the route's own ceiling-check records expect the configuration's expected identifier and report no other, and some response reported a recorded `target.reported_model` | the ceiling check; route start | `ceiling-check` prints a `REFUSED` line and exits 2 where its record reports an identifier with such a fault; `run` refuses to start | `modelRefusal`, `readCeilingProbes`, `probe.ModelFault` |
 | Ledger prices | the ledger's highest price at the cell bounds and at the ceiling-check bounds covers the ceiling rule's verdict | route start | refusal to start | `State.Covers` |
 | Clock offset | at most 60 s | cell start | the route stops; the cell is retained and labelled | `runCell` |
@@ -674,7 +674,8 @@ admission ledger before it is sent: `cmd/percentes-pilot` runs the
 descriptive pilot of SPEC-HOSTED amendment HA2 (two endpoints, one task,
 six paired sessions), and `cmd/percentes-release` runs one route of a
 release under amendment HA3 ([The release runner](#the-release-runner)).
-`cmd/percentes` refuses a hosted target before any setup or request.
+`cmd/percentes` and `cmd/percentes-campaign` refuse a hosted target
+before any setup or request.
 `run.CheckConfig` makes `cmd/percentes` and `cmd/percentes-campaign`
 refuse a pilot configuration, and any target that carries a literal body,
 before any setup.
@@ -755,13 +756,13 @@ before any setup.
 
 | File | Contents | Written by |
 |---|---|---|
-| `attempts.jsonl` | one JSON object per scheduled request, in index order: the times from the run epoch (intended, dispatch, first content event, terminal event), the outcome and error class, the protocol and HTTP status, the response headers `target.response_headers` allows and the first `Retry-After` among them (a header `target.retained_headers` names carries the stand-in `[retained]` here and its values in the frame store), the redacted error text, the peer address and whether the connection was reused, the content-event count, the usage object (the stream's usage objects merged, each later non-null field laid over the earlier ones) and completion token count where the stream carried them, the finish reason, the reported model and any mismatch, the system fingerprint, the first in-band error object, the unknown-event count, whether reasoning arrived, whether a refusal field carried text and its length where the shape names one, the scorer's verdict where the request had a label, and the run's invalid reasons repeated on every record. Outside the release profile a hosted record also carries the visible answer. | `evidence.WriteRun` |
-| `frames.jsonl` | per request, every read of a 200 body with its return time, up to 8 MiB per request, or the first 4,096 bytes of a non-200 body, read for at most 1 s after the status; the values of the retained headers; credentials masked; under a release route whose `target.retention.model_output` is `none`, no read of a 200 body, its byte count added to `dropped_bytes` | `evidence.WriteRunFrames`, into a directory named by the run epoch under `--frames` |
+| `attempts.jsonl` | one JSON object per scheduled request, in index order: the times from the run epoch (intended, dispatch, first content event, terminal event), the outcome and error class, the protocol and HTTP status, the response headers `target.response_headers` allows and the first `Retry-After` among them (a header `target.retained_headers` names carries the stand-in `[retained]` here and its values in the frame store), the redacted error text, the peer address and whether the connection was reused, the content-event count, the usage object (the stream's usage objects merged, each later non-null field laid over the earlier ones) and completion token count where the stream carried them, the finish reason, the reported model and any mismatch, the system fingerprint, the first in-band error object (on a target with a confidential limit, the stand-in `config.RetainedError` gives, with the object's SHA-256 in `stream_error_sha256` and its length in `stream_error_bytes`: the object with its `type` string alone, `{}` for an object without one, or `[retained]` for text that is not an object), the unknown-event count, whether reasoning arrived, whether a refusal field carried text and its length where the shape names one, the scorer's verdict where the request had a label, and the run's invalid reasons repeated on every record. Outside the release profile a hosted record also carries the visible answer. | `evidence.WriteRun` |
+| `frames.jsonl` | per request, every read of a 200 body with its return time, up to 8 MiB per request, or the first 4,096 bytes of a non-200 body, read for at most 1 s after the status; the values of the retained headers; on a target with a confidential limit, each request's in-band error object (`stream_error`); credentials masked; under a release route whose `target.retention.model_output` is `none`, no read of a 200 body, its byte count added to `dropped_bytes` | `evidence.WriteRunFrames`, into a directory named by the run epoch under `--frames` |
 | `clock.json`, `status-start.json`, `status-end.json` | the command, its output verbatim, exit code and timing; for the clock, the parsed offset and its flag | `evidence.WriteClock`, `evidence.WriteStatus` |
 | `refresh.json` | release cells only: the operator-records refresh command's run at the cell's start, with its output verbatim, exit code and timing, and the limits it printed; for a route with a confidential limit the output is `[retained]` and that limit carries no value, and the record as run is kept beside the cell's frames | `evidence.ReadStatus`, `evidence.PublishedRefresh`, `evidence.WriteStatus`, `evidence.WriteRetainedRefresh` |
 | `balance-start.json`, `balance-end.json` | release cells only: the operator's account balance or quota command, run like the status command, with its output verbatim, exit code and timing at the cell's start and at its end; the start record adds `check`, the printed amount against the cell's reservation (`sufficient`, `insufficient`, `unavailable` or `check_failed`) | `evidence.ReadBalance`, `evidence.CheckBalance`, `evidence.WriteStatus` |
-| `probe.json` | the probe record: the exchange (DNS, connects, TLS, peer, protocol, status, allowed headers, a non-200 body), the response shape, the findings against the configured shape and the start decision; a header `target.retained_headers` names carries `[retained]`, and the limits body is a hash where `target.probe.limits_retained` is set | `probe.Write` |
-| `probe-retained.json` | what a probe or ceiling-check record withholds: the retained headers' values in each request and the limits read, and the limits body; beside a cell's frames, or under `ceiling-check --frames` | `probe.WriteRetained` |
+| `probe.json` | the probe record: the exchange (DNS, connects, TLS, peer, protocol, status, allowed headers, a non-200 body), the response shape, the findings against the configured shape and the start decision; a header `target.retained_headers` names carries `[retained]`, and the limits body is a hash where `target.probe.limits_retained` is set; on a target with a confidential limit a non-200 body is its SHA-256 and length (`sha256`, `bytes`), and the response shape's in-band error is the stand-in with `error_sha256` and `error_bytes` | `probe.Write` |
+| `probe-retained.json` | what a probe or ceiling-check record withholds: the retained headers' values in each request and the limits read, the limits body, and on a target with a confidential limit each non-200 body and in-band error object (`stream_error`); beside a cell's frames, or under `ceiling-check --frames` | `probe.WriteRetained` |
 | `manifest.json` | the build revision and whether the tree was modified; the capture limits; the configuration file by hash, the file as published under the release profile; the endpoint as configured and as observed (requested, expected and reported models, mismatches, protocols, the parameters recorded as not applied); the client host; the clock and status records, and under the release profile the balance records; the operator file and its records by hash; the ledger's hash and line count; every artifact and the frame store by hash; validity and its reasons; the G2 and G6 gates, per ladder step under the release profile; the release cell record ([The cell's files and report](#the-cells-files-and-report)); and the replay record the report pair needs, absent for a release cell, whose pair reads its cell record | `evidence.NewManifest` |
 | `operator.json`, `records/` | copies of the operator file and its records as read at the cell's start, beside the frame store | `Operator.WriteCopies` |
 | `config.yaml` | release cells of a route with a confidential limit: the configuration as loaded, beside the cell's frames, readable by its owner only | `evidence.WriteConfigCopy` |
@@ -928,10 +929,13 @@ the route at 0.5 requests per second in the ceiling rule.
 provider's terms keep unpublished, in the form of `response_headers`; it
 may not cover `Retry-After`, whose values the tables print. On a target
 with a confidential limit it must cover every `response_headers` entry
-that ends in `*` or contains `ratelimit`, in upper or lower case, and
-`probe.limits_retained` must be set wherever `probe.limits_url` is,
-because a provider can echo the limit in either
-(`validateConfidentialRetention`).
+except two kinds written in full, with no `*`: `Retry-After` in any
+case, and a request identifier, a name that ends in `requestid` once
+case, `-` and `_` are ignored and contains no `ratelimit`
+(`config.RequestIDHeader`: `X-Request-Id`, `x-amzn-RequestId`).
+`probe.limits_retained` must also be set wherever `probe.limits_url`
+is, because a provider can echo the limit in any header or in the
+limits body (`validateConfidentialRetention`).
 `not_applied` lists the body parameters of SPEC-HOSTED HA3 point 3 that
 the target rejects (`stream_options`, `reasoning_effort` or
 `reasoning_format` on a chat-completions target; `thinking` or
@@ -961,7 +965,13 @@ limit's value replaced by the quoted string `"[retained]"` and every
 other byte as written. It refuses a value that is not a plain scalar
 written in `target.limits`, a comment inside that limit, and a comment
 or string anywhere in the file, a key among them, that carries the
-value's text. The freeze commits that file; every command reads the file
+value as a number of its own. The forms looked for are the value as
+written and in decimal, each also with its whole part grouped in threes
+by a comma, a space, a no-break space, a thin space or a narrow no-break
+space (`9,876,543.25`). A form inside a longer number does not count
+(`12,000` for a value of 12), and runs of 32 or more hexadecimal digits,
+such as a SHA-256 hash or a commit identifier, and `YYYY-MM-DD` dates
+are skipped (`valueForms`, `carries`). The freeze commits that file; every command reads the file
 as loaded. `configs/release.reference.yaml` is one route with
 placeholders for the system text, the limit snapshots and the caps; its
 comments give the form of a balance ruling, which it does not carry. The
@@ -991,13 +1001,18 @@ refuses any byte that differs from what the file's own input derives.
 --config FILE ... --ledger FILE --schedule FILE` writes it for the routes
 whose configurations are given, prints the counter, the ledger's hash and
 each route's offset and first cell, and never replaces an existing file.
-The file also freezes the run's inputs: per route, the SHA-256 of its
-configuration file as loaded and its host group (`configs`), and the
-SHA-256 of the ledger's open line, its first (`ledger_sha256`).
+The file also freezes the run's inputs: per route, the SHA-256 of the
+configuration as published (`frozenConfig`, through `Config.Published`)
+and its host group (`configs`), and the SHA-256 of the ledger's open
+line, its first (`ledger_sha256`). For a route with no confidential
+limit the file as published is the file as loaded.
 `schedule` refuses routes whose host groups disagree and a ledger that
 does not cap every route as its configuration does (`State.CheckRelease`),
-and `run` refuses a route whose configuration file, host group or ledger
-differs from the frozen one (`checkFrozen`, `checkLedger`).
+and `run` refuses a route whose configuration as published, host group
+or ledger differs from the frozen one (`checkFrozen`, `checkLedger`). A
+configuration that differs from the frozen one only in a confidential
+limit's value has the same file as published, so `checkFrozen` accepts
+it.
 
 ### Before the first cell
 
@@ -1005,15 +1020,15 @@ Four commands run before the window: `ledger create` once, then
 `ledger price` once per route, `ceiling-check` once per route at each
 ceiling checked, and `schedule` once. `ceiling-check` admits its
 requests in the ledger at the prices `ledger price` recorded, and
-`schedule` reads the ledger and freezes each configuration file, which
-must carry the ceiling the checks choose. `percentes-release run` reads
+`schedule` reads the ledger and freezes each configuration as
+published, which must carry the ceiling the checks choose. `percentes-release run` reads
 their outputs and refuses to start on any of these.
 
 | `run` refuses to start when | Checked by |
 |---|---|
 | the profile is not `release` | `newRoute` |
 | the schedule does not name the route, or does not re-derive from its own input | `schedule.Load`, `Schedule.Runs` |
-| the schedule freezes no configuration of the route, or froze another host group or another SHA-256 of the configuration file | `checkFrozen` |
+| the schedule freezes no configuration of the route, or froze another host group or another SHA-256 of the configuration as published | `checkFrozen` |
 | the operator file fails to load, the build has no version-control revision, or the tree was modified and no `source_diff` record is given | `evidence.LoadOperator`, `evidence.CheckSource` |
 | the open-file soft limit is below 65,536 | `checkOpenFiles` |
 | the frame root is inside the source tree | `evidence.CheckFramesRoot` |
@@ -1021,7 +1036,7 @@ their outputs and refuses to start on any of these.
 | the schedule freezes no ledger, or the ledger's open line has another SHA-256 than the one the schedule froze | `checkLedger` |
 | the ledger's caps differ from the configuration's, the ledger holds no price line for the route, or its prices do not cover the ceiling rule's verdict at the cell bounds and at the ceiling-check bounds | `State.CheckRelease`, `routePrice`, `State.Covers` |
 | the ceiling rule admits no step | `newRoute`, after `admission.CeilingRule` |
-| no `--ceiling-probe` record is given; a record is of a route outside the model's host group, or carries another model or byte cap; a record of this route carries another adapter, endpoint or expected model identifier, a body hash other than that of `target.body` at the record's ceiling, or a value the route withholds; another host's record carries a value its own confidential markings withhold; a record's stored results differ from the ones its requests give; a record of a host not left out of the choice was blocked at the start gate or failed its input bound; a host's record at a needed ceiling is missing; the records exclude the model or choose a ceiling other than the configuration's; or the route's own records report a model identifier other than the expected one, or none reports a recorded `target.reported_model` | `readCeilingProbes`, `ReleaseRecord.Verify`, `probe.ChooseCeiling`, `probe.Exposed`, `probe.ExposedByMarking`, `probe.ModelFault` |
+| no `--ceiling-probe` record is given; a record is of a route outside the model's host group, or carries another model or byte cap, or names in `ledger_sha256` a ledger other than the one the schedule froze; a record of this route carries another adapter, endpoint or expected model identifier, a body hash other than that of `target.body` at the record's ceiling, or a value the route withholds; another host's record carries a value its own confidential markings withhold; a record's stored results differ from the ones its requests give; a record of a host not left out of the choice was blocked at the start gate or failed its input bound; a host's record at a needed ceiling is missing; the records exclude the model or choose a ceiling other than the configuration's; or the route's own records report a model identifier other than the expected one, or none reports a recorded `target.reported_model` | `readCeilingProbes`, `ReleaseRecord.Verify`, `probe.ChooseCeiling`, `probe.Exposed`, `probe.ExposedByMarking`, `probe.ModelFault` |
 | `--byte-cap` is missing, or `--account-created` is not a date | `newRoute` |
 | the env file does not set the key | `loadKey` |
 
@@ -1031,7 +1046,11 @@ their outputs and refuses to start on any of these.
   its name, and the `global_usd` that every route's file carries with
   the same value. A release ledger caps liability only. The schedule
   freezes the SHA-256 of its open line, and `run` refuses any other
-  ledger. `ledger price
+  ledger. `run` then binds the ledger to that hash (`Ledger.Bind`). Each
+  later read at a cell (the limits check through `ledgerEntries`, the
+  reservation for the balance check, the admission and the settlement)
+  refuses a file at the path whose open line has another SHA-256; the
+  cell is labelled interrupted and `run` exits 1. `ledger price
   --ledger FILE --config FILE --input USD --output USD --source URL
   --retrieved DATE` records a route's list prices at two token bounds:
   the shape's input bound with the configured ceiling, the cell bounds,
@@ -1092,12 +1111,16 @@ their outputs and refuses to start on any of these.
   a remaining host. `percentes-release ceiling-check --config FILE --env
   FILE --ledger FILE --out DIR --byte-cap N [--frames DIR] [--snapshots
   DIR]` runs the check for one route at its configured ceiling: ten
-  Shape S texts, admitted in the ledger at the input bound and the
-  1,024-token ceiling before the first is sent and settled with the
-  count sent, written to
+  Shape S texts, admitted at the input bound and the 1,024-token
+  ceiling before the first is sent and settled with the count sent,
+  both in the ledger whose open line the command read first
+  (`Ledger.Bind`), and written to
   `ceiling-<UTC time>/<route>-<ceiling>/probe.json` under `--out` also
-  when the check fails or is blocked; `--frames` is required where the
-  route withholds probe values, and the withheld values go to
+  when the check fails or is blocked, with that open line's SHA-256 in
+  `ledger_sha256`. `--ledger` is therefore the release ledger the
+  schedule will freeze. `--frames` is required where the route
+  withholds probe values (`probe.Retains`), as every route with a
+  confidential limit does, and the withheld values go to
   `probe-retained.json` under it. It exits 0 when the ceiling and
   input-bound checks pass and 2 otherwise. Where the record reports a
   model identifier with a fault on which `run` refuses the route
@@ -1107,8 +1130,8 @@ their outputs and refuses to start on any of these.
   identifier is left to `run`, which reads it beside the route's other
   records. The runner reads the records from `--ceiling-probe`, one flag
   per record of every host of the model, and binds each to the request
-  it checked: its host's model and the `--byte-cap`, and for this
-  route's records also its adapter, redacted endpoint and expected model
+  it checked: its host's model, the `--byte-cap` and the ledger the
+  schedule froze (`ledger_sha256`), and for this route's records also its adapter, redacted endpoint and expected model
   identifier, which must be the configuration's, and the hash of
   `target.body` with the adapter's ceiling key set to the record's
   ceiling (`config.ReleaseBodyAt`). The 512 record of a route that runs
@@ -1121,11 +1144,14 @@ their outputs and refuses to start on any of these.
   input-bound results equal to the ones the requests give at the pinned
   input bound. This route's records are gated by its target, another
   host's by the setup-defect statuses alone. It refuses a record of this
-  route that carries a value the route withholds (`probe.Exposed`), and
+  route that carries a value the route withholds (`probe.Exposed`; on
+  a route with a confidential limit, a kept non-200 body or in-band
+  error text among them), and
   a record of another host that carries a value its own confidential
   markings withhold (`probe.ExposedByMarking`: where a snapshot in the
-  record is marked confidential, every header whose name contains
-  `ratelimit` and the limits body), and copies the records into each
+  record is marked confidential, every header other than `Retry-After`
+  and a request identifier, the limits body, each non-200 body and each
+  in-band error object), and copies the records into each
   cell's directory. A confidential limit's snapshot in a record carries
   no value. The runner also refuses the route where its own records report a
   model identifier other than the expected one, worded
@@ -1158,7 +1184,8 @@ order: the dimension, and a positive `value` or an `unavailable` reason
 route. `limitsStop` (`close.go`) applies the ceiling rule again with the
 values read in place of the recorded ones, a limit read as unavailable
 keeping its recorded value, to the ladder as the route started. It reads
-the ledger again for the route's newest recorded price, the price line
+the ledger again, bound to the open line the schedule froze, for the
+route's newest recorded price, the price line
 with the latest retrieval date (`routePrice`), so a price recorded during
 the window is tested against the spend limits. Where the rule no longer
 admits a step the route runs, the route stops before admission, the
@@ -1354,7 +1381,15 @@ route must carry the same ceiling-rule verdict, checked against the
 configuration's limits (`admission.CheckPublished`), and the same
 ceiling choice and ceiling-check records. Two routes given to `pages`
 that name each other as hosts of one model must carry the same choice
-and records too (`sameCeiling`). One counted attempt per scheduled cell
+and records too (`sameCeiling`). A route whose cells hold only the run
+records (`cell.json`) of missed or interrupted attempts, with no
+manifest, reads with no verdict: it gets no page and no index row, and
+`pages` prints `<route>: no cell with a manifest.json, <n> with a run
+record only; no page`. Where either route of such a pair has
+no manifest, the two routes' ceilings must agree instead, each taken
+from its manifests' choice or, with none, from its configuration's
+`release.shape.ceiling_tokens` (`ranAt`). A route with no cell record
+at all is refused. One counted attempt per scheduled cell
 enters the route's page; labelled, missed and interrupted attempts are
 counted in the printed summary and left out, and a `model_mismatch` attempt's identifiers are read from
 its manifest for the page's mismatch lines. It then writes `index.md` and `index.json`, and per route
@@ -1374,8 +1409,8 @@ and its replication pack; every email and form that described the work
 to a provider before the notices; every pre-release copy with the
 routes it withheld; and the weekdays the notice windows do not count.
 The command rebuilds the pages from the cells, with the refusals of
-`pages`, takes each route's
-duties from its configuration (`naming.permission_required`; a
+`pages`, takes each given route's
+duties, a route with no page among them, from its configuration (`naming.permission_required`; a
 replication pack where the endpoint host ends in `.amazonaws.com`) and
 refuses, exiting 2 with every problem named, unless the record matches
 the cells and the pages on disk, every route has its notice with at
@@ -1411,10 +1446,14 @@ confidential limit, the configuration as loaded (`config.yaml`) and the
 refresh record as run stay beside each cell's frames and in the
 window-close copies. The published configuration, refresh records and
 limit snapshots carry no value. Such a route's configuration loads only
-where it withholds every recorded header that can match a name
-containing `ratelimit`, and the limits body where it reads a limits URL
+where it withholds every recorded header other than `Retry-After` and a
+request identifier, and the limits body where it reads a limits URL
 ([The release profile](#the-release-profile)), so such a header or body
-that echoes the value stays in the retained store. Per route,
+that echoes the value stays in the retained store. On such a route the
+in-band error object of each request, in the attempts file and in the
+probe records, and each non-200 body of the probe records publish only
+as a stand-in with the text's SHA-256 and length; the text is in the
+frame store and in `probe-retained.json`. Per route,
 `window-close.json` publishes and its record copies stay under
 `--frames`. `percentes --check-release` refuses a cell whose named files
 are missing or differ from their recorded hashes.
@@ -1637,7 +1676,7 @@ The evidence files of a hosted run ([Hosted runs](#hosted-runs-and-the-evidence-
 
 | File or field | Computed in | SPEC |
 |---|---|---|
-| `attempts.jsonl`: the times, outcome, class, status, allowed headers, `retry_after`, `peer_addr`, `conn_reused`, `content_events`, `completion_tokens`, `usage`, `finish_reason`, `reported_model`, `model_mismatch`, `system_fingerprint`, `stream_error`, `unknown_events`, `reasoning`, `refusal` and `refusal_bytes` of each record | `loadgen.execute` and `recordChunk`, the usage through `mergeUsage`, copied by `evidence.Records` | SPEC-HOSTED §9 |
+| `attempts.jsonl`: the times, outcome, class, status, allowed headers, `retry_after`, `peer_addr`, `conn_reused`, `content_events`, `completion_tokens`, `usage`, `finish_reason`, `reported_model`, `model_mismatch`, `system_fingerprint`, `stream_error`, `stream_error_sha256`, `stream_error_bytes`, `unknown_events`, `reasoning`, `refusal` and `refusal_bytes` of each record | `loadgen.execute` and `recordChunk`, the usage through `mergeUsage`, copied by `evidence.Records`, which on a target with a confidential limit writes `config.RetainedError`'s stand-in to `stream_error` with the text's SHA-256 and length | SPEC-HOSTED §9 |
 | `attempts.jsonl`: `score` | `score.Scorer.Score`, through `evidence.Records` | SPEC-HOSTED HA2 §5 |
 | `attempts.jsonl`: `run_failures` | the command's invalid reasons, repeated on every record | SPEC-HOSTED §7 |
 | `frames.jsonl` | `evidence.FrameRecords`, from the timed reads `loadgen.execute` kept | SPEC-HOSTED §9 |
@@ -1658,8 +1697,9 @@ A release cell ([The release runner](#the-release-runner)):
 | `window-close.json`; `routes/<route>.json`: `window_close` | `windowClose`, `evidence.NewWindowClose`; `report.CompareWindowClose` | SPEC-HOSTED §4 |
 | `manifest.json`: `endpoint.expected_model`; the `model_mismatch` label | `Target.ExpectedModel`; `cellOutcome`, checked by `evidence.CheckRelease` | SPEC-HOSTED §2 |
 | a ceiling-check record's `expected_model` | `probe.RunRelease`, from `Target.ExpectedModel`; read by `ReleaseRecord.Expected` | SPEC-HOSTED §2 |
+| a ceiling-check record's `ledger_sha256` | `sendCeiling`, from `Ledger.Bound`; compared with the schedule's `ledger_sha256` by `readCeilingProbes` | HA3 point 9 |
 | a ceiling-check record's `ceiling_check` and `input_bound_check` results | `probe.RunRelease`; re-derived from the record's requests by `ReleaseRecord.Verify` when `run` reads it | HA3 point 7 |
-| `schedule.json`: `configs`, `ledger_sha256` | `scheduleCmd` through `frozenConfig` and the ledger's `State.OpenSHA256`; checked at route start by `checkFrozen` and `checkLedger` | HA3 point 9 |
+| `schedule.json`: `configs`, `ledger_sha256` | `scheduleCmd` through `frozenConfig` (the configuration as published, from `Config.Published`) and the ledger's `State.OpenSHA256`; checked at route start by `checkFrozen` and `checkLedger` | HA3 point 9 |
 | `routes/<route>.json`: `model_mismatch_cells` | `readRouteCells`, from each `model_mismatch` manifest's endpoint record; the text line by `StepTables.Text` | SPEC-HOSTED §2 |
 | the configuration as published, and the manifest's configuration hash | `Config.Published`, through `publicConfigCmd` and `evidence.NewManifest` | HA3 point 15 |
 | `probe-retained.json` | `probe.Withheld`, `probe.WriteRetained` | HA3 point 15 |
@@ -1841,7 +1881,10 @@ mode or a diagram.
   to its start t.
 - **Ledger**: the admission ledger, the hash-chained JSONL file in which
   every inference request to a hosted route is reserved before it is sent
-  and settled afterwards, under the caps on its first line.
+  and settled afterwards, under the caps on its first line. A release's
+  schedule freezes the SHA-256 of that line; a ceiling check names it in
+  its record, and a route's process refuses a file whose first line has
+  another hash, at its start and at each cell.
 - **Manifest**: `manifest.json`, the hashes and records of one hosted run
   (SPEC-HOSTED §9).
 - **Node-loss-representative**: the label a black-hole run keeps when both
