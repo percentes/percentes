@@ -1586,6 +1586,8 @@ It builds the pages as `pages` does, with its refusals, and passes the
 route's page files, at `pages/routes/<route>.txt` and
 `pages/routes/<route>.json`, and its cell manifests, at
 `out/<route>/<cell>-a<attempt>/manifest.json`, to `evidence.BuildPack`.
+It refuses a route with a page and no window-close record, which the
+page prints once `run` writes it.
 The pack is a tar archive file holding those files and
 `inventory.json`, which names the route and each file by path and
 SHA-256 in path order. Entries are in name order, each a regular file

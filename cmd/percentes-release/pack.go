@@ -23,7 +23,8 @@ const (
 // (SPEC-HOSTED HA3 point 14): the route's page files and cell manifests,
 // built from the cells under --out as pages builds them, with
 // inventory.json naming each by SHA-256 (evidence.BuildPack). The same
-// cells give the same bytes.
+// cells give the same bytes. A route with a page needs its window-close
+// record, which its page prints.
 func packCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("pack", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -69,6 +70,11 @@ func packCmd(args []string) (int, error) {
 	b, ok := packs[*route]
 	if !ok {
 		return exitError, fmt.Errorf("pack: --route %s is not the route of any --config", *route)
+	}
+	for i, r := range rp.routes {
+		if r.Config.Target.Name == *route && rp.recs[i].verdict != nil && rp.recs[i].close == nil {
+			return exitError, fmt.Errorf("pack: route %s has a page and no %s; run writes it once no cell is left", *route, evidence.WindowCloseFile)
+		}
 	}
 	if err := replaceFile(*packPath, b); err != nil {
 		return exitError, err

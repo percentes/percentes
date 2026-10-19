@@ -143,8 +143,9 @@ func publication(t *testing.T, out, pages string, packs map[string][]byte, edit 
 // recipient or account identifier, then passes and prints the providers
 // told before the notices, and refuses the page edited or a record with
 // a response the page lacks; pack writes groq's page files and manifests with
-// their inventory, the same bytes twice, and refuses an unknown route;
-// pages runs with no record and no window-close record; and the check
+// their inventory, the same bytes twice, and refuses an unknown route
+// and groq before its window-close record; pages runs with no record and
+// no window-close record; and the check
 // refuses, exiting 2, a paged route with no window-close record, a
 // record that lacks the naming permission the configuration requires,
 // misses responses, holds the notice's account in a correction, has an
@@ -206,8 +207,17 @@ func TestPublishCheck(t *testing.T) {
 		return code, text
 	}
 
-	if code, text := check(publication(t, groq.out, pages, groqPack(), nil)); code != exitAdverse ||
-		!strings.Contains(text, "NOT READY to publish: evidence: publication refused: route groq: window close: no window-close.json; a route with a page needs its window-close record\n") {
+	unclosed := filepath.Join(t.TempDir(), "groq.tar")
+	if code, err := packCmd(append([]string{"--route", "groq", "--pack", unclosed}, release...)); code != exitError || err == nil ||
+		err.Error() != "pack: route groq has a page and no window-close.json; run writes it once no cell is left" {
+		t.Fatalf("pack with no window-close record: exit %d: %v", code, err)
+	}
+	if _, err := os.Stat(unclosed); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("pack with no window-close record wrote %s: %v", unclosed, err)
+	}
+	if code, text := check(publication(t, groq.out, pages, map[string][]byte{"groq": []byte("no pack")}, nil)); code != exitAdverse ||
+		text != "NOT READY to publish: evidence: publication refused: route groq: notice.pack: groq-pack.tar is not the evidence pack the route's pages and manifests give (percentes-release pack); "+
+			"route groq: window close: no window-close.json; a route with a page needs its window-close record\n" {
 		t.Fatalf("no window-close record: exit %d:\n%s", code, text)
 	}
 	closeRoute := func() {
