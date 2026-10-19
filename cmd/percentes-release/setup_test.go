@@ -168,7 +168,13 @@ func TestNewRouteRefusals(t *testing.T) {
 		}, "route groq at 512: endpoint https://api.groq.com/openai/v1/chat/completions, want https://api.example.test/openai/v1/chat/completions"},
 		{"body", func(t *testing.T, f *fixture) {
 			ceiling(t, f, with(f, "groq", func(r *probe.ReleaseRecord) { r.BodySHA256 = strings.Repeat("0", 64) }), pass(f, "baseten", 512, true))
-		}, "route groq at 512: body sha256 0000000000000000000000000000000000000000000000000000000000000000, want target.body's"},
+		}, "route groq at 512: body sha256 0000000000000000000000000000000000000000000000000000000000000000, want "},
+		{"body of the fallback's 512 check", func(t *testing.T, f *fixture) {
+			fallback(t, f.in.cfg)
+			at512 := pass(f, "groq", 512, false)
+			at512.BodySHA256 = strings.Repeat("1", 64)
+			ceiling(t, f, at512, pass(f, "groq", 1024, true), pass(f, "baseten", 512, true), pass(f, "baseten", 1024, true))
+		}, "route groq at 512: body sha256 1111111111111111111111111111111111111111111111111111111111111111, want "},
 		{"endpoint of the fallback's 512 check", func(t *testing.T, f *fixture) {
 			fallback(t, f.in.cfg)
 			at512 := pass(f, "groq", 512, false)

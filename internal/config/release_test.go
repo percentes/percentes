@@ -564,6 +564,41 @@ func TestReleaseBody(t *testing.T) {
 	}
 }
 
+// ReleaseBodyAt changes the top-level ceiling key's number and no other
+// byte; the reference's body at 1024 differs from its own in that number.
+func TestReleaseBodyAt(t *testing.T) {
+	c := loadRef(t, releaseRef)
+	const at512, at1024 = `"max_completion_tokens": 512,`, `"max_completion_tokens": 1024,`
+	if got, err := ReleaseBodyAt(c.Target.Body, c.Target.Adapter, 1024); err != nil || strings.Count(c.Target.Body, at512) != 1 ||
+		got != strings.Replace(c.Target.Body, at512, at1024, 1) {
+		t.Fatalf("reference at 1024: %v\n%s", err, got)
+	}
+	if got, err := ReleaseBodyAt(c.Target.Body, c.Target.Adapter, 512); err != nil || got != c.Target.Body {
+		t.Fatalf("reference at 512: %v", err)
+	}
+	for _, tc := range []struct {
+		name, adapter, body, want string
+	}{
+		{"spaces kept", AdapterChatCompletions, `{ "max_tokens" :  512 , "stream":true}`, `{ "max_tokens" :  1024 , "stream":true}`},
+		{"last key", AdapterChatCompletions, `{"stream":true,"max_completion_tokens":512}`, `{"stream":true,"max_completion_tokens":1024}`},
+		{"nested key kept", AdapterMessages, `{"thinking":{"max_tokens":512},"max_tokens":512,"x":[512]}`, `{"thinking":{"max_tokens":512},"max_tokens":1024,"x":[512]}`},
+		{"key in a string kept", AdapterMessages, `{"system":"\"max_tokens\": 512","max_tokens":512}`, `{"system":"\"max_tokens\": 512","max_tokens":1024}`},
+		{"messages has one ceiling key", AdapterMessages, `{"max_completion_tokens":512,"max_tokens":512}`, `{"max_completion_tokens":512,"max_tokens":1024}`},
+		{"not an object", AdapterChatCompletions, `[512]`, "not a JSON object"},
+		{"no ceiling key", AdapterMessages, `{"stream":true}`, `one ceiling key of ["max_tokens"] required, got 0`},
+		{"both keys", AdapterChatCompletions, `{"max_tokens":512,"max_completion_tokens":512}`, `one ceiling key of ["max_tokens" "max_completion_tokens"] required, got 2`},
+		{"string ceiling", AdapterChatCompletions, `{"max_tokens":"512"}`, `ceiling key "max_tokens" is not a number`},
+	} {
+		got, err := ReleaseBodyAt(tc.body, tc.adapter, 1024)
+		if err != nil {
+			got = err.Error()
+		}
+		if got != tc.want {
+			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
+
 // The reference keeps model output under a Groq terms record; none
 // stops the frame store keeping it; each part of the record is required
 // under the release profile. A target with no retention keeps output.

@@ -340,11 +340,11 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 // record carries the host's model and byteCap, and the results its
 // requests give at the pinned input bound (probe.ReleaseRecord.Verify,
 // through this route's start gate for its own); this route's also carry
-// its adapter, endpoint and expected model id and none of the values the
-// route withholds (probe.Exposed), the one at the configured ceiling its
-// body's hash, and together no reported model id that keeps the
-// provider-model out (probe.ModelFault). Another host's records carry none
-// of the values their snapshots' confidential markings withhold
+// its adapter, endpoint and expected model id, the hash of its body at the
+// record's ceiling (config.ReleaseBodyAt) and none of the values the route
+// withholds (probe.Exposed), and together no reported model id that keeps
+// the provider-model out (probe.ModelFault). Another host's records carry
+// none of the values their snapshots' confidential markings withhold
 // (probe.ExposedByMarking), and another host whose records carry a model
 // fault is left out of the choice (probe.ChooseCeiling).
 func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.CeilingChoice, map[string][]byte, error) {
@@ -357,8 +357,15 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.C
 	for _, h := range cfg.Release.OtherHosts {
 		hosts, models[h.Route] = append(hosts, h.Route), h.Model
 	}
-	sum := sha256.Sum256([]byte(t.Body))
-	body := hex.EncodeToString(sum[:])
+	bodies := map[int]string{}
+	for _, c := range config.PinnedReleaseCeilings {
+		b, err := config.ReleaseBodyAt(t.Body, t.Adapter, c)
+		if err != nil {
+			return none, nil, fmt.Errorf("run: target.body at %d: %w", c, err)
+		}
+		sum := sha256.Sum256([]byte(b))
+		bodies[c] = hex.EncodeToString(sum[:])
+	}
 	var recs, own []*probe.ReleaseRecord
 	copies := map[string][]byte{}
 	for _, f := range files {
@@ -388,8 +395,8 @@ func readCeilingProbes(cfg *config.Config, files []string, byteCap int) (probe.C
 			fault = fmt.Sprintf("adapter %q, want %q", rec.Adapter, t.Adapter)
 		case rec.EndpointURL != redact.URL(t.EndpointURL):
 			fault = fmt.Sprintf("endpoint %s, want %s", rec.EndpointURL, redact.URL(t.EndpointURL))
-		case rec.Ceiling.Ceiling == cfg.Release.Shape.CeilingTokens && rec.BodySHA256 != body:
-			fault = fmt.Sprintf("body sha256 %s, want target.body's %s", rec.BodySHA256, body)
+		case rec.BodySHA256 != bodies[rec.Ceiling.Ceiling]:
+			fault = fmt.Sprintf("body sha256 %s, want %s (target.body at ceiling %d)", rec.BodySHA256, bodies[rec.Ceiling.Ceiling], rec.Ceiling.Ceiling)
 		default:
 			if exposed := probe.Exposed(t, &rec); len(exposed) > 0 {
 				fault = "carries values the route withholds: " + strings.Join(exposed, ", ")

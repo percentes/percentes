@@ -591,6 +591,52 @@ func checkReleaseBody(body, adapter string, ceiling int) error {
 	return nil
 }
 
+// ReleaseBodyAt is body with its ceiling key's number replaced by ceiling,
+// every other byte kept: the body a configuration at that ceiling sends.
+func ReleaseBodyAt(body, adapter string, ceiling int) (string, error) {
+	keys := []string{"max_tokens"}
+	if adapter == AdapterChatCompletions {
+		keys = append(keys, "max_completion_tokens")
+	}
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.UseNumber()
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return "", errors.New("not a JSON object")
+	}
+	var out strings.Builder
+	last, found := 0, 0
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return "", err
+		}
+		if k, _ := tok.(string); !slices.Contains(keys, k) {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return "", err
+			}
+			continue
+		}
+		v, err := dec.Token()
+		if err != nil {
+			return "", err
+		}
+		n, ok := v.(json.Number)
+		if !ok {
+			return "", fmt.Errorf("ceiling key %q is not a number", tok)
+		}
+		end := int(dec.InputOffset())
+		out.WriteString(body[last : end-len(n)])
+		out.WriteString(fmt.Sprint(ceiling))
+		last, found = end, found+1
+	}
+	if found != 1 {
+		return "", fmt.Errorf("one ceiling key of %q required, got %d", keys, found)
+	}
+	out.WriteString(body[last:])
+	return out.String(), nil
+}
+
 // validateReleaseNotApplied refuses a not_applied entry that is not one
 // of the adapter's releaseParams, repeats another, or is a key target.body
 // sends.

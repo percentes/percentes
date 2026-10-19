@@ -224,12 +224,17 @@ func passedCeiling(cfg *config.Config, byteCap int) *probe.ReleaseRecord {
 }
 
 // hostCeiling is host route's ceiling check record at ceiling, passed or
-// not, of cfg's model at byteCap: cfg's request when route is cfg's, else
-// route's model from release.other_hosts, expected as requested. One that
-// did not pass has its last request stopped at the ceiling.
+// not, of cfg's model at byteCap: cfg's request with its body at ceiling
+// when route is cfg's, else route's model from release.other_hosts,
+// expected as requested. One that did not pass has its last request
+// stopped at the ceiling.
 func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pass bool) probe.ReleaseRecord {
 	rec := *passedCeiling(cfg, byteCap)
 	rec.Route, rec.Ceiling.Ceiling = route, ceiling
+	if body, err := config.ReleaseBodyAt(cfg.Target.Body, cfg.Target.Adapter, ceiling); err == nil && route == cfg.Target.Name {
+		sum := sha256.Sum256([]byte(body))
+		rec.BodySHA256 = hex.EncodeToString(sum[:])
+	}
 	for _, h := range cfg.Release.OtherHosts {
 		if h.Route == route {
 			rec.RequestedModel, rec.ExpectedModel = h.Model, h.Model
