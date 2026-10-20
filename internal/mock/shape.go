@@ -84,6 +84,10 @@ type Shape struct {
 	// credential header, or the request is refused with 401.
 	Key        string
 	AuthHeader string
+
+	// Model, when set, is the model id every response reports in place
+	// of the request's.
+	Model string
 }
 
 // NewShaped builds a server that answers in the form sh describes. Fault

@@ -498,6 +498,11 @@ func (c *Config) validateReleaseTarget(v *validator, t *Target) {
 			v.errf("%s.body: %v", field, err)
 		}
 	}
+	if t.Body != "" && t.ModelName != "" && CheckLiteralBody(t.Body) == nil {
+		if err := checkBodyModel(t.Body, t.ModelName); err != nil {
+			v.errf("%s.body: %v", field, err)
+		}
+	}
 	validateReleaseNotApplied(v, field, t)
 	validateResponseHeaders(v, field, t)
 	if !HeaderAllowed(t.ResponseHeaders, "Retry-After") {
@@ -593,6 +598,32 @@ func checkReleaseBody(body, adapter string, ceiling int) error {
 		}
 	}
 	return nil
+}
+
+// checkBodyModel reports why a literal body's top-level "model", where
+// the body has one, is not the string modelName.
+func checkBodyModel(body, modelName string) error {
+	var top map[string]json.RawMessage
+	if json.Unmarshal([]byte(body), &top) != nil {
+		return errors.New("not a JSON object")
+	}
+	raw, ok := top["model"]
+	if !ok {
+		return nil
+	}
+	if m, isString := jsonStringValue(raw); !isString || m != modelName {
+		return fmt.Errorf("\"model\" must be target.model_name (%q), got %s", modelName, raw)
+	}
+	return nil
+}
+
+// jsonStringValue decodes raw as a JSON string; ok is false for any
+// other JSON value.
+func jsonStringValue(raw json.RawMessage) (s string, ok bool) {
+	if len(raw) == 0 || raw[0] != '"' {
+		return "", false
+	}
+	return s, json.Unmarshal(raw, &s) == nil
 }
 
 // ReleaseBodyAt is body with its ceiling key's number replaced by ceiling,

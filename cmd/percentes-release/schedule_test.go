@@ -272,7 +272,7 @@ func TestScheduleCmdHostGroups(t *testing.T) {
 		want    string
 	}{
 		"other host not given": {[]string{groq}, "schedule: route groq: other host baseten has no configuration given"},
-		"other host's model": {[]string{groq, edited(baseten, "model_name: openai/gpt-oss-120b", "model_name: openai/gpt-oss-20b")},
+		"other host's model": {[]string{groq, edited(edited(baseten, "model_name: openai/gpt-oss-120b", "model_name: openai/gpt-oss-20b"), `"model": "openai/gpt-oss-120b"`, `"model": "openai/gpt-oss-20b"`)},
 			`schedule: route groq: other host baseten at model "openai/gpt-oss-120b"; its configuration sends "openai/gpt-oss-20b"`},
 		"groups differ": {[]string{edited(groq, "  other_hosts:", "  other_hosts:\n    - route: azure\n      model: openai/gpt-oss-120b"), baseten,
 			edited(routeConfigFile(t, "azure", "https://api.example.test/v1/chat/completions", "10"), "    - route: baseten\n", "    - route: groq\n      model: openai/gpt-oss-120b\n    - route: baseten\n")},

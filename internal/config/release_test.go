@@ -540,7 +540,7 @@ func TestReleaseNotApplied(t *testing.T) {
 		t.Errorf("not_applied %q", c.Target.NotApplied)
 	}
 
-	const messages = `{"model":"m","system":"s","messages":[{"role":"user","content":"{{case}}"}],"stream":true,"max_tokens":512%s}`
+	const messages = `{"model":"openai/gpt-oss-120b","system":"s","messages":[{"role":"user","content":"{{case}}"}],"stream":true,"max_tokens":512%s}`
 	for _, tc := range []struct{ body, notApplied string }{
 		{`,"output_config":{"effort":"low"}`, "thinking"},
 		{`,"thinking":{"type":"between_tools"}`, "output_config"},
@@ -556,8 +556,8 @@ func TestReleaseNotApplied(t *testing.T) {
 }
 
 func TestReleaseBody(t *testing.T) {
-	const chat = `{"model":"m","messages":[{"role":"user","content":"{{case}}"}],"stream":true,%s}`
-	const messages = `{"model":"m","system":"s","messages":[{"role":"user","content":"{{case}}"}],"stream":true,%s}`
+	const chat = `{"model":"openai/gpt-oss-120b","messages":[{"role":"user","content":"{{case}}"}],"stream":true,%s}`
+	const messages = `{"model":"openai/gpt-oss-120b","system":"s","messages":[{"role":"user","content":"{{case}}"}],"stream":true,%s}`
 	for _, tc := range []struct {
 		name, adapter, body, want string
 	}{
@@ -587,6 +587,33 @@ func TestReleaseBody(t *testing.T) {
 		case tc.want == "" && err != nil:
 			t.Errorf("%s: must validate: %v", tc.name, err)
 		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), "target.body: "+tc.want)):
+			t.Errorf("%s: must fail naming %q, got: %v", tc.name, tc.want, err)
+		}
+	}
+}
+
+// A release body's top-level "model", where present, is the string
+// target.model_name.
+func TestReleaseBodyModel(t *testing.T) {
+	const chat = `{%s"messages":[{"role":"user","content":"{{case}}"}],"stream":true,"max_completion_tokens":512}`
+	for _, tc := range []struct{ name, model, want string }{
+		{"same", `"model":"openai/gpt-oss-120b",`, ""},
+		{"absent", ``, ""},
+		{"other", `"model":"openai/gpt-oss-20b",`, `target.body: "model" must be target.model_name ("openai/gpt-oss-120b"), got "openai/gpt-oss-20b"`},
+		{"case differs", `"model":"OpenAI/gpt-oss-120b",`, `got "OpenAI/gpt-oss-120b"`},
+		{"escaped same", `"model":"openai\/gpt-oss-120b",`, ""},
+		{"null", `"model":null,`, `target.body: "model" must be target.model_name ("openai/gpt-oss-120b"), got null`},
+		{"not a string", `"model":["openai/gpt-oss-120b"],`, `got ["openai/gpt-oss-120b"]`},
+		{"nested only", `"metadata":{"model":"x"},`, ""},
+	} {
+		c := loadRef(t, releaseRef)
+		c.Target.NotApplied = nil
+		c.Target.Body = strings.Replace(chat, "%s", tc.model, 1)
+		err := c.Validate()
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: must validate: %v", tc.name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
 			t.Errorf("%s: must fail naming %q, got: %v", tc.name, tc.want, err)
 		}
 	}

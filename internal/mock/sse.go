@@ -181,6 +181,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		id = fmt.Sprintf("msg_mock_%d", reqID)
 	}
 	model := req.Model
+	if s.shape != nil && s.shape.Model != "" {
+		model = s.shape.Model
+	}
 	if model == "" {
 		model = "percentes-mock"
 	}

@@ -592,17 +592,9 @@ func TestCeilingCheckLimitsBody(t *testing.T) {
 // one, with no target.reported_model recorded, is written and exits
 // adverse with the refusal run gives its record.
 func TestCeilingCheckReportedModel(t *testing.T) {
-	f := newCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), testKey)
-	b, err := os.ReadFile(f.cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const body = `{"model": "openai/gpt-oss-120b",`
-	if strings.Count(string(b), body) != 1 {
-		t.Fatalf("configuration: %q not found once", body)
-	}
-	f.cfg = writeFile(t, t.TempDir(), "groq.yaml", []byte(strings.Replace(string(b), body, `{"model": "openai/gpt-oss-120b-v2",`, 1)))
+	f := newCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice.", Model: "openai/gpt-oss-120b-v2"}), testKey)
 	var code int
+	var err error
 	out := stdoutOf(t, func() { code, err = ceilingCheckCmd(context.Background(), f.args()) })
 	if err != nil || code != exitAdverse {
 		t.Fatalf("ceiling-check: %d, %v\n%s", code, err, out)
