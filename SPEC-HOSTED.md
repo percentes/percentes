@@ -68,7 +68,7 @@ The request body is one fixed JSON (JavaScript Object Notation) document per rou
 
 Sections §1 to §9 carry every rule a release runs under, with the adopted amendments written in. The amendment log in this section records each adoption, and Appendix A holds the adopted text; where either differs from a body section, the body section governs.
 
-This document specifies how the Percentes harness measures a managed inference endpoint (`target.hosted`). It is subordinate to SPEC.md v0.2: SPEC.md §6's Hosted targets subsection fixes which pins apply, which cannot be verified, and which run-validity gates are evaluable, and this document adds the numbers that paragraph defers. Where the two disagree, SPEC.md governs and this document is amended.
+This document specifies how the Percentes harness measures a managed inference endpoint (`target.hosted`). It is subordinate to SPEC.md v0.2: SPEC.md §6's Hosted targets subsection fixes which pins apply, which cannot be verified, and which run-validity gates are evaluable, and this document adds the numbers that paragraph defers. Under HA3, that subsection hands this document's §3 the rate, output ceiling, input length, timeout and body of a release. Where the two disagree, SPEC.md governs and this document is amended.
 
 Every rate, duration, threshold, and coverage rule below is fixed here before collection. The SPEC.md §0 discipline governs: a configuration outside these numbers refuses to load under the `release` profile (§3, schema note), and a run missing a required artifact does not publish.
 
