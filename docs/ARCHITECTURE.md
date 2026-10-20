@@ -932,14 +932,15 @@ pins the numbers and refuses a file outside them:
 | `client.http_timeout_s` | 90, the hard timeout |
 | `load` | `poisson` arrivals, `ignore_eos` false, `unique_prefixes` true, `connections` 32; no rate, input length or `max_tokens` |
 | `release.caps` | `route_usd` and `global_usd`, positive decimals, the route's within the global |
-| `release.other_hosts` | the release's other routes of the target's model, each a route name and the model identifier its requests carry; empty for a model with one host |
+| `release.other_hosts` | the release's other routes of the target's model, each a route name and that route's `model_name`; empty for a model with one host |
 | `target` | `hosted` true, `name`, `model_name`, `api_key_env`, the complete `endpoint_url`, `adapter` (`chat_completions` or `messages`), `auth_header`, the literal `body`, at least one `limits` entry, a `response_headers` list matching `Retry-After`, a `naming` record and a `retention` record; optional `reported_model`, `retained_headers`, `response_shape` (chat completions only), `probe`, `unpublished_limits`, `not_applied`, `status_docs`, `error_docs`, `billing_refusals` and `balance_unavailable` |
 
 The literal body is checked as a JSON object with `stream` true and the
 case slot once; under the release profile it must also carry the
 adapter's ceiling key (`max_completion_tokens` or `max_tokens` on a
 chat-completions target, `max_tokens` on a Messages target) equal to
-`release.shape.ceiling_tokens`, and none of `temperature`, `top_p`,
+`release.shape.ceiling_tokens`, a top-level `model`, where present, equal to
+`target.model_name`, and none of `temperature`, `top_p`,
 `top_k`, `min_p`, `frequency_penalty`, `presence_penalty`,
 `repetition_penalty`, `ignore_eos` or `min_tokens`. Each `limits` entry
 records a dimension (requests or tokens per minute, input or output
