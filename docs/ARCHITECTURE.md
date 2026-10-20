@@ -852,7 +852,8 @@ configuration file (`report.FromRun`): it checks the configuration and
 attempts hashes and the protocol counts against the manifest, the
 invalid reasons on every record against the manifest's, the manifest's
 hosted G6 results against the records, the steps its G2 results cover
-(`report.stepG2`) and the ceiling rule's verdict against the
+(`report.stepG2`), the canary summaries against those steps
+(`report.stepCanary`) and the ceiling rule's verdict against the
 configuration's limits (`admission.CheckPublished`), writes the pair
 to OUT and exits 1 unless both files match
 the manifest's references byte for byte.
@@ -869,8 +870,10 @@ key, with no size, so the command needs `--release-key`; it refuses such
 a manifest where either is named by SHA-256, and any other target's
 where either is keyed (`readRef`). For a release cell it also checks the cell's label against its gates, the dispatches
 its own part of the aggregate dispatch series counts against the
-attempts file, its gap histograms against the completions, the balance
-records, and that the attempts file carries no answer text; the ceiling
+attempts file, its gap histograms against the completions, its canary
+summaries, where it has them, against its per-step G2 results and the
+canary's fixed timing, the balance records, and that the attempts
+file carries no answer text; the ceiling
 rule's verdict against the configuration's limits
 (`admission.CheckPublished`), with no confidential value in it; and the
 manifest's expected model, mismatch count and reported models against
@@ -1484,8 +1487,10 @@ over the cell (`dispatch_aggregate`: the cell's own series, then each
 concurrent run's, summed per UTC second, with the peak second and how
 far each source was read), the inter-chunk gap histograms per step
 (`inter_chunk_gaps`, 24 bins with lower edges from 1 microsecond to
-50 s on a 1-2-5 series, the last open above 50 s), the ceiling rule's
-verdict, the ceiling in force and the choice that set it, the
+50 s on a 1-2-5 series, the last open above 50 s), the loopback
+canary's summary per attempted step (`canary`, as `cell.json` has it),
+the ceiling rule's verdict, the ceiling in force and the choice that
+set it, the
 ceiling-check records by hash, the account's creation date, the requests
 the ledger settled before the window, and the label; its `gates` field
 carries G2 and hosted G6 per attempted step, and G2 over the whole
@@ -1493,8 +1498,11 @@ ladder where no stop interrupted it. The report pair is the cell report
 (`report.CellReport`): the label, whether the cell enters the frame, and
 the cell's per-step tables with each step's G2 result from the
 manifest's `gates` (`report.stepG2`, which refuses results that miss an
-attempted step, name a step twice or name an excluded step), rendered
-from the manifest, the attempts file and the configuration, so
+attempted step, name a step twice or name an excluded step) and the
+canary line after each G2 line (`report.stepCanary`, which refuses a
+number of summaries other than the number of per-step G2 results; a
+manifest without `canary` prints none), rendered from the manifest,
+the attempts file and the configuration, so
 `percentes --replay` reproduces it byte for byte and
 `percentes --check-release` accepts a labelled cell as a record outside
 the frame. `percentes-release dispatch --out
@@ -1983,7 +1991,7 @@ A release cell ([The release runner](#the-release-runner)):
 | File or field | Computed in | SPEC |
 |---|---|---|
 | `cell.json` | `cmd/percentes-release` (`runCell`, `cellOutcome`, `labelCell`); `auth_statuses` by `countAuth` | SPEC-HOSTED HA3 point 16 |
-| `manifest.json`: `release` | `evidence.Cell`, filled by `cellEvidence` and `retain`; `schedule_sha256` from the `--schedule` file's bytes in `newRoute`; `admission` by `admission.CeilingRule`; `ceiling_choice`, with `left_out`, by `probe.ChooseCeiling`; `dispatch_aggregate` by `hostDispatch`; `inter_chunk_gaps` by `evidence.StepGaps` | HA3 points 6, 7, 9 and 15 |
+| `manifest.json`: `release` | `evidence.Cell`, filled by `cellEvidence` and `retain`; `schedule_sha256` from the `--schedule` file's bytes in `newRoute`; `admission` by `admission.CeilingRule`; `ceiling_choice`, with `left_out`, by `probe.ChooseCeiling`; `dispatch_aggregate` by `hostDispatch`; `inter_chunk_gaps` by `evidence.StepGaps`; `canary` by `loadgen.SummarizeCanary` over each attempted step's window in `runCell` | HA3 points 6, 7, 9 and 15; §2 |
 | `manifest.json`: `gates` (per step) | `evidence.releaseGates`: `validity.G2` per attempted step and over the ladder, `validity.ReleaseG6` per step | HA3 points 5 and 13 |
 | `manifest.json`: `balance_start`, `balance_end` | `evidence.ReadBalance`, named by `evidence.NewManifest` | SPEC-HOSTED §9 |
 | `balance-start.json`: `check` | `evidence.CheckBalance`, against `State.ReservationUSD` | SPEC-HOSTED §3 |
@@ -2005,6 +2013,7 @@ A release cell ([The release runner](#the-release-runner)):
 | `report.json`: `tables.limits` | `admission.CeilingRule`, with the `unpublished:` cover tests; a confidential limit's source and `hmac_sha256` in place of its value, checked by `admission.CheckPublished` | HA3 points 6 and 15 |
 | `report.json`: `tables.cells[*].steps[*].lines`, `hosted_g6` | `report.stepTables`, `newRate` (Wilson); the finish-reason sub-lines by `finishLabel` | HA3 points 8 and 13 |
 | `report.json`: `tables.cells[*].steps[*].g2` | `report.stepG2`, from the manifest's per-step `gates`; the text line by `g2Text` | HA3 point 5 |
+| `report.json`: `tables.cells[*].steps[*].canary` | `report.stepCanary`, from the manifest's `release.canary`; the text line by `canaryText` | §2; SPEC-HOSTED §6 |
 | `report.json`: `tables.cells[*].steps[*].throughput`, `tables.step_s` | `report.throughput` over `release.ladder.step_s` | SPEC-HOSTED §8 |
 | `report.json`: `tables.cells[*].steps[*].completion_incidence`, `incidence_quantiles` | `report.curve`, `report.incidence` through `collect.EstimateIncidence` | HA3 point 13; §3 |
 | `report.json`: `tables.cells[*].steps[*].signals` (`failure_timing`, `ttft`, `whole_answer`, `latency_by_connection`, `content_events`, `completion_tokens`, `reasoning_tokens`, `inter_chunk_gaps`, `retry_after`) | `report.signals`, `distribution` with `collect.OrderStatRanks`, `counts`, `gapsOf` | HA3 point 8; SPEC-HOSTED §5, §8; §7 |
