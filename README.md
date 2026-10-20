@@ -96,14 +96,14 @@ to override.
 make hooks                    # once per clone: continuous-integration (CI) gates on commit and push
 make test-unit                # fast path: unit and integration tests only
 make reproduce                # AC7: one-command full harness run against the local cluster
-make test                     # the whole gate: unit + AC suite + kind smoke + reproduce + campaign e2e
+make test                     # the whole gate: unit + AC suite + kind smoke + reproduce + campaign end-to-end (e2e) + process-kill e2e
 make percentes-pilot          # bin/percentes-pilot, the hosted pilot command
 make percentes-release        # bin/percentes-release, the release runner for this host
 make percentes-release-linux  # a static linux/amd64 build of it for the client host
 ```
 
 In that order: `make hooks` before your first commit, `make test-unit` to see
-the tree is sound, then the cluster targets. `make test` runs all of them.
+the tree is sound, then the cluster targets. `make test` includes `make test-unit` and `make reproduce`.
 The two hosted binaries are needed only for the hosted measurement.
 
 `make hooks` points git at `hooks/`: gofmt, build and golangci-lint on
@@ -112,8 +112,10 @@ push, so a change fails locally before it fails CI. `hooks/commit-msg`
 requires a subject line of 55 characters or fewer in lowercase
 conventional style, with no body.
 
-The full gate's last three stages build a Docker image and drive a kind
-cluster. The AC suite measures this machine as well
+The full gate's last four stages build a Docker image. Three of them
+drive a kind cluster; the process-kill stage runs the mock in a local
+Docker container on host port 18100, which `PK_PORT` overrides, and kills
+the container's init process. The AC suite measures this machine as well
 as the code: before its timing-coupled tests it qualifies the host with
 a probe (timer wake lateness and garbage-collection pauses,
 `internal/hostqual`). On a host that fails the probe those tests skip and
@@ -124,10 +126,13 @@ fails.
 The cluster stages bind host ports 18080 to 18082, which `SVC_PORT`,
 `POD_PORT` and `ADMIN_PORT` override, and host port 18000, the kind
 mapping to the mock Service's NodePort 30800, which is fixed in
-`deploy/kind/kind-config.yaml`. On macOS the host CPU gate reports
-unmeasured, so every cluster run prints `RUN INVALID (run-failing gate)`
-and exits 2 while the stage itself passes: the gates are enforced, and
-this platform cannot supply one of their inputs. Reports are written to
+`deploy/kind/kind-config.yaml`. On macOS the stages that run the harness
+build it with `CGO_ENABLED=0`, which disables cgo (the Go mechanism for
+calling C code), and a macOS build without cgo reads no host CPU samples,
+so the host CPU gate reports unmeasured. Every run in those stages is
+then invalid, and the command that ran it exits 2 while the stage itself
+passes; `percentes` prints `RUN INVALID (run-failing gate)` and
+`percentes-campaign` prints `CAMPAIGN NOTE: at least one run is invalid`. Reports are written to
 `results/`.
 
 ## Layout
@@ -137,7 +142,7 @@ cmd/percentes            single-run harness command-line interface (CLI) for a s
 cmd/percentes-campaign   N-run campaign runner for a self-hosted target (SPEC §5 repetition, §10 gates)
 cmd/percentes-calibrate  SPEC §10 capacity ramp and §5 single-replica reference
 cmd/percentes-pilot      the SPEC-HOSTED hosted amendment 2 (HA2) pilot: ledger, probe, dev, session, check-cpu
-cmd/percentes-release    a SPEC-HOSTED hosted amendment 3 (HA3) release: key, schedule, ledger, ceiling-check, run, dispatch, pages, pack, publish-check, rehearse, check-cpu
+cmd/percentes-release    a SPEC-HOSTED hosted amendment 3 (HA3) release: key, schedule, ledger, ceiling-check, public-config, run, dispatch, pages, pack, publish-check, rehearse, check-cpu
 cmd/mockserver           fault-injectable mock inference server
 cmd/naivesweep           standalone reconnaissance probe, outside the instrument
 internal/                loadgen, collect, detect, orchestrator, validity, ...
