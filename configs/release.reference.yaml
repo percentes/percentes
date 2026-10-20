@@ -60,8 +60,9 @@ target:
   model_name: openai/gpt-oss-120b
   api_key_env: GROQ_API_KEY
   auth_header: authorization_bearer
-  # The whole request body. The case text replaces "{{case}}"; every other
-  # byte is sent as written.
+  # The whole request body. The case text, encoded as a JSON (JavaScript
+  # Object Notation) string, replaces the string "{{case}}", quotes
+  # included; every other byte is sent as written.
   body: |
     {"model": "openai/gpt-oss-120b",
      "messages": [
@@ -78,7 +79,8 @@ target:
   # as published carries "[retained]" in place of the value. sha256 is
   # the retained copy's SHA-256; a confidential limit records hmac_sha256
   # in its place, the copy's HMAC-SHA256 under the release key
-  # (percentes-release key sum).
+  # (percentes-release key sum). Both entries below are placeholders,
+  # source and retrieval date included.
   limits:
     - dimension: requests_per_minute
       value: 1000
