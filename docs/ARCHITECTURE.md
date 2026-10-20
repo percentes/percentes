@@ -1057,8 +1057,8 @@ key, and nobody without the key can test a guess against one of them.
 The schedule's hash of each configuration as loaded is keyed on every
 route. Every other hash a release publishes is a plain SHA-256, among
 them the manifest's references to the configuration as published, the
-attempts file, the report pair, the clock, status and balance records,
-the operator file and the ledger.
+attempts file, the report pair, the clock, status and balance records
+and the ledger.
 
 | Record | Keyed field | What it hashes |
 |---|---|---|
@@ -1066,8 +1066,8 @@ the operator file and the ledger.
 | `probe.json`, ceiling-check records | `hmac_sha256` of a body stand-in | each non-200 body, and the limits body where it is withheld |
 | `probe.json`, ceiling-check records | `error_hmac_sha256` | the response shape's in-band error object |
 | `attempts.jsonl` | `stream_error_hmac_sha256` | each request's in-band error object |
-| `manifest.json` | `frames.hmac_sha256`, `records[].hmac_sha256`, and `source.diff.hmac_sha256` where the build was modified | the frame store and each operator record, named with no `bytes` |
-| `window-close.json` | `records[].hmac_sha256` | each operator record read after the route's last cell |
+| `manifest.json` | `operator.hmac_sha256`, `frames.hmac_sha256`, `records[].hmac_sha256`, and `source.diff.hmac_sha256` where the build was modified | the frame store, the operator file and each operator record, named with no `bytes` |
+| `window-close.json` | `operator.hmac_sha256`, `records[].hmac_sha256` | the operator file and each operator record read after the route's last cell |
 | `routes/<route>.json` (`drift_changes`, `drift_parts`, `window_close`) | `hmac_sha256`; `routes/<route>.txt` prints `hmac-sha256` | each limits and eligibility record the drift rule compares |
 | `schedule.json`, every route | `config_hmac_sha256` | the configuration as loaded |
 
@@ -1697,7 +1697,7 @@ publication page.
 ### What publishes and what stays retained
 
 Per cell, the manifest names every published file by hash: the
-configuration as published, `attempts.jsonl`, `probe.json`, `dispatch.json`, the
+configuration as published, `attempts.jsonl`, `refresh.json`, `probe.json`, `dispatch.json`, the
 ceiling probe copies, the clock, status and balance records, and the
 report pair; `manifest.json` itself publishes with them. `cell.json` is
 the runner's working record and the manifest does not name it; its
@@ -1708,16 +1708,18 @@ beside it, stays under `--frames`, named in the manifest by hash and
 retained unpublished (SPEC-HOSTED §9); it also holds the values of the
 headers `target.retained_headers` names, which the published record
 replaces with `[retained]`; `probe.json` and the ceiling probe copies
-carry the same stand-in, and their withheld values, with the limits body
+carry the same stand-in. The withheld values of `probe.json`, with the limits body
 where `target.probe.limits_retained` is set, are in `probe-retained.json`
-beside the cell's frames. The answer text of a release request is in the
+beside the cell's frames, and those of the ceiling check are in
+`ceiling-<UTC time>/<route>-<ceiling>/probe-retained.json` under
+`ceiling-check --frames`. The answer text of a release request is in the
 frame store and in no published file; under a route whose
 `target.retention.model_output` is `none`, the frame store keeps no 200
 body and counts its bytes in `dropped_bytes`, while non-200 bodies and
 the retained header values are kept either way. For a route with a
 confidential limit, the configuration as loaded (`config.yaml`) and the
-refresh record as run stay beside each cell's frames and in the
-window-close copies. The published configuration, refresh records and
+refresh record as run stay beside each cell's frames, and the
+window-close copies keep the refresh record as run. The published configuration, refresh records and
 limit snapshots carry no value, and such a route's refresh record gives
 `[retained]` for every limit's `unavailable` reason.
 Such a route's configuration loads only
