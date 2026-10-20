@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +82,13 @@ func withDispatch(c *Cell, own int) *Cell {
 	d.MaxAtUTC = &at
 	c.Dispatch = d
 	return c
+}
+
+// canaryAt is a canary summary at the canary's fixed timing with four
+// completed streams.
+func canaryAt() loadgen.CanarySummary {
+	return loadgen.CanarySummary{TTFTMs: loadgen.CanaryTTFTMs, ITLMs: loadgen.CanaryITLMs, Tokens: loadgen.CanaryTokens, Streams: 4, Completed: 4,
+		TTFTDevP50Us: 300, TTFTDevMaxUs: 900, ITLDevP50Us: 80, ITLDevP99Us: 400, ITLDevMaxUs: 700, EventLagP99Us: 1100, EventLagMaxUs: 1500}
 }
 
 // A release record carries the request's shape, ceiling, step and
@@ -226,6 +234,58 @@ func TestManifestCellRecord(t *testing.T) {
 	in.BalanceStartPath = ""
 	if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "needs its start balance record") {
 		t.Errorf("release run without a start balance: %v", err)
+	}
+}
+
+// A release cell's manifest carries the canary summary of each attempted
+// step and reads it back; it refuses summaries that miss a step, add
+// one, or disagree with the canary's fixed timing or with themselves.
+func TestManifestCanary(t *testing.T) {
+	in, out := manifestRun(t)
+	cfg := releaseCfg(t)
+	releaseInput(&in, cfg)
+	in.Release = releaseCell(cfg)
+	in.Release.Canary = []loadgen.CanarySummary{canaryAt()}
+	m, err := NewManifest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := WriteManifest(out, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"canary": [`) || !strings.Contains(string(b), `"event_lag_max_us": 1500`) {
+		t.Errorf("manifest lacks the canary:\n%s", b)
+	}
+	back, err := ReadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back.Release.Canary, in.Release.Canary) {
+		t.Errorf("canary read back %+v, written %+v", back.Release.Canary, in.Release.Canary)
+	}
+
+	for name, c := range map[string]struct {
+		edit func(s []loadgen.CanarySummary) []loadgen.CanarySummary
+		want string
+	}{
+		"a step added": {func(s []loadgen.CanarySummary) []loadgen.CanarySummary { return append(s, canaryAt()) }, "canary: 2 summaries for 1 attempted steps"},
+		"none":         {func([]loadgen.CanarySummary) []loadgen.CanarySummary { return []loadgen.CanarySummary{} }, "canary: 0 summaries for 1 attempted steps"},
+		"another first-token time": {func(s []loadgen.CanarySummary) []loadgen.CanarySummary { s[0].TTFTMs = 25; return s },
+			"canary: step 1: 32 tokens at 25 ms TTFT and 10 ms ITL, the canary's 32 at 20 ms and 10 ms"},
+		"more completed than sent": {func(s []loadgen.CanarySummary) []loadgen.CanarySummary { s[0].Completed = 5; return s }, "canary: step 1: 5 of 4 streams completed"},
+		"p99 above the maximum":    {func(s []loadgen.CanarySummary) []loadgen.CanarySummary { s[0].EventLagP99Us = 1600; return s }, "canary: step 1: percentiles out of order"},
+		"timings with none completed": {func(s []loadgen.CanarySummary) []loadgen.CanarySummary { s[0].Completed = 0; return s },
+			"canary: step 1: timings with no stream completed"},
+	} {
+		in.Release.Canary = c.edit([]loadgen.CanarySummary{canaryAt()})
+		if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "release cell: "+c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 
@@ -709,6 +769,37 @@ func TestCheckReleaseCellAndAnswer(t *testing.T) {
 		t.Errorf("counted cell with no gates: %v", err)
 	}
 	r.m.Gates = gates
+
+	// A manifest written before the cell record carried the canary has
+	// none and passes; one that has it carries a summary per step with a
+	// G2 result, at the canary's fixed timing and in order.
+	if b := mustRead(t, filepath.Join(r.dir, ManifestFile)); bytes.Contains(b, []byte(`"canary"`)) {
+		t.Fatalf("manifest without canary summaries:\n%s", b)
+	}
+	r.m.Gates = append(slices.Clone(gates), validity.G2(1, &loadgen.GateReport{Pass: true}))
+	r.m.Release.Canary = []loadgen.CanarySummary{canaryAt()}
+	r.write(t)
+	if _, err := r.check(); err != nil {
+		t.Fatalf("release run with its canary: %v", err)
+	}
+	for name, c := range map[string]struct {
+		canary []loadgen.CanarySummary
+		want   string
+	}{
+		"a step added":        {[]loadgen.CanarySummary{canaryAt(), canaryAt()}, "cell record: canary: 2 summaries for 1 attempted steps"},
+		"another token count": {[]loadgen.CanarySummary{func() loadgen.CanarySummary { s := canaryAt(); s.Tokens = 16; return s }()}, "cell record: canary: step 1: 16 tokens at 20 ms"},
+		"fewer streams":       {[]loadgen.CanarySummary{func() loadgen.CanarySummary { s := canaryAt(); s.Streams = 3; return s }()}, "cell record: canary: step 1: 4 of 3 streams completed"},
+		"median above the maximum": {[]loadgen.CanarySummary{func() loadgen.CanarySummary { s := canaryAt(); s.TTFTDevP50Us = 1000; return s }()},
+			"cell record: canary: step 1: percentiles out of order"},
+	} {
+		r.m.Release.Canary = c.canary
+		r.write(t)
+		if _, err := r.check(); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	r.m.Release.Canary, r.m.Gates = nil, gates
+	r.write(t)
 
 	// A release run needs its start balance record.
 	start := r.m.BalanceStart

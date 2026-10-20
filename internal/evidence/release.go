@@ -53,7 +53,9 @@ func WriteConfigCopy(dir string, cfg *config.Config) error {
 // on every measured attempt of a pilot run, the cell record with a
 // consistent label and aggregate dispatch series, whose own run's part
 // counts the attempts file's dispatches, and inter-chunk gap histograms
-// that agree with the attempts file's completions, model fields that
+// that agree with the attempts file's completions, loopback canary
+// summaries, where the cell record has them, one per step with a G2
+// result at the canary's fixed timing, model fields that
 // agree with the attempts file's records and the configuration's
 // expected model, and an attempts file without answer text for a
 // release run, and the frame store with one line per attempt. A release
@@ -240,6 +242,11 @@ func CheckRelease(r Release) (*Manifest, error) {
 			} else if attempts != nil {
 				if err := CheckGaps(c.Gaps, recs); err != nil {
 					fail("cell record: %v", err)
+				}
+			}
+			if c.Canary != nil {
+				for _, p := range c.canaryProblems(m.Gates) {
+					fail("cell record: %s", p)
 				}
 			}
 		}

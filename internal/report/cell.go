@@ -10,6 +10,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/schedule"
 	"github.com/percentes/percentes/internal/validity"
 )
@@ -53,6 +54,9 @@ func cellReport(m *evidence.Manifest, cfg *config.Config, recs []evidence.Record
 		return nil, "", err
 	}
 	if err := stepG2(st.Cells[0].Steps, m.Gates); err != nil {
+		return nil, "", err
+	}
+	if err := stepCanary(st.Cells[0].Steps, c.Canary); err != nil {
 		return nil, "", err
 	}
 	rep := &CellReport{
@@ -114,6 +118,28 @@ func stepG2(steps []CellStep, gates []validity.Gate) error {
 		case k > 0 && s.G2 != nil && steps[k-1].G2 == nil:
 			return fmt.Errorf("report: G2 at step %d and none at step %d", s.Step, k)
 		}
+	}
+	return nil
+}
+
+// stepCanary sets the loopback canary's summary on each step with a G2
+// result, from canary in step order. A manifest with no summaries sets
+// none.
+func stepCanary(steps []CellStep, canary []loadgen.CanarySummary) error {
+	if len(canary) == 0 {
+		return nil
+	}
+	n := 0
+	for _, s := range steps {
+		if s.G2 != nil {
+			n++
+		}
+	}
+	if len(canary) != n {
+		return fmt.Errorf("report: %d canary summaries for %d steps with a G2 result", len(canary), n)
+	}
+	for k := range canary {
+		steps[k].Canary = &canary[k]
 	}
 	return nil
 }

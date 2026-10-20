@@ -301,7 +301,7 @@ func NewManifest(in ManifestInput) (*Manifest, error) {
 		return nil, errors.New("evidence: a release run's gates come from its ladder, not a gate report")
 	case release:
 		gates = releaseGates(cfg, res)
-		if err := checkCell(cfg, t, in.Release); err != nil {
+		if err := checkCell(cfg, t, in.Release, gates); err != nil {
 			return nil, err
 		}
 		if err := in.Release.checkLabel(in.RunValid, in.InvalidReasons, gates, res.ModelMismatches); err != nil {

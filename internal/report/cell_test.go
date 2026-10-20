@@ -205,6 +205,72 @@ func TestCellReportG2(t *testing.T) {
 	}
 }
 
+// A cell report prints each step's loopback canary summary from the
+// manifest beside its G2 result, including a step the ladder ran with
+// nothing dispatched; a manifest with no summaries prints none, and one
+// whose summaries miss a step with a G2 result is refused.
+func TestCellReportCanary(t *testing.T) {
+	reasons := []string{"G2 failed at step 2"}
+	m, cfg := cellManifest(t, evidence.CellInvalid, reasons, true)
+	recs := cellOf("x", outcome{1, LineInTime, 0, 3}, outcome{2, LineInTime, 0, 2}, outcome{3, LineUnsent, 0, 4}).Records
+	for i := range recs {
+		recs[i].RunFailures = reasons
+	}
+	pass := &loadgen.GateReport{Pass: true, CPUMeasured: true}
+	m.Gates = []validity.Gate{validity.G2(1, pass), validity.G2(2, pass), validity.G2(3, nil), validity.ReleaseG6(1, 3, 3, 30), validity.ReleaseG6(2, 2, 2, 30)}
+	_, plain, err := cellReport(m, cfg, recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "canary") {
+		t.Errorf("a manifest with no canary summaries prints one:\n%s", plain)
+	}
+
+	at := loadgen.CanarySummary{TTFTMs: 20, ITLMs: 10, Tokens: 32, Streams: 4, Completed: 4,
+		TTFTDevP50Us: 300, TTFTDevMaxUs: 900, ITLDevP50Us: 80, ITLDevP99Us: 400, ITLDevMaxUs: 700, EventLagP99Us: 1100, EventLagMaxUs: 1500}
+	m.Release.Canary = []loadgen.CanarySummary{at, at, {TTFTMs: 20, ITLMs: 10, Tokens: 32, Streams: 1}}
+	m.Release.Canary[1].EventLagMaxUs = 2250
+	raw, text, err := cellReport(m, cfg, recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep CellReport
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatal(err)
+	}
+	steps := rep.Tables.Cells[0].Steps
+	for k := range steps {
+		var want *loadgen.CanarySummary
+		if k < len(m.Release.Canary) {
+			want = &m.Release.Canary[k]
+		}
+		if got := steps[k].Canary; !reflect.DeepEqual(got, want) {
+			t.Errorf("step %d: canary %+v, want %+v", k+1, got, want)
+		}
+	}
+	const line = "  canary (loopback, client read path): "
+	for _, want := range []string{
+		" (run-failing)\n" + line + "4 of 4 streams completed, 32 tokens at 20 ms TTFT and 10 ms ITL; event lag p99 1.10 ms, max 1.50 ms; " +
+			"TTFT deviation p50 0.30 ms, max 0.90 ms; ITL deviation p50 0.08 ms, p99 0.40 ms, max 0.70 ms (reported, not run-invalidating)\n  hosted-G6",
+		"; event lag p99 1.10 ms, max 2.25 ms; ",
+		"step 3, 1 rps: not attempted (the cell's ladder ended before this step)\n" +
+			"  G2 (client validity at the step's drain end): not observed, so not passed; no verdict: the run stopped before the step's drain ended (run-failing)\n" +
+			line + "0 of 1 streams completed, so no bound on read-loop lag\nstep 4,",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text lacks %q:\n%s", want, text)
+		}
+	}
+	if n := strings.Count(text, line); n != 3 {
+		t.Errorf("%d canary lines for 3 steps with a G2 result:\n%s", n, text)
+	}
+
+	m.Release.Canary = m.Release.Canary[:2]
+	if _, _, err := cellReport(m, cfg, recs); err == nil || !strings.Contains(err.Error(), "2 canary summaries for 3 steps with a G2 result") {
+		t.Errorf("a step's summary left out: %v", err)
+	}
+}
+
 // A release cell manifest's hosted-G6 results are its step table's: the
 // same steps with the same counts and verdicts.
 func TestReleaseG6MatchesStepTable(t *testing.T) {

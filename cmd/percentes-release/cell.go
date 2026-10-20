@@ -326,9 +326,10 @@ type cellFiles struct {
 // operator records or refreshed limits error where they are held, the
 // configuration as loaded where it differs from the file as published,
 // the attempts file, the manifest carrying the cell's label, the host's
-// aggregate dispatch series and the inter-chunk gap histograms, and the
-// report pair. A nil res is a cell with no ladder result: its attempts
-// file and frame store are empty, and its epoch is the cell's start. A
+// aggregate dispatch series, the inter-chunk gap histograms and the
+// canary summaries, and the report pair. A nil res is a cell with no
+// ladder result: its attempts file and frame store are empty, its
+// manifest carries no canary summary, and its epoch is the cell's start. A
 // missed cell has no end records and no concurrent runs. A frame store
 // that fails to write leaves the rest to be written; the failure is
 // returned after them.
@@ -412,6 +413,9 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	}
 	cell.Outcome, cell.Reasons, cell.LadderStarted = rec.Outcome, rec.Reasons, ladder || ev.dispatched
 	cell.Gaps = evidence.StepGaps(res)
+	if ladder {
+		cell.Canary = rec.Canary
+	}
 	m, err := evidence.NewManifest(evidence.ManifestInput{
 		Config:           ev.cfg,
 		ConfigName:       r.configName,

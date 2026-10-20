@@ -212,7 +212,7 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	}
 	e.mu.Unlock()
 
-	m, _ := checkRetained(t, r, run)
+	m, text := checkRetained(t, r, run)
 	c := m.Release
 	if c == nil || c.Run != run || c.OffsetMinutes != r.offsetMinutes || c.AccountCreated != "2026-09-15" || len(c.Probes) != 2 || c.Admission.TopRPS != 1 || c.CeilingTokens != 512 {
 		t.Fatalf("cell record %+v", c)
@@ -267,6 +267,14 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	if g := g2[0]; !g.Observed || rec.Outcome == outcomeCounted && !g.Pass {
 		t.Errorf("%s cell, whole-ladder G2 %+v", rec.Outcome, g)
 	}
+	// The manifest carries the canary summary of each attempted step, as
+	// the cell record has it, and the text prints it after the step's G2.
+	if len(c.Canary) != len(want)-1 || !reflect.DeepEqual(c.Canary, rec.Canary) {
+		t.Fatalf("manifest canary %+v, the cell record's %+v, for %d attempted steps", c.Canary, rec.Canary, len(want)-1)
+	}
+	if n := strings.Count(text, "(run-failing)\n  canary (loopback, client read path): "); n != len(c.Canary) {
+		t.Errorf("%d canary lines after a G2 line for %d summaries:\n%s", n, len(c.Canary), text)
+	}
 	inTime, scheduled := map[int]int{}, map[int]int{}
 	for _, a := range recs {
 		if !a.Warmup {
@@ -300,6 +308,25 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	}
 	if gaps == 0 || len(c.Gaps) != len(completed) {
 		t.Fatalf("gap histograms %+v for completions per step %v", c.Gaps, completed)
+	}
+
+	// A canary count altered in the manifest changes the replayed text, so
+	// the pair no longer reproduces; a summary left out fails the
+	// completeness check.
+	c.Canary[0].Streams++
+	if _, err := evidence.WriteManifest(dir, m); err != nil {
+		t.Fatal(err)
+	}
+	if _, replayed, err := report.FromRun(dir, r.cfg.Raw); err != nil || replayed == text {
+		t.Errorf("altered canary: replay error %v, text unchanged %t", err, replayed == text)
+	}
+	c.Canary = c.Canary[1:]
+	if _, err := evidence.WriteManifest(dir, m); err != nil {
+		t.Fatal(err)
+	}
+	_, err = evidence.CheckRelease(evidence.Release{Dir: dir, Config: r.cfg.Raw, FramesRoot: r.framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}, Key: r.key})
+	if want := fmt.Sprintf("cell record: canary: %d summaries for %d attempted steps", len(c.Canary), len(c.Canary)+1); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("a summary left out: %v", err)
 	}
 }
 

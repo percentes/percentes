@@ -169,19 +169,21 @@ type G2 struct {
 // CellStep is one step of a cell. An attempted step with scheduled
 // requests carries its lines, hosted-G6, throughput, completion-incidence
 // curve with its quantiles, and signals. In a cell report, each step the
-// ladder ran carries G2.
+// ladder ran carries G2, and the loopback canary's summary where its
+// manifest records one.
 type CellStep struct {
-	Step       int                 `json:"step"`
-	RPS        float64             `json:"rps"`
-	State      string              `json:"state"`
-	Scheduled  int                 `json:"scheduled"`
-	Lines      []Line              `json:"lines,omitempty"`
-	G2         *G2                 `json:"g2,omitempty"`
-	G6         *G6                 `json:"hosted_g6,omitempty"`
-	Throughput *Throughput         `json:"throughput,omitempty"`
-	Curve      []CurvePoint        `json:"completion_incidence,omitempty"`
-	Incidence  *IncidenceQuantiles `json:"incidence_quantiles,omitempty"`
-	Signals    *Signals            `json:"signals,omitempty"`
+	Step       int                    `json:"step"`
+	RPS        float64                `json:"rps"`
+	State      string                 `json:"state"`
+	Scheduled  int                    `json:"scheduled"`
+	Lines      []Line                 `json:"lines,omitempty"`
+	G2         *G2                    `json:"g2,omitempty"`
+	Canary     *loadgen.CanarySummary `json:"canary,omitempty"`
+	G6         *G6                    `json:"hosted_g6,omitempty"`
+	Throughput *Throughput            `json:"throughput,omitempty"`
+	Curve      []CurvePoint           `json:"completion_incidence,omitempty"`
+	Incidence  *IncidenceQuantiles    `json:"incidence_quantiles,omitempty"`
+	Signals    *Signals               `json:"signals,omitempty"`
 }
 
 // CellTable is one cell's per-step table.
@@ -822,10 +824,12 @@ func (t *StepTables) text(frame bool) string {
 			case s.State == StepNotAttempted:
 				w("step %d, %g rps: not attempted (the cell's ladder ended before this step)", s.Step, s.RPS)
 				g2Text(w, s.G2)
+				canaryText(w, s.Canary)
 				continue
 			case s.Scheduled == 0:
 				w("step %d, %g rps: no requests scheduled", s.Step, s.RPS)
 				g2Text(w, s.G2)
+				canaryText(w, s.Canary)
 				continue
 			}
 			w("step %d, %g rps, %d scheduled:", s.Step, s.RPS, s.Scheduled)
@@ -836,6 +840,7 @@ func (t *StepTables) text(frame bool) string {
 				}
 			}
 			g2Text(w, s.G2)
+			canaryText(w, s.Canary)
 			w("  hosted-G6 (completion within %d s over scheduled): %s [%s, %s] against %.2f: %s (reported, not run-invalidating)",
 				t.DeadlineS, pct(s.G6.InTime.Value), pct(s.G6.InTime.Lo), pct(s.G6.InTime.Hi), config.PinnedBaselineGoodputMin, passText(s.G6.Pass))
 			if r := s.G6.ExcludingConnectReset; r != nil {
@@ -951,6 +956,23 @@ func g2Text(w func(string, ...any), g *G2) {
 		return
 	}
 	w("  G2 (client validity at the step's drain end): %s; %s (run-failing)", passText(g.Pass), g.Detail)
+}
+
+// canaryText writes a step's loopback canary line, or nothing for a step
+// with none.
+func canaryText(w func(string, ...any), c *loadgen.CanarySummary) {
+	const line = "  canary (loopback, client read path): "
+	ms := func(us int64) string { return fmt.Sprintf("%.2f ms", float64(us)/1000) }
+	switch {
+	case c == nil:
+		return
+	case c.Completed == 0:
+		w(line+"0 of %d streams completed, so no bound on read-loop lag", c.Streams)
+		return
+	}
+	w(line+"%d of %d streams completed, %d tokens at %d ms TTFT and %d ms ITL; event lag p99 %s, max %s; TTFT deviation p50 %s, max %s; ITL deviation p50 %s, p99 %s, max %s (reported, not run-invalidating)",
+		c.Completed, c.Streams, c.Tokens, c.TTFTMs, c.ITLMs, ms(c.EventLagP99Us), ms(c.EventLagMaxUs), ms(c.TTFTDevP50Us), ms(c.TTFTDevMaxUs),
+		ms(c.ITLDevP50Us), ms(c.ITLDevP99Us), ms(c.ITLDevMaxUs))
 }
 
 // confidentialText states a demand against a confidential limit without

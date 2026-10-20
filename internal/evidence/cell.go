@@ -9,6 +9,7 @@ import (
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/schedule"
 	"github.com/percentes/percentes/internal/validity"
@@ -56,6 +57,9 @@ type Cell struct {
 	Dispatch *Dispatch `json:"dispatch_aggregate"`
 	// Gaps are the run's inter-chunk gap histograms per ladder step.
 	Gaps []GapHistogram `json:"inter_chunk_gaps"`
+	// Canary is the §2 loopback canary's summary at each attempted
+	// ladder step, in step order.
+	Canary []loadgen.CanarySummary `json:"canary,omitempty"`
 	// Admission is the ceiling rule's verdict: the admitted steps, and
 	// each excluded step with its binding limit.
 	Admission *admission.Verdict `json:"admission"`
@@ -150,9 +154,43 @@ func (c *Cell) dispatchProblems() []string {
 	return problems
 }
 
+// canaryProblems reports every way c's canary summaries disagree with the
+// canary's fixed timing, with themselves and with gates, which hold one
+// G2 result per attempted step. A summary with no completed stream
+// carries no timings.
+func (c *Cell) canaryProblems(gates []validity.Gate) []string {
+	var problems []string
+	fail := func(format string, a ...any) { problems = append(problems, "canary: "+fmt.Sprintf(format, a...)) }
+	steps := 0
+	for _, g := range gates {
+		if g.ID == "G2" && g.Step > 0 {
+			steps++
+		}
+	}
+	if len(c.Canary) != steps {
+		fail("%d summaries for %d attempted steps", len(c.Canary), steps)
+	}
+	for i, s := range c.Canary {
+		if s.TTFTMs != loadgen.CanaryTTFTMs || s.ITLMs != loadgen.CanaryITLMs || s.Tokens != loadgen.CanaryTokens {
+			fail("step %d: %d tokens at %d ms TTFT and %d ms ITL, the canary's %d at %d ms and %d ms",
+				i+1, s.Tokens, s.TTFTMs, s.ITLMs, loadgen.CanaryTokens, loadgen.CanaryTTFTMs, loadgen.CanaryITLMs)
+		}
+		if s.Completed < 0 || s.Completed > s.Streams {
+			fail("step %d: %d of %d streams completed", i+1, s.Completed, s.Streams)
+		}
+		if s.TTFTDevP50Us > s.TTFTDevMaxUs || s.ITLDevP50Us > s.ITLDevP99Us || s.ITLDevP99Us > s.ITLDevMaxUs || s.EventLagP99Us > s.EventLagMaxUs {
+			fail("step %d: percentiles out of order", i+1)
+		}
+		if s.Completed == 0 && s != (loadgen.CanarySummary{TTFTMs: s.TTFTMs, ITLMs: s.ITLMs, Tokens: s.Tokens, Streams: s.Streams}) {
+			fail("step %d: timings with no stream completed", i+1)
+		}
+	}
+	return problems
+}
+
 // checkCell reports every way c disagrees with the route's configuration
-// and target.
-func checkCell(cfg *config.Config, t *config.Target, c *Cell) error {
+// and target, and its canary summaries, where it has them, with gates.
+func checkCell(cfg *config.Config, t *config.Target, c *Cell, gates []validity.Gate) error {
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
 	if c.Run.Route != t.Name {
@@ -203,6 +241,9 @@ func checkCell(cfg *config.Config, t *config.Target, c *Cell) error {
 		fail("inter_chunk_gaps: none")
 	}
 	problems = append(problems, gapProblems(c.Gaps)...)
+	if c.Canary != nil {
+		problems = append(problems, c.canaryProblems(gates)...)
+	}
 	if len(problems) > 0 {
 		return errors.New("evidence: release cell: " + strings.Join(problems, "; "))
 	}
