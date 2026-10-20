@@ -89,6 +89,8 @@ HA1 (2026-10-19, pre-data): load axis adopted as modified by HA3.
 
 HA3 (2026-10-19, pre-data): public descriptive release authorized; path shapes, body and credential per target, usage, shape, ceiling rule, frame, intervals and bands, index, publication steps.
 
+Corrections (2026-10-20, pre-data), aligning §1 to §9 with the instrument. §2: a literal body's `model`, where present, must equal `target.model_name`, or the configuration is refused. §5: each error class, status_429 among them, publishes on its own line at every attempted step, with no combined error rate and no headline line; the connect fraction alone withholds no cell; a missing clock-offset reading, a canary that did not start and a response over a protocol other than HTTP/1.1 make a cell client-invalid; connect, empty_stream and malformed_stream are defined as the client assigns them. §9: the schedule freezes the ledger's position as well as its first line, and the key file, the commands that read the key and the confidential value search are described as the code has them.
+
 The table is a reading guide to HA3's sixteen points, whose text is in Appendix A, and names the section each point's rule now lives in. Where a point names a sentence it replaces, that sentence is v0.1's, listed in the table of superseded values below.
 
 | Point | In plain words | Replaces or adds | Now in |
