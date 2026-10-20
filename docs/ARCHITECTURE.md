@@ -498,9 +498,11 @@ attempted step, and a G2 failure is also named by the cell's label. The
 request body the client generates omits `ignore_eos`
 and asks for no usage object; a target with a literal `body` sends that
 body instead ([Hosted runs](#hosted-runs-and-the-evidence-files)). The key
-is read at run start from the environment variable `target.api_key_env`
-names and sent in the one header `target.auth_header` selects:
-`Authorization: Bearer` (the default), `x-api-key` or `api-key`. It is
+is read at run start from a file given with `--env`, as the value of the
+variable `target.api_key_env` names, and sent in the one header
+`target.auth_header` selects: `authorization_bearer` (the default) sends
+`Authorization: Bearer` and the key, and `x-api-key` or `api-key` sends
+the key alone in the `X-Api-Key` or `Api-Key` header. The key is
 never recorded, and every recorded header, body and error string is
 masked for it.
 
@@ -935,7 +937,7 @@ pins the numbers and refuses a file outside them:
 | `load` | `poisson` arrivals, `ignore_eos` false, `unique_prefixes` true, `connections` 32; no rate, input length or `max_tokens` |
 | `release.caps` | `route_usd` and `global_usd`, positive decimals, the route's within the global |
 | `release.other_hosts` | the release's other routes of the target's model, each a route name and that route's `model_name`; empty for a model with one host |
-| `target` | `hosted` true, `name`, `model_name`, `api_key_env`, the complete `endpoint_url`, `adapter` (`chat_completions` or `messages`), `auth_header`, the literal `body`, at least one `limits` entry, a `response_headers` list matching `Retry-After`, a `naming` record and a `retention` record; optional `reported_model`, `retained_headers`, `response_shape` (chat completions only), `probe`, `unpublished_limits`, `not_applied`, `status_docs`, `error_docs`, `billing_refusals` and `balance_unavailable` |
+| `target` | `hosted` true, `name`, `model_name`, `api_key_env`, the complete `endpoint_url`, `adapter` (`chat_completions` or `messages`), the literal `body`, at least one `limits` entry, a `response_headers` list matching `Retry-After`, a `naming` record and a `retention` record; optional `auth_header` (`authorization_bearer` when absent), `reported_model`, `retained_headers`, `response_shape` (chat completions only), `probe`, `unpublished_limits`, `not_applied`, `status_docs`, `error_docs`, `billing_refusals` and `balance_unavailable` |
 
 The literal body is checked as a JSON object with `stream` true and the
 case slot once; under the release profile it must also carry the
