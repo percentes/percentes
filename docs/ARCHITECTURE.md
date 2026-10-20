@@ -196,7 +196,7 @@ splits the work in two (`internal/loadgen/loadgen.go`):
 1. **The pacer**, a loop in one goroutine (Go's lightweight thread), sleeps
    until t_i − 10 ms (`spawnLeadNs`), spawns the worker for request i, and
    moves straight on to request i + 1. It never does the precise wait.
-2. **The worker** sleeps on its own timer (`waitTimer`) until
+2. **The worker** sleeps on its own timer (`gen.sleep`) until
    t_i − 1.5 ms (`spinNs`), then spins on the clock until it reaches t_i and
    dispatches. The timer keeps the spin short; the spin covers timer
    wake-up latency.
@@ -1979,11 +1979,11 @@ A release cell ([The release runner](#the-release-runner)):
 | a ceiling-check record's `expected_model` | `probe.RunRelease`, from `Target.ExpectedModel`; read by `ReleaseRecord.Expected` | SPEC-HOSTED §2 |
 | a ceiling-check record's `ledger_sha256` | `sendCeiling`, from `Ledger.Bound`; compared with the schedule's `ledger_sha256` by `readCeilingProbes` | HA3 point 9 |
 | a ceiling-check record's `ceiling_check` and `input_bound_check` results | `probe.RunRelease`; re-derived from the record's requests by `ReleaseRecord.Verify` when `run` reads it | HA3 point 7 |
-| `schedule.json`: `configs` (`config_sha256`, `config_hmac_sha256`, `host_group`), `ledger_sha256`, `ledger_lines`, `ledger_head_sha256` | `scheduleCmd` through `frozenConfig` (the configuration as published, from `Config.Published`, and the configuration as loaded under `releasekey.Key.Sum`) and the ledger's `State.OpenSHA256`, `State.Lines` and `State.HeadSHA256`; checked at route start by `checkFrozen`, `checkLedger` and `frozenEntries` | HA3 point 9 |
+| `schedule.json`: `input.configs` (`config_sha256`, `config_hmac_sha256`, `host_group`), `input.ledger_sha256`, `input.ledger_lines`, `input.ledger_head_sha256` | `scheduleCmd` through `frozenConfig` (the configuration as published, from `Config.Published`, and the configuration as loaded under `releasekey.Key.Sum`) and the ledger's `State.OpenSHA256`, `State.Lines` and `State.HeadSHA256`; checked at route start by `checkFrozen`, `checkLedger` and `frozenEntries` | HA3 point 9 |
 | `routes/<route>.json`: `model_mismatch_cells` | `readRouteCells`, from each `model_mismatch` manifest's endpoint record; the text line by `StepTables.Text` | SPEC-HOSTED §2 |
 | the configuration as published, and the manifest's configuration hash | `Config.Published`, through `publicConfigCmd` and `evidence.NewManifest` | HA3 point 15 |
 | `probe-retained.json` | `probe.Withheld`, `probe.WriteRetained` | HA3 point 15 |
-| `manifest.json`: `frames`, `records` (`sha256` and `bytes`, or `hmac_sha256`) | `evidence.NewManifest` through `refOf`, `keyedRefOf` and `Operator.records`; checked by `readRef` in `evidence.CheckRelease` | SPEC-HOSTED §9; HA3 point 15 |
+| `manifest.json`: `frames`, `records` (`sha256` and `bytes`, or `hmac_sha256`) | `evidence.NewManifest` through `refOf`, `keyedRefOf` and `Operator.published`; checked by `readRef` in `evidence.CheckRelease` | SPEC-HOSTED §9; HA3 point 15 |
 | the publication record's check | `evidence.LoadPublication`, `Publication.Check`, through `publishCheckCmd` | HA3 point 14 |
 | `publication.md`, `publication.json` | `Publication.Page`, `PublicationPage.Markdown`, through `publishCheckCmd` | SPEC-HOSTED §9; HA3 point 14 |
 | `report.json`: `tables.cells[*].steps[*].signals.content_events_errored`, `content_events_censored`, `prompt_tokens` | `report.signals`, `promptTokens` | SPEC-HOSTED §8 |
@@ -1995,7 +1995,7 @@ A release cell ([The release runner](#the-release-runner)):
 | `report.json`: `tables.cells[*].steps[*].completion_incidence`, `incidence_quantiles` | `report.curve`, `report.incidence` through `collect.EstimateIncidence` | HA3 point 13; §3 |
 | `report.json`: `tables.cells[*].steps[*].signals` (`failure_timing`, `ttft`, `whole_answer`, `latency_by_connection`, `content_events`, `completion_tokens`, `reasoning_tokens`, `inter_chunk_gaps`, `retry_after`) | `report.signals`, `distribution` with `collect.OrderStatRanks`, `counts`, `gapsOf` | HA3 point 8; SPEC-HOSTED §5, §8; §7 |
 | `tables.pooled` (a complete frame) | `report.pool`, `newPooled`, `designEffect`; `throughput` by `pooledThroughput` | HA3 point 13; SPEC-HOSTED §8 |
-| `tables.drift_changes`, `tables.drift_parts` | `report.DocsOf`, `tables.drift` | SPEC-HOSTED §4; HA3 point 9 |
+| `tables.drift_changes`, `tables.drift_parts` | `report.DocsOf`, `report.drift` | SPEC-HOSTED §4; HA3 point 9 |
 | the index table, `index.md` and `index.json` | `report.NewIndex`, `Index.Markdown`, written by `pagesCmd` | HA3 point 12 |
 | `routes/<route>.txt`, `routes/<route>.json` | `StepTables.Text` and the tables' JSON encoding, written by `pagesCmd` | HA3 point 13 |
 | `dispatch.json`, `dispatch-aggregate.json` | `newDispatchSeries` and `liveSeries`, `aggregate` | HA3 point 9 |
@@ -2113,8 +2113,8 @@ mode or a diagram.
   manifests with `inventory.json`, which names each by SHA-256
   (SPEC-HOSTED HA3 point 14).
 - **Expected model**: the identifier each response's reported model is
-  compared with: `target.reported_model` where recorded, otherwise
-  `model_name`; a cell with any other is labelled `model_mismatch`
+  compared with: `target.reported_model.name` where recorded, otherwise
+  `target.model_name`; a cell with any other is labelled `model_mismatch`
   (SPEC-HOSTED §2). A ceiling-check record carries it as
   `expected_model`.
 - **Fire anchor**: the earlier of T_inject and the recorded actual fire
@@ -2254,9 +2254,9 @@ mode or a diagram.
   observed, and the fault-source and injection-timing checks passed.
 - **Send skew**: actual dispatch time minus t_i (§2).
 - **Shape S**: the release request shape: a frozen system text and a user
-  text of the six-digit unique prefix, a space and a synthetic ticket,
-  under a 1,200-token input bound and a 512- or 1,024-token ceiling
-  (SPEC-HOSTED HA3 point 7).
+  text of the unique prefix `cs-<seed>-<i>` (six-digit index), a space and
+  a synthetic ticket, under a 1,200-token input bound and a 512- or
+  1,024-token ceiling (SPEC-HOSTED HA3 point 7).
 - **Shaped mock**: the mock built with `mock.NewShaped`, which answers in
   a hosted provider's stream form for the tests of the hosted code.
 - **SSE**: server-sent events, the streaming format of the
