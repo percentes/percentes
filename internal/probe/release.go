@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -444,7 +445,8 @@ func (r *ReleaseRecord) Verify(t *config.Target, length string, bound int) error
 
 // promptTokens is the stream's reported prompt token count: a
 // chat-completions prompt_tokens, or a Messages input_tokens plus its two
-// cache counts, which input_tokens excludes.
+// cache counts, which input_tokens excludes; a sum past math.MaxInt is
+// math.MaxInt.
 func promptTokens(s *Shape) (int, bool) {
 	if n, ok := s.tokens("prompt_tokens"); ok {
 		return n, true
@@ -455,6 +457,10 @@ func promptTokens(s *Shape) (int, bool) {
 	}
 	for _, k := range []string{"cache_creation_input_tokens", "cache_read_input_tokens"} {
 		if c, ok := s.tokens(k); ok {
+			if c > math.MaxInt-n {
+				n = math.MaxInt
+				continue
+			}
 			n += c
 		}
 	}
@@ -478,7 +484,7 @@ func ceilingCheck(reqs []CheckRequest, ceiling int, length string) CeilingCheck 
 func inputCheck(reqs []CheckRequest, bound int) InputCheck {
 	c := InputCheck{BoundTokens: bound}
 	for _, r := range reqs {
-		if r.PromptTokens == nil {
+		if r.PromptTokens == nil || *r.PromptTokens < 0 {
 			continue
 		}
 		c.Reported++

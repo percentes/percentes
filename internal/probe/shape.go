@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/redact"
 	"github.com/percentes/percentes/internal/sse"
 )
@@ -326,14 +327,10 @@ func (s *Shape) count(c map[string]int, k string) {
 	c[k]++
 }
 
-// tokens returns the integer at key in the stream's usage; it is false
-// when the key is missing or null.
+// tokens returns the count (loadgen.TokenCount) at key in the stream's
+// usage.
 func (s *Shape) tokens(key string) (int, bool) {
-	var n *int
-	if v, ok := s.usage[key]; !ok || json.Unmarshal(v, &n) != nil || n == nil {
-		return 0, false
-	}
-	return *n, true
+	return loadgen.TokenCount(s.usage[key])
 }
 
 func (s *Shape) deltaKey(k string, v json.RawMessage) {
