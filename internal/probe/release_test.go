@@ -1389,7 +1389,58 @@ func TestChooseCeiling(t *testing.T) {
 		{"a Shape R record", gpt, []*ReleaseRecord{checked("groq", 512, 10), checkedR("baseten", 512, 10)},
 			CeilingChoice{}, `probe: route baseten: a check of Shape "R"; the host group sends Shape S`},
 	} {
-		got, err := ChooseCeiling(c.hosts, c.recs)
+		got, err := ChooseCeiling(&config.Shape{Name: config.ShapeS}, c.hosts, c.recs)
+		if !reflect.DeepEqual(got, c.want) || fmt.Sprint(err) != map[bool]string{true: "<nil>", false: c.err}[c.err == ""] {
+			t.Errorf("%s: got %+v, %v; want %+v, %q", c.name, got, err, c.want, c.err)
+		}
+	}
+}
+
+// A Shape R host group runs at 16 when every host passes there, at 256
+// when it declares the fallback and every host passes there, and is
+// excluded otherwise; a failed input or output bound fails the check at
+// that ceiling. A route declaring no fallback is excluded at 16 and
+// refuses a record at 256.
+func TestChooseCeilingShapeR(t *testing.T) {
+	yes, no := true, false
+	withFallback := &config.Shape{Name: config.ShapeR, Fallback: &yes}
+	without := &config.Shape{Name: config.ShapeR, Fallback: &no}
+	inputOver := checkedR("azure-R", 16, 10)
+	inputOver.InputBound = InputCheck{BoundTokens: 128, Reported: 10, MaxPromptTokens: 130, Exceeded: 1}
+	outputOver := checkedR("azure-R", 16, 10)
+	outputOver.OutputBound = OutputCheck{CeilingTokens: 16, Reported: 10, MaxOutputTokens: 40, Exceeded: 3}
+	azure, anthropic := []string{"azure-R"}, []string{"anthropic-R"}
+	for _, c := range []struct {
+		name  string
+		shape *config.Shape
+		hosts []string
+		recs  []*ReleaseRecord
+		want  CeilingChoice
+		err   string
+	}{
+		{"passes at 16", withFallback, azure, []*ReleaseRecord{checkedR("azure-R", 16, 10)},
+			CeilingChoice{Ceiling: 16, Reason: "every host passed at 16"}, ""},
+		{"fails at 16, passes at 256", withFallback, azure, []*ReleaseRecord{checkedR("azure-R", 16, 7), checkedR("azure-R", 256, 10)},
+			CeilingChoice{Ceiling: 256, Reason: "azure-R failed at 16; every host passed at 256"}, ""},
+		{"input bound over at 16", withFallback, azure, []*ReleaseRecord{inputOver, checkedR("azure-R", 256, 10)},
+			CeilingChoice{Ceiling: 256, Reason: "azure-R failed at 16; every host passed at 256"}, ""},
+		{"output bound over at 16", withFallback, azure, []*ReleaseRecord{outputOver, checkedR("azure-R", 256, 10)},
+			CeilingChoice{Ceiling: 256, Reason: "azure-R failed at 16; every host passed at 256"}, ""},
+		{"fails at both", withFallback, azure, []*ReleaseRecord{checkedR("azure-R", 16, 0), checkedR("azure-R", 256, 9)},
+			CeilingChoice{Excluded: true, Reason: "azure-R failed at 256"}, ""},
+		{"no check at 256", withFallback, azure, []*ReleaseRecord{checkedR("azure-R", 16, 9)},
+			CeilingChoice{}, "probe: route azure-R has no check at 256; azure-R failed at 16"},
+		{"no fallback, passes", without, anthropic, []*ReleaseRecord{checkedR("anthropic-R", 16, 10)},
+			CeilingChoice{Ceiling: 16, Reason: "every host passed at 16"}, ""},
+		{"no fallback, fails", without, anthropic, []*ReleaseRecord{checkedR("anthropic-R", 16, 9)},
+			CeilingChoice{Excluded: true, Reason: "anthropic-R failed at 16; the 256-token fallback is declared absent"}, ""},
+		{"no fallback, a record at 256", without, anthropic, []*ReleaseRecord{checkedR("anthropic-R", 16, 9), checkedR("anthropic-R", 256, 10)},
+			CeilingChoice{}, "probe: route anthropic-R: ceiling 256 is not one of [16]"},
+		{"a Shape S record", without, anthropic, []*ReleaseRecord{checked("anthropic-R", 512, 10)},
+			CeilingChoice{}, `probe: route anthropic-R: a check of Shape "S"; the host group sends Shape R`},
+		{"no shape", &config.Shape{Name: "L"}, anthropic, nil, CeilingChoice{}, `probe: no release request shape "L"`},
+	} {
+		got, err := ChooseCeiling(c.shape, c.hosts, c.recs)
 		if !reflect.DeepEqual(got, c.want) || fmt.Sprint(err) != map[bool]string{true: "<nil>", false: c.err}[c.err == ""] {
 			t.Errorf("%s: got %+v, %v; want %+v, %q", c.name, got, err, c.want, c.err)
 		}

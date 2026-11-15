@@ -70,7 +70,7 @@
 //	    --frames DIR --clock-sync CMD
 //	    --status-cmd CMD --balance-cmd CMD --refresh-cmd CMD
 //	    --operator FILE [--host-config FILE ...] --ceiling-probe FILE ...
-//	    --byte-cap N --account-created DATE
+//	    [--byte-cap N] --account-created DATE
 //	percentes-release dispatch --out DIR
 //	percentes-release pages --out DIR --frames DIR --config FILE ...
 //	    --schedule FILE --pages DIR [--release-key FILE]

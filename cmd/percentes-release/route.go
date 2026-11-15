@@ -118,7 +118,7 @@ type route struct {
 	ceilingProbes  map[string][]byte
 	accountCreated string
 	preWindow      int
-	shape          *pilot.ShapeS
+	shape          pilot.Shape
 	openFiles      uint64
 	// rule is the ceiling rule's input behind verdict other than the
 	// price, which limitsStop applies again at each cell's start.
@@ -176,8 +176,8 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	opPath := fs.String("operator", "", "the route's operator file, read again at each cell's start (required)")
 	var hostFiles, probeFiles listFlag
 	fs.Var(&hostFiles, "host-config", "the release configuration of a route in release.other_hosts, as the schedule froze it: one per route (repeatable, required for each)")
-	fs.Var(&probeFiles, "ceiling-probe", "a ceiling check record of a host of the route's model: every host's at 512, and at 1024 when one failed at 512 (repeatable, required)")
-	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
+	fs.Var(&probeFiles, "ceiling-probe", "a ceiling check record of a host of the route's host group: every host's at the shape's ceiling (512 or 16), and at its fallback (1024 or 256) when one failed there; for Shape S also each record of another route that spent a byte cap (repeatable, required)")
+	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required for a Shape S route; absent for Shape R)")
 	accountCreated := fs.String("account-created", "", "the account's creation date, 2006-01-02 (required)")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
@@ -400,14 +400,18 @@ func newRoute(in routeInput) (*route, error) {
 	first, _ := time.Parse(schedule.DateLayout, sched.Input.First)
 	r.preWindow = sentBefore(entries, name, first)
 
-	if in.byteCap <= 0 {
-		return nil, fmt.Errorf("run: --byte-cap %d: the Shape S ticket byte cap is required", in.byteCap)
-	}
-	if r.ceiling, r.ceilingProbes, err = readCeilingProbes(cfg, hosts, in.probeFiles, in.byteCap, sched.Input.LedgerSHA256); err != nil {
+	if r.shape, err = routeShape("run", cfg, in.byteCap); err != nil {
 		return nil, err
 	}
-	if r.shape, err = pilot.GenerateShapeS(pilot.ShapeSSeed, in.byteCap); err != nil {
+	if r.ceiling, r.ceilingProbes, _, err = ceilingChoice(cfg, hosts, in.probeFiles, in.byteCap, sched.Input.LedgerSHA256, frozen); err != nil {
 		return nil, err
+	}
+	if err := runsAt(cfg, r.ceiling); err != nil {
+		return nil, err
+	}
+	group := cfg.Release.AccountGroup
+	if err := lateChecks(entries, len(frozen), group, groupRoutes(sched, name, group)); err != nil {
+		return nil, fmt.Errorf("run: %w", err)
 	}
 	if _, err := time.Parse(time.DateOnly, in.accountCreated); err != nil {
 		return nil, fmt.Errorf("run: --account-created %q is not a date (2006-01-02)", in.accountCreated)
@@ -530,28 +534,74 @@ func hostTargets(cfg *config.Config, hostCfgs []*config.Config, sched *schedule.
 }
 
 // readCeilingProbes reads the ceiling check's records of the route's
-// model, whose hosts are the target and release.other_hosts, and requires
-// their choice to run the model at the configured ceiling. Every record
-// holds no field probe.ReleaseRecord does not define and is byte for byte
-// the probe.Encode encoding of the record it decodes to. Every host's
-// record is judged by the host's target, this route's own or the one in
-// configs: it carries the host's model and byteCap, was admitted in the
-// ledger whose open-line SHA-256 is ledger, carries the target's expected
-// model id, adapter and endpoint and the hash of its body at the record's
-// ceiling (config.ReleaseBodyAt), none of the values the target withholds
-// (probe.Exposed), and the results its requests give at the pinned input
-// bound through the target's start gate (probe.ReleaseRecord.Verify).
-// This route's records together carry no reported model id that keeps the
-// provider-model out (probe.ModelFault).
-// Another host's records also carry none of the values their snapshots'
-// confidential markings withhold (probe.ExposedByMarking), and another
-// host whose records carry a model fault is left out of the choice
-// (probe.ChooseCeiling). It refuses a record at a ceiling the choice does
-// not need: one at 1,024 where the choice is 512.
+// host group, whose hosts are the target and release.other_hosts, all of
+// the route's request shape, and requires their choice to run the group
+// at the configured ceiling. Every record holds no field
+// probe.ReleaseRecord does not define and is byte for byte the
+// probe.Encode encoding of the record it decodes to. Every host's record
+// is judged by the host's target, this route's own or the one in configs:
+// it carries the host's model, the route's shape and byteCap or a byte
+// cap spent above it (ceilingChoiceFor), was admitted in the ledger whose
+// open-line SHA-256 is ledger, carries the target's expected model id,
+// adapter and endpoint and the hash of its body at the record's ceiling,
+// one the shape permits the route (config.ReleaseBodyAt), none of the
+// values the target withholds (probe.Exposed), and the results its
+// requests give at the shape's input bound through the target's start
+// gate (probe.ReleaseRecord.Verify). This route's records together carry
+// no reported model id that keeps the provider-model out
+// (probe.ModelFault). Another host's records also carry none of the
+// values their snapshots' confidential markings withhold
+// (probe.ExposedByMarking), and another host whose records carry a model
+// fault is left out of the choice (probe.ChooseCeiling). A record at a
+// ceiling the choice does not need is kept with the others.
 func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, files []string, byteCap int, ledger string) (probe.CeilingChoice, map[string][]byte, error) {
+	choice, copies, _, err := ceilingChoice(cfg, configs, files, byteCap, ledger, nil)
+	if err != nil {
+		return probe.CeilingChoice{}, nil, err
+	}
+	if err := runsAt(cfg, choice); err != nil {
+		return probe.CeilingChoice{}, nil, err
+	}
+	return choice, copies, nil
+}
+
+// runsAt refuses a choice that excludes cfg's host group or does not run
+// it at cfg's ceiling.
+func runsAt(cfg *config.Config, choice probe.CeilingChoice) error {
+	switch {
+	case choice.Excluded:
+		return fmt.Errorf("run: the ceiling check excludes the host group: %s", choice.Reason)
+	case choice.Ceiling != cfg.Release.Shape.CeilingTokens:
+		return fmt.Errorf("run: the ceiling check chose %d (%s); the configuration runs at %d", choice.Ceiling, choice.Reason, cfg.Release.Shape.CeilingTokens)
+	}
+	return nil
+}
+
+// ceilingChoice is ceilingChoiceFor as run reads the records.
+func ceilingChoice(cfg *config.Config, configs map[string]*config.Target, files []string, byteCap int, ledger string, entries []admission.Entry) (probe.CeilingChoice, map[string][]byte, []*probe.ReleaseRecord, error) {
+	return ceilingChoiceFor(cfg, configs, files, byteCap, ledger, entries, false)
+}
+
+// ceilingChoiceFor is readCeilingProbes up to the ceiling check's choice,
+// which may exclude the host group, with the host group's records read.
+// A Shape S host group also reads the records among files of other
+// routes that spend a byte cap (probe.Spent), each sent on ledger and
+// re-derived from its requests; it refuses byteCap above a spent cap,
+// and a host's record at a byte cap other than byteCap unless it was
+// stopped or the cap is spent and above byteCap, where the record
+// decides nothing (probe.ChooseCeilingAt). A host's record is verified
+// under its route's configuration (frozenVerify). A host's repeat of a
+// refused check must start at least probe.RepeatQuiet of the host's
+// target after the refused check's end. Where entries, the ledger lines
+// the schedule froze, are given, the records must hold one record of each
+// ceiling-check admission there of a host (checkAdmitted). Where
+// excluding is set, a model fault in this route's own records
+// (probe.ModelFault) excludes the host group as not characterized;
+// otherwise it is refused.
+func ceilingChoiceFor(cfg *config.Config, configs map[string]*config.Target, files []string, byteCap int, ledger string, entries []admission.Entry, excluding bool) (probe.CeilingChoice, map[string][]byte, []*probe.ReleaseRecord, error) {
 	var none probe.CeilingChoice
 	if len(files) == 0 {
-		return none, nil, errors.New("run: --ceiling-probe is required: the ceiling check's probe records")
+		return none, nil, nil, errors.New("run: --ceiling-probe is required: the ceiling check's probe records")
 	}
 	t := &cfg.Target
 	hosts, models := []string{t.Name}, map[string]string{t.Name: t.ModelName}
@@ -566,41 +616,49 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 	bodies := map[string]map[int]string{}
 	for route, ht := range targets {
 		bodies[route] = map[int]string{}
-		for _, c := range config.PinnedReleaseCeilings {
+		for _, c := range cfg.Release.Shape.Ceilings() {
 			b, err := config.ReleaseBodyAt(ht.Body, ht.Adapter, c)
 			if err != nil {
-				return none, nil, fmt.Errorf("run: route %s: target.body at %d: %w", route, c, err)
+				return none, nil, nil, fmt.Errorf("run: route %s: target.body at %d: %w", route, c, err)
 			}
 			sum := sha256.Sum256([]byte(b))
 			bodies[route][c] = hex.EncodeToString(sum[:])
 		}
 	}
-	var recs, own []*probe.ReleaseRecord
-	var paths []string
+	shapeS := cfg.Release.Shape.Name == config.ShapeS
+	var recs, own, others []*probe.ReleaseRecord
+	paths := map[*probe.ReleaseRecord]string{}
 	copies := map[string][]byte{}
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
-			return none, nil, fmt.Errorf("ceiling probe: %w", err)
+			return none, nil, nil, fmt.Errorf("ceiling probe: %w", err)
 		}
 		var rec probe.ReleaseRecord
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&rec); err != nil {
-			return none, nil, fmt.Errorf("ceiling probe %s: %w", f, err)
+			return none, nil, nil, fmt.Errorf("ceiling probe %s: %w", f, err)
 		}
 		if canon, err := probe.Encode(&rec); err != nil || !bytes.Equal(b, canon) {
-			return none, nil, fmt.Errorf("ceiling probe %s: not the record as ceiling-check writes it", f)
+			return none, nil, nil, fmt.Errorf("ceiling probe %s: not the record as ceiling-check writes it", f)
 		}
 		var fault string
 		model, host := models[rec.Route]
 		ht, body := targets[rec.Route], bodies[rec.Route][rec.Ceiling.Ceiling]
 		switch {
+		case !host && (!shapeS || len(probe.Spent([]*probe.ReleaseRecord{&rec})) == 0):
+			fault = fmt.Sprintf("route %s is not a host of the host group (%s), and its record spends no byte cap", rec.Route, strings.Join(hosts, ", "))
+		case !host && rec.LedgerSHA256 != ledger:
+			fault = fmt.Sprintf("ledger open line sha256 %q; the schedule froze %s", rec.LedgerSHA256, ledger)
 		case !host:
+			if err := rec.Verify(nil, probe.LengthValue(rec.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+				fault = err.Error()
+			}
 		case rec.RequestedModel != model:
 			fault = fmt.Sprintf("model %q, want %q", rec.RequestedModel, model)
-		case rec.ByteCap != byteCap:
-			fault = fmt.Sprintf("byte cap %d, want --byte-cap %d", rec.ByteCap, byteCap)
+		case rec.Shape != cfg.Release.Shape.Name:
+			fault = fmt.Sprintf("Shape %q, want Shape %s", rec.Shape, cfg.Release.Shape.Name)
 		case rec.LedgerSHA256 != ledger:
 			fault = fmt.Sprintf("ledger open line sha256 %q; the schedule froze %s", rec.LedgerSHA256, ledger)
 		case ht == nil:
@@ -628,37 +686,106 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 		}
 		if fault == "" && host {
 			if err := rec.Verify(ht, probe.LengthValue(rec.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
-				fault = err.Error()
+				fault = frozenVerify(err).Error()
 			}
 		}
 		if fault != "" {
-			return none, nil, fmt.Errorf("ceiling probe %s: route %s at %d: %s", f, rec.Route, rec.Ceiling.Ceiling, fault)
+			return none, nil, nil, fmt.Errorf("ceiling probe %s: route %s at %d: %s", f, rec.Route, rec.Ceiling.Ceiling, fault)
 		}
-		recs, paths = append(recs, &rec), append(paths, f)
-		if rec.Route == t.Name {
+		paths[&rec] = f
+		switch {
+		case !host:
+			others = append(others, &rec)
+		case rec.Route == t.Name:
 			own = append(own, &rec)
+			fallthrough
+		default:
+			recs = append(recs, &rec)
 		}
-		copies[fmt.Sprintf("ceiling-probe-%s-%d.json", rec.Route, rec.Ceiling.Ceiling)] = b
+		name := probeCopyName(&rec)
+		if copies[name] != nil {
+			return none, nil, nil, fmt.Errorf("ceiling probe %s: route %s at %d: a record of ledger line %d given twice", f, rec.Route, rec.Ceiling.Ceiling, rec.LedgerSeq)
+		}
+		copies[name] = b
 	}
-	if fault := probe.ModelFault(t, own); fault != "" {
-		return none, nil, fmt.Errorf("run: route %s is not characterized (SPEC-HOSTED §2): %s", t.Name, fault)
+	spent := probe.Spent(append(slices.Clone(recs), others...))
+	var superseded []int
+	if shapeS {
+		var caps []int
+		for c := range spent {
+			caps = append(caps, c)
+		}
+		slices.Sort(caps)
+		for _, c := range caps {
+			if byteCap > c {
+				return none, nil, nil, fmt.Errorf("run: --byte-cap %d is above byte cap %d, which route %s's check at ledger line %d spent", byteCap, c, spent[c].Route, spent[c].LedgerSeq)
+			}
+			if c > byteCap {
+				superseded = append(superseded, c)
+			}
+		}
 	}
-	choice, err := probe.ChooseCeiling(hosts, recs)
+	var live []*probe.ReleaseRecord
+	for _, rec := range recs {
+		if rec.ByteCap != byteCap && !slices.Contains(superseded, rec.ByteCap) && rec.Outcome() != probe.CheckStopped {
+			return none, nil, nil, fmt.Errorf("ceiling probe %s: route %s at %d: byte cap %d, want --byte-cap %d", paths[rec], rec.Route, rec.Ceiling.Ceiling, rec.ByteCap, byteCap)
+		}
+		if !slices.Contains(superseded, rec.ByteCap) {
+			live = append(live, rec)
+		}
+	}
+	modelFault := probe.ModelFault(t, own)
+	if modelFault != "" && !excluding {
+		return none, nil, nil, fmt.Errorf("run: route %s is not characterized (SPEC-HOSTED §2): %s", t.Name, modelFault)
+	}
+	if err := repeatQuiet(live, targets); err != nil {
+		return none, nil, nil, err
+	}
+	if entries != nil {
+		if err := checkAdmitted(entries, hosts, append(slices.Clone(recs), others...)); err != nil {
+			return none, nil, nil, fmt.Errorf("run: %w", err)
+		}
+	}
+	if modelFault != "" {
+		return probe.CeilingChoice{Excluded: true, Reason: "not characterized (SPEC-HOSTED §2): " + modelFault}, copies, recs, nil
+	}
+	choice, err := probe.ChooseCeilingAt(&cfg.Release.Shape, hosts, recs, superseded)
 	if err != nil {
-		return none, nil, err
+		return none, nil, nil, err
 	}
-	switch {
-	case choice.Excluded:
-		return none, nil, fmt.Errorf("run: the ceiling rule excludes the model: %s", choice.Reason)
-	case choice.Ceiling != cfg.Release.Shape.CeilingTokens:
-		return none, nil, fmt.Errorf("run: the ceiling check chose %d (%s); the configuration runs at %d", choice.Ceiling, choice.Reason, cfg.Release.Shape.CeilingTokens)
+	return choice, copies, recs, nil
+}
+
+// repeatQuiet refuses a host's repeat of a refused check, the later of
+// two records at one ceiling that were not stopped, that started less
+// than probe.RepeatQuiet of the host's target in targets after the
+// refused check ended.
+func repeatQuiet(recs []*probe.ReleaseRecord, targets map[string]*config.Target) error {
+	type key struct {
+		route   string
+		ceiling int
 	}
-	for i, rec := range recs {
-		if c := rec.Ceiling.Ceiling; c != config.PinnedReleaseCeilings[0] && c != choice.Ceiling {
-			return none, nil, fmt.Errorf("ceiling probe %s: route %s at %d: the ceiling check chose %d, which does not need this record", paths[i], rec.Route, c, choice.Ceiling)
+	at := map[key][]*probe.ReleaseRecord{}
+	for _, r := range recs {
+		if r.Outcome() != probe.CheckStopped {
+			k := key{r.Route, r.Ceiling.Ceiling}
+			at[k] = append(at[k], r)
 		}
 	}
-	return choice, copies, nil
+	for k, rs := range at {
+		if len(rs) != 2 || targets[k.route] == nil {
+			continue
+		}
+		a, b := rs[0], rs[1]
+		if b.LedgerSeq < a.LedgerSeq {
+			a, b = b, a
+		}
+		if q := probe.RepeatQuiet(targets[k.route]); a.Outcome() == probe.CheckRefused && b.StartUTC.Before(a.EndUTC.Add(q)) {
+			return fmt.Errorf("run: route %s at %d: the check at ledger line %d repeats the one refused at line %d %s after its end; the repeat waits %s",
+				k.route, k.ceiling, b.LedgerSeq, a.LedgerSeq, b.StartUTC.Sub(a.EndUTC), q)
+		}
+	}
+	return nil
 }
 
 // waitUntil sleeps until the wall clock reaches t, or returns ctx's cause

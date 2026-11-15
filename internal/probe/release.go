@@ -1412,9 +1412,9 @@ type LeftOut struct {
 	Fault string `json:"model_fault"`
 }
 
-// ChooseCeiling keeps its HA3 form until run passes the request shape.
-func ChooseCeiling(hosts []string, recs []*ReleaseRecord) (CeilingChoice, error) {
-	return ChooseCeilingAt(&config.Shape{Name: config.ShapeS}, hosts, recs, nil)
+// ChooseCeiling is ChooseCeilingAt with no byte cap superseded.
+func ChooseCeiling(s *config.Shape, hosts []string, recs []*ReleaseRecord) (CeilingChoice, error) {
+	return ChooseCeilingAt(s, hosts, recs, nil)
 }
 
 // ChooseCeilingAt applies the ceiling rule (SPEC-HOSTED HA3 point 7 and
