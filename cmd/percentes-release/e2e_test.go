@@ -27,9 +27,9 @@ import (
 
 // e2eMinute is one minute of a route's pinned offset in the scaled run.
 // The scaled cell (shortLadder) puts its 2 s top step 13 s after the
-// epoch, so routes 10 offset minutes apart keep their top steps 2 s
+// epoch, so routes 40 offset minutes apart keep their top steps 2 s
 // apart when both start on time.
-const e2eMinute = 400 * time.Millisecond
+const e2eMinute = 100 * time.Millisecond
 
 const e2eAnswer = "Two sentences about the ticket."
 
@@ -239,7 +239,7 @@ func mockCounts(t *testing.T, s *mock.Server) map[string]int {
 	return c
 }
 
-// Six mock routes in the release's mixed request forms run one cell each,
+// Five mock routes in the release's mixed request forms run one cell each,
 // concurrently from one process, up the whole ladder (scaled down by
 // shortLadder) at their pinned offsets (scaled by e2eMinute), sharing one
 // schedule, one ledger and one output directory. Each mock answers only
@@ -247,11 +247,14 @@ func mockCounts(t *testing.T, s *mock.Server) map[string]int {
 // the key arrived there alone. Every cell counts with the client-validity
 // gate passing at each of the five steps; the evidence of every route
 // passes the completeness check, with its per-step table in its report
-// pair. Under the race detector, with six routes sharing one process's
-// garbage collector, the gate can fail; when that is the only reason a
-// cell does not count, the rest is checked over the attempted steps and
-// the test is skipped.
-func TestReleaseLadderSixMockRoutes(t *testing.T) {
+// pair. The gate's GC (garbage collection) pause, CPU and send-skew
+// bounds read this one process, which the five routes share, and are
+// widened (hostGatesWide); a request left undispatched still fails the
+// gate, and a write the release write limit refused fails the test. When
+// the gate is the only reason a cell does not count and no write was
+// refused, the rest is checked over the attempted steps; where nothing
+// else failed, the test is skipped, naming the gate parts that failed.
+func TestReleaseLadderFiveMockRoutes(t *testing.T) {
 	enoughOpenFiles(t)
 	fastDispatch(t)
 	dir := t.TempDir()
@@ -306,16 +309,17 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := r.verdict.Admitted(); !slices.Equal(got, config.PinnedReleaseStepsRPS) {
-			t.Fatalf("%s: admitted %v, want the whole ladder", name, got)
+		if got, want := r.verdict.Admitted(), r.cfg.Release.Ladder.StepRates(r.cfg.Release.BindingRPS); !slices.Equal(got, want) || r.cfg.Release.BindingRPS != 7.048 {
+			t.Fatalf("%s: admitted %v, want the whole ladder %v of the binding rate 7.048, not %g", name, got, want, r.cfg.Release.BindingRPS)
 		}
 		shortLadder(r)
+		hostGatesWide(r)
 		routes[i] = r
 		offsets = append(offsets, r.offsetMinutes)
 	}
 	slices.Sort(offsets)
-	if !slices.Equal(offsets, []int{0, 10, 20, 30, 40, 50}) {
-		t.Fatalf("offsets %v, want a permutation of 0 to 50 in tens", offsets)
+	if !slices.Equal(offsets, []int{0, 40, 80, 120, 160}) {
+		t.Fatalf("offsets %v, want a permutation of 0 to 160 in forties", offsets)
 	}
 
 	label := routes[0].runs[0].Label
@@ -326,7 +330,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 			t.Fatalf("%s: no run of cell %s", names[i], label)
 		}
 		runs[i] = r.runs[k]
-		if runs[i].Start.Minute() != r.offsetMinutes || runs[i].Start.Second() != 0 {
+		if off := runs[i].Start.Sub(runs[i].Start.Truncate(4 * time.Hour)); off != time.Duration(r.offsetMinutes)*time.Minute {
 			t.Fatalf("%s: run starts at %s, not its slot plus %d min", names[i], runs[i].Start, r.offsetMinutes)
 		}
 	}
@@ -358,7 +362,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	for i, r := range routes {
 		name, rec := names[i], recs[i]
 		t.Logf("%s at %d min: %s %q", name, r.offsetMinutes, rec.Outcome, rec.Reasons)
-		top := len(config.PinnedReleaseStepsRPS)
+		top := len(config.PinnedReleaseStepFractions)
 		passed := top
 		switch {
 		case rec.Outcome == outcomeCounted:
@@ -382,8 +386,17 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 			if attempted := k < top; s.Attempted != attempted || attempted && (s.Gates == nil || k < passed && !s.Gates.Pass) {
 				t.Errorf("%s: step %d attempted %t, gates %+v", name, k+1, s.Attempted, s.Gates)
 			}
-			if s.Gates != nil && !s.Gates.Pass {
-				t.Logf("%s: step %d gate %+v", name, k+1, *s.Gates)
+			if g := s.Gates; g != nil && !g.Pass {
+				t.Logf("%s: step %d gate %+v", name, k+1, *g)
+				parts, defect := gateSkipParts(g)
+				if defect {
+					t.Errorf("%s: step %d: %d writes denied under a write capacity the short ladder never reaches", name, k+1, g.WritesDenied)
+				}
+				for _, part := range parts {
+					if !slices.Contains(gateParts, part) {
+						gateParts = append(gateParts, part)
+					}
+				}
 			}
 		}
 		if rec.Tripwires == nil || rec.Tripwires.Fired || len(rec.Canary) != top {
@@ -450,14 +463,18 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 			if k >= top {
 				continue
 			}
-			inTime := -1
+			inTime, unsent := -1, 0
 			for _, line := range s.Lines {
-				if line.Name == report.LineInTime {
+				switch line.Name {
+				case report.LineInTime:
 					inTime = line.Count
+				case report.LineUnsent:
+					unsent = line.Count
 				}
 			}
 			lg := rec.Ladder.Steps[k].Gates
-			if s.State != report.StepAttempted || s.Scheduled == 0 || inTime != s.Scheduled || s.G2 == nil || lg == nil || s.G2.Pass != lg.Pass || s.G6 == nil || !s.G6.Pass {
+			if s.State != report.StepAttempted || s.Scheduled == 0 || lg == nil || unsent != lg.Undispatched || inTime+unsent != s.Scheduled || s.G2 == nil || s.G2.Pass != lg.Pass || s.G6 == nil ||
+				s.G6.Pass != (float64(inTime)/float64(s.Scheduled) >= config.PinnedBaselineGoodputMin) {
 				t.Errorf("%s: step %d table %+v", name, k+1, s)
 			}
 		}
@@ -533,6 +550,9 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	var tops []window
 	for i, rec := range recs {
 		s := rec.Ladder.Steps[len(rec.Ladder.Steps)-1]
+		if !s.Attempted {
+			continue
+		}
 		tops = append(tops, window{names[i], rec.EpochUTC.Add(time.Duration(s.StartNs)), rec.EpochUTC.Add(time.Duration(s.EndNs))})
 	}
 	slices.SortFunc(tops, func(a, b window) int { return a.from.Compare(b.from) })
