@@ -62,8 +62,8 @@
 //	percentes-release ledger price --ledger FILE --config FILE --input USD
 //	    --output USD --source URL --retrieved DATE
 //	percentes-release ceiling-check --config FILE --env FILE --ledger FILE
-//	    --out DIR --byte-cap N [--frames DIR] [--snapshots DIR]
-//	    [--release-key FILE]
+//	    --out DIR [--byte-cap N] [--frames DIR] [--snapshots DIR]
+//	    [--release-key FILE] [--recover [--record FILE]]
 //	percentes-release public-config --config FILE --out FILE
 //	percentes-release run --config FILE --env FILE --ledger FILE
 //	    --release-key FILE --schedule FILE --out DIR --ack-dir DIR

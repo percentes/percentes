@@ -941,3 +941,21 @@ func TestCheckTimes(t *testing.T) {
 		t.Errorf("gemini-S: %v, want %v", got, want)
 	}
 }
+
+// A ceiling check is paced at the lowest step of the rate the route's
+// limits admit at its newest price: the reference route's 0.438 requests
+// per second, the 0.25 step of 1.755. A route with no price is refused.
+func TestCheckStepRPS(t *testing.T) {
+	cfg := releaseConfig(t, "https://api.example.test/openai/v1/chat/completions")
+	f := newFixture(t, cfg, "+0.005")
+	entries, err := ledgerEntries(f.ledger, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rps, err := checkStepRPS(cfg, entries); err != nil || rps != 0.438 {
+		t.Fatalf("%g, %v; want 0.438", rps, err)
+	}
+	if _, err := checkStepRPS(cfg, entries[:1]); err == nil || !strings.Contains(err.Error(), "no price recorded for route groq") {
+		t.Fatalf("no price: %v", err)
+	}
+}

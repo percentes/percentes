@@ -489,7 +489,7 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 		cwg.Add(1)
 		go func(i int, cfg *config.Config) {
 			defer cwg.Done()
-			checks[i], checkErrs[i] = sendCeiling(ctx, l, cfg, shape, "", in.byteCap, key)
+			checks[i], checkErrs[i] = sendCeiling(ctx, l, cfg, shape, "", in.byteCap, key, config.PinnedReleaseStepsRPS[0], nil, nil)
 		}(i, cfg)
 	}
 	cwg.Wait()
