@@ -35,10 +35,13 @@ func packCmd(args []string) (int, error) {
 	keyPath := fs.String("release-key", "", "the release key file (required where a route has a confidential limit)")
 	route := fs.String("route", "", "the route whose pack to write (required)")
 	packPath := fs.String("pack", "", "the file to write the pack to (required)")
+	ledgerPath := fs.String("ledger", "", "the release admission ledger the schedule froze, as the routes left it (required)")
+	var checkPaths listFlag
+	fs.Var(&checkPaths, "check-record", checkRecordUsage)
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
-	for _, f := range [][2]string{{"--out", *out}, {"--frames", *framesRoot}, {"--schedule", *schedulePath}, {"--route", *route}, {"--pack", *packPath}} {
+	for _, f := range [][2]string{{"--out", *out}, {"--frames", *framesRoot}, {"--schedule", *schedulePath}, {"--route", *route}, {"--pack", *packPath}, {"--ledger", *ledgerPath}} {
 		if f[1] == "" {
 			return exitError, fmt.Errorf("pack: %s is required", f[0])
 		}
@@ -51,11 +54,11 @@ func packCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, fmt.Errorf("pack: %w", err)
 	}
-	sched, err := scheduleSHA256(*schedulePath)
+	sched, schedSum, err := loadSchedule(*schedulePath)
 	if err != nil {
 		return exitError, fmt.Errorf("pack: %w", err)
 	}
-	rp, err := buildPages(*out, *framesRoot, sched, cfgs, key)
+	rp, err := buildPages(*out, *framesRoot, sched, schedSum, *ledgerPath, checkPaths, cfgs, key, "")
 	if err != nil {
 		return exitError, err
 	}
@@ -73,7 +76,7 @@ func packCmd(args []string) (int, error) {
 	}
 	for i, r := range rp.routes {
 		if r.Config.Target.Name == *route && rp.recs[i].verdict != nil && rp.recs[i].close == nil {
-			return exitError, fmt.Errorf("pack: route %s has a page and no %s; run writes it once no cell is left", *route, evidence.WindowCloseFile)
+			return exitError, fmt.Errorf("pack: route %s has a cell manifest and no %s; run writes it once no cell is left", *route, evidence.WindowCloseFile)
 		}
 	}
 	if err := replaceFile(*packPath, b); err != nil {
@@ -86,18 +89,26 @@ func packCmd(args []string) (int, error) {
 
 // routePacks builds each route's evidence pack from the pages rp and the
 // release's cell manifests, by slash path under the release output
-// directory. A route with no page has an inventory with no file.
+// directory: its page files, its exclusion's where it ran no cell or its
+// stops' where it has no manifest, each with its host group's
+// ceiling-check records as pages copies them under the output directory,
+// and its manifests. A route with no page has an inventory with no file.
 func routePacks(rp *releasePages, manifests map[string][]byte) (map[string][]byte, error) {
 	packs := map[string][]byte{}
 	for i, r := range rp.routes {
 		name := r.Config.Target.Name
 		files := map[string][]byte{}
-		if rp.recs[i].verdict != nil {
+		if rp.recs[i].verdict != nil || rp.recs[i].excluded != nil || len(rp.recs[i].stops) > 0 {
 			for _, p := range []string{r.Page, path.Join(routesDir, name+".json")} {
 				files[path.Join(packPagesDir, p)] = rp.files[p]
 			}
 		}
 		for p, b := range manifests {
+			if strings.HasPrefix(p, name+"/") {
+				files[path.Join(packOutDir, p)] = b
+			}
+		}
+		for p, b := range rp.out {
 			if strings.HasPrefix(p, name+"/") {
 				files[path.Join(packOutDir, p)] = b
 			}

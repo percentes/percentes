@@ -158,10 +158,8 @@ func TestPagesCmd(t *testing.T) {
 	shortLadder(groq)
 	counted, blocked := groq.runs[0], groq.runs[1]
 	if rec := runCellOK(t, groq, counted); rec.Outcome != outcomeCounted {
-		for _, reason := range rec.Reasons {
-			if !strings.HasPrefix(reason, "client-validity gate failed") && !strings.HasPrefix(reason, "ladder ended at step") {
-				t.Fatalf("outcome %s, reason %q", rec.Outcome, reason)
-			}
+		if !clientGateOnly(rec) {
+			t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
 		}
 		t.Skipf("client-validity gate failed (%q); no counted cell to page", rec.Reasons)
 	}
@@ -180,7 +178,7 @@ func TestPagesCmd(t *testing.T) {
 	}
 
 	pages := t.TempDir()
-	args := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--config", basetenCfg, "--schedule", sched, "--pages", pages}
+	args := []string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", groqCfg, "--config", basetenCfg, "--schedule", sched, "--pages", pages}
 	if code, err := pagesCmd(args); code != exitOK || err != nil {
 		t.Fatalf("exit %d: %v", code, err)
 	}
@@ -190,8 +188,8 @@ func TestPagesCmd(t *testing.T) {
 	}
 	index := string(files[indexPage])
 	for _, frag := range []string{
-		"| Groq | baseten | openai/gpt-oss-120b | 1 | 0.25 | admitted | none | 512 | incomplete frame, 0 of 12 cells recorded |",
-		"| Groq | groq | openai/gpt-oss-120b | 1 | 0.25 | admitted | 3 | 512 | incomplete frame, 1 of 12 cells recorded |",
+		"| Groq | baseten | openai/gpt-oss-120b | S | 1 | 0.438 | admitted | none | 512 | incomplete frame, 0 of 12 cells recorded |",
+		"| Groq | groq | openai/gpt-oss-120b | S | 1 | 0.438 | admitted | 5 | 512 | incomplete frame, 1 of 12 cells recorded |",
 		"| [groq](routes/groq.txt) |\n",
 		"| [baseten](routes/baseten.txt) |\n",
 	} {
@@ -382,7 +380,7 @@ func TestPagesModelMismatch(t *testing.T) {
 	}
 	n := rec.Sent.Warmup + rec.Sent.Measured
 	pages := t.TempDir()
-	if code, err := pagesCmd([]string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--schedule", sched, "--pages", pages}); code != exitOK || err != nil {
+	if code, err := pagesCmd([]string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", groqCfg, "--schedule", sched, "--pages", pages}); code != exitOK || err != nil {
 		t.Fatalf("exit %d: %v", code, err)
 	}
 	files := readPages(t, pages)
@@ -430,31 +428,53 @@ func TestPagesCmdRefusals(t *testing.T) {
 		want string
 	}{
 		{"no pages", func(_ *testing.T, g *route, cfg, sched, _ string) []string {
-			return []string{"--out", g.out, "--frames", g.framesRoot, "--config", cfg, "--schedule", sched}
+			return []string{"--out", g.out, "--ledger", g.ledgerPath, "--frames", g.framesRoot, "--config", cfg, "--schedule", sched}
 		}, "--pages is required"},
 		{"no config", func(_ *testing.T, g *route, _, sched, pages string) []string {
-			return []string{"--out", g.out, "--frames", g.framesRoot, "--schedule", sched, "--pages", pages}
+			return []string{"--out", g.out, "--ledger", g.ledgerPath, "--frames", g.framesRoot, "--schedule", sched, "--pages", pages}
 		}, "--config is required"},
 		{"no schedule", func(_ *testing.T, g *route, cfg, _, pages string) []string {
-			return []string{"--out", g.out, "--frames", g.framesRoot, "--config", cfg, "--pages", pages}
+			return []string{"--out", g.out, "--ledger", g.ledgerPath, "--frames", g.framesRoot, "--config", cfg, "--pages", pages}
 		}, "--schedule is required"},
+		{"no ledger", func(_ *testing.T, g *route, cfg, sched, pages string) []string {
+			return []string{"--out", g.out, "--frames", g.framesRoot, "--config", cfg, "--schedule", sched, "--pages", pages}
+		}, "--ledger is required"},
+		{"other ledger", func(t *testing.T, g *route, cfg, sched, pages string) []string {
+			caps, err := admission.ReleaseCaps(g.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "ledger.jsonl")
+			if _, err := admission.Create(path, caps); err != nil {
+				t.Fatal(err)
+			}
+			return []string{"--out", g.out, "--ledger", path, "--frames", g.framesRoot, "--config", cfg, "--schedule", sched, "--pages", pages}
+		}, "; the route is bound to"},
+		{"ledger before the freeze", func(t *testing.T, g *route, cfg, sched, pages string) []string {
+			b, err := os.ReadFile(g.ledgerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := writeFile(t, t.TempDir(), "ledger.jsonl", b[:bytes.IndexByte(b, '\n')+1])
+			return []string{"--out", g.out, "--ledger", path, "--frames", g.framesRoot, "--config", cfg, "--schedule", sched, "--pages", pages}
+		}, "pages: run: the ledger holds 1 lines; the schedule froze it at line"},
 		{"route without cells", func(t *testing.T, g *route, cfg, sched, pages string) []string {
 			anth := routeConfigFile(t, "anth", e.url(), "10")
-			return []string{"--out", g.out, "--frames", g.framesRoot, "--config", cfg, "--config", anth, "--schedule", sched, "--pages", pages}
+			return []string{"--out", g.out, "--ledger", g.ledgerPath, "--frames", g.framesRoot, "--config", cfg, "--config", anth, "--schedule", sched, "--pages", pages}
 		}, "route anth has no cell with a manifest.json"},
 		{"cells without config", func(t *testing.T, g *route, _, _, pages string) []string {
 			var sched string
 			anth, cfg := pagesRoute(t, "anth", e.url(), g.out, g.framesRoot, scheduleOf(&sched))
 			runCellOK(t, anth, anth.runs[0])
-			return []string{"--out", g.out, "--frames", g.framesRoot, "--config", cfg, "--schedule", sched, "--pages", pages}
+			return []string{"--out", g.out, "--ledger", g.ledgerPath, "--frames", g.framesRoot, "--config", cfg, "--schedule", sched, "--pages", pages}
 		}, "route groq has cells under"},
 		{"other config", func(t *testing.T, g *route, _, sched, pages string) []string {
 			changed := writeFile(t, t.TempDir(), "groq.yaml", append(append([]byte{}, g.cfg.Raw...), "# changed\n"...))
-			return []string{"--out", g.out, "--frames", g.framesRoot, "--config", changed, "--schedule", sched, "--pages", pages}
+			return []string{"--out", g.out, "--ledger", g.ledgerPath, "--frames", g.framesRoot, "--config", changed, "--schedule", sched, "--pages", pages}
 		}, "config: not groq.yaml"},
 		{"other schedule", func(t *testing.T, g *route, cfg, _, pages string) []string {
 			path := writeFile(t, t.TempDir(), "schedule.json", other)
-			return []string{"--out", g.out, "--frames", g.framesRoot, "--config", cfg, "--schedule", path, "--pages", pages}
+			return []string{"--out", g.out, "--ledger", g.ledgerPath, "--frames", g.framesRoot, "--config", cfg, "--schedule", path, "--pages", pages}
 		}, "\"; --schedule has sha256 " + sha(string(other))},
 		{"running", func(t *testing.T, g *route, _, _, _ string) []string {
 			rec := g.newRecord(g.runs[2])
@@ -500,7 +520,7 @@ func TestPagesCmdRefusals(t *testing.T) {
 		}, "the ceiling choice or its probe records differ from the route's other cells'"},
 		{"verdict differs", func(t *testing.T, g *route, _, _, _ string) []string {
 			editJSON(t, filepath.Join(g.cellDir(g.runs[1]), evidence.ManifestFile), func(m *evidence.Manifest) {
-				m.Release.Admission.Steps[0].Demands[0].Fraction += 0.01
+				m.Release.Admission.Plan.ChecksUTC = append(m.Release.Admission.Plan.ChecksUTC, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
 			})
 			return nil
 		}, "the ceiling-rule verdict differs"},
@@ -515,7 +535,7 @@ func TestPagesCmdRefusals(t *testing.T) {
 				}
 			}
 			pages := t.TempDir()
-			args := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfg, "--schedule", sched, "--pages", pages}
+			args := []string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", cfg, "--schedule", sched, "--pages", pages}
 			if code, err := pagesCmd(args); code != exitOK || err != nil {
 				t.Fatalf("before the edit: exit %d: %v", code, err)
 			}
@@ -536,7 +556,7 @@ func TestPagesCmdRefusals(t *testing.T) {
 	}
 }
 
-// The hosts of one model page when their manifests carry one ceiling
+// The hosts of one host group page when their manifests carry one ceiling
 // choice and one set of probe records, and are refused, writing nothing,
 // when a host's process read another set of probe records or its
 // manifest records another choice.
@@ -556,10 +576,10 @@ func TestPagesHostGroup(t *testing.T) {
 		want     string
 	}{
 		{"one choice", func(*fixture) {}, nil, ""},
-		{"other probe records", retaken, nil, "pages: routes groq and baseten, hosts of one model, carry different ceiling probe records"},
+		{"other probe records", retaken, nil, "pages: routes groq and baseten, hosts of one host group, carry different ceiling probe records"},
 		{"other choice", func(*fixture) {}, func(m *evidence.Manifest) {
 			m.Release.Ceiling.Reason = "groq failed at 512; every host passed at 1024"
-		}, "pages: routes groq and baseten, hosts of one model, ran at different ceiling choices"},
+		}, "pages: routes groq and baseten, hosts of one host group, ran at different ceiling choices"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			share, sched := oneRelease(t, e.url(), "groq", "baseten")
@@ -575,7 +595,7 @@ func TestPagesHostGroup(t *testing.T) {
 				editJSON(t, filepath.Join(baseten.cellDir(baseten.runs[0]), evidence.ManifestFile), c.manifest)
 			}
 			pages := filepath.Join(t.TempDir(), "pages")
-			code, err := pagesCmd([]string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--config", basetenCfg, "--schedule", sched, "--pages", pages})
+			code, err := pagesCmd([]string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", groqCfg, "--config", basetenCfg, "--schedule", sched, "--pages", pages})
 			if c.want == "" {
 				if code != exitOK || err != nil {
 					t.Fatalf("exit %d: %v", code, err)
@@ -596,7 +616,8 @@ func TestPagesHostGroup(t *testing.T) {
 // pack whose inventory names no file, needs no window-close record, and
 // leaves its sibling's pages and publication record to pass while its
 // configuration runs at the sibling's ceiling;
-// at another ceiling pages and publish-check refuse it, writing nothing.
+// at another ceiling or request shape pages and publish-check refuse it,
+// writing nothing.
 func TestPagesMissedHost(t *testing.T) {
 	publishAt(t, noticeClosed)
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
@@ -624,7 +645,7 @@ func TestPagesMissedHost(t *testing.T) {
 		}
 	})
 	pages := t.TempDir()
-	args := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--config", basetenCfg, "--schedule", sched, "--pages", pages}
+	args := []string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", groqCfg, "--config", basetenCfg, "--schedule", sched, "--pages", pages}
 	var code int
 	text := stdoutOf(t, func() { code, err = pagesCmd(args) })
 	if code != exitOK || err != nil || !strings.Contains(text, "baseten: no cell with a manifest.json, 2 with a run record only; no page\n") {
@@ -653,8 +674,8 @@ func TestPagesMissedHost(t *testing.T) {
 	}
 
 	other := filepath.Join(t.TempDir(), "pages")
-	args = []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", groqCfg, "--config", fallbackFile(t, basetenCfg), "--schedule", sched, "--pages", other}
-	const want = "pages: routes groq and baseten, hosts of one model, ran at ceilings 512 and 1024"
+	args = []string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", groqCfg, "--config", fallbackFile(t, basetenCfg), "--schedule", sched, "--pages", other}
+	const want = "pages: routes groq and baseten, hosts of one host group, ran at ceilings 512 and 1024"
 	if code, err := pagesCmd(args); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("exit %d: %v, want %q", code, err, want)
 	}

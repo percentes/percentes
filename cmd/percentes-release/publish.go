@@ -29,7 +29,8 @@ var publishNow = time.Now
 // point 14) against the cell manifests and the window-close records under
 // --out, the pages the cells generate under the schedule file given,
 // which must be the pages under --pages, and the files the record names.
-// A route with a page needs its window-close record. Each notice's pack
+// A route with a cell manifest needs its window-close record, and a
+// route with none, excluded or stopped, needs none. Each notice's pack
 // must be the route's pack as pack builds it from the same cells, and a
 // replication pack must carry that pack's files. A notice may not be
 // dated before the UTC day on which its route's last cell started or its
@@ -51,10 +52,13 @@ func publishCheckCmd(args []string) (int, error) {
 	schedulePath := fs.String("schedule", "", "the committed schedule file the cells ran under (required)")
 	keyPath := fs.String("release-key", "", "the release key file (required where a route has a confidential limit)")
 	writePage := fs.Bool("write-page", false, "write the publication page under --pages once the record is complete")
+	ledgerPath := fs.String("ledger", "", "the release admission ledger the schedule froze, as the routes left it (required)")
+	var checkPaths listFlag
+	fs.Var(&checkPaths, "check-record", checkRecordUsage)
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
-	for _, f := range [][2]string{{"--out", *out}, {"--frames", *framesRoot}, {"--pages", *pages}, {"--record", *record}, {"--schedule", *schedulePath}} {
+	for _, f := range [][2]string{{"--out", *out}, {"--frames", *framesRoot}, {"--pages", *pages}, {"--record", *record}, {"--schedule", *schedulePath}, {"--ledger", *ledgerPath}} {
 		if f[1] == "" {
 			return exitError, fmt.Errorf("publish-check: %s is required", f[0])
 		}
@@ -67,7 +71,7 @@ func publishCheckCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, fmt.Errorf("publish-check: %w", err)
 	}
-	sched, err := scheduleSHA256(*schedulePath)
+	sched, sum, err := loadSchedule(*schedulePath)
 	if err != nil {
 		return exitError, fmt.Errorf("publish-check: %w", err)
 	}
@@ -75,7 +79,7 @@ func publishCheckCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	rp, err := buildPages(*out, *framesRoot, sched, cfgs, key)
+	rp, err := buildPages(*out, *framesRoot, sched, sum, *ledgerPath, checkPaths, cfgs, key, "")
 	if err != nil {
 		return exitError, err
 	}

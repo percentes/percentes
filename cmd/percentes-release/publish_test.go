@@ -190,7 +190,7 @@ func TestPublishCheck(t *testing.T) {
 		}
 	}
 	pages := t.TempDir()
-	base := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--pages", pages}
+	base := []string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--pages", pages}
 	release := base[: len(base)-2 : len(base)-2]
 	groqPack := func() map[string][]byte { return map[string][]byte{"groq": packOf(t, release, "groq")} }
 	if code, err := pagesCmd(base); code != exitOK || err != nil {
@@ -209,7 +209,7 @@ func TestPublishCheck(t *testing.T) {
 
 	unclosed := filepath.Join(t.TempDir(), "groq.tar")
 	if code, err := packCmd(append([]string{"--route", "groq", "--pack", unclosed}, release...)); code != exitError || err == nil ||
-		err.Error() != "pack: route groq has a page and no window-close.json; run writes it once no cell is left" {
+		err.Error() != "pack: route groq has a cell manifest and no window-close.json; run writes it once no cell is left" {
 		t.Fatalf("pack with no window-close record: exit %d: %v", code, err)
 	}
 	if _, err := os.Stat(unclosed); !errors.Is(err, os.ErrNotExist) {
@@ -495,8 +495,8 @@ func TestPublishCheck(t *testing.T) {
 	}{
 		{base, "publish-check: --record is required"},
 		{append(base[:len(base):len(base)], "--record", filepath.Join(t.TempDir(), "absent.json")), "absent.json: no such file"},
-		{[]string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--pages", pages, "--record", record}, "publish-check: --schedule is required"},
-		{[]string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", writeFile(t, t.TempDir(), "schedule.json", other), "--pages", pages, "--record", record},
+		{[]string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", cfgPath, "--pages", pages, "--record", record}, "publish-check: --schedule is required"},
+		{[]string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", writeFile(t, t.TempDir(), "schedule.json", other), "--pages", pages, "--record", record},
 			"pages: route groq: the cells ran under schedule sha256 \"" + sha(string(raw)) + "\"; --schedule has sha256 " + sha(string(other))},
 	} {
 		if code, err := publishCheckCmd(c.args); code != exitError || err == nil || !strings.Contains(err.Error(), c.want) {
@@ -561,7 +561,7 @@ func TestPublishCheckWithheld(t *testing.T) {
 	}
 
 	pages := t.TempDir()
-	base := []string{"--out", groq.out, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--release-key", testReleaseKeyPath, "--pages", pages}
+	base := []string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--release-key", testReleaseKeyPath, "--pages", pages}
 	if code, err := pagesCmd(base); code != exitOK || err != nil {
 		t.Fatalf("pages: exit %d: %v", code, err)
 	}

@@ -74,12 +74,15 @@
 //	    [--byte-cap N] --account-created DATE
 //	percentes-release dispatch --out DIR
 //	percentes-release pages --out DIR --frames DIR --config FILE ...
-//	    --schedule FILE --pages DIR [--release-key FILE]
+//	    --schedule FILE --ledger FILE [--check-record FILE ...] --pages DIR
+//	    [--release-key FILE]
 //	percentes-release pack --out DIR --frames DIR --config FILE ...
-//	    --schedule FILE --route NAME --pack FILE [--release-key FILE]
+//	    --schedule FILE --ledger FILE [--check-record FILE ...] --route NAME
+//	    --pack FILE [--release-key FILE]
 //	percentes-release publish-check --out DIR --frames DIR
-//	    --config FILE ... --schedule FILE --pages DIR --record FILE
-//	    [--write-page] [--release-key FILE]
+//	    --config FILE ... --schedule FILE --ledger FILE
+//	    [--check-record FILE ...] --pages DIR --record FILE [--write-page]
+//	    [--release-key FILE]
 //	percentes-release rehearse --out DIR --frames DIR --clock-sync CMD
 //	    --byte-cap N [--scale N] [--master-seed SEED] [--source-diff FILE]
 //	percentes-release check-cpu
