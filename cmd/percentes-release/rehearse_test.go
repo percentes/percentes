@@ -196,6 +196,18 @@ func rehearseChecked(t *testing.T, editRoute func(*route), retries int) {
 			t.Errorf("%s: replay input mode %v, %v", sp.name, fi.Mode().Perm(), err)
 		}
 	}
+	if d := sum.Disk; d == nil || len(d.Routes) != len(rehearsalRoutes) || len(d.Missing) > 0 || d.Attempts != rehearsalAttemptsPerWindow || d.FreeOutput == 0 || d.FreeFrames == 0 {
+		t.Errorf("disk projection %+v", d)
+	} else {
+		ceilings := map[string]int{"anthropic": 16, "azure": 1024, "azure-R": 256, "gemini": 1024, "baseten": 1024}
+		for i, rd := range d.Routes {
+			sp := &rehearsalRoutes[i]
+			wantMult := diskMargin * max(1, float64(ceilings[sp.name])/float64(rd.MockEvents))
+			if rd.Route != sp.name || rd.CeilingTokens != ceilings[sp.name] || rd.MockEvents < 1 || rd.OutputBytes == 0 || rd.FramesBytes == 0 || rd.OutputMultiple != diskMargin || rd.FramesMultiple != wantMult {
+				t.Errorf("disk projection of %s: %+v, want frames multiple %g", sp.name, rd, wantMult)
+			}
+		}
+	}
 
 	excused := map[string]bool{}
 	cellOK := func(rr *rehearsalRoute) {
@@ -444,6 +456,37 @@ func TestRehearsalResourceBounds(t *testing.T) {
 		if p := strings.Join(r.problems(), "; "); !strings.Contains(p, tc.want) {
 			t.Errorf("%+v: problems %q, want %q", r, p, tc.want)
 		}
+	}
+}
+
+// A window's projected disk sums every route's attempts at their
+// multiples: on one filesystem output and frames together against its
+// free disk, on two each against its own. A route with no cell is a
+// problem.
+func TestRehearsalWindowDisk(t *testing.T) {
+	routes := []routeDisk{{Route: "a", OutputBytes: 4, FramesBytes: 2, OutputMultiple: 1, FramesMultiple: 1}, {Route: "b", OutputBytes: 4, FramesBytes: 1, OutputMultiple: 1, FramesMultiple: 2}}
+	for _, tc := range []struct {
+		shared              bool
+		freeOut, freeFrames uint64
+		want                string
+	}{
+		{true, 169, 169, ""},
+		{true, 168, 500, "112 bytes of output and 56 of frames on one filesystem with 168 free"},
+		{false, 113, 57, ""},
+		{false, 112, 500, "112 bytes of output with 112 free"},
+		{false, 200, 56, "56 bytes of frames with 56 free"},
+	} {
+		w := &windowDisk{Routes: routes, Shared: tc.shared, FreeOutput: tc.freeOut, FreeFrames: tc.freeFrames}
+		w.project()
+		got := strings.Join(w.problems(), "; ")
+		if w.Output != 112 || w.Frames != 56 || (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+			t.Errorf("shared %t, free %d and %d: projected %d and %d, problems %q, want %q", tc.shared, tc.freeOut, tc.freeFrames, w.Output, w.Frames, got, tc.want)
+		}
+	}
+	w := &windowDisk{Routes: routes, FreeOutput: 1 << 30, FreeFrames: 1 << 30, Missing: []string{"c"}}
+	w.project()
+	if p := w.problems(); !slices.Equal(p, []string{"no rehearsal cell of c to project"}) {
+		t.Errorf("unsampled route: %q", p)
 	}
 }
 

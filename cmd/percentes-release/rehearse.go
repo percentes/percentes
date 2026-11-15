@@ -467,6 +467,8 @@ type rehearsal struct {
 	// AnthropicRPM is the anthropic route's requests_per_minute limit
 	// rehearsed.
 	AnthropicRPM int `json:"anthropic_rpm"`
+	// Disk is a window's projected disk use beside the free disk.
+	Disk *windowDisk `json:"projected_window_disk,omitempty"`
 
 	Ladder          config.Ladder      `json:"ladder"`
 	CPUWindowS      int                `json:"cpu_window_s"`
@@ -813,6 +815,14 @@ func rehearse(ctx context.Context, in rehearsalInput) (int, error) {
 	}
 	if err != nil {
 		note(5, "ceiling checks", nil, err)
+	}
+	sum.Disk, err = h.windowDisk(sum)
+	if err != nil {
+		errs = append(errs, err)
+		sum.Reasons = append(sum.Reasons, "disk projection: execution error: "+err.Error())
+	}
+	for _, p := range sum.Disk.problems() {
+		sum.Reasons = append(sum.Reasons, "disk projection: "+p)
 	}
 	sum.Green = len(sum.Reasons) == 0
 	sum.EndUTC = time.Now().UTC()
