@@ -43,11 +43,16 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 // runCell runs one cell attempt (SPEC-HOSTED HA3 point 16) and returns its
 // record, also written to the cell's directory. A clock offset above the
 // pinned bound, limits read at the cell's start that no longer admit the
-// route's steps at its newest recorded price (limitsStop) or a ledger
-// refusal stops the route before
-// any request; operator records or limits not refreshed at the cell's
-// start (cellOperator, evidence.ReadRefreshedLimits), a failed balance
-// check, a balance below the cell's reservation, or a
+// route's steps at its newest recorded price (limitsStop), ctx ending
+// during the start checks or a ledger refusal stops the route before
+// any request; SIGTERM (errTerminated) where no stop is found
+// interrupts the cell, before admission, before the first dispatch or
+// in the ladder before its end, with no evidence retained, its
+// admission settled and a ladder's final dispatch series written, and
+// the next start labels it (labelCell), while a ladder that ran to its
+// end keeps its own label; operator records or limits not refreshed at
+// the cell's start (cellOperator, evidence.ReadRefreshedLimits), a
+// failed balance check, a balance below the cell's reservation, a
 // balance unavailable where the route records no balance_unavailable
 // ruling, or a clock with no reading (evidence.ReadClock) blocks the
 // start before admission; the limits and the balance are checked at one
@@ -155,6 +160,14 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		}
 		if limitStop != nil {
 			finish(outcomeStopped, limitStop.Error())
+			return rec, r.retain(ctx, ev, rec, nil)
+		}
+		if terminated(ctx) {
+			finish(outcomeInterrupted, terminatedReason)
+			return rec, nil
+		}
+		if ctx.Err() != nil {
+			finish(outcomeStopped, "stopped before admission: "+context.Cause(ctx).Error())
 			return rec, r.retain(ctx, ev, rec, nil)
 		}
 		if opFault != "" {
@@ -289,6 +302,11 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 
 	outcome, reasons := cellOutcome(res, runErr, context.Cause(cellCtx), ev.clock, canaryErr)
 	finish(outcome, reasons...)
+	if outcome == outcomeInterrupted {
+		// The next start labels the cell (labelCell).
+		ev.live.stop()
+		return rec, replaceJSON(filepath.Join(dir, dispatchFile), newDispatchSeries(run, res))
+	}
 	return rec, r.retain(ctx, ev, rec, res)
 }
 
@@ -360,6 +378,7 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	var statusEnd, balanceEnd string
 	if rec.Outcome != outcomeMissed {
 		var serr, berr error
+		ctx := context.WithoutCancel(ctx)
 		if statusEnd, serr = evidence.WriteStatus(ev.dir, evidence.StatusEndFile, evidence.ReadStatus(ctx, r.status)); serr != nil {
 			statusEnd = ""
 		}
@@ -599,6 +618,14 @@ func (r *route) labelCell(ctx context.Context, rec *cellRecord) error {
 		return err
 	}
 	return replaceJSON(filepath.Join(dir, cellFile), rec)
+}
+
+// terminatedReason is the reason of a cell SIGTERM interrupted.
+const terminatedReason = "the process ended during the cell: SIGTERM"
+
+// terminated reports whether ctx ended on SIGTERM (errTerminated).
+func terminated(ctx context.Context) bool {
+	return ctx.Err() != nil && errors.Is(context.Cause(ctx), errTerminated)
 }
 
 func fileExists(path string) bool {

@@ -26,9 +26,10 @@ const (
 )
 
 // dispatchSeries counts a cell's dispatches per UTC second, from
-// StartUTC. A finished cell's series is final, from the second of the
-// epoch; a running cell's is rewritten as it runs, from the second of
-// its start, and counts every dispatch before ThroughUTC.
+// StartUTC. A finished cell's series, and the series of a ladder SIGTERM
+// cut, is final, from the second of the epoch; a running cell's is
+// rewritten as it runs, from the second of its start, and counts every
+// dispatch before ThroughUTC.
 type dispatchSeries struct {
 	Run        schedule.Run `json:"run"`
 	StartUTC   time.Time    `json:"start_utc"`
@@ -51,7 +52,7 @@ func (s *dispatchSeries) add(at time.Time) {
 	s.Counts[k]++
 }
 
-// newDispatchSeries is a finished cell's final series: each dispatched
+// newDispatchSeries is the final series of res: each dispatched
 // request's send time on the wall clock from the run epoch.
 func newDispatchSeries(run schedule.Run, res *loadgen.Result) *dispatchSeries {
 	s := &dispatchSeries{Run: run, StartUTC: res.EpochWall.UTC().Truncate(time.Second), Counts: []int{}, Final: true}
@@ -150,7 +151,8 @@ func (l *liveSeries) stop() {
 
 // hostDispatch is the host's aggregate dispatch series over a cell, from
 // the second of from through the second of to on the host's wall clock:
-// the cell's own series, final unless the cell was interrupted, and each
+// the cell's own series, final unless the process ended during the cell
+// or SIGTERM ended it before its ladder, and each
 // concurrent run's, read from its cell directory once it is final or
 // counts every dispatch through to, or as it stands after
 // dispatchWaitMax.

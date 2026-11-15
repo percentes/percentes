@@ -66,8 +66,8 @@
 //	    [--release-key FILE]
 //	percentes-release public-config --config FILE --out FILE
 //	percentes-release run --config FILE --env FILE --ledger FILE
-//	    --release-key FILE --schedule FILE --out DIR --frames DIR
-//	    --clock-sync CMD
+//	    --release-key FILE --schedule FILE --out DIR --ack-dir DIR
+//	    --frames DIR --clock-sync CMD
 //	    --status-cmd CMD --balance-cmd CMD --refresh-cmd CMD
 //	    --operator FILE [--host-config FILE ...] --ceiling-probe FILE ...
 //	    --byte-cap N --account-created DATE
@@ -84,19 +84,28 @@
 //	percentes-release check-cpu
 //
 // Exit codes: 0 = the route's runs are over and every cell counts, or
-// the ceiling check passed with the input bound and run accepts the
-// model ids it reported; 2 = the runs are over and a cell does not
-// count, or the ceiling check failed, was blocked or reported a model id
-// on which run refuses the route;
+// the ceiling check passed with the input and output bounds and run
+// accepts the model ids it reported, or ceiling-check --recover settled
+// a check; 2 = the ceiling check failed, was refused or blocked, stopped
+// on an interruption or at a request that reached no connection, or
+// reported a model id on which run refuses the route, or a Go panic or
+// fatal error in any command;
 // 3 = the route stopped (a ledger refusal, a documented billing refusal,
 // a clock offset above the pinned bound, limits read at a cell's start
 // that no longer admit the route's steps at its newest recorded price, a
-// probe 401 or 403 the route's
-// previous probed cell also saw, or an operator abort); 1 = execution
-// error or refusal to start. rehearse exits 0 when the rehearsal is
-// green and 2 when it is not; publish-check exits 0 when the publication
-// record is complete and the publication page under --pages is the one
-// it gives, and 2 when either is not.
+// cell's request that reported more tokens than its bounds, a probe 401
+// or 403 the route's previous probed cell also saw, or an operator abort,
+// which with no run left stops it before the window close), and on every
+// later start while that stopped cell, abort marker or stop marker (a
+// stopped cell whose record failed to write) has no acknowledgement file
+// under --ack-dir;
+// 4 = run's window is over and a cell does not count; 5 = run ended on
+// SIGTERM with no stop found, a cell in progress interrupted only where
+// the signal came before its ladder's end; 1 =
+// execution error or refusal to start. rehearse exits 0 when the
+// rehearsal is green and 2 when it is not; publish-check exits 0 when
+// the publication record is complete and the publication page under
+// --pages is the one it gives, and 2 when either is not.
 package main
 
 import (
@@ -115,13 +124,19 @@ import (
 	"github.com/percentes/percentes/internal/loadgen"
 )
 
-// Exit codes.
+// Exit codes. Only run exits 4 and 5; any command exits 2 on a Go panic or
+// fatal error.
 const (
-	exitOK      = 0
-	exitError   = 1
-	exitAdverse = 2
-	exitStopped = 3
+	exitOK            = 0
+	exitError         = 1
+	exitAdverse       = 2
+	exitStopped       = 3
+	exitWindowAdverse = 4
+	exitTerminated    = 5
 )
+
+// errTerminated is run's context cause on SIGTERM.
+var errTerminated = errors.New("SIGTERM")
 
 const usage = `usage: percentes-release <command> [flags]
 
@@ -153,7 +168,7 @@ func dispatch(args []string) int {
 		fmt.Fprint(os.Stderr, usage)
 		return exitError
 	}
-	ctx, stop := operatorContext()
+	ctx, stop := operatorContext(sigtermCause(args[0]))
 	defer stop()
 	var (
 		code int
@@ -195,17 +210,33 @@ func dispatch(args []string) int {
 	return code
 }
 
-// operatorContext is cancelled with loadgen.ErrOperatorAbort on SIGINT or
-// SIGTERM, so a cell it stops records an operator abort.
-func operatorContext() (context.Context, func()) {
+// sigtermCause is command's context cause on SIGTERM: errTerminated for
+// run, an operator abort for every other command.
+func sigtermCause(command string) error {
+	if command == "run" {
+		return errTerminated
+	}
+	return loadgen.ErrOperatorAbort
+}
+
+// operatorContext is cancelled with loadgen.ErrOperatorAbort on SIGINT
+// or SIGHUP, so run writes its abort marker at the signal, a cell it
+// stops records an operator abort and a ceiling check its record, and
+// with term on SIGTERM; the first signal sets the cause. The returned
+// stop cancels it with no cause.
+func operatorContext(term error) (context.Context, func()) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	done := make(chan struct{})
 	go func() {
 		select {
-		case <-sig:
-			cancel(loadgen.ErrOperatorAbort)
+		case s := <-sig:
+			if s == syscall.SIGTERM {
+				cancel(term)
+			} else {
+				cancel(loadgen.ErrOperatorAbort)
+			}
 		case <-done:
 		}
 	}()

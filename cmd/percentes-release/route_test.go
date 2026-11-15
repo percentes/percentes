@@ -6,12 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
@@ -30,6 +32,9 @@ func clockRoute(t *testing.T, start time.Time, outcomes func(schedule.Run) strin
 	out := t.TempDir()
 	cfg := &config.Config{Target: config.Target{Name: "groq"}}
 	r := &route{cfg: cfg, sched: sched, runs: runs, out: out, dir: filepath.Join(out, "groq"), verdict: &admission.Verdict{}}
+	if r.ledger, err = admission.Create(filepath.Join(out, "ledger.jsonl"), admission.PilotCaps()); err != nil {
+		t.Fatal(err)
+	}
 	now := start
 	r.now = func() time.Time { return now }
 	r.wait = func(_ context.Context, at time.Time) error {
@@ -114,7 +119,7 @@ func TestLoopReruns(t *testing.T) {
 	}
 	r := clockRoute(t, time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC), outcomes, &ran)
 	code, err := r.loop(context.Background())
-	if err != nil || code != exitAdverse {
+	if err != nil || code != exitWindowAdverse {
 		t.Fatalf("loop: %d, %v", code, err)
 	}
 	var reruns []string
@@ -128,6 +133,14 @@ func TestLoopReruns(t *testing.T) {
 	}
 	if !slices.IsSortedFunc(ran, func(a, b schedule.Run) int { return a.Start.Compare(b.Start) }) {
 		t.Fatal("runs out of start order")
+	}
+}
+
+// run's window-over code for a cell that does not count is neither a Go
+// crash's 2 nor the stop code.
+func TestWindowOverExitCodeForUncountedCell(t *testing.T) {
+	if exitWindowAdverse == 2 || exitWindowAdverse == exitStopped {
+		t.Fatalf("exitWindowAdverse %d", exitWindowAdverse)
 	}
 }
 
@@ -170,7 +183,7 @@ func TestLoopMissedAndInterrupted(t *testing.T) {
 	if taken != schedule.MaxReruns || len(ran) != 12-4+taken {
 		t.Fatalf("%d re-runs taken, %d runs ran", taken, len(ran))
 	}
-	if code != exitAdverse {
+	if code != exitWindowAdverse {
 		t.Fatalf("code %d", code)
 	}
 	if want := []schedule.Run{runs[3], runs[0], runs[1], runs[2]}; !slices.Equal(labelled, want) {
@@ -193,8 +206,10 @@ func TestLoopMissedAndInterrupted(t *testing.T) {
 	}
 }
 
-// A stopped cell ends the loop with the stop code; a later process takes
-// its re-run and goes on. A wait cut short by the operator stops too.
+// A stopped cell ends the loop with the stop code; a later process is
+// held until the stop's acknowledgement file exists, then takes its
+// re-run and goes on. A wait cut short by the operator stops too, and
+// holds the route the same way.
 func TestLoopStopAndRestart(t *testing.T) {
 	var ran []schedule.Run
 	stopAt := ""
@@ -205,20 +220,56 @@ func TestLoopStopAndRestart(t *testing.T) {
 		return outcomeCounted
 	}
 	r := clockRoute(t, time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC), outcomes, &ran)
+	r.ackDir = t.TempDir()
 	stopAt = r.runs[1].Label
 	code, err := r.loop(context.Background())
 	if err != nil || code != exitStopped || len(ran) != 2 || closedAfter != nil {
 		t.Fatalf("loop: %d, %v, ran %d, window close after %v", code, err, len(ran), closedAfter)
 	}
 	code, err = r.loop(context.Background())
+	if err != nil || code != exitStopped || len(ran) != 2 || closedAfter != nil {
+		t.Fatalf("restart with no acknowledgement: %d, %v, ran %d", code, err, len(ran))
+	}
+	acknowledge(t, r, cellLabel(r.runs[1]))
+	code, err = r.loop(context.Background())
 	if err != nil || code != exitOK || len(ran) != 13 || !slices.Equal(closedAfter, []int{13}) {
 		t.Fatalf("restart: %d, %v, ran %d, window close after %v", code, err, len(ran), closedAfter)
 	}
 
-	r2 := clockRoute(t, time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC), counted, new([]schedule.Run))
-	r2.wait = func(context.Context, time.Time) error { return errors.New("operator abort") }
-	if code, err := r2.loop(context.Background()); err != nil || code != exitStopped {
+	var ran2 []schedule.Run
+	r2 := clockRoute(t, time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC), counted, &ran2)
+	r2.ackDir = t.TempDir()
+	wait := r2.wait
+	waits := 0
+	r2.wait = func(context.Context, time.Time) error {
+		waits++
+		return loadgen.ErrOperatorAbort
+	}
+	if code, err := r2.loop(context.Background()); err != nil || code != exitStopped || waits != 1 {
 		t.Fatalf("aborted wait: %d, %v", code, err)
+	}
+	if code, err := r2.loop(context.Background()); err != nil || code != exitStopped || waits != 1 || len(ran2) != 0 {
+		t.Fatalf("restart after the abort: %d, %v, %d waits", code, err, waits)
+	}
+	markers, err := filepath.Glob(filepath.Join(r2.dir, abortPrefix+"*.json"))
+	if err != nil || len(markers) != 1 {
+		t.Fatalf("abort markers %v: %v", markers, err)
+	}
+	acknowledge(t, r2, strings.TrimSuffix(filepath.Base(markers[0]), ".json"))
+	r2.wait = wait
+	if code, err := r2.loop(context.Background()); err != nil || code != exitOK || len(ran2) != 12 {
+		t.Fatalf("acknowledged restart: %d, %v, ran %d", code, err, len(ran2))
+	}
+}
+
+// acknowledge writes the acknowledgement file that releases r's hold id.
+func acknowledge(t *testing.T, r *route, id string) {
+	t.Helper()
+	if r.ackDir == "" {
+		r.ackDir = t.TempDir()
+	}
+	if err := os.WriteFile(r.ackFile(id), nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

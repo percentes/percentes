@@ -67,6 +67,9 @@ type cellRecord struct {
 	ProbeStatus    int        `json:"probe_status,omitempty"`
 	// AuthStatuses counts the ladder's 401 and 403 responses by status.
 	AuthStatuses map[int]int `json:"auth_statuses,omitempty"`
+	// BillingRefusals counts the probe's and the ladder's responses that
+	// the target documents as a billing refusal (billingRefusal).
+	BillingRefusals int `json:"billing_refusals,omitempty"`
 	// Ladder, Tripwires and Interrupted are loadgen's records of the run.
 	Ladder      *loadgen.LadderRecord   `json:"ladder,omitempty"`
 	Tripwires   *loadgen.Tripwires      `json:"tripwires,omitempty"`
@@ -96,6 +99,8 @@ type route struct {
 	offsetMinutes int
 	// out is the release output directory; dir the route's under it.
 	out, dir string
+	// ackDir holds the operator's acknowledgement files (route.holds).
+	ackDir string
 
 	verdict        *admission.Verdict
 	steps          int
@@ -149,6 +154,7 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	keyPath := fs.String("release-key", "", "the release key file the schedule froze the configuration under (required)")
 	schedulePath := fs.String("schedule", "", "the committed schedule file (required)")
 	out := fs.String("out", "", "release output directory; the route writes <route>/<cell>-a<attempt>/ under it (required)")
+	ackDir := fs.String("ack-dir", "", "directory outside --out, read-only to the route's user, of the operator's acknowledgement files: a stopped cell holds the route until resume-<route>-<cell>-a<attempt> exists in it, an operator abort until resume-<route>-abort-<time> does, and a stopped cell whose record failed to write until resume-<route>-stop-<cell>-a<attempt> does (required)")
 	framesRoot := fs.String("frames", "", "raw-frame store directory outside the source tree (required)")
 	clockSync := fs.String("clock-sync", "", "host clock-sync command run before each cell, split on spaces with no shell (required)")
 	statusCmd := fs.String("status-cmd", "", "endpoint-status command run at each cell's start and end, split on spaces with no shell (required)")
@@ -185,9 +191,15 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	if *ackDir == "" {
+		return exitError, errors.New("run: --ack-dir is required")
+	}
+	if err := checkAckDir(*ackDir, *out); err != nil {
+		return exitError, err
+	}
 	build, _ := debug.ReadBuildInfo()
 	r, err := newRoute(routeInput{
-		cfg: cfg, hostCfgs: hostCfgs, configName: filepath.Base(*cfgPath), schedulePath: *schedulePath, out: *out, ledgerPath: *ledgerPath, key: key,
+		cfg: cfg, hostCfgs: hostCfgs, configName: filepath.Base(*cfgPath), schedulePath: *schedulePath, out: *out, ackDir: *ackDir, ledgerPath: *ledgerPath, key: key,
 		framesRoot: *framesRoot, clockSync: *clockSync, statusCmd: *statusCmd, balanceCmd: *balanceCmd, refreshCmd: *refreshCmd, opPath: *opPath, probeFiles: probeFiles,
 		byteCap: *byteCap, accountCreated: *accountCreated, build: build,
 	})
@@ -214,6 +226,7 @@ type routeInput struct {
 	cfg                                       *config.Config
 	hostCfgs                                  []*config.Config
 	configName, schedulePath, out, ledgerPath string
+	ackDir                                    string
 	key                                       *releasekey.Key
 	framesRoot, clockSync, statusCmd, opPath  string
 	balanceCmd, refreshCmd                    string
@@ -255,7 +268,7 @@ func newRoute(in routeInput) (*route, error) {
 		return nil, err
 	}
 	sum := sha256.Sum256(raw)
-	r := &route{cfg: cfg, configName: in.configName, sched: sched, scheduleSHA256: hex.EncodeToString(sum[:]), runs: runs, out: in.out, dir: filepath.Join(in.out, name),
+	r := &route{cfg: cfg, configName: in.configName, sched: sched, scheduleSHA256: hex.EncodeToString(sum[:]), runs: runs, out: in.out, dir: filepath.Join(in.out, name), ackDir: in.ackDir,
 		ledgerPath: in.ledgerPath, key: in.key, framesRoot: in.framesRoot, opPath: in.opPath, build: in.build, now: time.Now, wait: waitUntil}
 	r.cell, r.label, r.close = r.runCell, r.labelCell, r.windowClose
 	if err := r.sameSchedule(); err != nil {
@@ -550,20 +563,23 @@ func readCeilingProbes(cfg *config.Config, configs map[string]*config.Target, fi
 	return choice, copies, nil
 }
 
-// waitUntil sleeps until t, or returns ctx's cause when it ends first.
+// waitUntil sleeps until the wall clock reaches t, or returns ctx's cause
+// when ctx has ended or ends first. A t with no monotonic reading is
+// reached on the wall clock, which timers do not follow.
 func waitUntil(ctx context.Context, t time.Time) error {
-	d := time.Until(t)
-	if d <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
+	if ctx.Err() != nil {
 		return context.Cause(ctx)
 	}
+	for d := time.Until(t); d > 0; d = time.Until(t) {
+		timer := time.NewTimer(d)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return context.Cause(ctx)
+		}
+	}
+	return nil
 }
 
 // cellDir is a run's directory under the route's.
@@ -584,6 +600,7 @@ type routeState struct {
 	records    map[string]*cellRecord
 	next       *schedule.Run
 	unlabelled []*cellRecord
+	recovered  []*cellRecord
 }
 
 func runKey(r schedule.Run) string { return fmt.Sprintf("%s/%d", r.Label, r.Attempt) }
@@ -738,23 +755,74 @@ func (r *route) hasAttempt2(label string) bool {
 
 // loop runs the route's cells in start order until none is left, the
 // route stops, or ctx ends. A run whose start passed more than the start
-// tolerance ago is recorded as missed. Each missed or interrupted cell is
-// labelled before the next run. After the last cell the route's
-// window-close record is written.
+// tolerance ago is recorded as missed, and a cell whose ladder would start
+// later than that is missed too (runCell). On every start, before it
+// labels, records a missed cell or sends, it exits with the stop code
+// while a stopped cell or an operator abort or stop marker has no
+// acknowledgement file (route.holds); a cell that stopped the route stops
+// it even when its evidence then failed to write. An operator abort
+// writes its marker at the signal, naming the cell in progress or the
+// run the loop waits for (abortHold), or when that cell or the wait ends,
+// and stops the route; one that ends the loop with no run left stops it
+// before the window close, with no marker. SIGTERM writes no marker and
+// ends the loop with exitTerminated before the next label, wait, cell or
+// window close, or once the cell in progress ends unless it stopped the
+// route. A wait that ends for another cause is an execution error. Each
+// cell state finds unlabelled is labelled before the next run, a label
+// under way running its commands to their own timeouts after ctx ends,
+// as a cell's end status and balance commands do. After the last cell
+// the route's window-close record is written. It refuses to start while
+// another process holds the route's lock on the ledger
+// (admission.Ledger.LockRoute).
 func (r *route) loop(ctx context.Context) (int, error) {
+	owner, err := r.ledger.LockRoute(r.cfg.Target.Name)
+	if err != nil {
+		return exitError, err
+	}
+	defer owner.Close()
+	hold := &abortHold{r: r}
+	defer hold.watch(ctx)()
 	for {
 		st, err := r.state()
 		if err != nil {
 			return exitError, err
 		}
+		hold.at(st.next, false)
+		for _, rec := range st.recovered {
+			fmt.Printf("%s %s attempt %d: %s, recorded before the process ended\n", rec.Run.Route, rec.Run.Label, rec.Run.Attempt, cellSummary(rec))
+		}
+		holds, err := r.holds(st)
+		if err != nil {
+			return exitError, err
+		}
+		if len(holds) > 0 {
+			for _, h := range holds {
+				fmt.Println(h)
+			}
+			return exitStopped, nil
+		}
 		for _, rec := range st.unlabelled {
-			if err := r.label(ctx, rec); err != nil {
+			if terminated(ctx) {
+				return r.endTerminated(fmt.Sprintf("before labelling %s attempt %d", rec.Run.Label, rec.Run.Attempt)), nil
+			}
+			if err := r.label(context.WithoutCancel(ctx), rec); err != nil {
 				return exitError, fmt.Errorf("%s %s attempt %d: label: %w", rec.Run.Route, rec.Run.Label, rec.Run.Attempt, err)
 			}
 			fmt.Printf("%s %s attempt %d: %s, labelled\n", rec.Run.Route, rec.Run.Label, rec.Run.Attempt, rec.Outcome)
 		}
 		if st.next == nil {
+			if terminated(ctx) {
+				return r.endTerminated("before the window close"), nil
+			}
+			if ctx.Err() != nil {
+				fmt.Printf("%s: stopped before the window close: %v\n", r.cfg.Target.Name, context.Cause(ctx))
+				return exitStopped, nil
+			}
 			if err := r.close(ctx, st); err != nil {
+				if terminated(ctx) {
+					fmt.Fprintf(os.Stderr, "%s: window close: %v\n", r.cfg.Target.Name, err)
+					return r.endTerminated("during the window close"), nil
+				}
 				return exitError, err
 			}
 			return r.finish(st), nil
@@ -771,22 +839,87 @@ func (r *route) loop(ctx context.Context) (int, error) {
 			continue
 		}
 		if err := r.wait(ctx, next.Start); err != nil {
+			if terminated(ctx) {
+				return r.endTerminated(fmt.Sprintf("before %s attempt %d", next.Label, next.Attempt)), nil
+			}
+			if !errors.Is(err, loadgen.ErrOperatorAbort) {
+				return exitError, fmt.Errorf("%s: wait for %s attempt %d: %w", next.Route, next.Label, next.Attempt, err)
+			}
 			fmt.Printf("%s: stopped before %s attempt %d: %v\n", next.Route, next.Label, next.Attempt, err)
+			hold.settle(ctx)
+			if id, werr := hold.write(next, false, err); werr != nil {
+				fmt.Fprintf(os.Stderr, "%s: abort marker not written: %v\n", next.Route, werr)
+			} else {
+				fmt.Printf("%s: held until %s exists\n", next.Route, r.ackFile(id))
+			}
 			return exitStopped, nil
 		}
+		hold.at(&next, true)
 		rec, err := r.cell(ctx, next)
-		if err != nil {
-			return exitError, err
-		}
-		fmt.Printf("%s %s attempt %d: %s\n", next.Route, next.Label, next.Attempt, cellSummary(rec))
-		if rec.Outcome == outcomeStopped {
-			return exitStopped, nil
+		if code, done, err := r.cellEnded(ctx, hold, next, rec, err); done {
+			return code, err
 		}
 	}
 }
 
+// cellEnded prints the outcome of next's cell, rec, which ended with
+// err, and returns loop's exit code, with done false where the loop goes
+// on. From here until the loop names the next run, an abort names none.
+// An operator abort during the cell stops the route, held by its marker,
+// which is written now where the signal's write failed; SIGTERM ends the
+// loop with exitTerminated, or exitStopped where the cell stopped.
+func (r *route) cellEnded(ctx context.Context, hold *abortHold, next schedule.Run, rec *cellRecord, err error) (int, bool, error) {
+	cause := context.Cause(ctx)
+	aborted := errors.Is(cause, loadgen.ErrOperatorAbort)
+	hold.at(nil, false)
+	if errors.Is(cause, errTerminated) && rec != nil {
+		fmt.Printf("%s %s attempt %d: %s\n", next.Route, next.Label, next.Attempt, cellSummary(rec))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s %s attempt %d: execution error: %v\n", next.Route, next.Label, next.Attempt, err)
+		}
+		if rec.Outcome == outcomeStopped {
+			return exitStopped, true, nil
+		}
+		return r.endTerminated(fmt.Sprintf("after %s attempt %d", next.Label, next.Attempt)), true, nil
+	}
+	if aborted {
+		if rec != nil {
+			fmt.Printf("%s %s attempt %d: %s\n", next.Route, next.Label, next.Attempt, cellSummary(rec))
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s %s attempt %d: execution error: %v\n", next.Route, next.Label, next.Attempt, err)
+		}
+		hold.settle(ctx)
+		if id, werr := hold.write(next, true, cause); werr != nil {
+			fmt.Fprintf(os.Stderr, "%s: abort marker not written: %v\n", next.Route, werr)
+		} else {
+			fmt.Printf("%s: held until %s exists\n", next.Route, r.ackFile(id))
+		}
+		return exitStopped, true, nil
+	}
+	if err != nil && rec != nil && rec.Outcome == outcomeStopped {
+		fmt.Fprintf(os.Stderr, "%s %s attempt %d: %s; execution error: %v\n", next.Route, next.Label, next.Attempt, cellSummary(rec), err)
+		return exitStopped, true, nil
+	}
+	if err != nil {
+		return exitError, true, err
+	}
+	fmt.Printf("%s %s attempt %d: %s\n", next.Route, next.Label, next.Attempt, cellSummary(rec))
+	if rec.Outcome == outcomeStopped {
+		return exitStopped, true, nil
+	}
+	return 0, false, nil
+}
+
+// endTerminated prints that the process ends on SIGTERM where, with no
+// hold, and returns exitTerminated.
+func (r *route) endTerminated(where string) int {
+	fmt.Printf("%s: ended on SIGTERM %s; no hold, the next start goes on\n", r.cfg.Target.Name, where)
+	return exitTerminated
+}
+
 // finish prints each cell's final attempt and returns exitOK when every
-// cell counts.
+// cell counts, and exitWindowAdverse when one does not.
 func (r *route) finish(st *routeState) int {
 	code := exitOK
 	for _, a := range r.runs {
@@ -797,7 +930,7 @@ func (r *route) finish(st *routeState) int {
 			}
 		}
 		if rec == nil || rec.Outcome != outcomeCounted {
-			code = exitAdverse
+			code = exitWindowAdverse
 		}
 		if rec != nil {
 			fmt.Printf("%s %s: attempt %d %s\n", a.Route, a.Label, rec.Run.Attempt, cellSummary(rec))

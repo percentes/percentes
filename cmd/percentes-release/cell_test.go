@@ -1276,7 +1276,7 @@ func TestLabelMissedAndInterrupted(t *testing.T) {
 		now = now.Add(time.Second)
 		return now
 	}
-	r.wait = func(context.Context, time.Time) error { return errors.New("operator abort") }
+	r.wait = func(context.Context, time.Time) error { return loadgen.ErrOperatorAbort }
 	ctx := context.Background()
 
 	other := schedule.Run{Route: "other", Label: gone.Label, Attempt: 1, Date: gone.Date, Start: gone.Start.Add(-time.Minute)}
@@ -1423,7 +1423,7 @@ func TestLabelUndecodableClock(t *testing.T) {
 		now = now.Add(time.Second)
 		return now
 	}
-	r.wait = func(context.Context, time.Time) error { return errors.New("operator abort") }
+	r.wait = func(context.Context, time.Time) error { return loadgen.ErrOperatorAbort }
 	rec := r.newRecord(gone)
 	rec.Outcome, rec.StartUTC = outcomeRunning, gone.Start
 	if err := r.writeNew(gone, rec); err != nil {
