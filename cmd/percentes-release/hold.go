@@ -57,9 +57,35 @@ func (r *route) writeAbort(run schedule.Run, during bool, cause error) (string, 
 	return id, replaceJSON(filepath.Join(r.dir, id+".json"), m)
 }
 
+// writeStopHold records rec's stop, for a stopped cell whose record
+// failed to write.
+func (r *route) writeStopHold(rec *cellRecord) (string, error) {
+	id := stopPrefix + cellLabel(rec.Run)
+	m := &abortMarker{Route: r.cfg.Target.Name, Run: rec.Run, Stop: true, AtUTC: r.now().UTC(), Reason: strings.Join(rec.Reasons, "; "),
+		Reasons: slices.Clone(rec.Reasons), BillingRefusals: rec.BillingRefusals, ProbeStatus: rec.ProbeStatus, Sent: &rec.Sent}
+	return id, replaceJSON(filepath.Join(r.dir, id+".json"), m)
+}
+
 // stopMarkerPath is the stop marker file of run's cell.
 func (r *route) stopMarkerPath(run schedule.Run) string {
 	return filepath.Join(r.dir, stopPrefix+cellLabel(run)+".json")
+}
+
+// stopMarker is the stop marker of run's cell, or nil where none is
+// written.
+func (r *route) stopMarker(run schedule.Run) (*abortMarker, error) {
+	p := r.stopMarkerPath(run)
+	b, err := os.ReadFile(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	var m abortMarker
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("%s: %w", p, err)
+	}
+	return &m, nil
 }
 
 // abortHold writes at most one operator-abort marker for a route

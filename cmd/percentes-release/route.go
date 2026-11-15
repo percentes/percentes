@@ -80,6 +80,16 @@ type cellRecord struct {
 	Concurrent []schedule.Run   `json:"concurrent_runs,omitempty"`
 	Sent       admission.Counts `json:"sent"`
 	Error      string           `json:"error,omitempty"`
+	// Decided is a stopped cell's label, written to its running record
+	// before its evidence.
+	Decided *decidedLabel `json:"decided,omitempty"`
+}
+
+// decidedLabel is a cell's outcome, reasons and billing refusals.
+type decidedLabel struct {
+	Outcome         string   `json:"outcome"`
+	Reasons         []string `json:"reasons,omitempty"`
+	BillingRefusals int      `json:"billing_refusals,omitempty"`
 }
 
 func (c *cellRecord) rerunnable() bool {
@@ -595,9 +605,10 @@ func runDir(routeDir string, run schedule.Run) string {
 
 // routeState is the route's position read from its cell records: every
 // run it takes in start order, the attempt 1 runs and the re-runs taken,
-// and the first of them with no record; and, in start order, the missed
-// and interrupted cells whose directory holds no manifest and no
-// attempts file.
+// and the first of them with no record; in start order, the missed and
+// interrupted cells whose directory holds no manifest and no attempts
+// file; and the cells left running by an ended process that state labels
+// stopped.
 type routeState struct {
 	runs       []schedule.Run
 	records    map[string]*cellRecord
@@ -652,8 +663,19 @@ func retainedReads(dir, framesRoot string, t *config.Target) ([]evidence.Refresh
 }
 
 // state reads the route's cell records and refuses one written under
-// another schedule file. A record left running by an ended process
-// becomes interrupted. A re-run is taken, in order of the
+// another schedule file. A record left running by an ended process takes
+// the label of a manifest beside it (labelledBy); with no manifest, a
+// record whose cell left a stop marker takes the marker's label, probe
+// status and requests sent where the marker carries them, one
+// that carries its decided label takes that, and one whose probe record
+// is a documented billing refusal (probeBilling) is stopped, each with an
+// execution error, and any other becomes interrupted, with the probe's
+// status and count from its probe record (probeSent); each of these that
+// ends stopped goes to recovered. Each takes an end: the stop marker's
+// time, and otherwise the latest time its records carry (recordsEnd). A
+// stopped record is never labelled after the fact: it holds the route
+// until its acknowledgement file exists (holds), and pages publishes it
+// from its run record. A re-run is taken, in order of the
 // attempt 1 runs, for each attempt 1 that does not count while the route
 // has re-runs left and the window holds the cell's attempt 2.
 func (r *route) state() (*routeState, error) {
@@ -677,20 +699,64 @@ func (r *route) state() (*routeState, error) {
 		if err := r.scheduleOf(p, &rec); err != nil {
 			return nil, err
 		}
+		dir := filepath.Dir(p)
 		if rec.Outcome == outcomeRunning {
-			rec.Outcome, rec.Reasons = outcomeInterrupted, append(rec.Reasons, "the process ended during the cell")
+			sm, err := r.stopMarker(rec.Run)
+			if err != nil {
+				return nil, err
+			}
+			switch d := rec.Decided; {
+			case labelledBy(dir, &rec):
+			case sm != nil:
+				rec.Outcome, rec.Reasons, rec.BillingRefusals = outcomeStopped, slices.Clone(sm.Reasons), sm.BillingRefusals
+				rec.Error = "the cell's record failed to write; its label is its stop marker's"
+				if sm.Sent != nil {
+					rec.ProbeStatus, rec.Sent = sm.ProbeStatus, *sm.Sent
+				} else {
+					probeSent(dir, &rec)
+				}
+				end := sm.AtUTC.UTC()
+				rec.EndUTC = &end
+			case d != nil:
+				rec.Outcome, rec.Reasons, rec.BillingRefusals = d.Outcome, slices.Clone(d.Reasons), d.BillingRefusals
+				rec.Error = "the process ended before the cell's evidence was written"
+				probeSent(dir, &rec)
+			default:
+				pb, err := r.probeRecordBilling(dir)
+				if err != nil {
+					return nil, err
+				}
+				if pb != nil {
+					rec.Outcome, rec.Reasons, rec.BillingRefusals = outcomeStopped, []string{pb.Error()}, 1
+					rec.Error = "the cell's record was not rewritten after its probe; its label is its probe record's"
+					probeSent(dir, &rec)
+					break
+				}
+				rec.Outcome, rec.Reasons = outcomeInterrupted, append(rec.Reasons, "the process ended during the cell")
+				probeSent(dir, &rec)
+			}
+			if rec.EndUTC == nil {
+				end, err := recordsEnd(dir, &rec)
+				if err != nil {
+					return nil, err
+				}
+				rec.EndUTC = &end
+			}
+			rec.Decided = nil
+			if rec.Outcome == outcomeStopped {
+				st.recovered = append(st.recovered, &rec)
+			}
 			if err := replaceJSON(p, &rec); err != nil {
 				return nil, err
 			}
 		}
 		st.records[runKey(rec.Run)] = &rec
-		dir := filepath.Dir(p)
-		if (rec.Outcome == outcomeMissed || rec.Outcome == outcomeInterrupted) &&
-			!fileExists(filepath.Join(dir, evidence.ManifestFile)) && !fileExists(filepath.Join(dir, evidence.AttemptsFile)) {
+		if rec.Outcome != outcomeStopped && rec.unlabelled() && !fileExists(filepath.Join(dir, evidence.ManifestFile)) && !fileExists(filepath.Join(dir, evidence.AttemptsFile)) {
 			st.unlabelled = append(st.unlabelled, &rec)
 		}
 	}
 	slices.SortFunc(st.unlabelled, func(a, b *cellRecord) int { return a.Run.Start.Compare(b.Run.Start) })
+	slices.SortFunc(st.recovered, func(a, b *cellRecord) int { return a.Run.Start.Compare(b.Run.Start) })
 	st.runs = slices.Clone(r.runs)
 	taken := 0
 	for _, a := range r.runs {
@@ -713,6 +779,93 @@ func (r *route) state() (*routeState, error) {
 		}
 	}
 	return st, nil
+}
+
+// labelledBy gives rec, a record left running, the outcome, reasons,
+// billing refusals and epoch of the manifest in dir, read unverified, and
+// its modification time as the end, with the probe's status and count
+// from the cell's probe record (probeSent), and reports whether a
+// manifest labelled the cell.
+func labelledBy(dir string, rec *cellRecord) bool {
+	path := filepath.Join(dir, evidence.ManifestFile)
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	m, err := evidence.ReadManifest(path)
+	if err != nil || m.Release == nil || m.Release.Outcome == "" || m.Release.Outcome == outcomeRunning {
+		return false
+	}
+	rec.Outcome, rec.Reasons, rec.BillingRefusals = m.Release.Outcome, slices.Clone(m.Release.Reasons), m.Release.BillingRefusals
+	if m.Release.LadderStarted {
+		epoch := m.StartUTC.UTC()
+		rec.EpochUTC = &epoch
+	}
+	end := fi.ModTime().UTC()
+	rec.EndUTC = &end
+	probeSent(dir, rec)
+	return true
+}
+
+// probeSent gives rec the status and request count of the probe record
+// in dir, where one decodes.
+func probeSent(dir string, rec *cellRecord) {
+	b, err := os.ReadFile(filepath.Join(dir, probe.File))
+	if err != nil {
+		return
+	}
+	var pr probe.Record
+	if json.Unmarshal(b, &pr) != nil {
+		return
+	}
+	rec.ProbeStatus, rec.Sent.Probe = pr.Request.Status, admission.ProbeSent(&pr)
+}
+
+// probeBilling is the route stop for pr where t documents its response
+// as a billing refusal (billingRefusal), and nil otherwise.
+func probeBilling(t *config.Target, pr *probe.Record) *routeStop {
+	// A target with a confidential limit withholds the probe's body and
+	// in-band error.
+	b := pr.Request.Body
+	if h := pr.Request.Retained; h != nil && h.Body != nil {
+		b = h.Body
+	}
+	var body []byte
+	if b != nil && b.Text != nil {
+		body = []byte(*b.Text)
+	}
+	inBand := ""
+	if pr.Shape != nil {
+		inBand = pr.Shape.Error
+	}
+	if h := pr.Request.Retained; h != nil && h.StreamError != "" {
+		inBand = h.StreamError
+	}
+	return billingRefusal(t, pr.Request.Status, body, inBand)
+}
+
+// probeRecordBilling is the probeBilling stop of the probe record in
+// dir, nil where none is written or it does not decode.
+func (r *route) probeRecordBilling(dir string) (*routeStop, error) {
+	b, err := os.ReadFile(filepath.Join(dir, probe.File))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	var pr probe.Record
+	if json.Unmarshal(b, &pr) != nil {
+		return nil, nil
+	}
+	return probeBilling(&r.cfg.Target, &pr), nil
+}
+
+// unlabelled reports whether the record is of a cell that may have no
+// manifest: a missed or interrupted cell, which a manifest labels after
+// the fact, or a stopped one whose evidence failed to write, which keeps
+// its run record alone.
+func (c *cellRecord) unlabelled() bool {
+	return c.Outcome == outcomeMissed || c.Outcome == outcomeInterrupted || c.Outcome == outcomeStopped && c.Error != ""
 }
 
 // sameSchedule refuses the route's cell records written under a schedule

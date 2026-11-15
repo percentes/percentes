@@ -1311,6 +1311,7 @@ func TestLabelMissedAndInterrupted(t *testing.T) {
 	if _, err := probe.Write(dir, &probe.Record{}); err != nil {
 		t.Fatal(err)
 	}
+	pinRecordTimes(t, dir, gone.Start)
 	through := gone.Start.Add(3 * time.Second)
 	if err := replaceJSON(filepath.Join(dir, dispatchFile), &dispatchSeries{Run: gone, StartUTC: gone.Start, Counts: []int{0, 3, 2}, ThroughUTC: &through}); err != nil {
 		t.Fatal(err)

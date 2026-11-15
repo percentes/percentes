@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
@@ -80,14 +81,25 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		rec.Outcome = outcome
 		rec.Reasons = append(rec.Reasons, reasons...)
 	}
+	// settleOnly marks an error from the ledger settlement alone.
+	settleOnly := false
 	defer func() {
 		if err != nil {
-			rec.Outcome, rec.Error = outcomeInterrupted, err.Error()
+			if rec.Outcome != outcomeStopped && (!settleOnly || rec.Outcome == outcomeRunning) {
+				rec.Outcome = outcomeInterrupted
+			}
+			rec.Error = err.Error()
 		}
 		end := r.now().UTC()
 		rec.EndUTC = &end
 		if werr := replaceJSON(path, rec); werr != nil {
 			err = errors.Join(err, werr)
+			if rec.Outcome == outcomeStopped {
+				if _, herr := r.writeStopHold(rec); herr != nil {
+					err = errors.Join(err, fmt.Errorf("stop marker: %w", herr))
+					fmt.Fprintf(os.Stderr, "%s: stop marker not written: %v\n", r.cfg.Target.Name, herr)
+				}
+			}
 		}
 	}()
 
@@ -210,6 +222,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	defer func() {
 		rec.Sent = admission.WindowSent(pr, res)
 		if serr := r.ledger.Settle(a, rec.Sent); serr != nil {
+			settleOnly = err == nil
 			err = errors.Join(err, serr)
 		}
 	}()
@@ -220,27 +233,25 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if pr, err = probe.Run(ctx, probe.Input{Target: t, CaseText: r.shape.UserText(run.Seed, len(offsets)), Timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second, Key: r.key}); err != nil {
 		return rec, err
 	}
-	pb, err := probe.Encode(pr)
-	if err != nil {
-		return rec, err
-	}
+	pr.PromptTokens, pr.OutputTokens = pr.Shape.Reported()
+	billStop := probeBilling(t, pr)
 	probePath := filepath.Join(dir, probe.File)
-	if err := replaceFile(probePath, pb); err != nil {
+	pb, err := probe.Encode(pr)
+	if err == nil {
+		err = replaceFile(probePath, pb)
+	}
+	if err != nil {
+		if billStop != nil {
+			rec.BillingRefusals = 1
+			finish(outcomeStopped, billStop.Error())
+		}
 		return rec, err
 	}
 	ev.probePath, ev.probe = probePath, pr
 	rec.ProbeStatus = pr.Request.Status
-	// A target with a confidential limit withholds the probe's body.
-	b := pr.Request.Body
-	if h := pr.Request.Retained; h != nil && h.Body != nil {
-		b = h.Body
-	}
-	var probeBody []byte
-	if b != nil && b.Text != nil {
-		probeBody = []byte(*b.Text)
-	}
-	if stop := billingRefusal(t, pr.Request.Status, probeBody, ""); stop != nil {
-		finish(outcomeStopped, stop.Error())
+	if billStop != nil {
+		rec.BillingRefusals = 1
+		finish(outcomeStopped, billStop.Error())
 		return rec, r.retain(ctx, ev, rec, nil)
 	}
 	if pr.Start.Blocked {
@@ -266,7 +277,9 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	var (
 		canary    *loadgen.Canary
 		canaryErr error
+		decidedMu sync.Mutex
 	)
+	running := *rec
 	res, runErr := loadgen.Run(cellCtx, cfg, &loadgen.Hooks{
 		Cases: cases,
 		OnEpoch: func(e time.Time) {
@@ -277,6 +290,13 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		OnDone: func(q *loadgen.Request) {
 			if s := billingRefusal(t, q.Status, q.ErrorBody, q.StreamError); s != nil {
 				stop(s)
+				decidedMu.Lock()
+				if running.Decided == nil {
+					running.Decided = &decidedLabel{Outcome: outcomeStopped, Reasons: []string{s.Error()}, BillingRefusals: running.BillingRefusals}
+				}
+				running.Decided.BillingRefusals++
+				replaceJSON(path, &running) //nolint:errcheck
+				decidedMu.Unlock()
 			} else if e := clientExhausted(q); e != nil {
 				stop(e)
 			}
@@ -350,13 +370,24 @@ type cellFiles struct {
 // configuration as loaded where it differs from the file as published,
 // the attempts file, the manifest carrying the cell's label, the host's
 // aggregate dispatch series, the inter-chunk gap histograms and the
-// canary summaries, and the report pair. A nil res is a cell with no
-// ladder result: its attempts file and frame store are empty, its
-// manifest carries no canary summary, and its epoch is the cell's start. A
-// missed cell has no end records and no concurrent runs. A frame store
-// that fails to write leaves the rest to be written; the failure is
-// returned after them.
+// canary summaries, and the report pair. The end status and balance
+// commands run to their own timeouts after ctx ends. A nil res is a
+// cell with no ladder result: its attempts file and frame store are
+// empty, its manifest carries no canary summary, and its epoch is the
+// cell's start. A missed cell that never began has no end records and no
+// concurrent runs. A stopped cell running in this process first writes
+// its record, still running, with its decided label. A frame store that
+// fails to write leaves the attempts file to be written and no manifest
+// or report pair; the failure is returned after it.
 func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res *loadgen.Result) error {
+	if ev.live != nil && rec.Outcome == outcomeStopped {
+		held := *rec
+		held.Outcome, held.Reasons, held.BillingRefusals = outcomeRunning, nil, 0
+		held.Decided = &decidedLabel{Outcome: rec.Outcome, Reasons: slices.Clone(rec.Reasons), BillingRefusals: rec.BillingRefusals}
+		if err := replaceJSON(filepath.Join(ev.dir, cellFile), &held); err != nil {
+			return err
+		}
+	}
 	ladder := res != nil
 	if !ladder {
 		res = &loadgen.Result{EpochWall: rec.StartUTC}
@@ -410,6 +441,9 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	attempts, err := evidence.WriteRun(ev.dir, ev.cfg, res, evidence.Options{RunFailures: invalid, Key: r.key})
 	if err != nil {
 		return errors.Join(ferr, err)
+	}
+	if ferr != nil {
+		return ferr
 	}
 	artifacts := []string{attempts}
 	if ev.refreshPath != "" {
@@ -515,13 +549,15 @@ func (r *route) operatorFault(ev *cellFiles, err error) error {
 }
 
 // labelCell writes the labelled manifest and report pair of a missed or
-// interrupted cell (SPEC-HOSTED HA3 point 16) from what its directory
+// interrupted cell (SPEC-HOSTED HA3 point 16), from what its directory
 // holds: the clock record, start status and balance, refresh record,
 // probe record and dispatch series the cell wrote, each start record it
 // did not write read now (a clock record that does not decode counts as
 // not written), and the operator file and its records as they
 // stand (cellOperator, with no refresh). The empty attempts file is written first, so a label that
 // fails part-way is never written again and the cell keeps its record.
+// A frame store at the cell's start that holds no frame, left by the
+// cell's own earlier retain, is removed before the label's is written.
 func (r *route) labelCell(ctx context.Context, rec *cellRecord) error {
 	run := rec.Run
 	dir := r.cellDir(run)
@@ -611,10 +647,19 @@ func (r *route) labelCell(ctx context.Context, rec *cellRecord) error {
 	for k, n := range ev.own.Counts {
 		if n > 0 {
 			ev.dispatched = true
-			later(ev.own.StartUTC.Add(time.Duration(k) * time.Second))
+			later(ev.own.StartUTC.Add(time.Duration(k+1) * time.Second))
 		}
 	}
 	ev.dispatched = ev.dispatched || rec.EpochUTC != nil
+	frames := evidence.FramesDir(r.framesRoot, rec.StartUTC)
+	switch fi, err := os.Stat(filepath.Join(frames, evidence.FramesFile)); {
+	case errors.Is(err, os.ErrNotExist) || err == nil && fi.Size() == 0:
+		if err := os.RemoveAll(frames); err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	}
 	if err := r.retain(ctx, ev, rec, nil); err != nil {
 		return err
 	}
@@ -733,6 +778,9 @@ func (r *route) cellEvidence(dir string, run schedule.Run, rec *cellRecord) (*ev
 		Probes:            []evidence.FileRef{},
 		AccountCreated:    r.accountCreated,
 		PreWindowRequests: r.preWindow,
+		BillingRefusals:   rec.BillingRefusals,
+		Shape:             r.cfg.Release.Shape.Name,
+		AccountGroup:      r.cfg.Release.AccountGroup,
 	}
 	if c.Concurrent == nil {
 		c.Concurrent = []schedule.Run{}
