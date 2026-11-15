@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -84,6 +85,9 @@ type Input struct {
 	// limit: the fingerprints of what its record withholds are keyed
 	// hashes under it.
 	Key *releasekey.Key
+	// RootCAs, when set, replaces the system roots in verifying the
+	// target's certificate.
+	RootCAs *x509.CertPool
 }
 
 // Record is one probe. Fields ending in Ns are nanoseconds on the
@@ -276,7 +280,7 @@ func Run(ctx context.Context, in Input) (*Record, error) {
 		BodySHA256:     hex.EncodeToString(sum[:]),
 		BodyBytes:      len(body),
 	}
-	transport := newTransport(1)
+	transport := newTransport(1, in.RootCAs)
 	defer transport.CloseIdleConnections()
 	p := &prober{rt: transport, target: t, mask: m, timeout: timeout, key: in.Key}
 

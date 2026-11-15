@@ -23,6 +23,7 @@ package loadgen
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -470,6 +471,9 @@ type Hooks struct {
 	// on that request's goroutine, concurrently with other calls. It must
 	// not block.
 	OnDone func(r *Request)
+	// RootCAs, when set, replaces the system roots in verifying the
+	// target's certificate.
+	RootCAs *x509.CertPool
 }
 
 // Run executes the full scheduled load against cfg.Target.EndpointURL,
@@ -521,7 +525,11 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 	if ladder != nil {
 		provision = cfg.ReleaseConnectionProvision(ladder.TopRPS())
 	}
-	transport := NewTransport(provision)
+	var roots *x509.CertPool
+	if hooks != nil {
+		roots = hooks.RootCAs
+	}
+	transport := NewTransport(provision, roots)
 	defer transport.CloseIdleConnections()
 	model := RequestedModel(cfg)
 	var apiKey string
@@ -834,7 +842,10 @@ func interruption(cause error, stopNs int64, requests []Request) *Interruption {
 // NewTransport pins HTTP/1.1 on plain and TLS connections, so each
 // in-flight request holds its own connection. A non-nil empty
 // TLSNextProto stops the transport from offering h2 in the TLS handshake.
-func NewTransport(provision int) *http.Transport {
+// A non-nil roots replaces the system roots in verifying the server's
+// certificate. Its connections record when the socket accepts each
+// request's last byte (WatchWrite).
+func NewTransport(provision int, roots *x509.CertPool) *http.Transport {
 	tr := &http.Transport{
 		ForceAttemptHTTP2:   false,
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
@@ -843,6 +854,9 @@ func NewTransport(provision int) *http.Transport {
 		MaxConnsPerHost:     0, // never throttle dispatch on connection count
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  true,
+	}
+	if roots != nil {
+		tr.TLSClientConfig = &tls.Config{RootCAs: roots}
 	}
 	instrumentWrites(tr)
 	return tr

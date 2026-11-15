@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -61,6 +62,9 @@ type ReleaseInput struct {
 	// hashes under it, and its confidential limits' retained copies are
 	// checked against their recorded HMAC-SHA256.
 	Key *releasekey.Key
+	// RootCAs, when set, replaces the system roots in verifying the
+	// target's certificate.
+	RootCAs *x509.CertPool
 }
 
 // ReleaseRecord is one release probe: the ceiling and input-bound checks
@@ -200,7 +204,7 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 		RTTNs:          []int64{},
 		Snapshots:      []Snapshot{},
 	}
-	transport := newTransport(1)
+	transport := newTransport(1, in.RootCAs)
 	defer transport.CloseIdleConnections()
 	p := &prober{rt: transport, target: t, mask: m, timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second, key: in.Key}
 	length := LengthValue(t.Adapter)

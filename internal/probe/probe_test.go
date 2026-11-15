@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -406,20 +405,10 @@ func TestProbeTLSAndDNS(t *testing.T) {
 	defer srv.Close()
 	pilot, tg := reference(t, srv.URL+"/v1/chat/completions")
 	roots := srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
-	session := newTransport
-	defer func() { newTransport = session }()
-	newTransport = func(n int) *http.Transport {
-		tr := session(n)
-		// A request with no URL fixes the protocol defaults before the root
-		// is added; adding a TLS config first would turn h2 off by itself.
-		tr.RoundTrip(&http.Request{}) //nolint:errcheck,bodyclose
-		if tr.TLSClientConfig == nil {
-			tr.TLSClientConfig = &tls.Config{}
-		}
-		tr.TLSClientConfig.RootCAs = roots
-		return tr
+	if rec := probe(t, Input{Pilot: pilot, Target: tg, CaseText: caseText}); rec.Request.TLS == nil || rec.Request.TLS.Error == "" || rec.Request.Status != 0 {
+		t.Fatalf("without the server's root: status %d tls %+v", rec.Request.Status, rec.Request.TLS)
 	}
-	rec := probe(t, Input{Pilot: pilot, Target: tg, CaseText: caseText})
+	rec := probe(t, Input{Pilot: pilot, Target: tg, CaseText: caseText, RootCAs: roots})
 	ex := rec.Request
 	if ex.Status != 200 || ex.Proto != "HTTP/1.1" || ex.TLS == nil || ex.TLS.Error != "" || ex.TLS.Version == "" || ex.TLS.CipherSuite == "" ||
 		ex.TLS.ALPN == "h2" || ex.TLS.Certificate == nil || ex.TLS.DurationNs <= 0 {

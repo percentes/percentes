@@ -166,6 +166,32 @@ func TestReleaseProbeChatCeiling(t *testing.T) {
 	}
 }
 
+// Against a mock serving TLS under a self-signed certificate, the check
+// verifies the certificate against the input's root pool and passes over
+// HTTP/1.1; without the pool its first request fails at the handshake.
+func TestReleaseProbeRootCAs(t *testing.T) {
+	noSpacing(t)
+	cert, pool, err := mock.SelfSignedCert("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := config.LatencyDist{Distribution: "fixed"}
+	s := mock.NewShaped(config.Mock{ListenAddr: "127.0.0.1:0", Seed: 1, TTFT: fixed, ITL: fixed}, mock.Shape{Answer: "The customer was billed twice."})
+	if err := s.StartTLS(cert); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := releaseConfig(t, "https://"+s.Addr()+"/v1/chat/completions")
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, RootCAs: pool})
+	if ex := rec.Requests[0].Exchange; !rec.Ceiling.Pass || ex.Status != 200 || ex.Proto != "HTTP/1.1" || ex.TLS == nil || ex.TLS.Error != "" {
+		t.Fatalf("with the pool: check %+v, status %d over %q, tls %+v", rec.Ceiling, ex.Status, ex.Proto, ex.TLS)
+	}
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if ex := rec.Requests[0].Exchange; rec.Ceiling.Pass || ex.Status != 0 || ex.TLS == nil || ex.TLS.Error == "" {
+		t.Fatalf("without the pool: check %+v, status %d, tls %+v", rec.Ceiling, ex.Status, ex.TLS)
+	}
+}
+
 // The bodies sent are the configured body with each text in place, every
 // other byte unchanged.
 func TestReleaseProbeSendsTheConfiguredBody(t *testing.T) {

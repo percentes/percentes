@@ -131,7 +131,7 @@ func TestResendCountsAsDispatch(t *testing.T) {
 	var hits atomic.Int64
 	srv := countingServer(t, &hits)
 	cfg := pilotRunCfg(srv.URL, 0)
-	client := &http.Client{Transport: sendTwice{NewTransport(2)}}
+	client := &http.Client{Transport: sendTwice{NewTransport(2, nil)}}
 	g := &gen{cfg: cfg, client: client, epoch: time.Now(), filler: "xyz", model: "percentes-mock", trip: newTripwire(cfg, 1)}
 	r := &Request{}
 	g.execute(r)
