@@ -127,8 +127,13 @@ type Exchange struct {
 	Connects []Connect `json:"connects,omitempty"`
 	TLS      *TLS      `json:"tls,omitempty"`
 	PeerAddr string    `json:"peer_addr,omitempty"`
-	Proto    string    `json:"proto,omitempty"`
-	Status   int       `json:"status,omitempty"`
+	// ConnAcquiredNs is when the request's connection was acquired and
+	// WroteRequestNs when the socket accepted its last byte, each after
+	// dispatch and absent where it did not happen.
+	ConnAcquiredNs int64  `json:"conn_acquired_ns,omitempty"`
+	WroteRequestNs int64  `json:"wrote_request_ns,omitempty"`
+	Proto          string `json:"proto,omitempty"`
+	Status         int    `json:"status,omitempty"`
 	// Headers holds the response headers target.response_headers allows,
 	// with config.RetainedHeaderValue in place of each value of a header
 	// target.retained_headers names; HeaderNames lists every response
@@ -495,8 +500,8 @@ func withhold(ex *Exchange, s *Shape, key *releasekey.Key) {
 // set on the request, the credential header first. A 200 body goes to
 // stream when set; any other body is kept up to limit bytes.
 func (p *prober) exchange(ctx context.Context, method, url string, body []byte, headers [][2]string, limit int, stream func(io.Reader, func() int64)) Exchange {
-	ex := Exchange{Method: method, URL: redact.URL(url), DispatchUTC: time.Now().UTC()}
 	start := time.Now()
+	ex := Exchange{Method: method, URL: redact.URL(url), DispatchUTC: start.UTC()}
 	since := func() int64 { return time.Since(start).Nanoseconds() }
 	timeout := p.timeout
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -506,6 +511,7 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 	// to the returned record.
 	var mu sync.Mutex
 	var closed bool
+	var observation *loadgen.WriteObservation
 	var dnsStart, tlsStart int64
 	connStart := map[string]int64{}
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
@@ -577,7 +583,8 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 			if closed {
 				return
 			}
-			ex.PeerAddr = info.Conn.RemoteAddr().String()
+			observation = loadgen.WatchWrite(info.Conn, len(body), since)
+			ex.PeerAddr, ex.ConnAcquiredNs = info.Conn.RemoteAddr().String(), since()
 		},
 		GotFirstResponseByte: func() {
 			mu.Lock()
@@ -592,6 +599,7 @@ func (p *prober) exchange(ctx context.Context, method, url string, body []byte, 
 		mu.Lock()
 		defer mu.Unlock()
 		closed = true
+		ex.WroteRequestNs = observation.Nanoseconds()
 		ex.DoneNs = since()
 		return ex
 	}
