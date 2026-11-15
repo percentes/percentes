@@ -3,6 +3,7 @@ package redact
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -89,6 +90,39 @@ func TestWrapKeepsTheCauseAndHidesTheText(t *testing.T) {
 	}
 	if !errors.Is(Wrap("x", context.DeadlineExceeded, time.Second), context.DeadlineExceeded) {
 		t.Error("deadline cause lost")
+	}
+}
+
+// An established connection's error names the peer and leaves out this host.
+func TestErrorTextOmitsSourceAddress(t *testing.T) {
+	err := &net.OpError{Op: "read", Net: "tcp",
+		Source: &net.TCPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 51000},
+		Addr:   &net.TCPAddr{IP: net.IPv4(198, 51, 100, 9), Port: 443},
+		Err:    errors.New("connection reset by peer")}
+	if got, want := ErrorText(err, 0), "read tcp 198.51.100.9:443: connection reset by peer"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if err.Source == nil {
+		t.Error("the caller's error lost its source")
+	}
+}
+
+// An OpError nested in another, as a proxyconnect error wraps a read
+// error, prints no source address either.
+func TestErrorTextOmitsNestedSourceAddress(t *testing.T) {
+	inner := &net.OpError{Op: "read", Net: "tcp",
+		Source: &net.TCPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 51000},
+		Addr:   &net.TCPAddr{IP: net.IPv4(198, 51, 100, 9), Port: 3128},
+		Err:    errors.New("connection reset by peer")}
+	for _, wrapped := range []error{inner, fmt.Errorf("%w", inner)} {
+		err := &net.OpError{Op: "proxyconnect", Net: "tcp", Err: wrapped}
+		got := ErrorText(err, 0)
+		if want := "proxyconnect tcp: read tcp 198.51.100.9:3128: connection reset by peer"; got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+	if inner.Source == nil {
+		t.Error("the caller's error lost its source")
 	}
 }
 

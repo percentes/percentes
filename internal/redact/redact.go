@@ -1,7 +1,7 @@
 // Package redact keeps credentials and response bytes out of anything
 // printed or written. URL strips the parts of an endpoint that carry a
-// credential, and ErrorText prints an error in full only when its Go type
-// cannot carry response bytes.
+// credential, and ErrorText prints an error only when its Go type cannot
+// carry response bytes.
 package redact
 
 import (
@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -80,7 +81,10 @@ func ErrorText(err error, timeout time.Duration) string {
 	var ne net.Error
 	switch {
 	case errors.As(err, &op):
-		return op.Error()
+		// Source is this host's own address.
+		noSource := *op
+		noSource.Source = nil
+		return dropSources(noSource.Error(), op.Err)
 	case errors.As(err, &cert):
 		return cert.Error()
 	case errors.Is(err, context.DeadlineExceeded):
@@ -91,6 +95,17 @@ func ErrorText(err error, timeout time.Duration) string {
 		return "connection closed"
 	}
 	return fmt.Sprintf("%T, text withheld", err)
+}
+
+// dropSources removes from s the source address of each *net.OpError
+// that err wraps.
+func dropSources(s string, err error) string {
+	for ; err != nil; err = errors.Unwrap(err) {
+		if op, ok := err.(*net.OpError); ok && op.Source != nil {
+			s = strings.ReplaceAll(s, op.Source.String()+"->", "")
+		}
+	}
+	return s
 }
 
 // Wrap returns an error whose text is prefix and the allowlisted text of

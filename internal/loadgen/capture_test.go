@@ -242,7 +242,7 @@ func TestErrorBodyStallKeepsPartial(t *testing.T) {
 	}
 }
 
-// A connect failure records its Go error string.
+// A connect failure records its network error's text.
 func TestConnectRecordsErrText(t *testing.T) {
 	srv := statusServer(http.StatusOK, "")
 	srv.Close()
