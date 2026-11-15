@@ -3,9 +3,12 @@ package report
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
@@ -114,6 +117,115 @@ func TestHistorySends(t *testing.T) {
 	}
 	if _, ok := ExchangeSend("groq", "probe", SendProbe, 1, &probe.Exchange{}, nil, nil, 1200, 512, 90); ok {
 		t.Error("an undispatched exchange gave a send")
+	}
+}
+
+// Each token limit's printed counting names what its window count adds
+// up for a send: prompt tokens, the output ceiling, both, or prompt
+// tokens plus the ceiling times the output burndown rate.
+func TestTokenCounting(t *testing.T) {
+	prompt := 100
+	s := &Send{InputBound: 128, PromptTokens: &prompt, Ceiling: 16}
+	ix := &historyIndex{}
+	for _, c := range []struct {
+		l     config.Limit
+		units int64
+		text  string
+	}{
+		{config.Limit{Dimension: config.LimitInputTPM}, 100, "as counted in reported prompt tokens"},
+		{config.Limit{Dimension: config.LimitOutputTPM}, 16, "as counted at the output ceiling"},
+		{config.Limit{Dimension: config.LimitTPM, Counting: config.CountingInput}, 100, "as counted in reported prompt tokens"},
+		{config.Limit{Dimension: config.LimitTPM, Counting: config.CountingInputOutput}, 116, "as counted in reported prompt tokens plus the ceiling"},
+		{config.Limit{Dimension: config.LimitTPD, Counting: config.CountingOutputBurndown, OutputBurndown: 2}, 132,
+			"as counted in reported prompt tokens plus the ceiling times the output burndown rate of 2"},
+		{config.Limit{Dimension: config.LimitRPM}, 1, ""},
+	} {
+		got, _ := ix.demand(&c.l, s)
+		if got.Cmp(big.NewRat(c.units, 1)) != 0 || tokenCounting(&c.l) != c.text {
+			t.Errorf("%s %s: demand %s, counting %q; want %d, %q", c.l.Dimension, c.l.Counting, got.RatString(), tokenCounting(&c.l), c.units, c.text)
+		}
+	}
+}
+
+// A limit that counts output at generation also counts, in each window,
+// the sends written before it that may have ended in it: two written
+// 61 s before a refusal and ending at it take a 60 s window of 16 tokens
+// to 48 against a share of 20, which reads unresolved, while the same
+// sends ended before the window leave it at or below. A window whose
+// sends by write time exceed the share reads unresolved, never above.
+func TestAttributionOutputAtGeneration(t *testing.T) {
+	at := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	old := at.Add(-61 * time.Second)
+	send := func(wrote, end time.Time) Send {
+		return Send{Route: "azure", WroteUTC: &wrote, DispatchUTC: wrote, LatestUTC: end, EndUTC: end, Ceiling: 16}
+	}
+	cfg := &config.Config{}
+	cfg.Target.Limits = []config.Limit{{Dimension: config.LimitOutputTPM, Value: 20, Marking: config.MarkingPublic, OutputAtGeneration: true}}
+	for _, c := range []struct {
+		name  string
+		sends []Send
+		label string
+		count float64
+		bound float64
+	}{
+		{"ended in the window", []Send{send(old, at), send(old, at), send(at, at)}, LabelUnresolved, 16, 48},
+		{"ended before the window", []Send{send(old, old.Add(time.Second)), send(old, old.Add(time.Second)), send(at, at)}, LabelAtOrBelow, 16, 16},
+		{"ended at the window's open start", []Send{send(old, at.Add(-60*time.Second)), send(at, at)}, LabelAtOrBelow, 16, 16},
+		{"above by write time", []Send{send(at.Add(-time.Second), at), send(at, at)}, LabelUnresolved, 32, 32},
+	} {
+		ix, err := newHistoryIndex(&History{Sends: c.sends})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &Refusal{WroteUTC: &at}
+		if err := ix.attribute(r, cfg, make([]bool, len(cfg.Target.Limits)), 0); err != nil {
+			t.Fatal(err)
+		}
+		wc := r.Windows[0]
+		if r.Label != c.label || wc.Above || wc.Count != c.count || wc.Bound == nil || *wc.Bound != c.bound {
+			t.Errorf("%s: label %s, window %+v, want %s with count %g and bound %g", c.name, r.Label, wc, c.label, c.count, c.bound)
+		}
+		if c.label == LabelUnresolved && !strings.Contains(strings.Join(r.Unresolved, "; "), "counts output at generation") {
+			t.Errorf("%s: unresolved %q", c.name, r.Unresolved)
+		}
+	}
+
+	cfg.Target.Limits[0].OutputAtGeneration = false
+	ix, err := newHistoryIndex(&History{Sends: []Send{send(old, at), send(at.Add(-time.Second), at), send(at, at)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Refusal{WroteUTC: &at}
+	if err := ix.attribute(r, cfg, make([]bool, len(cfg.Target.Limits)), 0); err != nil {
+		t.Fatal(err)
+	}
+	if r.Label != LabelAbove || r.Windows[0].Bound != nil {
+		t.Errorf("unflagged limit: label %s, window %+v", r.Label, r.Windows[0])
+	}
+}
+
+// A send with no write time whose end reaches into the window of a limit
+// that counts output at generation leaves that window unresolved, though
+// it was written by a time before the window.
+func TestAttributionOutputAtGenerationUnwritten(t *testing.T) {
+	at := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	d := at.Add(-80 * time.Second)
+	h := &History{Sends: []Send{{Route: "azure", DispatchUTC: d, LatestUTC: d.Add(time.Second), EndUTC: d.Add(90 * time.Second), Ceiling: 16}}}
+	cfg := &config.Config{}
+	cfg.Target.Limits = []config.Limit{{Dimension: config.LimitOutputTPM, Value: 20, Marking: config.MarkingPublic, OutputAtGeneration: true}}
+	for _, flagged := range []bool{true, false} {
+		cfg.Target.Limits[0].OutputAtGeneration = flagged
+		ix, err := newHistoryIndex(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &Refusal{WroteUTC: &at}
+		if err := ix.attribute(r, cfg, make([]bool, len(cfg.Target.Limits)), 0); err != nil {
+			t.Fatal(err)
+		}
+		if want := map[bool]string{true: LabelUnresolved, false: LabelAtOrBelow}[flagged]; r.Label != want {
+			t.Errorf("flagged %t: label %s %q, want %s", flagged, r.Label, r.Unresolved, want)
+		}
 	}
 }
 

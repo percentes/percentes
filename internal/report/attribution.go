@@ -403,6 +403,303 @@ type ResetDaySent struct {
 	Incomplete   bool    `json:"incomplete,omitempty"`
 }
 
+// historyIndex is a history sorted for window counts: written sends by
+// write time, the sends with no write time, the gaps and the prices,
+// each pair of bounds' revisions in ledger order. longest is the most
+// any written send's end follows its write.
+type historyIndex struct {
+	h         *History
+	written   []*Send
+	times     []int64
+	unwritten []*Send
+	prices    map[priceKey][]datedPrice
+	longest   time.Duration
+}
+
+type datedPrice struct {
+	from time.Time
+	usd  *big.Rat
+}
+
+type priceKey struct {
+	route   string
+	in, out int
+}
+
+func newHistoryIndex(h *History) (*historyIndex, error) {
+	ix := &historyIndex{h: h, prices: map[priceKey][]datedPrice{}}
+	for i := range h.Sends {
+		s := &h.Sends[i]
+		if s.WroteUTC != nil {
+			ix.written = append(ix.written, s)
+		} else {
+			ix.unwritten = append(ix.unwritten, s)
+		}
+	}
+	slices.SortStableFunc(ix.written, func(a, b *Send) int { return a.WroteUTC.Compare(*b.WroteUTC) })
+	for _, s := range ix.written {
+		ix.times = append(ix.times, s.WroteUTC.UnixNano())
+		ix.longest = max(ix.longest, s.EndUTC.Sub(*s.WroteUTC))
+	}
+	for _, p := range h.Prices {
+		r, ok := new(big.Rat).SetString(p.PerRequestUSD)
+		if !ok {
+			return nil, fmt.Errorf("report: history: route %s price %q", p.Route, p.PerRequestUSD)
+		}
+		k := priceKey{p.Route, p.InputTokens, p.OutputTokens}
+		ix.prices[k] = append(ix.prices[k], datedPrice{p.RecordedUTC, r})
+	}
+	return ix, nil
+}
+
+// demand is one send's demand under limit l, in l's unit: a request, its
+// tokens under l's counting at its reported prompt count or, atBound,
+// its input bound, or its price, the latest recorded at or before its
+// write time (its dispatch time where it has none); price nil where none
+// is.
+func (ix *historyIndex) demand(l *config.Limit, s *Send) (units *big.Rat, atBound bool) {
+	in := s.InputBound
+	atBound = s.PromptTokens == nil || *s.PromptTokens < 0
+	if !atBound {
+		in = *s.PromptTokens
+	}
+	switch l.Dimension {
+	case config.LimitTPM, config.LimitTPD:
+		switch l.Counting {
+		case config.CountingInput:
+			return big.NewRat(int64(in), 1), atBound
+		case config.CountingOutputBurndown:
+			out := new(big.Rat).Mul(big.NewRat(int64(s.Ceiling), 1), new(big.Rat).SetFloat64(l.OutputBurndown))
+			return out.Add(out, big.NewRat(int64(in), 1)), atBound
+		}
+		return new(big.Rat).Add(big.NewRat(int64(in), 1), big.NewRat(int64(s.Ceiling), 1)), atBound
+	case config.LimitInputTPM:
+		return big.NewRat(int64(in), 1), atBound
+	case config.LimitOutputTPM:
+		return big.NewRat(int64(s.Ceiling), 1), false
+	case config.LimitSpendWindow:
+		at := s.DispatchUTC
+		if s.WroteUTC != nil {
+			at = *s.WroteUTC
+		}
+		prices := ix.prices[priceKey{s.Route, s.InputBound, s.Ceiling}]
+		for i := len(prices) - 1; i >= 0; i-- {
+			if !prices[i].from.After(at) {
+				return prices[i].usd, false
+			}
+		}
+		return nil, false
+	}
+	return big.NewRat(1, 1), false
+}
+
+// saturated reports whether limit l counts send s at a prompt count of
+// math.MaxInt, a reported count past it.
+func saturated(l *config.Limit, s *Send) bool {
+	switch l.Dimension {
+	case config.LimitTPM, config.LimitTPD, config.LimitInputTPM:
+		return s.PromptTokens != nil && *s.PromptTokens == math.MaxInt
+	}
+	return false
+}
+
+// tokenCounting is how limit l's window counts a send's tokens, as the
+// page prints it beside the count (demand); empty for a limit not
+// counted in tokens.
+func tokenCounting(l *config.Limit) string {
+	switch l.Dimension {
+	case config.LimitInputTPM:
+		return "as counted in reported prompt tokens"
+	case config.LimitOutputTPM:
+		return "as counted at the output ceiling"
+	case config.LimitTPM, config.LimitTPD:
+		switch l.Counting {
+		case config.CountingInput:
+			return "as counted in reported prompt tokens"
+		case config.CountingOutputBurndown:
+			return fmt.Sprintf("as counted in reported prompt tokens plus the ceiling times the output burndown rate of %g", l.OutputBurndown)
+		}
+		return "as counted in reported prompt tokens plus the ceiling"
+	}
+	return ""
+}
+
+// window counts the written sends in (from, to], or [from, to] where
+// closed, against limit l of share, with what may be missing.
+func (ix *historyIndex) window(wc *WindowCount, l *config.Limit, share *big.Rat, from, to time.Time, closed bool) {
+	lo, hi := from.UnixNano(), to.UnixNano()
+	i := sortSearch(ix.times, lo, closed)
+	j := sortSearch(ix.times, hi, false)
+	sum, unpriced := new(big.Rat), 0
+	for _, s := range ix.written[i:j] {
+		d, atBound := ix.demand(l, s)
+		wc.Requests++
+		if atBound {
+			wc.AtBound++
+		}
+		if saturated(l, s) {
+			wc.Saturated++
+		}
+		if d == nil {
+			unpriced++
+			continue
+		}
+		sum.Add(sum, d)
+	}
+	wc.Count, _ = sum.Float64()
+	wc.Share, _ = share.Float64()
+	wc.count, wc.share = sum, share
+	wc.Above = sum.Cmp(share) > 0
+	if l.OutputAtGeneration {
+		bound, earlierUnpriced := new(big.Rat).Set(sum), 0
+		for _, s := range ix.written[sortSearch(ix.times, from.Add(-ix.longest).UnixNano(), true):i] {
+			if !s.EndUTC.After(from) && !(closed && s.EndUTC.Equal(from)) {
+				continue
+			}
+			d, _ := ix.demand(l, s)
+			wc.Earlier++
+			if saturated(l, s) {
+				wc.EarlierSaturated++
+			}
+			if d == nil {
+				earlierUnpriced++
+				continue
+			}
+			bound.Add(bound, d)
+		}
+		b, _ := bound.Float64()
+		wc.Bound, wc.bound = &b, bound
+		if bound.Cmp(share) > 0 {
+			wc.Above = false
+			wc.Unresolved = append(wc.Unresolved, fmt.Sprintf("%s counts output at generation: with the %d sends written before the window that may have ended in it, the window may hold %s against a share of %s",
+				wc.name(), wc.Earlier, wc.exact(bound, b, wc.Saturated+wc.EarlierSaturated > 0), wc.exact(share, wc.Share, false)))
+		}
+		if earlierUnpriced > 0 {
+			wc.Unresolved = append(wc.Unresolved, fmt.Sprintf("%d sends written before the window that may have ended in it have no recorded price", earlierUnpriced))
+		}
+	}
+	if unpriced > 0 {
+		wc.Unresolved = append(wc.Unresolved, fmt.Sprintf("%d sends in the window have no recorded price", unpriced))
+	}
+	overlaps := func(a time.Time, b *time.Time) bool {
+		return !a.After(to) && (b == nil || b.After(from) || closed && b.Equal(from))
+	}
+	missing := map[string]int{}
+	var routes []string
+	for _, s := range ix.unwritten {
+		end := s.LatestUTC
+		if l.OutputAtGeneration && s.EndUTC.After(end) {
+			end = s.EndUTC
+		}
+		if overlaps(s.DispatchUTC, &end) {
+			if missing[s.Route] == 0 {
+				routes = append(routes, s.Route)
+			}
+			missing[s.Route]++
+		}
+	}
+	for _, r := range routes {
+		wc.Unresolved = append(wc.Unresolved, fmt.Sprintf("%d sends of route %s that may fall in the window have no write time", missing[r], r))
+	}
+	for _, g := range ix.h.Gaps {
+		if overlaps(g.FromUTC, g.ToUTC) {
+			wc.Unresolved = append(wc.Unresolved, fmt.Sprintf("the history may lack sends of route %s from %s: %s", g.Route, gapSpan(g), g.Reason))
+		}
+	}
+}
+
+// sortSearch is the first index of times after t, or at or after it
+// where closed.
+func sortSearch(times []int64, t int64, closed bool) int {
+	i, _ := slices.BinarySearch(times, t)
+	if closed {
+		return i
+	}
+	for i < len(times) && times[i] <= t {
+		i++
+	}
+	return i
+}
+
+func gapSpan(g HistoryGap) string {
+	if g.ToUTC == nil {
+		return g.FromUTC.Format(time.RFC3339Nano) + " on"
+	}
+	return g.FromUTC.Format(time.RFC3339Nano) + " to " + g.ToUTC.Format(time.RFC3339Nano)
+}
+
+// attribute labels ref from the account group's history against cfg's
+// public limits, clockS being the cell's recorded clock-offset bound in
+// seconds; read[i] marks a limit at the value read at the cell's start.
+func (ix *historyIndex) attribute(ref *Refusal, cfg *config.Config, read []bool, clockS float64) error {
+	ref.AboveIn, ref.Unresolved, ref.Windows = nil, nil, nil
+	if ref.WroteUTC == nil {
+		ref.Label, ref.Unresolved = LabelUnresolved, []string{"the refused request has no write time"}
+		return nil
+	}
+	t := *ref.WroteUTC
+	unresolved := false
+	for i := range cfg.Target.Limits {
+		l := &cfg.Target.Limits[i]
+		if l.Marking != config.MarkingPublic {
+			continue
+		}
+		value, ok := new(big.Rat).SetString(strconv.FormatFloat(l.Value, 'g', -1, 64))
+		if !ok {
+			return fmt.Errorf("report: target.limits[%d] value %g", i, l.Value)
+		}
+		switch l.Dimension {
+		case config.LimitRPD, config.LimitTPD:
+			loc, err := time.LoadLocation(l.ResetZone)
+			if err != nil {
+				return fmt.Errorf("report: target.limits[%d] reset zone: %w", i, err)
+			}
+			lt := t.In(loc)
+			start := time.Date(lt.Year(), lt.Month(), lt.Day(), 0, 0, 0, 0, loc)
+			next := time.Date(lt.Year(), lt.Month(), lt.Day()+1, 0, 0, 0, 0, loc)
+			wc := WindowCount{Dimension: l.Dimension, Limit: i, Value: l.Value, ReadAtStart: read[i], ResetDay: start.Format(time.DateOnly), Counting: tokenCounting(l)}
+			ix.window(&wc, l, value, start, t, true)
+			bound := time.Duration(clockS * float64(time.Second))
+			if t.Sub(start) <= bound || next.Sub(t) <= bound {
+				wc.Unresolved = append(wc.Unresolved, fmt.Sprintf("the refusal falls within the cell's clock-offset bound of %g s of a reset of %s", clockS, l.ResetZone))
+				wc.Above = false
+			}
+			ref.Windows = append(ref.Windows, wc)
+		case config.LimitRPM, config.LimitRPS, config.LimitTPM, config.LimitInputTPM, config.LimitOutputTPM, config.LimitSpendWindow:
+			for _, w := range l.WindowsS() {
+				share := new(big.Rat).Mul(value, new(big.Rat).SetFloat64(w))
+				share.Quo(share, new(big.Rat).SetFloat64(l.StatedWindowS()))
+				wc := WindowCount{Dimension: l.Dimension, Limit: i, Value: l.Value, ReadAtStart: read[i], WindowS: w, Counting: tokenCounting(l)}
+				ix.window(&wc, l, share, t.Add(-time.Duration(w*float64(time.Second))), t, false)
+				ref.Windows = append(ref.Windows, wc)
+			}
+		}
+	}
+	for i := range ref.Windows {
+		wc := &ref.Windows[i]
+		switch {
+		case wc.Above:
+			ref.AboveIn = append(ref.AboveIn, wc.name())
+		case len(wc.Unresolved) > 0:
+			unresolved = true
+			for _, u := range wc.Unresolved {
+				if !slices.Contains(ref.Unresolved, u) {
+					ref.Unresolved = append(ref.Unresolved, u)
+				}
+			}
+		}
+	}
+	switch {
+	case len(ref.AboveIn) > 0:
+		ref.Label, ref.Unresolved = LabelAbove, nil
+	case unresolved:
+		ref.Label = LabelUnresolved
+	default:
+		ref.Label = LabelAtOrBelow
+	}
+	return nil
+}
+
 // refusalsText writes a segment's status_429 context: the 30 s bins, the
 // first bin on its own line, each refusal with its label, window counts,
 // error fields as received and rate-limit headers.
