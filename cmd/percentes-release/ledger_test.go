@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/percentes/percentes/internal/admission"
-	"github.com/percentes/percentes/internal/config"
 )
 
 // ledger create starts a ledger with every route's release caps; ledger
@@ -66,8 +65,8 @@ func TestLedgerCmd(t *testing.T) {
 			bounds = append(bounds, e.OutputTokens)
 		}
 	}
-	if !reflect.DeepEqual(bounds, config.PinnedReleaseCeilings) {
-		t.Fatalf("prices at %v output tokens, want %v", bounds, config.PinnedReleaseCeilings)
+	if want := cfgs[0].Release.Shape.Ceilings(); !reflect.DeepEqual(bounds, want) {
+		t.Fatalf("prices at %v output tokens, want %v", bounds, want)
 	}
 	if st, err = l.State(); err != nil {
 		t.Fatal(err)

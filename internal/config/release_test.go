@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"slices"
@@ -34,6 +35,67 @@ func TestReleaseReferenceLoads(t *testing.T) {
 	c.Target.Body = strings.Replace(c.Target.Body, `"max_completion_tokens": 512`, `"max_completion_tokens": 1024`, 1)
 	if err := c.Validate(); err != nil {
 		t.Errorf("fallback ceiling 1024: %v", err)
+	}
+}
+
+// shapeRConfig is the release reference turned into a Shape R route at
+// ceiling, with the fallback line given (none where empty).
+func shapeRConfig(t *testing.T, bound, ceiling int, fallback string) (*Config, error) {
+	t.Helper()
+	raw, err := os.ReadFile(releaseRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	for _, r := range [][2]string{
+		{"    name: S ", "    name: R "},
+		{"    input_bound_tokens: 1200 ", fmt.Sprintf("    input_bound_tokens: %d ", bound)},
+		{"    ceiling_tokens: 512 ", fmt.Sprintf("    ceiling_tokens: %d ", ceiling)},
+		{`"max_completion_tokens": 512`, fmt.Sprintf(`"max_completion_tokens": %d`, ceiling)},
+		{"    deadline_s: 30\n", "    deadline_s: 30\n" + fallback},
+	} {
+		if !strings.Contains(s, r[0]) {
+			t.Fatalf("reference no longer carries %q", r[0])
+		}
+		s = strings.Replace(s, r[0], r[1], 1)
+	}
+	return Parse([]byte(s))
+}
+
+// Shape R takes its own input bound and ceilings, its fallback only where
+// declared; Shape S keeps 512 and 1,024.
+func TestReleaseShapePins(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		bound, ceiling int
+		fallback, want string
+		permitted      []int
+	}{
+		{"16, no fallback", 128, 16, "    fallback: false\n", "", []int{16}},
+		{"16, fallback declared", 128, 16, "    fallback: true\n", "", []int{16, 256}},
+		{"256, fallback declared", 128, 256, "    fallback: true\n", "", []int{16, 256}},
+		{"256 without the fallback", 128, 256, "    fallback: false\n", "release.shape.ceiling_tokens: must be one of [16] for Shape R as declared", nil},
+		{"512", 128, 512, "    fallback: true\n", "release.shape.ceiling_tokens: must be one of [16 256] for Shape R", nil},
+		{"1024", 128, 1024, "    fallback: true\n", "release.shape.ceiling_tokens", nil},
+		{"fallback undeclared", 128, 16, "", "release.shape.fallback: required for Shape R", nil},
+		{"Shape S bound", 1200, 16, "    fallback: false\n", "release.shape.input_bound_tokens: pinned 128 for Shape R", nil},
+	} {
+		c, err := shapeRConfig(t, tc.bound, tc.ceiling, tc.fallback)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: must load, got %v", tc.name, err)
+		case tc.want == "" && !slices.Equal(c.Release.Shape.Ceilings(), tc.permitted):
+			t.Errorf("%s: permitted ceilings %v, want %v", tc.name, c.Release.Shape.Ceilings(), tc.permitted)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: must fail naming %q, got: %v", tc.name, tc.want, err)
+		}
+	}
+	c := loadRef(t, releaseRef)
+	if got := c.Release.Shape.Ceilings(); !slices.Equal(got, []int{512, 1024}) {
+		t.Errorf("Shape S ceilings %v", got)
+	}
+	if got := (&Shape{Name: "L"}).Ceilings(); got != nil {
+		t.Errorf("unknown shape ceilings %v", got)
 	}
 }
 
@@ -108,10 +170,15 @@ func TestReleaseRefusals(t *testing.T) {
 		{"warm-up", func(c *Config) { c.Release.Ladder.WarmupS = 30 }, "release.ladder.warmup_s: pinned 60"},
 		{"step window 480", func(c *Config) { c.Release.Ladder.StepS = 480 }, "release.ladder.step_s: pinned 240"},
 		{"drain", func(c *Config) { c.Release.Ladder.DrainS = 30 }, "release.ladder.drain_s: pinned 90"},
-		{"shape name", func(c *Config) { c.Release.Shape.Name = "L" }, "release.shape.name: pinned \"S\""},
-		{"input bound", func(c *Config) { c.Release.Shape.InputBoundTokens = 8000 }, "release.shape.input_bound_tokens: pinned 1200"},
-		{"ceiling 256", func(c *Config) { c.Release.Shape.CeilingTokens = 256 }, "release.shape.ceiling_tokens: must be one of [512 1024]"},
+		{"shape name", func(c *Config) { c.Release.Shape.Name = "L" }, "release.shape.name: must be one of [\"S\" \"R\"]"},
+		{"input bound", func(c *Config) { c.Release.Shape.InputBoundTokens = 8000 }, "release.shape.input_bound_tokens: pinned 1200 for Shape S"},
+		{"Shape S at the Shape R bound", func(c *Config) { c.Release.Shape.InputBoundTokens = 128 }, "release.shape.input_bound_tokens: pinned 1200 for Shape S"},
+		{"Shape S at 16", func(c *Config) { c.Release.Shape.CeilingTokens = 16 }, "release.shape.ceiling_tokens: must be one of [512 1024] for Shape S"},
+		{"Shape S at 256", func(c *Config) { c.Release.Shape.CeilingTokens = 256 }, "release.shape.ceiling_tokens: must be one of [512 1024]"},
 		{"ceiling 2048", func(c *Config) { c.Release.Shape.CeilingTokens = 2048 }, "release.shape.ceiling_tokens"},
+		{"Shape S declares a fallback", func(c *Config) { c.Release.Shape.Fallback = new(bool) }, "release.shape.fallback: must be absent for Shape S"},
+		{"no account group", func(c *Config) { c.Release.AccountGroup = "" }, "release.account_group: the provider account or deployment"},
+		{"account group name", func(c *Config) { c.Release.AccountGroup = "azure east" }, "release.account_group"},
 		{"deadline", func(c *Config) { c.Release.Shape.DeadlineS = 60 }, "release.shape.deadline_s: pinned 30"},
 		{"no caps", func(c *Config) { c.Release.Caps = LedgerCaps{} }, "release.caps.route_usd: a positive decimal number of US dollars required"},
 		{"no global cap", func(c *Config) { c.Release.Caps.GlobalUSD = "" }, "release.caps.global_usd: a positive decimal number"},

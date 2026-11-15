@@ -104,6 +104,35 @@ func floor(r *big.Rat) int64 {
 	return new(big.Int).Quo(r.Num(), r.Denom()).Int64()
 }
 
+// Release request shapes (SPEC-HOSTED HA3 point 7 and HA4).
+const (
+	// ShapeS is the protocol's request: a synthetic support ticket.
+	ShapeS = "S"
+	// ShapeR is the short request that probes request-count limits.
+	ShapeR = "R"
+)
+
+// ShapePin is one request shape's pinned input bound and output
+// ceilings. A route's ceiling check tries Ceiling first and Fallback
+// after it; under DeclaresFallback a route runs at Fallback only where
+// release.shape.fallback is true.
+type ShapePin struct {
+	Name              string
+	InputBoundTokens  int
+	Ceiling, Fallback int
+	DeclaresFallback  bool
+}
+
+// LookupShape is the pin of the shape name; false for no release shape.
+func LookupShape(name string) (ShapePin, bool) {
+	for _, p := range PinnedReleaseShapes {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return ShapePin{}, false
+}
+
 // Shape is the request shape. The hard timeout is client.http_timeout_s;
 // the deadline is a reporting cut inside completed.
 type Shape struct {
@@ -111,6 +140,25 @@ type Shape struct {
 	InputBoundTokens int    `yaml:"input_bound_tokens" json:"input_bound_tokens"`
 	CeilingTokens    int    `yaml:"ceiling_tokens" json:"ceiling_tokens"`
 	DeadlineS        int    `yaml:"deadline_s" json:"deadline_s"`
+	// Fallback declares whether a route of a shape whose pin
+	// DeclaresFallback may run at the pinned fallback; it is set, true or
+	// false, for such a shape and absent for any other.
+	Fallback *bool `yaml:"fallback,omitempty" json:"fallback,omitempty"`
+}
+
+// Ceilings are the output ceilings the route's shape permits it, in the
+// order its ceiling check tries them: the pinned ceiling, then the
+// fallback unless the route declares it absent. Nil for no release
+// shape.
+func (s *Shape) Ceilings() []int {
+	p, ok := LookupShape(s.Name)
+	switch {
+	case !ok:
+		return nil
+	case p.DeclaresFallback && (s.Fallback == nil || !*s.Fallback):
+		return []int{p.Ceiling}
+	}
+	return []int{p.Ceiling, p.Fallback}
 }
 
 // Values of target.adapter.
@@ -502,13 +550,7 @@ func (c *Config) validateRelease(v *validator) {
 	pin("release.ladder.warmup_s", r.Ladder.WarmupS, PinnedReleaseWarmupS)
 	pin("release.ladder.step_s", r.Ladder.StepS, PinnedReleaseStepS)
 	pin("release.ladder.drain_s", r.Ladder.DrainS, PinnedReleaseDrainS)
-	if r.Shape.Name != PinnedReleaseShape {
-		v.errf("release.shape.name: pinned %q under the release profile (SPEC-HOSTED HA3 point 7), got %q", PinnedReleaseShape, r.Shape.Name)
-	}
-	pin("release.shape.input_bound_tokens", float64(r.Shape.InputBoundTokens), PinnedReleaseInputBoundTokens)
-	if !slices.Contains(PinnedReleaseCeilings, r.Shape.CeilingTokens) {
-		v.errf("release.shape.ceiling_tokens: must be one of %v (SPEC-HOSTED HA3 point 7), got %d", PinnedReleaseCeilings, r.Shape.CeilingTokens)
-	}
+	validateShape(v, "release.shape", &r.Shape)
 	pin("release.shape.deadline_s", float64(r.Shape.DeadlineS), PinnedReleaseDeadlineS)
 	validateLedgerCaps(v, "release.caps", r.Caps)
 	if !fieldKey(r.AccountGroup) {
@@ -530,6 +572,33 @@ func (c *Config) validateRelease(v *validator) {
 	}
 
 	c.validateReleaseTarget(v, &c.Target)
+}
+
+// validateShape requires a release shape, its pinned input bound, the
+// fallback declared where the shape's routes declare it and absent
+// otherwise, and a ceiling among those the shape permits the route.
+func validateShape(v *validator, field string, s *Shape) {
+	p, ok := LookupShape(s.Name)
+	if !ok {
+		var names []string
+		for _, p := range PinnedReleaseShapes {
+			names = append(names, p.Name)
+		}
+		v.errf("%s.name: must be one of %q (SPEC-HOSTED HA4), got %q", field, names, s.Name)
+		return
+	}
+	if s.InputBoundTokens != p.InputBoundTokens {
+		v.errf("%s.input_bound_tokens: pinned %d for Shape %s (SPEC-HOSTED HA4), got %d", field, p.InputBoundTokens, p.Name, s.InputBoundTokens)
+	}
+	switch {
+	case p.DeclaresFallback && s.Fallback == nil:
+		v.errf("%s.fallback: required for Shape %s: true where the route may run at the %d-token fallback, false where it declares none (SPEC-HOSTED HA4)", field, p.Name, p.Fallback)
+	case !p.DeclaresFallback && s.Fallback != nil:
+		v.errf("%s.fallback: must be absent for Shape %s, whose %d-token fallback is pinned", field, p.Name, p.Fallback)
+	}
+	if c := s.Ceilings(); !slices.Contains(c, s.CeilingTokens) {
+		v.errf("%s.ceiling_tokens: must be one of %v for Shape %s as declared (SPEC-HOSTED HA3 point 7 and HA4), got %d", field, c, p.Name, s.CeilingTokens)
+	}
 }
 
 // validateLedgerCaps requires both caps as positive decimal numbers, the

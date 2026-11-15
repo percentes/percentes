@@ -29,10 +29,10 @@ import (
 //   - "pilot": the SPEC-HOSTED HA2 descriptive pilot: two hosted
 //     endpoints sent one literal request body at deterministic arrivals,
 //     with no replicas, SLO, fault or §6 infrastructure pins.
-//   - "release": one route of a SPEC-HOSTED HA3 public descriptive
-//     release: one hosted target sent its literal request body (Shape S)
-//     up the HA1 ladder as HA3 modifies it, with no replicas, SLO, fault
-//     or §6 infrastructure pins.
+//   - "release": one route of a SPEC-HOSTED HA3 or HA4 public
+//     descriptive release: one hosted target sent its literal request
+//     body (Shape S or Shape R) up the HA1 ladder as HA3 and HA4 modify
+//     it, with no replicas, SLO, fault or §6 infrastructure pins.
 type Profile string
 
 const (
@@ -200,6 +200,14 @@ var (
 	// The HA3 pins stay until every caller reads the HA4 ones.
 	PinnedReleaseStepsRPS = []float64{0.25, 0.5, 1, 2, 4}
 	PinnedReleaseCeilings = []int{512, 1024}
+
+	// SPEC-HOSTED HA3 point 7 and HA4: each request shape's input bound,
+	// its output ceiling and its one fallback. A Shape R route declares
+	// whether it may run at the fallback.
+	PinnedReleaseShapes = []ShapePin{
+		{Name: ShapeS, InputBoundTokens: 1200, Ceiling: 512, Fallback: 1024},
+		{Name: ShapeR, InputBoundTokens: 128, Ceiling: 16, Fallback: 256, DeclaresFallback: true},
+	}
 )
 
 // Config is the root of the run configuration.

@@ -41,11 +41,13 @@ release:
     warmup_s: 60
     step_s: 240
     drain_s: 90
-  shape:                    # pinned (HA3 point 7)
-    name: S
-    input_bound_tokens: 1200
-    ceiling_tokens: 512     # 512, or the fallback 1024
+  shape:                    # pinned per shape (HA3 point 7, HA4)
+    name: S                 # S, or R for the short request
+    input_bound_tokens: 1200  # 1200 for S, 128 for R
+    ceiling_tokens: 512     # S: 512, or the fallback 1024; R: 16, or 256
     deadline_s: 30
+    # Shape R only: fallback true where the route may run at 256, false
+    # where it declares none. Shape S leaves it out.
   caps:                     # admission ledger caps, US$
     route_usd: "10"
     global_usd: "1400"      # the same in every route's file
