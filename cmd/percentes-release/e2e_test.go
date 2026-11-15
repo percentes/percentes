@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -63,15 +64,148 @@ func e2eConfig(t *testing.T, f *mockForm, endpoint string) *config.Config {
 	return cfg
 }
 
-// gateReasons reports whether reasons hold only the client-validity
-// gate's failure and the ladder end it caused.
+// clientValidityEnd is the ladder end the client-validity gate gives.
+var clientValidityEnd = regexp.MustCompile(`^ladder ended at step [1-5]: ` + regexp.QuoteMeta(loadgen.LadderEndClientValidity) + `$`)
+
+// gateReasons reports whether reasons hold the client-validity gate's
+// failure and nothing else but the ladder end it caused.
 func gateReasons(reasons []string) bool {
+	failed := false
 	for _, r := range reasons {
-		if !strings.HasPrefix(r, "client-validity gate failed") && !(strings.HasPrefix(r, "ladder ended at step") && strings.HasSuffix(r, ": "+loadgen.LadderEndClientValidity)) {
-			return false
+		switch r {
+		case "client-validity gate failed (§2)", "client-validity gate failed (§2): host CPU unmeasured on this platform build":
+			failed = true
+		default:
+			if !clientValidityEnd.MatchString(r) {
+				return false
+			}
 		}
 	}
-	return len(reasons) > 0
+	return failed
+}
+
+// clientGateOnly reports whether rec is client-invalid by the
+// client-validity gate alone.
+func clientGateOnly(rec *cellRecord) bool {
+	return rec.Outcome == outcomeInvalid && gateReasons(rec.Reasons)
+}
+
+// hostGateFailed reports whether rec is client-invalid by the
+// client-validity gate alone, with a failed step gate on record that
+// ended its ladder and no refused write (gateSkipParts).
+func hostGateFailed(rec *cellRecord) bool {
+	if !clientGateOnly(rec) || rec.Ladder == nil || rec.Ladder.End != loadgen.LadderEndClientValidity {
+		return false
+	}
+	failed := false
+	for i := range rec.Ladder.Steps {
+		if g := rec.Ladder.Steps[i].Gates; g != nil && !g.Pass {
+			parts, defect := gateSkipParts(g)
+			if defect {
+				return false
+			}
+			failed = failed || len(parts) > 0
+		}
+	}
+	return failed
+}
+
+// skipOnHostGate skips the rest of t for a cell hostGateFailed takes,
+// which has no counted label to check. The failed-gate subtests check its
+// client_invalid label on every run.
+func skipOnHostGate(t *testing.T, rec *cellRecord) {
+	t.Helper()
+	if hostGateFailed(rec) {
+		t.Skipf("client-validity gate failed (%q); no counted cell", rec.Reasons)
+	}
+}
+
+// freshSends is what a fresh cell of scheduled ladder requests sends with
+// its probe, less the requests rec's ladder left undispatched.
+func freshSends(scheduled int, rec *cellRecord) int64 {
+	n := int64(1 + scheduled)
+	if rec.Ladder == nil {
+		return n
+	}
+	for i := range rec.Ladder.Steps {
+		if g := rec.Ladder.Steps[i].Gates; g != nil {
+			n -= int64(g.Undispatched)
+		}
+	}
+	return n
+}
+
+// gateSkipParts names the failed parts of g, a failed step gate under the
+// widened bounds (hostGatesWide), and reports a defect where the release
+// write limit refused a write.
+func gateSkipParts(g *loadgen.GateReport) (parts []string, defect bool) {
+	for _, p := range []struct {
+		name string
+		fail bool
+	}{
+		{"gc pause", !g.GCPass},
+		{"cpu", !g.CPUPass},
+		{"send skew", !g.SendSkewPass && g.WritesDenied == 0},
+		{"writes denied", g.WritesDenied > 0},
+		{"undispatched", !g.UndispatchedPass},
+	} {
+		if p.fail {
+			parts = append(parts, p.name)
+		}
+	}
+	return parts, g.WritesDenied > 0
+}
+
+// A refused write is a defect of the five-route test; any other failed
+// part (gc pause, cpu, send skew or undispatched) skips it.
+func TestGateSkipPartsFailsOnRefusedWrite(t *testing.T) {
+	pass := loadgen.GateReport{SendSkewPass: true, UndispatchedPass: true, CPUMeasured: true, CPUPass: true, GCPass: true}
+	for _, tc := range []struct {
+		name   string
+		set    func(g *loadgen.GateReport)
+		parts  []string
+		defect bool
+	}{
+		{"write denied", func(g *loadgen.GateReport) { g.WritesDenied, g.SendSkewPass = 1, false }, []string{"writes denied"}, true},
+		{"write denied beside undispatched", func(g *loadgen.GateReport) {
+			g.WritesDenied, g.SendSkewPass, g.Undispatched, g.UndispatchedPass = 2, false, 1, false
+		}, []string{"writes denied", "undispatched"}, true},
+		{"undispatched", func(g *loadgen.GateReport) { g.Undispatched, g.UndispatchedPass = 1, false }, []string{"undispatched"}, false},
+		{"cpu unmeasured", func(g *loadgen.GateReport) { g.CPUMeasured, g.CPUPass = false, false }, []string{"cpu"}, false},
+		{"gc pause", func(g *loadgen.GateReport) { g.GCPauseOpen, g.GCPass = true, false }, []string{"gc pause"}, false},
+		{"send skew", func(g *loadgen.GateReport) { g.SendSkewMaxUs, g.SendSkewPass = 1_500_000, false }, []string{"send skew"}, false},
+	} {
+		g := pass
+		tc.set(&g)
+		if parts, defect := gateSkipParts(&g); !slices.Equal(parts, tc.parts) || defect != tc.defect {
+			t.Errorf("%s: parts %q, defect %t; want %q, %t", tc.name, parts, defect, tc.parts, tc.defect)
+		}
+	}
+}
+
+// gateReasons excuses the client-validity gate's own reasons and no
+// other: a reason that merely starts like them, a ladder end with no
+// recorded failure, or a failure beside another reason.
+func TestGateReasons(t *testing.T) {
+	for _, reasons := range [][]string{
+		{"client-validity gate failed; pricing-bound breach"},
+		{"ladder ended at step billing: client_validity"},
+		{"ladder ended at step 1: client_validity"},
+		{"client-validity gate failed (§2)", "probe request returned 401, a setup defect"},
+		nil,
+	} {
+		if gateReasons(reasons) {
+			t.Errorf("excused %q", reasons)
+		}
+	}
+	for _, reasons := range [][]string{
+		{"client-validity gate failed (§2)"},
+		{"client-validity gate failed (§2): host CPU unmeasured on this platform build", "ladder ended at step 3: client_validity"},
+	} {
+		if !gateReasons(reasons) {
+			t.Errorf("not excused %q", reasons)
+		}
+	}
 }
 
 // mockCounts is the mock's count of finished requests by outcome label.
@@ -196,6 +330,7 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	}
 
 	gateOnly := false
+	var gateParts []string
 	sent := 0
 	var sends []time.Time
 	st := ledgerState(t, ledgerPath)
@@ -407,7 +542,90 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	}
 	t.Logf("aggregate dispatch: at most %d per second at %s", agg.MaxPerSecond, agg.MaxAtUTC.Format(time.RFC3339))
 
-	if gateOnly {
-		t.Skip("client-validity gate failed under the race detector; outcomes logged above")
+	if gateOnly && !t.Failed() {
+		slices.Sort(gateParts)
+		t.Skipf("client-validity gate failed in-process (%s); outcomes logged above", strings.Join(gateParts, ", "))
+	}
+}
+
+// hostGateFailed takes a failed step gate on record that ended the ladder,
+// with no refused write, beside the gate's own reasons.
+func TestHostGateFailed(t *testing.T) {
+	reasons := []string{"client-validity gate failed (§2)", "ladder ended at step 1: client_validity"}
+	recOf := func(reasons []string, gs ...*loadgen.GateReport) *cellRecord {
+		steps := make([]loadgen.StepRecord, len(gs))
+		for i, g := range gs {
+			steps[i].Gates = g
+		}
+		return &cellRecord{Outcome: outcomeInvalid, Reasons: reasons, Ladder: &loadgen.LadderRecord{End: loadgen.LadderEndClientValidity, Steps: steps}}
+	}
+	rec := func(reasons []string, g *loadgen.GateReport) *cellRecord { return recOf(reasons, g) }
+	pass := loadgen.GateReport{Pass: true, SendSkewPass: true, UndispatchedPass: true, CPUMeasured: true, CPUPass: true, GCPass: true}
+	undispatched := pass
+	undispatched.Pass, undispatched.Undispatched, undispatched.UndispatchedPass = false, 1, false
+	denied := pass
+	denied.Pass, denied.WritesDenied, denied.SendSkewPass = false, 1, false
+	noPart := pass
+	noPart.Pass = false
+	noEnd := rec(reasons, &undispatched)
+	noEnd.Ladder.End = ""
+	for _, tc := range []struct {
+		name string
+		rec  *cellRecord
+		want bool
+	}{
+		{"undispatched", rec(reasons, &undispatched), true},
+		{"first of two steps failed", recOf(reasons, &undispatched, &pass), true},
+		{"failed part, then a failed gate with none", recOf(reasons, &undispatched, &noPart), true},
+		{"last of two steps failed", recOf(reasons, &pass, &undispatched), true},
+		{"gate reason with every gate passed", rec(reasons, &pass), false},
+		{"failed gate with no failed part", rec(reasons, &noPart), false},
+		{"refused write", rec(reasons, &denied), false},
+		{"refused write in the first of two steps", recOf(reasons, &denied, &undispatched), false},
+		{"another reason", rec([]string{"stopped: x"}, &undispatched), false},
+		{"no ladder", &cellRecord{Outcome: outcomeInvalid, Reasons: reasons}, false},
+		{"failed gate with no ladder end", noEnd, false},
+	} {
+		if got := hostGateFailed(tc.rec); got != tc.want {
+			t.Errorf("%s: %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
+// skipOnHostGate skips a cell hostGateFailed takes, and a counted cell or
+// any other failure goes on to the test's own checks.
+func TestSkipOnHostGate(t *testing.T) {
+	failed := loadgen.GateReport{Undispatched: 1, SendSkewPass: true, CPUMeasured: true, CPUPass: true, GCPass: true}
+	ladder := &loadgen.LadderRecord{End: loadgen.LadderEndClientValidity, Steps: []loadgen.StepRecord{{Gates: &failed}}}
+	for _, tc := range []struct {
+		name string
+		rec  *cellRecord
+		want bool
+	}{
+		{"counted", &cellRecord{Outcome: outcomeCounted, Ladder: &loadgen.LadderRecord{}}, false},
+		{"another reason", &cellRecord{Outcome: outcomeInvalid, Reasons: []string{"stopped: x"}, Ladder: ladder}, false},
+		{"gate failed", &cellRecord{Outcome: outcomeInvalid, Reasons: []string{"client-validity gate failed (§2)", "ladder ended at step 1: client_validity"}, Ladder: ladder}, true},
+	} {
+		var skipped bool
+		t.Run(tc.name, func(st *testing.T) {
+			defer func() { skipped = st.Skipped() }()
+			skipOnHostGate(st, tc.rec)
+		})
+		if skipped != tc.want {
+			t.Errorf("%s: skipped %t, want %t", tc.name, skipped, tc.want)
+		}
+	}
+}
+
+// A fresh cell's sends are its schedule and probe less each step's
+// undispatched requests; a re-run with no ladder is the whole count, which
+// its test then refuses.
+func TestFreshSends(t *testing.T) {
+	two := &cellRecord{Ladder: &loadgen.LadderRecord{Steps: []loadgen.StepRecord{{Gates: &loadgen.GateReport{Undispatched: 2}}, {}, {Gates: &loadgen.GateReport{Undispatched: 1}}}}}
+	if got := freshSends(30, two); got != 28 {
+		t.Errorf("three steps: %d, want 28", got)
+	}
+	if got := freshSends(30, &cellRecord{}); got != 31 {
+		t.Errorf("no ladder: %d, want 31", got)
 	}
 }

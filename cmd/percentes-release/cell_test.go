@@ -175,12 +175,8 @@ func runAdmittedCell(t *testing.T, gate func(*route)) *cellRecord {
 		t.Fatal(err)
 	}
 	t.Logf("outcome %s %q", rec.Outcome, rec.Reasons)
-	if rec.Outcome != outcomeCounted {
-		for _, reason := range rec.Reasons {
-			if !strings.HasPrefix(reason, "client-validity gate failed") && !strings.HasPrefix(reason, "ladder ended at step") {
-				t.Errorf("reason %q", reason)
-			}
-		}
+	if rec.Outcome != outcomeCounted && !clientGateOnly(rec) {
+		t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
 	}
 	if got := readCell(t, r, run); got.Outcome != rec.Outcome || got.EndUTC == nil || got.Run != run {
 		t.Fatalf("cell record %+v", got)
@@ -744,7 +740,7 @@ func TestCellConfidentialLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("outcome %s %q", rec.Outcome, rec.Reasons)
-	if rec.Outcome != outcomeCounted && !(rec.Outcome == outcomeInvalid && gateReasons(rec.Reasons)) {
+	if rec.Outcome != outcomeCounted && !clientGateOnly(rec) {
 		t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
 	}
 	m, text := checkRetained(t, r, run)
@@ -1557,10 +1553,8 @@ func TestCellOperatorRefreshed(t *testing.T) {
 		begun := time.Now().Add(-2 * time.Second)
 		rec := runCellOK(t, r, c.run)
 		if rec.Outcome != outcomeCounted {
-			for _, reason := range rec.Reasons {
-				if !strings.HasPrefix(reason, "client-validity gate failed") && !strings.HasPrefix(reason, "ladder ended at step") {
-					t.Fatalf("%s: outcome %s, reason %q", c.run.Label, rec.Outcome, reason)
-				}
+			if !clientGateOnly(rec) {
+				t.Fatalf("%s: outcome %s %q", c.run.Label, rec.Outcome, rec.Reasons)
 			}
 			notCounted = append(notCounted, fmt.Sprintf("%s %q", c.run.Label, rec.Reasons))
 		}
