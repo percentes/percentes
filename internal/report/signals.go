@@ -3,6 +3,7 @@ package report
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -53,12 +54,12 @@ const (
 // whole answer. retry counts the status_429 responses per Retry-After
 // value. events holds each completion's content events, and tokens and
 // reasoning its provider-reported completion and reasoning tokens where
-// its record carries them; erroredEvents and censoredEvents hold the
-// content events of each errored and censored request. sent counts the
-// requests with an outcome, and prompt holds the provider-reported
-// prompt tokens of those whose usage carries them. obs holds every
-// request's terminal state for the incidence estimator, and gaps the
-// inter-chunk gaps per bin of evidence.GapEdgesUs.
+// its record carries a non-negative count; erroredEvents and
+// censoredEvents hold the content events of each errored and censored
+// request. sent counts the requests with an outcome, and prompt holds
+// the provider-reported prompt tokens of those whose usage carries them.
+// obs holds every request's terminal state for the incidence estimator,
+// and gaps the inter-chunk gaps per bin of evidence.GapEdgesUs.
 type timing struct {
 	failure                       map[string][]int64
 	ttft, done                    [2][]int64
@@ -99,10 +100,10 @@ func (t *timing) add(line string, r *evidence.Record, horizonUs int64) error {
 		t.done[c] = append(t.done[c], r.DoneNs-r.IntendedNs)
 		t.obs = append(t.obs, collect.Obs{TimeUs: (r.DoneNs - r.IntendedNs) / 1000, Kind: collect.ObsCompletion})
 		t.events = append(t.events, r.ContentEvents)
-		if r.CompletionTokens != nil {
+		if r.CompletionTokens != nil && *r.CompletionTokens >= 0 {
 			t.tokens = append(t.tokens, *r.CompletionTokens)
 		}
-		if r.ReasoningTokens != nil {
+		if r.ReasoningTokens != nil && *r.ReasoningTokens >= 0 {
 			t.reasoning = append(t.reasoning, *r.ReasoningTokens)
 		}
 	default:
@@ -127,20 +128,16 @@ func (t *timing) add(line string, r *evidence.Record, horizonUs int64) error {
 
 // promptTokens is the provider-reported prompt token count in a record's
 // usage: a chat-completions prompt_tokens, or a Messages input_tokens
-// plus its two cache counts, which input_tokens excludes. A missing or
-// null count is absent; an explicit 0 is a count.
+// plus its two cache counts, which input_tokens excludes. A missing,
+// null, negative or fractional count is absent; an explicit 0 is a
+// count, an integral count in exponent form is its value, and a count
+// or sum past math.MaxInt is math.MaxInt.
 func promptTokens(usage json.RawMessage) (int, bool) {
 	var u map[string]json.RawMessage
 	if json.Unmarshal(usage, &u) != nil {
 		return 0, false
 	}
-	count := func(key string) (int, bool) {
-		var n *int
-		if v, ok := u[key]; !ok || json.Unmarshal(v, &n) != nil || n == nil {
-			return 0, false
-		}
-		return *n, true
-	}
+	count := func(key string) (int, bool) { return loadgen.TokenCount(u[key]) }
 	if n, ok := count("prompt_tokens"); ok {
 		return n, true
 	}
@@ -150,6 +147,10 @@ func promptTokens(usage json.RawMessage) (int, bool) {
 	}
 	for _, k := range []string{"cache_creation_input_tokens", "cache_read_input_tokens"} {
 		if c, ok := count(k); ok {
+			if c > math.MaxInt-n {
+				n = math.MaxInt
+				continue
+			}
 			n += c
 		}
 	}
@@ -378,8 +379,8 @@ func signalsText(w func(string, ...any), s *Signals, pooled bool) {
 	} else {
 		w("  completion length over the %d completions:", s.ContentEvents.Of)
 		w("    %-37s %s", "content events", countsText(s.ContentEvents))
-		w("    %-37s %s", "provider-reported completion tokens", countsText(s.CompletionTokens))
-		w("    %-37s %s", "provider-reported reasoning tokens", countsText(s.ReasoningTokens))
+		w("    %-37s %s", "provider-reported completion tokens", tokenCountsText(s.CompletionTokens))
+		w("    %-37s %s", "provider-reported reasoning tokens", tokenCountsText(s.ReasoningTokens))
 	}
 	for _, o := range []struct {
 		name string
@@ -395,9 +396,22 @@ func signalsText(w func(string, ...any), s *Signals, pooled bool) {
 		w("  prompt length: no requests sent")
 	} else {
 		w("  prompt length over the %d requests sent:", s.PromptTokens.Of)
-		w("    %-37s %s", "provider-reported prompt tokens", countsText(s.PromptTokens))
+		w("    %-37s %s", "provider-reported prompt tokens", tokenCountsText(s.PromptTokens))
 	}
 	gapsText(w, s.Gaps)
+}
+
+// tokenCountsText renders a token count over requests as countsText
+// does, a count of math.MaxInt as at least it (loadgen.TokenCountText).
+func tokenCountsText(c Counts) string {
+	n := loadgen.TokenCountText
+	switch {
+	case c.N == 0:
+		return countsText(c)
+	case c.N == c.Of:
+		return fmt.Sprintf("min %s, median %s, 90th percentile %s, max %s", n(c.Min), n(c.P50), n(c.P90), n(c.Max))
+	}
+	return fmt.Sprintf("on %d of %d: min %s, median %s, 90th percentile %s, max %s", c.N, c.Of, n(c.Min), n(c.P50), n(c.P90), n(c.Max))
 }
 
 // retryAfterText renders a step's status_429 context: the largest

@@ -66,9 +66,9 @@ type Record struct {
 	// CompletionTokens is present only when the stream carried a usage
 	// object with a completion count.
 	CompletionTokens *int `json:"completion_tokens,omitempty"`
-	// ReasoningTokens is a release record's integer under a key named
-	// reasoning_tokens at any depth of Usage; absent when there is none
-	// or two disagree.
+	// ReasoningTokens is a release record's count (loadgen.TokenCount)
+	// under a key named reasoning_tokens at any depth of Usage; absent
+	// when there is none or two disagree.
 	ReasoningTokens   *int            `json:"reasoning_tokens,omitempty"`
 	Usage             json.RawMessage `json:"usage,omitempty"`
 	FinishReason      string          `json:"finish_reason,omitempty"`
@@ -207,8 +207,9 @@ func record(r *loadgen.Request, cfg *config.Config, key *releasekey.Key) Record 
 	return rec
 }
 
-// reasoningTokens is the integer under a key named reasoning_tokens at
-// any depth of usage, or nil when there is none or two disagree.
+// reasoningTokens is the count (loadgen.TokenCount) under a key named
+// reasoning_tokens at any depth of usage, or nil when there is none or
+// two disagree.
 func reasoningTokens(usage json.RawMessage) *int {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(usage))
@@ -216,14 +217,14 @@ func reasoningTokens(usage json.RawMessage) *int {
 	if len(usage) == 0 || dec.Decode(&v) != nil {
 		return nil
 	}
-	var found []int64
+	var found []int
 	var walk func(any)
 	walk = func(v any) {
 		switch t := v.(type) {
 		case map[string]any:
 			for k, e := range t {
 				if n, ok := e.(json.Number); ok && k == "reasoning_tokens" {
-					if i, err := n.Int64(); err == nil {
+					if i, ok := loadgen.TokenCount(json.RawMessage(n)); ok {
 						found = append(found, i)
 					}
 				}
@@ -239,7 +240,7 @@ func reasoningTokens(usage json.RawMessage) *int {
 	if len(found) == 0 || slices.Min(found) != slices.Max(found) {
 		return nil
 	}
-	n := int(found[0])
+	n := found[0]
 	return &n
 }
 
