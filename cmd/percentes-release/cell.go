@@ -49,13 +49,13 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 // start (cellOperator, evidence.ReadRefreshedLimits), a failed balance
 // check, a balance below the cell's reservation, or a
 // balance unavailable where the route records no balance_unavailable
-// ruling blocks the start before admission; the limits and the balance
-// are checked at one ledger snapshot's price, a price recorded for the
-// route between that snapshot and the admission repeats both checks
-// once, and a second blocks the start (priceChangedReason); a probe
-// status that blocks
-// the start ends the cell before the ladder, unless it is a 401 or 403
-// the route's previous probed cell also saw, which stops the route; a
+// ruling, or a clock with no reading (evidence.ReadClock) blocks the
+// start before admission; the limits and the balance are checked at one
+// ledger snapshot's price, a price recorded for the route between that
+// snapshot and the admission repeats both checks once, and a second
+// blocks the start (priceChangedReason); a probe status that blocks the
+// start ends the cell before the ladder, unless it is a 401 or 403 the
+// route's previous probed cell also saw, which stops the route; a
 // documented billing refusal on the probe or inside the ladder stops the
 // route; an EMFILE error ends the ladder and the cell is client-invalid;
 // a response whose reported model differs from the expected one labels
@@ -163,6 +163,10 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		}
 		if reason := balance.Check.Blocks(); reason != "" {
 			finish(outcomeBlocked, reason)
+			return rec, r.retain(ctx, ev, rec, nil)
+		}
+		if c := ev.clock; c.AbsOffsetS == nil {
+			finish(outcomeBlocked, c.Flag)
 			return rec, r.retain(ctx, ev, rec, nil)
 		}
 
