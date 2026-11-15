@@ -33,8 +33,11 @@ const (
 	// MaxWindowDays bounds the committed window, first and last date
 	// included.
 	MaxWindowDays = 14
-	// OffsetStep spaces the routes' offsets inside a slot.
-	OffsetStep = 10 * time.Minute
+	// OffsetStep spaces the routes' offsets inside a slot, and
+	// GroupSeparation the offsets of two routes of one account group,
+	// measured both ways round the slot.
+	OffsetStep      = 40 * time.Minute
+	GroupSeparation = 80 * time.Minute
 	// StartTolerance applies to a route's offset start.
 	StartTolerance = 15 * time.Minute
 	// MaxAttempts per cell, and MaxReruns per route over the window.
@@ -81,13 +84,24 @@ type Input struct {
 
 // RouteConfig is a route's configuration as frozen with the schedule:
 // the SHA-256 of the file as published, the HMAC-SHA256 of the file as
-// loaded under the release key, and the routes of its model, its own
-// among them, sorted.
+// loaded under the release key, the routes of its model, its own among
+// them, sorted, its account group and its frozen binding rate.
 type RouteConfig struct {
 	Route            string   `json:"route"`
 	ConfigSHA256     string   `json:"config_sha256"`
 	ConfigHMACSHA256 string   `json:"config_hmac_sha256,omitempty"`
 	HostGroup        []string `json:"host_group"`
+	// AccountGroup is release.account_group: routes of one group start
+	// at least GroupSeparation apart.
+	AccountGroup string `json:"account_group,omitempty"`
+	// BindingRPS is the route's binding rate in requests per second,
+	// rounded down to 0.001; BindingLimit names the limit or cap that sets
+	// it, and BindingWindowS the evaluation window in seconds it is taken
+	// over, 0 for one with none (SPEC-HOSTED HA4). The step rates are
+	// fractions of BindingRPS (config.Ladder.StepRates).
+	BindingRPS     float64 `json:"binding_rps,omitempty"`
+	BindingLimit   string  `json:"binding_limit,omitempty"`
+	BindingWindowS float64 `json:"binding_window_s,omitempty"`
 }
 
 // Offset is a route's pinned start offset inside every slot.
@@ -105,9 +119,9 @@ type Attempt struct {
 	Seed      int64     `json:"seed"`
 }
 
-// Cell is one slot on one day type. Attempts holds attempt 1 and, where
-// the window has a later date of the cell's day type, attempt 2 on the
-// first such date.
+// Cell is one slot on one day type. Attempts holds attempt 1, never on
+// the last date of the cell's day type in the window, and attempt 2 on
+// the next date of that day type.
 type Cell struct {
 	Label       string    `json:"label"`
 	DayType     string    `json:"day_type"`
@@ -116,13 +130,15 @@ type Cell struct {
 }
 
 // Schedule is the derived schedule. Counter is the value appended to the
-// master seed by the Saturday-and-Sunday rule; 0 means the bare seed.
-// Cells are in order of attempt 1's slot start.
+// master seed by the Saturday-and-Sunday rule, and OffsetCounter the
+// value appended to the offset draws' key by the account-group rule; 0
+// means none. Cells are in order of attempt 1's slot start.
 type Schedule struct {
-	Input   Input    `json:"input"`
-	Counter int      `json:"counter"`
-	Offsets []Offset `json:"offsets"`
-	Cells   []Cell   `json:"cells"`
+	Input         Input    `json:"input"`
+	Counter       int      `json:"counter"`
+	OffsetCounter int      `json:"offset_counter"`
+	Offsets       []Offset `json:"offsets"`
+	Cells         []Cell   `json:"cells"`
 }
 
 // Run is one route's run of one cell attempt.
@@ -182,7 +198,9 @@ func parseDate(field, s string) (time.Time, error) {
 	return d, nil
 }
 
-// window returns, per day type, the window's dates in calendar order.
+// window returns, per day type, the window's dates in calendar order. A
+// day type's last date takes no attempt 1, so the window must hold a
+// weekday, a Saturday and a Sunday before the last date of each day type.
 func window(in Input) (map[string][]time.Time, error) {
 	first, err1 := parseDate("first", in.First)
 	last, err2 := parseDate("last", in.Last)
@@ -196,25 +214,30 @@ func window(in Input) (map[string][]time.Time, error) {
 		return nil, fmt.Errorf("schedule: window %s to %s is %d days, at most %d", in.First, in.Last, days, MaxWindowDays)
 	}
 	out := map[string][]time.Time{}
-	saturday, sunday := false, false
 	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
 		out[dayType(d)] = append(out[dayType(d)], d)
-		saturday = saturday || d.Weekday() == time.Saturday
-		sunday = sunday || d.Weekday() == time.Sunday
 	}
-	if len(out[Weekday]) == 0 || !saturday || !sunday {
-		return nil, fmt.Errorf("schedule: window %s to %s needs a weekday, a Saturday and a Sunday", in.First, in.Last)
+	saturday, sunday := false, false
+	if we := out[Weekend]; len(we) > 0 {
+		for _, d := range we[:len(we)-1] {
+			saturday = saturday || d.Weekday() == time.Saturday
+			sunday = sunday || d.Weekday() == time.Sunday
+		}
+	}
+	if len(out[Weekday]) < 2 || !saturday || !sunday {
+		return nil, fmt.Errorf("schedule: window %s to %s needs a weekday, a Saturday and a Sunday before the last date of each day type", in.First, in.Last)
 	}
 	return out, nil
 }
 
-// derive draws each cell's attempt 1 date from its day type's dates.
-// ok is false when the weekend dates miss a Saturday or a Sunday.
+// derive draws each cell's attempt 1 date from its day type's dates but
+// the last. ok is false when the weekend dates miss a Saturday or a
+// Sunday.
 func derive(seed string, pools map[string][]time.Time) (cells []Cell, ok bool) {
 	weekend := map[time.Weekday]bool{}
 	for _, c := range labels {
 		pool := pools[c.DayType]
-		i := draw(seed+c.Label, len(pool))
+		i := draw(seed+c.Label, len(pool)-1)
 		if c.DayType == Weekend {
 			weekend[pool[i].Weekday()] = true
 		}
@@ -232,13 +255,15 @@ func derive(seed string, pools map[string][]time.Time) (cells []Cell, ok bool) {
 }
 
 // New derives the schedule from in by the SPEC-HOSTED §4 procedure as
-// amended by HA3 point 9. Each cell's attempt 1 date is drawn from its
-// day type's dates in the window by SHA-256 of the seed and the cell
-// label reduced modulo their count; attempt 2 is the next date of that
-// day type in the window. Where the six weekend dates miss a Saturday or
-// a Sunday, an incrementing counter is appended to the master seed and
-// the whole schedule re-derived. The offsets 0, 10, 20 ... minutes are
-// shuffled over the routes in name order.
+// amended by HA3 point 9 and HA4. Each cell's attempt 1 date is drawn
+// from its day type's dates in the window but the last, by SHA-256 of
+// the seed and the cell label reduced modulo their count; attempt 2 is
+// the next date of that day type in the window. Where the six weekend
+// dates miss a Saturday or a Sunday, an incrementing counter is appended
+// to the master seed and the whole schedule re-derived. The offsets 0,
+// 40, 80 ... minutes are shuffled over the routes in name order and drawn
+// again until each account group's routes start at least GroupSeparation
+// apart (drawOffsets).
 func New(in Input) (*Schedule, error) {
 	if in.MasterSeed == "" {
 		return nil, errors.New("schedule: empty master seed")
@@ -290,21 +315,59 @@ func New(in Input) (*Schedule, error) {
 			continue
 		}
 		slices.SortFunc(cells, func(a, b Cell) int { return a.Attempts[0].SlotStart.Compare(b.Attempts[0].SlotStart) })
+		offsets, offsetCounter, err := drawOffsets(seed, routes, in.Configs)
+		if err != nil {
+			return nil, err
+		}
+		return &Schedule{Input: in, Counter: counter, OffsetCounter: offsetCounter, Offsets: offsets, Cells: cells}, nil
+	}
+	return nil, fmt.Errorf("schedule: no Saturday and Sunday among the weekend dates within counter %d", maxCounter)
+}
+
+// drawOffsets shuffles the offsets 0, OffsetStep, 2·OffsetStep ... over
+// the sorted routes by SHA-256 draws keyed by seed. Where two routes of
+// one account group start less than GroupSeparation apart either way
+// round the slot, an incrementing counter is appended to the draws' key
+// and the offsets drawn again; it returns the counter.
+func drawOffsets(seed string, routes []string, cs []RouteConfig) ([]Offset, int, error) {
+	group := map[string]string{}
+	for _, c := range cs {
+		group[c.Route] = c.AccountGroup
+	}
+	step, slot, apart := int(OffsetStep/time.Minute), int(slotLength/time.Minute), int(GroupSeparation/time.Minute)
+	for counter := 0; counter <= maxCounter; counter++ {
+		key := seed + "offset"
+		if counter > 0 {
+			key += strconv.Itoa(counter)
+		}
 		minutes := make([]int, len(routes))
 		for i := range minutes {
-			minutes[i] = i * int(OffsetStep/time.Minute)
+			minutes[i] = i * step
 		}
 		for i := len(minutes) - 1; i > 0; i-- {
-			j := draw(fmt.Sprintf("%soffset/%d", seed, i), i+1)
+			j := draw(fmt.Sprintf("%s/%d", key, i), i+1)
 			minutes[i], minutes[j] = minutes[j], minutes[i]
+		}
+		separated := true
+		for i := range routes {
+			for j := i + 1; j < len(routes); j++ {
+				if g := group[routes[i]]; g == "" || g != group[routes[j]] {
+					continue
+				}
+				d := (minutes[i] - minutes[j] + slot) % slot
+				separated = separated && min(d, slot-d) >= apart
+			}
+		}
+		if !separated {
+			continue
 		}
 		offsets := make([]Offset, len(routes))
 		for i, r := range routes {
 			offsets[i] = Offset{Route: r, Minutes: minutes[i]}
 		}
-		return &Schedule{Input: in, Counter: counter, Offsets: offsets, Cells: cells}, nil
+		return offsets, counter, nil
 	}
-	return nil, fmt.Errorf("schedule: no Saturday and Sunday among the weekend dates within counter %d", maxCounter)
+	return nil, 0, fmt.Errorf("schedule: no offsets within counter %d start each account group's routes %v apart", maxCounter, GroupSeparation)
 }
 
 // routeConfigs checks cs against the sorted routes and returns them in

@@ -14,14 +14,15 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
+	"github.com/percentes/percentes/internal/config"
 )
 
-var routes = []string{"groq", "baseten", "anthropic", "google", "azure", "bedrock"}
+var routes = []string{"anthropic-R", "azure-S", "azure-R", "gemini-S", "baseten-S"}
 
-// target is the design's target window, Saturday 17 to Monday 26
-// October 2026.
+// target is the design's target window, Saturday 31 October to Monday 9
+// November 2026.
 func target() Input {
-	return Input{MasterSeed: "percentes-release-schedule-test", First: "2026-10-17", Last: "2026-10-26", Routes: slices.Clone(routes)}
+	return Input{MasterSeed: "percentes-release-schedule-test", First: "2026-10-31", Last: "2026-11-09", Routes: slices.Clone(routes)}
 }
 
 func derived(t *testing.T, in Input) *Schedule {
@@ -102,11 +103,8 @@ func checkSchedule(t *testing.T, in Input, s *Schedule) {
 			t.Errorf("%s: attempt 1 not after the previous cell's", c.Label)
 		}
 		pool := pools[dt]
-		k := mod(seed+c.Label, len(pool))
-		var want []time.Time
-		for n := k; n < len(pool) && n < k+2; n++ {
-			want = append(want, pool[n])
-		}
+		k := mod(seed+c.Label, len(pool)-1)
+		want := []time.Time{pool[k], pool[k+1]}
 		if len(c.Attempts) != len(want) {
 			t.Errorf("%s: %d attempts, want %d", c.Label, len(c.Attempts), len(want))
 			continue
@@ -136,28 +134,56 @@ func checkSchedule(t *testing.T, in Input, s *Schedule) {
 		t.Errorf("labels %v", labels)
 	}
 	for d, n := range perDate {
-		if n > admission.ReleaseDayCells {
-			t.Errorf("%s carries %d attempts, at most %d", d, n, admission.ReleaseDayCells)
+		if n > len(SlotHoursUTC) {
+			t.Errorf("%s carries %d attempts, at most %d", d, n, len(SlotHoursUTC))
 		}
 	}
 	if !weekend[time.Saturday] || !weekend[time.Sunday] {
 		t.Errorf("weekend attempt 1 days %v miss a Saturday or a Sunday", weekend)
 	}
 
-	minutes := make([]int, len(sorted))
-	for i := range minutes {
-		minutes[i] = 10 * i
+	group := map[string]string{}
+	for _, c := range in.Configs {
+		group[c.Route] = c.AccountGroup
 	}
-	for i := len(minutes) - 1; i > 0; i-- {
-		j := mod(fmt.Sprintf("%soffset/%d", seed, i), i+1)
-		minutes[i], minutes[j] = minutes[j], minutes[i]
-	}
-	var want []Offset
-	for i, r := range sorted {
-		want = append(want, Offset{Route: r, Minutes: minutes[i]})
-	}
-	if !reflect.DeepEqual(s.Offsets, want) {
-		t.Errorf("offsets %v, want %v", s.Offsets, want)
+	for counter := 0; ; counter++ {
+		key := seed + "offset"
+		if counter > 0 {
+			key += strconv.Itoa(counter)
+		}
+		minutes := make([]int, len(sorted))
+		for i := range minutes {
+			minutes[i] = 40 * i
+		}
+		for i := len(minutes) - 1; i > 0; i-- {
+			j := mod(fmt.Sprintf("%s/%d", key, i), i+1)
+			minutes[i], minutes[j] = minutes[j], minutes[i]
+		}
+		apart := true
+		for i := range sorted {
+			for j := range sorted {
+				if g := group[sorted[i]]; i == j || g == "" || g != group[sorted[j]] {
+					continue
+				}
+				if d := minutes[i] - minutes[j]; d >= 0 && (d < 80 || 240-d < 80) {
+					apart = false
+				}
+			}
+		}
+		if !apart {
+			if counter > 100 {
+				t.Fatal("no separated offsets within counter 100")
+			}
+			continue
+		}
+		var want []Offset
+		for i, r := range sorted {
+			want = append(want, Offset{Route: r, Minutes: minutes[i]})
+		}
+		if !reflect.DeepEqual(s.Offsets, want) || s.OffsetCounter != counter {
+			t.Errorf("offsets %v at counter %d, want %v at %d", s.Offsets, s.OffsetCounter, want, counter)
+		}
+		return
 	}
 }
 
@@ -181,24 +207,23 @@ func TestScheduleIsDeterministic(t *testing.T) {
 		got = append(got, fmt.Sprintf("%s +%d", o.Route, o.Minutes))
 	}
 	want := []string{
-		"weekend-04 2026-10-17 2026-10-18",
-		"weekday-08 2026-10-19 2026-10-20",
-		"weekday-16 2026-10-19 2026-10-20",
-		"weekday-04 2026-10-20 2026-10-21",
-		"weekday-00 2026-10-21 2026-10-22",
-		"weekday-12 2026-10-21 2026-10-22",
-		"weekday-20 2026-10-22 2026-10-23",
-		"weekend-08 2026-10-24 2026-10-25",
-		"weekend-12 2026-10-24 2026-10-25",
-		"weekend-20 2026-10-24 2026-10-25",
-		"weekend-00 2026-10-25",
-		"weekend-16 2026-10-25",
-		"anthropic +10",
-		"azure +40",
-		"baseten +20",
-		"bedrock +50",
-		"google +30",
-		"groq +0",
+		"weekend-00 2026-10-31 2026-11-01",
+		"weekend-08 2026-10-31 2026-11-01",
+		"weekend-12 2026-11-01 2026-11-07",
+		"weekday-12 2026-11-02 2026-11-03",
+		"weekday-20 2026-11-02 2026-11-03",
+		"weekday-08 2026-11-04 2026-11-05",
+		"weekday-16 2026-11-04 2026-11-05",
+		"weekday-00 2026-11-05 2026-11-06",
+		"weekday-04 2026-11-05 2026-11-06",
+		"weekend-04 2026-11-07 2026-11-08",
+		"weekend-16 2026-11-07 2026-11-08",
+		"weekend-20 2026-11-07 2026-11-08",
+		"anthropic-R +40",
+		"azure-R +160",
+		"azure-S +80",
+		"baseten-S +0",
+		"gemini-S +120",
 	}
 	if !slices.Equal(got, want) || a.Counter != 0 {
 		t.Errorf("counter %d, schedule\n%s\nwant counter 0,\n%s", a.Counter, strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -208,7 +233,7 @@ func TestScheduleIsDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(j)
-	if got, want := hex.EncodeToString(sum[:]), "502c5903b833834a2b5f88d2d859d8a93b31f66d521ff617101083a2f18b322e"; got != want {
+	if got, want := hex.EncodeToString(sum[:]), "cbd3a52396348462e94b879f75a934997423a8fb4369e802141882a1ef091e95"; got != want {
 		t.Errorf("schedule JSON sha256 %s, want %s", got, want)
 	}
 
@@ -227,33 +252,58 @@ func TestScheduleIsDeterministic(t *testing.T) {
 // three windows.
 func TestScheduleWindows(t *testing.T) {
 	windows := [][2]string{
-		{"2026-10-17", "2026-10-26"}, // target
-		{"2026-10-21", "2026-10-26"}, // fallback
-		{"2026-10-24", "2026-10-26"}, // last
-		{"2026-10-12", "2026-10-25"}, // 14 days
+		{"2026-10-31", "2026-11-09"}, // target
+		{"2026-11-07", "2026-11-16"}, // fallback
+		{"2026-10-24", "2026-10-31"}, // one Saturday and one Sunday before the last weekend date
+		{"2026-10-26", "2026-11-08"}, // 14 days
+		{"2026-11-14", "2026-11-23"}, // freeze 13 Nov
 	}
-	counters := 0
+	counters, offsetCounters := 0, 0
 	for _, w := range windows {
 		for i := 0; i < 40; i++ {
 			in := Input{MasterSeed: fmt.Sprintf("seed-%d", i), First: w[0], Last: w[1], Routes: routes[:1+i%len(routes)]}
+			if len(in.Routes) >= 3 {
+				in.Configs = azureGroup()
+			}
 			s := derived(t, in)
 			checkSchedule(t, in, s)
 			if s.Counter > 0 {
 				counters++
 			}
+			if s.OffsetCounter > 0 {
+				offsetCounters++
+			}
 		}
 	}
-	if counters == 0 {
-		t.Error("no derivation needed the counter; the Saturday-and-Sunday rule is untested")
+	if counters == 0 || offsetCounters == 0 {
+		t.Errorf("%d derivations needed the counter and %d the offset counter; a rule is untested", counters, offsetCounters)
+	}
+}
+
+// The longest window holds two weekdays, a Saturday and a Sunday before
+// each day type's last date from any first day of the week; ten days from
+// a Monday, Tuesday or Wednesday hold one weekend and are refused.
+func TestMaxWindowEveryWeekday(t *testing.T) {
+	monday := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 7; i++ {
+		first := monday.AddDate(0, 0, i)
+		in := Input{First: first.Format(DateLayout), Last: first.AddDate(0, 0, MaxWindowDays-1).Format(DateLayout)}
+		if _, err := window(in); err != nil {
+			t.Errorf("%s: %v", first.Weekday(), err)
+		}
+		in.Last = first.AddDate(0, 0, 9).Format(DateLayout)
+		if _, err := window(in); (err != nil) != (i < 3) {
+			t.Errorf("ten days from %s: %v", first.Weekday(), err)
+		}
 	}
 }
 
 // TestScheduleCounter shows the counter in use: with one Saturday and one
-// Sunday in the window, the bare seed draws every weekend cell onto one
-// of them.
+// Sunday before the window's last weekend date, the bare seed draws every
+// weekend cell onto one of them.
 func TestScheduleCounter(t *testing.T) {
 	for i := 0; i < 1000; i++ {
-		in := Input{MasterSeed: fmt.Sprintf("counter-%d", i), First: "2026-10-24", Last: "2026-10-26", Routes: []string{"r"}}
+		in := Input{MasterSeed: fmt.Sprintf("counter-%d", i), First: "2026-10-24", Last: "2026-10-31", Routes: []string{"r"}}
 		days := map[time.Weekday]bool{}
 		for _, h := range SlotHoursUTC {
 			k := mod(fmt.Sprintf("%sweekend-%02d", in.MasterSeed, h), 2)
@@ -292,23 +342,31 @@ func TestRunsAndReruns(t *testing.T) {
 		}
 	}
 
-	r, err := s.Rerun("bedrock", "weekday-08", 1)
-	if err != nil {
-		t.Fatal(err)
+	for _, c := range s.Cells {
+		if len(c.Attempts) != 2 {
+			t.Errorf("%s: %d attempts, want 2", c.Label, len(c.Attempts))
+		}
 	}
-	want := Run{Route: "bedrock", Label: "weekday-08", Attempt: 2, Date: "2026-10-20", Start: time.Date(2026, 10, 20, 8, 50, 0, 0, time.UTC), Seed: seedOf(s.Input.MasterSeed + "weekday-082/run-seed")}
-	if r != want {
-		t.Errorf("rerun %+v, want %+v", r, want)
+	off, _ := s.offset("baseten-S")
+	for _, c := range s.Cells {
+		r, err := s.Rerun("baseten-S", c.Label, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := c.Attempts[1]
+		want := Run{Route: "baseten-S", Label: c.Label, Attempt: 2, Date: a.Date, Start: a.SlotStart.Add(off), Seed: seedOf(s.Input.MasterSeed + c.Label + "2/run-seed")}
+		if r != want {
+			t.Errorf("rerun %+v, want %+v", r, want)
+		}
 	}
 	for _, c := range []struct {
 		route, label string
 		taken        int
 		err          string
 	}{
-		{"groq", "weekday-08", 2, "has taken 2 re-runs, at most 2"},
-		{"groq", "weekend-00", 0, "cell weekend-00 has no later weekend date"},
+		{"gemini-S", "weekday-08", 2, "has taken 2 re-runs, at most 2"},
 		{"openai", "weekday-08", 0, `no route "openai"`},
-		{"groq", "weekday-09", 0, `no cell "weekday-09"`},
+		{"gemini-S", "weekday-09", 0, `no cell "weekday-09"`},
 	} {
 		if _, err := s.Rerun(c.route, c.label, c.taken); err == nil || !strings.Contains(err.Error(), c.err) {
 			t.Errorf("Rerun(%s, %s, %d): %v, want %q", c.route, c.label, c.taken, err, c.err)
@@ -350,12 +408,13 @@ func TestLoad(t *testing.T) {
 	}
 	a := s.Cells[0].Attempts[0]
 	for name, edit := range map[string][2]string{
-		"date":    {`"date": "` + a.Date + `"`, `"date": "2026-10-26"`},
-		"seed":    {strconv.FormatInt(a.Seed, 10), "1"},
-		"offset":  {`"minutes": 0`, `"minutes": 60`},
-		"counter": {`"counter": 0`, `"counter": 1`},
-		"routes":  {`"anthropic",`, `"zeta",`},
-		"newline": {"}\n", "}"},
+		"date":           {`"date": "` + a.Date + `"`, `"date": "2026-11-09"`},
+		"seed":           {strconv.FormatInt(a.Seed, 10), "1"},
+		"offset":         {`"minutes": 0`, `"minutes": 60`},
+		"counter":        {`"counter": 0`, `"counter": 1`},
+		"offset counter": {`"offset_counter": 0`, `"offset_counter": 1`},
+		"routes":         {`"anthropic-R",`, `"zeta",`},
+		"newline":        {"}\n", "}"},
 	} {
 		bad := bytes.Replace(j, []byte(edit[0]), []byte(edit[1]), 1)
 		if bytes.Equal(bad, j) {
@@ -371,10 +430,7 @@ func TestLoad(t *testing.T) {
 }
 
 func TestNewRefuses(t *testing.T) {
-	many := make([]string, 19)
-	for i := range many {
-		many[i] = fmt.Sprintf("r%02d", i)
-	}
+	six := append(slices.Clone(routes), "zeta")
 	for _, c := range []struct {
 		name string
 		edit func(*Input)
@@ -383,15 +439,21 @@ func TestNewRefuses(t *testing.T) {
 		{"empty seed", func(in *Input) { in.MasterSeed = "" }, "empty master seed"},
 		{"no routes", func(in *Input) { in.Routes = nil }, "no routes"},
 		{"empty route", func(in *Input) { in.Routes[2] = "" }, "empty route name"},
-		{"route twice", func(in *Input) { in.Routes[2] = "groq" }, `route "groq" named twice`},
-		{"19 routes", func(in *Input) { in.Routes = many }, "19 routes"},
-		{"bad first", func(in *Input) { in.First = "17/10/2026" }, `first "17/10/2026"`},
+		{"route twice", func(in *Input) { in.Routes[2] = "azure-S" }, `route "azure-S" named twice`},
+		{"6 routes", func(in *Input) { in.Routes = six }, "6 routes: the last offset 3h20m0s plus the 15m0s tolerance and a 28m30s cell exceed the 4h0m0s slot"},
+		{"bad first", func(in *Input) { in.First = "31/10/2026" }, `first "31/10/2026"`},
 		{"bad last", func(in *Input) { in.Last = "" }, `last ""`},
-		{"last before first", func(in *Input) { in.Last = "2026-10-16" }, "is before first"},
-		{"15 days", func(in *Input) { in.Last = "2026-10-31" }, "is 15 days, at most 14"},
-		{"no Sunday", func(in *Input) { in.First, in.Last = "2026-10-19", "2026-10-24" }, "needs a weekday, a Saturday and a Sunday"},
-		{"no Saturday", func(in *Input) { in.First, in.Last = "2026-10-18", "2026-10-23" }, "needs a weekday, a Saturday and a Sunday"},
-		{"no weekday", func(in *Input) { in.First, in.Last = "2026-10-17", "2026-10-18" }, "needs a weekday, a Saturday and a Sunday"},
+		{"last before first", func(in *Input) { in.Last = "2026-10-30" }, "is before first"},
+		{"15 days", func(in *Input) { in.Last = "2026-11-14" }, "is 15 days, at most 14"},
+		{"no Sunday", func(in *Input) { in.First, in.Last = "2026-10-19", "2026-10-24" }, "needs a weekday, a Saturday and a Sunday before the last date of each day type"},
+		{"no Saturday", func(in *Input) { in.First, in.Last = "2026-10-18", "2026-10-23" }, "needs a weekday, a Saturday and a Sunday before the last date of each day type"},
+		{"no weekday", func(in *Input) { in.First, in.Last = "2026-10-17", "2026-10-18" }, "needs a weekday, a Saturday and a Sunday before the last date of each day type"},
+		{"one weekend", func(in *Input) { in.First, in.Last = "2026-10-31", "2026-11-05" }, "needs a weekday, a Saturday and a Sunday before the last date of each day type"},
+		{"group of four", func(in *Input) {
+			for _, r := range routes[:4] {
+				in.Configs = append(in.Configs, RouteConfig{Route: r, ConfigSHA256: strings.Repeat("ab", 32), HostGroup: []string{r}, AccountGroup: "one"})
+			}
+		}, "no offsets within counter 10000 start each account group's routes 1h20m0s apart"},
 	} {
 		in := target()
 		c.edit(&in)
@@ -400,14 +462,70 @@ func TestNewRefuses(t *testing.T) {
 		}
 	}
 	in := target()
-	in.Routes = many[:18]
-	if _, err := New(in); err != nil {
-		t.Errorf("18 routes: %v", err)
-	}
-	in = target()
-	in.First, in.Last = "2026-10-12", "2026-10-25"
+	in.First, in.Last = "2026-10-26", "2026-11-08"
 	if _, err := New(in); err != nil {
 		t.Errorf("14 days: %v", err)
+	}
+}
+
+// azureGroup freezes azure-S and azure-R as one account group.
+func azureGroup() []RouteConfig {
+	sum := strings.Repeat("ab", 32)
+	return []RouteConfig{
+		{Route: "azure-S", ConfigSHA256: sum, HostGroup: []string{"azure-S"}, AccountGroup: "azure"},
+		{Route: "azure-R", ConfigSHA256: sum, HostGroup: []string{"azure-R"}, AccountGroup: "azure"},
+	}
+}
+
+// The routes of one account group start at least 80 minutes apart both
+// ways round the slot. Where a draw breaks that, the offset counter
+// re-draws it; the committed counter loads, and the accepted offsets
+// spread over the allowed pairs.
+func TestAccountGroupSeparation(t *testing.T) {
+	pairs := map[[2]int]int{}
+	counters := 0
+	for i := 0; i < 300; i++ {
+		in := target()
+		in.MasterSeed = fmt.Sprintf("group-%d", i)
+		in.Configs = azureGroup()
+		s := derived(t, in)
+		checkSchedule(t, in, s)
+		a, _ := s.offset("azure-S")
+		b, _ := s.offset("azure-R")
+		d := (a - b + slotLength) % slotLength
+		if min(d, slotLength-d) < GroupSeparation {
+			t.Fatalf("%s: azure-S at %v, azure-R at %v", in.MasterSeed, a, b)
+		}
+		pairs[[2]int{int(min(a, b) / time.Minute), int(max(a, b) / time.Minute)}]++
+		if s.OffsetCounter == 0 {
+			continue
+		}
+		counters++
+		j, err := s.JSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l, err := Load(j); err != nil || l.OffsetCounter != s.OffsetCounter {
+			t.Fatalf("load at offset counter %d: %v", s.OffsetCounter, err)
+		}
+		edit := fmt.Sprintf(`"offset_counter": %d`, s.OffsetCounter)
+		if _, err := Load(bytes.Replace(j, []byte(edit), []byte(`"offset_counter": 0`), 1)); err == nil {
+			t.Error("a schedule with its offset counter reset loaded")
+		}
+		bare := in
+		bare.Configs = nil
+		if reflect.DeepEqual(derived(t, bare).Offsets, s.Offsets) {
+			t.Errorf("%s: the re-drawn offsets equal the bare draw's", in.MasterSeed)
+		}
+	}
+	want := [][2]int{{0, 80}, {0, 120}, {0, 160}, {40, 120}, {40, 160}, {80, 160}}
+	var got [][2]int
+	for p := range pairs {
+		got = append(got, p)
+	}
+	slices.SortFunc(got, func(a, b [2]int) int { return a[0]*1000 + a[1] - b[0]*1000 - b[1] })
+	if !slices.Equal(got, want) || counters == 0 {
+		t.Errorf("offset pairs %v, want %v; %d re-draws", got, want, counters)
 	}
 }
 
@@ -418,22 +536,22 @@ func TestNewConfigs(t *testing.T) {
 	sum, keyed := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	in := target()
 	in.Configs = []RouteConfig{
-		{Route: "groq", ConfigSHA256: sum, ConfigHMACSHA256: keyed, HostGroup: []string{"groq", "baseten"}},
-		{Route: "baseten", ConfigSHA256: sum, HostGroup: []string{"groq", "baseten"}},
+		{Route: "gemini-S", ConfigSHA256: sum, ConfigHMACSHA256: keyed, HostGroup: []string{"gemini-S", "baseten-S"}, AccountGroup: "gemini", BindingRPS: 75.454, BindingLimit: config.LimitRPM, BindingWindowS: 1},
+		{Route: "baseten-S", ConfigSHA256: sum, HostGroup: []string{"gemini-S", "baseten-S"}, AccountGroup: "baseten", BindingRPS: 0.249, BindingLimit: config.LimitRPM, BindingWindowS: 60},
 	}
 	s := derived(t, in)
 	want := []RouteConfig{
-		{Route: "baseten", ConfigSHA256: sum, HostGroup: []string{"baseten", "groq"}},
-		{Route: "groq", ConfigSHA256: sum, ConfigHMACSHA256: keyed, HostGroup: []string{"baseten", "groq"}},
+		{Route: "baseten-S", ConfigSHA256: sum, HostGroup: []string{"baseten-S", "gemini-S"}, AccountGroup: "baseten", BindingRPS: 0.249, BindingLimit: config.LimitRPM, BindingWindowS: 60},
+		{Route: "gemini-S", ConfigSHA256: sum, ConfigHMACSHA256: keyed, HostGroup: []string{"baseten-S", "gemini-S"}, AccountGroup: "gemini", BindingRPS: 75.454, BindingLimit: config.LimitRPM, BindingWindowS: 1},
 	}
 	if !reflect.DeepEqual(s.Input.Configs, want) {
 		t.Fatalf("configs %+v, want %+v", s.Input.Configs, want)
 	}
-	if c, ok := s.Config("groq"); !ok || !reflect.DeepEqual(c, want[1]) {
-		t.Errorf("Config(groq): %+v, %t", c, ok)
+	if c, ok := s.Config("gemini-S"); !ok || !reflect.DeepEqual(c, want[1]) {
+		t.Errorf("Config(gemini-S): %+v, %t", c, ok)
 	}
-	if _, ok := s.Config("azure"); ok {
-		t.Error("Config(azure) found a configuration none froze")
+	if _, ok := s.Config("azure-S"); ok {
+		t.Error("Config(azure-S) found a configuration none froze")
 	}
 	bare := derived(t, target())
 	if !reflect.DeepEqual(s.Cells, bare.Cells) || !reflect.DeepEqual(s.Offsets, bare.Offsets) {
@@ -453,12 +571,12 @@ func TestNewConfigs(t *testing.T) {
 		err  string
 	}{
 		{"not scheduled", RouteConfig{Route: "mistral", ConfigSHA256: sum, HostGroup: []string{"mistral"}}, `configuration of route "mistral", which is not scheduled`},
-		{"short hash", RouteConfig{Route: "azure", ConfigSHA256: "abcd", HostGroup: []string{"azure"}}, `route "azure": config_sha256 "abcd"`},
-		{"upper-case hash", RouteConfig{Route: "azure", ConfigSHA256: strings.ToUpper(sum), HostGroup: []string{"azure"}}, "is not a lowercase hex SHA-256"},
-		{"short keyed hash", RouteConfig{Route: "azure", ConfigSHA256: sum, ConfigHMACSHA256: "abcd", HostGroup: []string{"azure"}}, `route "azure": config_hmac_sha256 "abcd" is not a lowercase hex HMAC-SHA256`},
-		{"group without the route", RouteConfig{Route: "azure", ConfigSHA256: sum, HostGroup: []string{"bedrock"}}, `route "azure": host group [bedrock] must name the route`},
-		{"host twice", RouteConfig{Route: "azure", ConfigSHA256: sum, HostGroup: []string{"azure", "bedrock", "azure"}}, "host group [azure azure bedrock]"},
-		{"route twice", RouteConfig{Route: "groq", ConfigSHA256: sum, HostGroup: []string{"groq"}}, `route "groq" has two configurations`},
+		{"short hash", RouteConfig{Route: "azure-S", ConfigSHA256: "abcd", HostGroup: []string{"azure-S"}}, `route "azure-S": config_sha256 "abcd"`},
+		{"upper-case hash", RouteConfig{Route: "azure-S", ConfigSHA256: strings.ToUpper(sum), HostGroup: []string{"azure-S"}}, "is not a lowercase hex SHA-256"},
+		{"short keyed hash", RouteConfig{Route: "azure-S", ConfigSHA256: sum, ConfigHMACSHA256: "abcd", HostGroup: []string{"azure-S"}}, `route "azure-S": config_hmac_sha256 "abcd" is not a lowercase hex HMAC-SHA256`},
+		{"group without the route", RouteConfig{Route: "azure-S", ConfigSHA256: sum, HostGroup: []string{"azure-R"}}, `route "azure-S": host group [azure-R] must name the route`},
+		{"host twice", RouteConfig{Route: "azure-S", ConfigSHA256: sum, HostGroup: []string{"azure-S", "azure-R", "azure-S"}}, "host group [azure-R azure-S azure-S]"},
+		{"route twice", RouteConfig{Route: "gemini-S", ConfigSHA256: sum, HostGroup: []string{"gemini-S"}}, `route "gemini-S" has two configurations`},
 	} {
 		bad := target()
 		bad.Configs = append(slices.Clone(in.Configs), c.cfg)
