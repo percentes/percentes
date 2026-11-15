@@ -100,6 +100,27 @@ func scheduleCmd(args []string) (int, error) {
 	return exitOK, nil
 }
 
+// bindingName is c's binding limit with its evaluation window, if any,
+// and the pinned hard timeout where a public limit of route c's config
+// in cfgs, of that dimension and window, counts output at generation.
+func bindingName(c schedule.RouteConfig, cfgs []*config.Config) string {
+	if c.BindingWindowS <= 0 {
+		return c.BindingLimit
+	}
+	name := fmt.Sprintf("%s over %g s", c.BindingLimit, c.BindingWindowS)
+	for _, cfg := range cfgs {
+		if cfg.Target.Name != c.Route {
+			continue
+		}
+		for _, l := range cfg.Target.Limits {
+			if l.Dimension == c.BindingLimit && l.Marking == config.MarkingPublic && l.OutputAtGeneration && slices.Contains(l.WindowsS(), c.BindingWindowS) {
+				return name + fmt.Sprintf(" plus the %d s hard timeout", config.PinnedReleaseHardTimeoutS)
+			}
+		}
+	}
+	return name
+}
+
 // hostGroup is the routes of cfg's model: its target and its
 // release.other_hosts, sorted.
 func hostGroup(cfg *config.Config) []string {

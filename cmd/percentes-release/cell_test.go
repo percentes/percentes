@@ -143,12 +143,32 @@ func ledgerState(t *testing.T, path string) *admission.State {
 // aggregate dispatch series and the inter-chunk gap histograms, and the
 // report pair, with no temporary file left.
 func TestCellRunsAdmittedSteps(t *testing.T) {
+	runAdmittedCell(t, nil)
+}
+
+// A cell the client-validity gate ends at step 1 writes the same evidence
+// for its one attempted step; a 0 ms GC pause bound fails the gate on any
+// host.
+func TestCellEndedByGateAtStepOneWritesEvidence(t *testing.T) {
+	rec := runAdmittedCell(t, func(r *route) { r.cfg.ClientValidity.GoGCPauseP99Ms = 0 })
+	if rec.Outcome != outcomeInvalid || rec.Ladder.EndStep != 1 || rec.Ladder.End != loadgen.LadderEndClientValidity || len(rec.Canary) != 1 {
+		t.Fatalf("outcome %s %q, ladder end %q at step %d, %d canary summaries", rec.Outcome, rec.Reasons, rec.Ladder.End, rec.Ladder.EndStep, len(rec.Canary))
+	}
+}
+
+// runAdmittedCell runs the first cell of a route at the reference limits
+// on a short ladder, with gate, where set, changing the client-validity
+// bounds, checks its evidence and returns its record.
+func runAdmittedCell(t *testing.T, gate func(*route)) *cellRecord {
 	e := newEndpoint(t, always200)
 	r, f := newTestRoute(t, releaseConfig(t, e.url()), "+0.005032")
-	if got := r.verdict.Admitted(); len(got) != 3 || r.steps != 3 {
-		t.Fatalf("admitted %v, steps %d; the reference limits admit 0.25, 0.5 and 1 rps", got, r.steps)
+	if got := r.verdict.Admitted(); len(got) != 5 || r.steps != 5 {
+		t.Fatalf("admitted %v, steps %d; the reference limits admit every step", got, r.steps)
 	}
 	shortLadder(r)
+	if gate != nil {
+		gate(r)
+	}
 	run := r.runs[0]
 	rec, err := r.runCell(context.Background(), run)
 	if err != nil {
@@ -165,7 +185,7 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	if got := readCell(t, r, run); got.Outcome != rec.Outcome || got.EndUTC == nil || got.Run != run {
 		t.Fatalf("cell record %+v", got)
 	}
-	if l := rec.Ladder; l == nil || len(l.Steps) != 3 || (rec.Outcome == outcomeCounted && !l.Steps[2].Attempted) {
+	if l := rec.Ladder; l == nil || len(l.Steps) != 5 || (rec.Outcome == outcomeCounted && !l.Steps[4].Attempted) {
 		t.Fatalf("ladder %+v", l)
 	}
 	dir := r.cellDir(run)
@@ -187,7 +207,7 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	}
 	sent := 0
 	for _, a := range recs {
-		if a.Step < 1 || a.Step > 3 || a.Answer != nil {
+		if a.Step < 1 || a.Step > 5 || a.Answer != nil {
 			t.Fatalf("record %d: step %d, answer %v", a.Index, a.Step, a.Answer)
 		}
 		if a.DispatchNs != 0 {
@@ -214,7 +234,7 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 
 	m, text := checkRetained(t, r, run)
 	c := m.Release
-	if c == nil || c.Run != run || c.OffsetMinutes != r.offsetMinutes || c.AccountCreated != "2026-09-15" || len(c.Probes) != 2 || c.Admission.TopRPS != 1 || c.CeilingTokens != 512 {
+	if c == nil || c.Run != run || c.OffsetMinutes != r.offsetMinutes || c.AccountCreated != "2026-09-15" || len(c.Probes) != 2 || c.Admission.TopRPS != 1.755 || c.CeilingTokens != 512 {
 		t.Fatalf("cell record %+v", c)
 	}
 	if m.Counted() != (rec.Outcome == outcomeCounted) || c.Outcome != rec.Outcome || !c.LadderStarted || !slices.Equal(c.Reasons, rec.Reasons) {
@@ -311,8 +331,8 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	}
 
 	// A canary count altered in the manifest changes the replayed text, so
-	// the pair no longer reproduces; a summary left out fails the
-	// completeness check.
+	// the pair no longer reproduces; a summary added fails the completeness
+	// check.
 	c.Canary[0].Streams++
 	if _, err := evidence.WriteManifest(dir, m); err != nil {
 		t.Fatal(err)
@@ -320,14 +340,15 @@ func TestCellRunsAdmittedSteps(t *testing.T) {
 	if _, replayed, err := report.FromRun(dir, r.cfg.Raw); err != nil || replayed == text {
 		t.Errorf("altered canary: replay error %v, text unchanged %t", err, replayed == text)
 	}
-	c.Canary = c.Canary[1:]
+	c.Canary = append(c.Canary, c.Canary[0])
 	if _, err := evidence.WriteManifest(dir, m); err != nil {
 		t.Fatal(err)
 	}
 	_, err = evidence.CheckRelease(evidence.Release{Dir: dir, Config: r.cfg.Raw, FramesRoot: r.framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}, Key: r.key})
-	if want := fmt.Sprintf("cell record: canary: %d summaries for %d attempted steps", len(c.Canary), len(c.Canary)+1); err == nil || !strings.Contains(err.Error(), want) {
-		t.Errorf("a summary left out: %v", err)
+	if want := fmt.Sprintf("cell record: canary: %d summaries for %d attempted steps", len(c.Canary), len(c.Canary)-1); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("a summary added: %v", err)
 	}
+	return rec
 }
 
 // A documented billing refusal inside the ladder stops the route: the
@@ -710,10 +731,10 @@ func rulingConfig(t *testing.T, endpoint string) *config.Config {
 // key.
 func TestCellConfidentialLimit(t *testing.T) {
 	e := newEndpoint(t, always200)
-	endpoint, _ := withHeaders(t, e.url(), map[string]string{"X-Ratelimit-Limit-Tokens": "250013.5"})
-	cfg := confidentialConfig(t, endpoint)
+	endpoint, _ := withHeaders(t, e.url(), map[string]string{"X-Ratelimit-Limit-Tokens": "190013.5"})
+	cfg := confidentialConfigAt(t, endpoint, "190013.5")
 	r, f := newTestRoute(t, cfg, "+0.005032")
-	if got := r.verdict.Admitted(); len(got) != 3 {
+	if got := r.verdict.Admitted(); len(got) != 5 {
 		t.Fatalf("admitted %v", got)
 	}
 	shortLadder(r)
@@ -735,11 +756,14 @@ func TestCellConfidentialLimit(t *testing.T) {
 		t.Errorf("manifest config %+v, not the file as published", m.Config)
 	}
 	l := cfg.Target.Limits[1]
-	if want := "tokens_per_minute confidential (" + l.Source + ", hmac-sha256 " + l.HMACSHA256 + "): nominal demand at most half of it (half test: pass)"; !strings.Contains(text, want) {
+	if want := "tokens_per_minute confidential (" + l.Source + ", hmac-sha256 " + l.HMACSHA256 + "): step rate at most the rate it admits over 60 s (window test over 60 s: pass)"; !strings.Contains(text, want) {
 		t.Errorf("report lacks %q:\n%s", want, text)
 	}
-	if b := m.Release.Admission.Steps[3].Binding; b == nil || !b.Confidential || b.Value != 0 || b.HMACSHA256 != l.HMACSHA256 {
-		t.Errorf("binding limit %+v", b)
+	top := m.Release.Admission.Steps[4]
+	if i := slices.IndexFunc(top.Demands, func(d admission.Demand) bool { return d.Limit == 1 }); i < 0 {
+		t.Errorf("top step demands %+v", top.Demands)
+	} else if d := top.Demands[i]; !d.Confidential || d.Value != 0 || d.RateRPS != 0 || d.HMACSHA256 != l.HMACSHA256 || !d.Pass {
+		t.Errorf("top step's demand against the confidential limit %+v", d)
 	}
 	noReleaseKey(t, f.in.out, r.framesRoot)
 	read := func(p string) []byte {
@@ -777,7 +801,7 @@ func TestCellConfidentialLimit(t *testing.T) {
 			return err
 		}
 		files++
-		if bytes.Contains(b, []byte("250013.5")) || bytes.Contains(b, []byte("2.500135e+05")) {
+		if bytes.Contains(b, []byte("190013.5")) || bytes.Contains(b, []byte("1.900135e+05")) {
 			t.Errorf("%s carries the confidential value", p)
 		}
 		for name, h := range held {

@@ -133,6 +133,19 @@ func TestNewRouteRefusals(t *testing.T) {
 				t.Fatalf("two ledgers open with sha256 %s", a)
 			}
 		}, "run: ledger open line sha256 "},
+		{"binding rate not frozen", func(t *testing.T, f *fixture) {
+			f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", rebound(t, f, func(c *schedule.RouteConfig) {
+				c.BindingRPS, c.BindingLimit, c.BindingWindowS = 0, "", 0
+			}))
+		}, "run: the schedule freezes no binding rate of route groq"},
+		{"binding rate not the rule's", func(t *testing.T, f *fixture) {
+			f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", rebound(t, f, func(c *schedule.RouteConfig) { c.BindingRPS = 1.7 }))
+		}, "run: route groq: the binding-rate rule gives 1.755 rps, binding limit route_cap_usd; the schedule froze 1.7 rps, route_cap_usd"},
+		{"binding limit not the rule's", func(t *testing.T, f *fixture) {
+			f.in.schedulePath = writeFile(t, t.TempDir(), "schedule.json", rebound(t, f, func(c *schedule.RouteConfig) {
+				c.BindingLimit, c.BindingWindowS = config.LimitTPM, 60
+			}))
+		}, "the schedule froze 1.755 rps, tokens_per_minute over 60 s"},
 		{"ledger position not frozen", func(t *testing.T, f *fixture) {
 			in := testSchedule(t, append([]*config.Config{f.in.cfg}, f.in.hostCfgs...), "groq", "other", "baseten").Input
 			in.LedgerSHA256 = f.open
@@ -530,11 +543,19 @@ func TestNewRouteCeilingRecords(t *testing.T) {
 	}
 }
 
-// The ceiling rule reads the schedule's seeded counts: each step's and
-// the warm-up's largest over every cell attempt.
+// The ceiling rule reads the schedule's seeded counts at the route's
+// binding rate, each step's and the warm-up's largest over every cell
+// attempt, which the count rule fixes: at azure-S's 2.429 requests per
+// second, 36 warm-up requests and 145, 291, 437, 524 and 582 per step;
+// and the route's scheduled attempts at its offset. With no binding rate
+// there is no ladder to count.
 func TestExactPlan(t *testing.T) {
 	cfg := releaseConfig(t, "https://api.example.test/openai/v1/chat/completions")
 	sched := testSchedule(t, nil, "groq")
+	if _, err := exactPlan(cfg, sched); err == nil {
+		t.Fatal("a plan with no binding rate")
+	}
+	cfg.Release.BindingRPS = 2.429
 	p, err := exactPlan(cfg, sched)
 	if err != nil {
 		t.Fatal(err)
@@ -546,20 +567,20 @@ func TestExactPlan(t *testing.T) {
 	if p.WarmupRequests != 36 || !slices.Equal(p.StepRequests, []int{145, 291, 437, 524, 582}) {
 		t.Fatalf("warm-up %d and steps %v, want 36 and [145 291 437 524 582]", p.WarmupRequests, p.StepRequests)
 	}
-	found := false
+	var attempts []admission.Attempt
 	for _, c := range sched.Cells {
 		for _, a := range c.Attempts {
+			attempts = append(attempts, admission.Attempt{Start: a.SlotStart.Add(time.Duration(sched.Offsets[0].Minutes) * time.Minute), Rerun: a.Attempt == 2})
 			sc := *cfg
 			sc.Run.Seed = a.Seed
 			l := loadgen.BuildLadder(&sc)
-			found = found || l.Steps[4].End-l.Steps[4].First == p.StepRequests[4]
-			if l.Steps[0].First > p.WarmupRequests {
-				t.Fatalf("attempt warm-up %d above the plan's %d", l.Steps[0].First, p.WarmupRequests)
+			if l.Steps[0].First != p.WarmupRequests || l.Steps[4].End-l.Steps[4].First != p.StepRequests[4] {
+				t.Fatalf("attempt warm-up %d and top step %d, the plan's %d and %d", l.Steps[0].First, l.Steps[4].End-l.Steps[4].First, p.WarmupRequests, p.StepRequests[4])
 			}
 		}
 	}
-	if !found {
-		t.Fatal("the top step's count is no attempt's")
+	if !slices.Equal(p.Attempts, attempts) || len(attempts) != 24 {
+		t.Errorf("attempts %v, want %v", p.Attempts, attempts)
 	}
 }
 
@@ -866,5 +887,57 @@ func TestCommandFlags(t *testing.T) {
 	}
 	if code, err := runCmd(context.Background(), nil); err == nil || code != exitError {
 		t.Fatalf("run: %d, %v", code, err)
+	}
+}
+
+// rebound is f's schedule with edit applied to the frozen configuration
+// of f's route.
+func rebound(t *testing.T, f *fixture, edit func(c *schedule.RouteConfig)) []byte {
+	t.Helper()
+	b, err := os.ReadFile(f.in.schedulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := schedule.Load(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := s.Input
+	in.Configs = slices.Clone(in.Configs)
+	for i := range in.Configs {
+		if in.Configs[i].Route == f.in.cfg.Target.Name {
+			edit(&in.Configs[i])
+		}
+	}
+	if s, err = schedule.New(in); err != nil {
+		t.Fatal(err)
+	}
+	if b, err = s.JSON(); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// The daily test counts the ceiling-check requests the ledger admitted
+// on the route's account group, every route of the group's checks at
+// their admission times, and no other group's; a route with no account
+// group counts its own.
+func TestCheckTimes(t *testing.T) {
+	at := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	entries := []admission.Entry{
+		{Kind: admission.KindAdmit, Purpose: admission.PurposeProbe, Route: "azure-S", Reserve: 2, Time: at},
+		{Kind: admission.KindAdmit, Purpose: admission.PurposeProbe, Route: "azure-R", Reserve: 1, Time: at.Add(time.Minute)},
+		{Kind: admission.KindAdmit, Purpose: admission.PurposeProbe, Route: "gemini-S", Reserve: 3, Time: at},
+		{Kind: admission.KindAdmit, Purpose: admission.PurposeCell, Route: "azure-S", Reserve: 9, Time: at},
+		{Kind: admission.KindSettle, Route: "azure-S", Time: at},
+	}
+	sched := &schedule.Schedule{Input: schedule.Input{Configs: []schedule.RouteConfig{
+		{Route: "azure-R", AccountGroup: "azure"}, {Route: "azure-S", AccountGroup: "azure"}, {Route: "gemini-S"},
+	}}}
+	if got, want := checkTimes(entries, sched, "azure-R"), []time.Time{at, at, at.Add(time.Minute)}; !slices.Equal(got, want) {
+		t.Errorf("azure-R: %v, want %v", got, want)
+	}
+	if got, want := checkTimes(entries, sched, "gemini-S"), []time.Time{at, at, at}; !slices.Equal(got, want) {
+		t.Errorf("gemini-S: %v, want %v", got, want)
 	}
 }

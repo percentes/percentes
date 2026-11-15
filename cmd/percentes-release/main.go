@@ -4,25 +4,25 @@
 // endpoint status, runs the route's refresh command and reads the
 // operator file, its records and the limits the command prints again,
 // records the account balance or quota, stops the route where those
-// limits no longer admit its steps at its newest recorded price, blocks
-// the cell where the limits and
-// model documentation were not refreshed or the balance check does not
-// let it start, admits the
-// cell in the ledger, sends a one-request probe and runs the ladder up
-// to the route's top admitted step with the loopback canary, then writes
-// the cell's evidence with a labelled manifest and report pair, also for
-// a cell stopped or blocked before its ladder. A missed cell, and one
-// whose process ended or failed during it, gets its labelled pair from
-// what its directory holds when the process next reads the route's
-// records. A cell in which a response reported a model identifier other
-// than the expected one is labelled model_mismatch. A cell that does not
-// count is re-run on its attempt 2 date within the route's two re-runs.
-// After the last cell the refresh command runs once more and the records
-// read after it are the route's window-close record.
-// Each route of a release runs as its own process on one client host, all
-// writing under one --out directory. The key comes from the env file
-// named with --env, never from the inherited environment, and is never
-// printed.
+// limits no longer admit its step rates at its newest recorded price,
+// blocks the cell where the limits and model documentation were not
+// refreshed or the balance check does not let it start, admits the cell
+// in the ledger, sends a one-request probe and, unless the ladder's epoch
+// would fall more than the start tolerance late, which misses the cell,
+// runs the ladder at the step rates of the binding rate the schedule
+// froze with the loopback canary, then writes the cell's evidence with a
+// labelled manifest and report pair, also for a cell stopped or blocked
+// before its ladder. A missed cell, and one whose process ended or failed
+// during it, gets its labelled pair from what its directory holds when
+// the process next reads the route's records. A cell in which a response
+// reported a model identifier other than the expected one is labelled
+// model_mismatch. A cell that does not count is re-run on its attempt 2
+// date within the route's two re-runs. After the last cell the refresh
+// command runs once more and the records read after it are the route's
+// window-close record. Each route of a release runs as its own process on
+// one client host, all writing under one --out directory. The key comes
+// from the env file named with --env, never from the inherited
+// environment, and is never printed.
 //
 // Before the window, key create writes the release key, under which
 // every published fingerprint of a value a confidential route withholds

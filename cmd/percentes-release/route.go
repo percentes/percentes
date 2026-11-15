@@ -228,10 +228,12 @@ func runCmd(ctx context.Context, args []string) (int, error) {
 
 // ceilingInput is the ceiling rule's input other than the price: the
 // configuration as the route started, before a test or the rehearsal
-// scales its ladder, and the plan at the schedule's exact counts.
+// scales its ladder, the plan at the schedule's exact counts and the
+// binding rate the schedule froze, which the steps are fractions of.
 type ceilingInput struct {
-	cfg  *config.Config
-	plan admission.Plan
+	cfg        *config.Config
+	plan       admission.Plan
+	bindingRPS float64
 }
 
 // routeInput is a run command after its flags are read.
@@ -250,11 +252,13 @@ type routeInput struct {
 }
 
 // newRoute checks the route's inputs and fixes what every cell shares:
-// the ceiling rule's verdict at the schedule's exact counts and the
-// route's newest price up to the ledger position the schedule froze, the
-// ceiling choice, the Shape S set and the account record. It refuses an
-// output directory holding a cell of the route written under another
-// schedule file.
+// the binding rate the schedule froze, which the binding-rate rule must
+// give again at the route's newest price up to the ledger position the
+// schedule froze (bindingSolution); the ceiling rule's verdict at that
+// rate and price and the schedule's exact counts, which must admit every
+// step; the ceiling choice, the request set and the account record. It
+// refuses an output directory holding a cell of the route written under
+// another schedule file.
 func newRoute(in routeInput) (*route, error) {
 	cfg := in.cfg
 	if cfg.Profile != config.ProfileRelease || cfg.Release == nil {
@@ -354,25 +358,45 @@ func newRoute(in routeInput) (*route, error) {
 	if err != nil {
 		return nil, err
 	}
+	fc, _ := sched.Config(name)
+	if fc.BindingLimit == "" {
+		return nil, fmt.Errorf("run: the schedule freezes no binding rate of route %s", name)
+	}
+	sol, err := bindingSolution(cfg, sched, frozen)
+	if err != nil {
+		return nil, err
+	}
+	if sol.BindingRPS != fc.BindingRPS || sol.Binding.Dimension != fc.BindingLimit || sol.Binding.WindowS != fc.BindingWindowS {
+		got := schedule.RouteConfig{Route: name, BindingLimit: sol.Binding.Dimension, BindingWindowS: sol.Binding.WindowS}
+		cfgs := []*config.Config{cfg}
+		return nil, fmt.Errorf("run: route %s: the binding-rate rule gives %g rps, binding limit %s; the schedule froze %g rps, %s",
+			name, sol.BindingRPS, bindingName(got, cfgs), fc.BindingRPS, bindingName(fc, cfgs))
+	}
+	cfg.Release.BindingRPS = fc.BindingRPS
 	plan, err := exactPlan(cfg, sched)
 	if err != nil {
 		return nil, err
 	}
-	if r.verdict, err = admission.CeilingRule(cfg, price, plan, cfg.Release.BindingRPS); err != nil {
+	plan.ChecksUTC = checkTimes(frozen, sched, name)
+	if r.verdict, err = admission.CeilingRule(cfg, price, plan, fc.BindingRPS); err != nil {
 		return nil, err
 	}
 	rc, rel := *cfg, *cfg.Release
 	rc.Release = &rel
-	r.rule = ceilingInput{cfg: &rc, plan: plan}
+	r.rule = ceilingInput{cfg: &rc, plan: plan, bindingRPS: fc.BindingRPS}
 	if st, err = r.ledger.State(); err != nil {
 		return nil, err
 	}
 	if err := st.Covers(cfg, r.verdict); err != nil {
 		return nil, fmt.Errorf("run: %w", err)
 	}
-	if r.steps = len(r.verdict.Admitted()); r.steps == 0 {
-		return nil, fmt.Errorf("run: the ceiling rule admits no step of route %s; binding limit %s", name, r.verdict.Steps[0].Binding.Dimension)
+	for k, s := range r.verdict.Steps {
+		if !s.Admitted {
+			return nil, fmt.Errorf("run: route %s: the ceiling rule at the frozen binding rate %g rps refuses step %d (%g rps) at the schedule's counts; binding limit %s",
+				name, fc.BindingRPS, k+1, s.RPS, s.Binding.Dimension)
+		}
 	}
+	r.steps = len(r.verdict.Steps)
 	first, _ := time.Parse(schedule.DateLayout, sched.Input.First)
 	r.preWindow = sentBefore(entries, name, first)
 
@@ -392,9 +416,10 @@ func newRoute(in routeInput) (*route, error) {
 	return r, nil
 }
 
-// exactPlan is the ceiling rule's plan at the schedule's seeded counts:
-// each step's count and the warm-up's are the largest over every cell
-// attempt's ladder.
+// exactPlan is the ceiling rule's plan at the schedule's seeded counts of
+// cfg's ladder at release.BindingRPS, each step's count and the warm-up's
+// the largest over every cell attempt's ladder, with the route's
+// scheduled attempts (scheduledAttempts).
 func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, error) {
 	p := admission.ExpectedPlan(cfg, cfg.Release.BindingRPS)
 	p.WarmupRequests = 0
@@ -405,7 +430,7 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 			sc.Run.Seed = a.Seed
 			l := loadgen.BuildLadder(&sc)
 			if l == nil || len(l.Steps) != len(p.StepRequests) {
-				return admission.Plan{}, errors.New("run: the configuration builds no release ladder")
+				return admission.Plan{}, errors.New("run: the configuration builds no release ladder at its binding rate")
 			}
 			p.WarmupRequests = max(p.WarmupRequests, l.Steps[0].First)
 			for k, st := range l.Steps {
@@ -413,7 +438,67 @@ func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, er
 			}
 		}
 	}
+	p.Attempts = scheduledAttempts(sched, cfg.Target.Name)
 	return p, nil
+}
+
+// scheduledAttempts are route's cell attempts in sched, each at its slot
+// start plus the route's offset.
+func scheduledAttempts(sched *schedule.Schedule, route string) []admission.Attempt {
+	var offset time.Duration
+	for _, o := range sched.Offsets {
+		if o.Route == route {
+			offset = time.Duration(o.Minutes) * time.Minute
+		}
+	}
+	var out []admission.Attempt
+	for _, c := range sched.Cells {
+		for _, a := range c.Attempts {
+			out = append(out, admission.Attempt{Start: a.SlotStart.Add(offset), Rerun: a.Attempt > 1})
+		}
+	}
+	return out
+}
+
+// checkTimes are the send times the ledger entries record for the
+// ceiling-check requests on route's account group in sched, each probe
+// admission's reserved requests at its time: the group's routes, or the
+// route alone where it names none.
+func checkTimes(entries []admission.Entry, sched *schedule.Schedule, route string) []time.Time {
+	group := []string{route}
+	if own, _ := sched.Config(route); own.AccountGroup != "" {
+		group = nil
+		for _, c := range sched.Input.Configs {
+			if c.AccountGroup == own.AccountGroup {
+				group = append(group, c.Route)
+			}
+		}
+	}
+	var out []time.Time
+	for _, e := range entries {
+		if e.Kind == admission.KindAdmit && e.Purpose == admission.PurposeProbe && slices.Contains(group, e.Route) {
+			for i := 0; i < e.Reserve; i++ {
+				out = append(out, e.Time)
+			}
+		}
+	}
+	return out
+}
+
+// bindingSolution is the binding-rate rule (admission.Solve) applied to
+// cfg's route at its newest price in entries, over its attempts in sched
+// and the ceiling-check requests entries record on its account group
+// (checkTimes).
+func bindingSolution(cfg *config.Config, sched *schedule.Schedule, entries []admission.Entry) (*admission.Solution, error) {
+	price, err := routePrice(entries, cfg.Target.Name)
+	if err != nil {
+		return nil, err
+	}
+	// Solve reads no step counts.
+	plan := admission.ExpectedPlan(cfg, 1)
+	plan.Attempts = scheduledAttempts(sched, cfg.Target.Name)
+	plan.ChecksUTC = checkTimes(entries, sched, cfg.Target.Name)
+	return admission.Solve(cfg, price, plan)
 }
 
 // hostTargets are the targets of hostCfgs by route: one configuration of
