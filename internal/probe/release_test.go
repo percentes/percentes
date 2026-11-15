@@ -461,8 +461,10 @@ func TestReleaseProbeFailures(t *testing.T) {
 // refuses a record whose recorded results its requests do not give: too
 // few requests, a failed request recorded as passed, a pass on a request
 // not answered 200, a request out of order or after the blocking one, a
-// blocking status in a record not blocked, and a summary or input bound
-// other than the re-derived one, including one at another bound.
+// blocking status in a record not blocked, a summary, input bound or
+// output bound other than the re-derived one, including one at another
+// bound, and a record of no release shape or at a ceiling its shape does
+// not pin.
 func TestReleaseRecordVerify(t *testing.T) {
 	noSpacing(t)
 	answer := "The customer was billed twice."
@@ -523,6 +525,11 @@ func TestReleaseRecordVerify(t *testing.T) {
 		{"input bound at another bound", passed, tg, func(r *ReleaseRecord) { r.InputBound.BoundTokens = 8000 }, "input bound recorded {BoundTokens:8000"},
 		{"prompt over the bound", passed, tg, func(r *ReleaseRecord) { *r.Requests[1].PromptTokens = 1201 }, "input bound recorded"},
 		{"prompt unreported", passed, nil, func(r *ReleaseRecord) { r.Requests[8].PromptTokens = nil }, "input bound recorded"},
+		{"output bound at another ceiling", passed, tg, func(r *ReleaseRecord) { r.OutputBound.CeilingTokens = 1024 }, "output bound recorded {CeilingTokens:1024"},
+		{"output over the ceiling", passed, tg, func(r *ReleaseRecord) { *r.Requests[2].OutputTokens = 513 }, "output bound recorded"},
+		{"output unreported", passed, nil, func(r *ReleaseRecord) { r.Requests[2].OutputTokens = nil }, "output bound recorded"},
+		{"no shape", passed, tg, func(r *ReleaseRecord) { r.Shape = "" }, `request shape "" is not a release shape`},
+		{"a ceiling the shape does not pin", passed, tg, func(r *ReleaseRecord) { r.Shape = config.ShapeR }, "ceiling 512 is not one of Shape R's [16 256]"},
 	} {
 		r := read(t, c.rec)
 		c.edit(r)

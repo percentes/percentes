@@ -476,6 +476,38 @@ func requestGate(t *config.Target, ex *Exchange, s *Shape) Start {
 	return Start{}
 }
 
+// withheldBilling reports whether reason, a recorded start reason, names
+// one of t's billing refusals at q's status, for an exchange whose body
+// the record withholds, or at the status target.error_docs give the type
+// of a withheld in-band error, which cannot be matched again, on a route
+// with a confidential limit.
+func withheldBilling(t *config.Target, q *CheckRequest, reason string) bool {
+	if !t.Confidential() {
+		return false
+	}
+	ex := &q.Exchange
+	if ex.Body != nil && ex.Body.Retained {
+		for i := range t.BillingRefusals {
+			if b := &t.BillingRefusals[i]; b.Status == ex.Status && reason == billingReason(ex.Status, b) {
+				return true
+			}
+		}
+	}
+	s := q.Shape
+	if ex.Status != http.StatusOK || s == nil || s.Error == "" || s.ErrorHMACSHA256 == "" {
+		return false
+	}
+	typ := errorType(s.Error)
+	for _, d := range t.ErrorDocs {
+		for i := range t.BillingRefusals {
+			if b := &t.BillingRefusals[i]; d.Type == typ && b.Status == d.Status && reason == inBandBillingReason(d.Status, b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Outcomes of a ceiling check (ReleaseRecord.Outcome).
 const (
 	// CheckStopped is a check the start gate blocked, on a billing
@@ -911,46 +943,125 @@ func ceilingFail(status int, s *Shape, finish, length string) string {
 	return ""
 }
 
+// DocsError is a Verify error that the route's response documentation
+// decides: target.error_docs, target.billing_refusals or
+// target.probe.account_limit_statuses.
+type DocsError struct{ err error }
+
+func (e *DocsError) Error() string { return e.err.Error() }
+
+func (e *DocsError) Unwrap() error { return e.err }
+
+// docsErrorf is a DocsError with fmt.Errorf's text.
+func docsErrorf(format string, a ...any) error {
+	return &DocsError{fmt.Errorf(format, a...)}
+}
+
 // Verify re-derives r's results from its requests: each request's pass
-// from its status, shape and finish reason; the start gate from each
-// status through Gate(t, status), or through config.SetupDefectStatuses
-// alone when t is nil; the ceiling check at r's ceiling with length, the
-// adapter's LengthValue; and the input bound at bound. It returns why r is refused: a count of requests other
-// than CeilingRequests in a record not blocked, a request after the one
-// the gate blocks on, a passed request not answered 200, or a recorded
-// result other than the re-derived one.
+// from its status, shape and finish reason under r's request shape; the
+// start gate from each request through requestGate, or through
+// config.SetupDefectStatuses alone when t is nil, where a last request
+// whose body or in-band error the record withholds blocks when r's start
+// reason is the billing refusal t documents at its status
+// (withheldBilling); the start reason from the last request where t is
+// given; the ceiling check at r's ceiling with length, the adapter's
+// LengthValue; the input bound at bound; and the output bound at r's
+// ceiling. It returns why r is refused: a request shape other than a
+// release shape or a ceiling the shape does not pin, a count of requests
+// other than CeilingRequests in a record neither blocked, interrupted
+// nor unreached, a blocked record whose last response does not block or
+// gives another reason, an interrupted record that is blocked, or that
+// holds CeilingRequests requests and whose last one did not end on the
+// cancellation (cancelled), or that holds requests and whose reason is
+// not interruptedForm at its Sent and CeilingRequests, then ": " and a
+// cause (interruptedAt), a request after the one the gate blocks on, a
+// passed request not answered 200, a request with a stand-in for a body or
+// in-band error on a route t gives with no confidential limit, a record
+// unreached at other than its last request (unreachedLast), a record
+// neither blocked nor interrupted with a dispatched request that reached
+// no connection and that Unreached does not name (silentUnreached), a
+// recorded in-band status other than the re-derived one (verifyInBand),
+// or a recorded result other than the re-derived one. An error the
+// route's response documentation decides is a DocsError. It does not
+// authenticate the observations it re-derives from: on a record whose
+// only refusing request is its last, refusing by no response or a cut
+// stream, that request's error or stream read error edited to the
+// cancellation, or by a stream that ended early, that read error and the
+// request's recorded failure edited, with a matching Interrupted, turns
+// the record stopped and leaves its Sent unchanged.
 func (r *ReleaseRecord) Verify(t *config.Target, length string, bound int) error {
+	documented := t != nil
 	if t == nil {
 		t = &config.Target{}
 	}
+	p, ok := config.LookupShape(r.Shape)
+	switch {
+	case !ok:
+		return fmt.Errorf("request shape %q is not a release shape", r.Shape)
+	case r.Ceiling.Ceiling != p.Ceiling && r.Ceiling.Ceiling != p.Fallback:
+		return fmt.Errorf("ceiling %d is not one of Shape %s's %v", r.Ceiling.Ceiling, p.Name, []int{p.Ceiling, p.Fallback})
+	}
+	stop := stopValue(r.Shape, length)
 	blocked := false
 	for i, q := range r.Requests {
 		if q.Index != i {
 			return fmt.Errorf("request %d has index %d", i, q.Index)
 		}
 		if blocked {
-			return fmt.Errorf("request %d follows the one the start gate blocks on", i)
+			return docsErrorf("request %d follows the one the start gate blocks on", i)
 		}
-		fail := ceilingFail(q.Exchange.Status, q.Shape, q.FinishReason, length)
+		fail := ceilingFail(q.Exchange.Status, q.Shape, q.FinishReason, stop)
 		if q.Pass != (fail == "") || q.Fail != fail {
 			return fmt.Errorf("request %d records pass %t (%q); its response gives %t (%q)", i, q.Pass, q.Fail, fail == "", fail)
 		}
 		if q.Pass && (q.Exchange.Status != http.StatusOK || q.Exchange.DispatchUTC.IsZero()) {
 			return fmt.Errorf("request %d passed with status %d, dispatched %t", i, q.Exchange.Status, !q.Exchange.DispatchUTC.IsZero())
 		}
-		blocked = Gate(t, q.Exchange.Status).Blocked
+		if documented && !t.Confidential() && (q.Exchange.Body != nil && q.Exchange.Body.Retained || q.Shape != nil && q.Shape.ErrorHMACSHA256 != "") {
+			return fmt.Errorf("request %d carries a stand-in; route %s has no confidential limit and withholds no body or in-band error", i, t.Name)
+		}
+		if err := verifyInBand(t, documented, q); err != nil {
+			return fmt.Errorf("request %d: %w", i, err)
+		}
+		blocked = requestGate(t, &q.Exchange, q.Shape).Blocked ||
+			i == len(r.Requests)-1 && r.Start.Blocked && withheldBilling(t, &q, r.Start.Reason)
 	}
-	switch {
+	switch last := len(r.Requests) - 1; {
+	case blocked && !r.Start.Blocked && r.Requests[last].Exchange.Status == http.StatusOK:
+		return docsErrorf("request %d's in-band error blocks the start; the record is not blocked", last)
 	case blocked && !r.Start.Blocked:
-		return fmt.Errorf("request %d's status %d blocks the start; the record is not blocked", len(r.Requests)-1, r.Requests[len(r.Requests)-1].Exchange.Status)
-	case !r.Start.Blocked && len(r.Requests) != CeilingRequests:
+		return docsErrorf("request %d's status %d blocks the start; the record is not blocked", last, r.Requests[last].Exchange.Status)
+	case !blocked && r.Start.Blocked:
+		return docsErrorf("the record is blocked (%s); no response of its requests blocks the start", r.Start.Reason)
+	case r.Interrupted != "" && r.Start.Blocked:
+		return errors.New("the record is both interrupted and blocked")
+	case r.Unreached != "" && (r.Start.Blocked || r.Interrupted != ""):
+		return errors.New("a record that reached no connection is also blocked or interrupted")
+	case r.Unreached != "" && !unreachedLast(r):
+		return fmt.Errorf("the record says %q; its last request reached a connection or has no error", r.Unreached)
+	case !r.Start.Blocked && r.Interrupted == "" && silentUnreached(r) >= 0:
+		return fmt.Errorf("request %d reached no connection and the record does not name it unreached", silentUnreached(r))
+	case !r.Start.Blocked && r.Interrupted == "" && r.Unreached == "" && len(r.Requests) != CeilingRequests:
 		return fmt.Errorf("%d requests, want %d", len(r.Requests), CeilingRequests)
+	case r.Interrupted != "" && len(r.Requests) == CeilingRequests && !cancelled(&r.Requests[last]):
+		return fmt.Errorf("the record is interrupted after all %d requests and the interruption did not cut its last one", CeilingRequests)
+	case r.Interrupted != "" && !interruptedAt(r):
+		return fmt.Errorf("the record says %q; it sent %d of %d requests", r.Interrupted, r.Sent(), CeilingRequests)
+	}
+	if last := len(r.Requests) - 1; documented && r.Start.Blocked {
+		q := &r.Requests[last]
+		if g := requestGate(t, &q.Exchange, q.Shape); r.Start.Reason != g.Reason && !withheldBilling(t, q, r.Start.Reason) {
+			return docsErrorf("the record is blocked (%s); request %d's response gives %q", r.Start.Reason, last, g.Reason)
+		}
 	}
 	if c := ceilingCheck(r.Requests, r.Ceiling.Ceiling, length); c != r.Ceiling {
 		return fmt.Errorf("ceiling check recorded %+v; its requests give %+v", r.Ceiling, c)
 	}
 	if c := inputCheck(r.Requests, bound); c != r.InputBound {
 		return fmt.Errorf("input bound recorded %+v; its requests give %+v", r.InputBound, c)
+	}
+	if c := outputCheck(r.Requests, r.Ceiling.Ceiling); c != r.OutputBound {
+		return fmt.Errorf("output bound recorded %+v; its requests give %+v", r.OutputBound, c)
 	}
 	return nil
 }
@@ -959,6 +1070,58 @@ func (r *ReleaseRecord) Verify(t *config.Target, length string, bound int) error
 // interrupted check: its requests sent (Sent), CeilingRequests, then the
 // context's cause.
 const interruptedForm = "the check's context ended after %d of %d requests"
+
+// interruptedAt reports whether r.Interrupted is interruptedForm at r's
+// Sent and CeilingRequests, then ": " and a non-empty cause, or any
+// reason on a record with no request (InterruptedRecord). The cause
+// itself is not checked.
+func interruptedAt(r *ReleaseRecord) bool {
+	var n, m int
+	if _, err := fmt.Sscanf(r.Interrupted, interruptedForm, &n, &m); err == nil && strings.HasPrefix(r.Interrupted, fmt.Sprintf(interruptedForm, n, m)) {
+		cause, ok := strings.CutPrefix(r.Interrupted, fmt.Sprintf(interruptedForm+": ", n, m))
+		return ok && cause != "" && n == r.Sent() && m == CeilingRequests
+	}
+	return len(r.Requests) == 0
+}
+
+// unreachedLast reports whether r.Unreached is unreachedText of r's last
+// request, which reached no connection (Reached) and records an error.
+func unreachedLast(r *ReleaseRecord) bool {
+	n := len(r.Requests)
+	if n == 0 {
+		return false
+	}
+	ex := &r.Requests[n-1].Exchange
+	return !Reached(ex) && ex.Error != "" && r.Unreached == unreachedText(n-1, ex)
+}
+
+// silentUnreached is the first dispatched request of r that reached no
+// connection (Reached), other than a last one r.Unreached names, or -1.
+func silentUnreached(r *ReleaseRecord) int {
+	for i, q := range r.Requests {
+		if !q.Exchange.DispatchUTC.IsZero() && !Reached(&q.Exchange) && (i != len(r.Requests)-1 || r.Unreached == "") {
+			return i
+		}
+	}
+	return -1
+}
+
+// verifyInBand refuses q's recorded InBandStatus unless it is the one
+// InBandRefusal gives under t where documented, the request's target is
+// at hand, or else 0 or a refusing status on a stream with an in-band
+// error.
+func verifyInBand(t *config.Target, documented bool, q CheckRequest) error {
+	if documented {
+		if want := InBandRefusal(t, q.Shape); q.InBandStatus != want {
+			return docsErrorf("in-band status %d recorded; its in-band error and target.error_docs give %d", q.InBandStatus, want)
+		}
+		return nil
+	}
+	if q.InBandStatus != 0 && (!refusing(q.InBandStatus) || q.Shape == nil || q.Shape.Error == "") {
+		return fmt.Errorf("in-band status %d recorded on a request with no in-band error, or not a refusing status", q.InBandStatus)
+	}
+	return nil
+}
 
 // promptTokens is the stream's reported prompt token count: a
 // chat-completions prompt_tokens, or a Messages input_tokens plus its two
