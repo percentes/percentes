@@ -338,19 +338,29 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 
 // cellEnd is when the cell in dir, with run record rec, last ran: its
 // end_utc, or for an interrupted cell with none the latest time its
-// records carry: start_utc, the dispatch series (to the end of each
-// second it counts a request in), the clock, status, balance and refresh
-// records (a record that does not decode gives its file's modification
-// time), and each attempt's times from epoch_utc. Any other cell with no
-// end_utc ends at its start_utc.
+// records carry (recordsEnd). Any other cell with no end_utc ends at its
+// start_utc.
 func cellEnd(dir string, rec *cellRecord) (time.Time, error) {
 	if rec.EndUTC != nil {
 		return *rec.EndUTC, nil
 	}
-	end := rec.StartUTC
 	if rec.Outcome != outcomeInterrupted {
-		return end, nil
+		return rec.StartUTC, nil
 	}
+	end, err := recordsEnd(dir, rec)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("pages: %w", err)
+	}
+	return end, nil
+}
+
+// recordsEnd is the latest time the records of the cell in dir, with run
+// record rec, carry: start_utc, the dispatch series (to the end of each
+// second it counts a request in), the clock, status, balance and refresh
+// records (a record that does not decode gives its file's modification
+// time), and each attempt's times from epoch_utc.
+func recordsEnd(dir string, rec *cellRecord) (time.Time, error) {
+	end := rec.StartUTC
 	later := func(t time.Time) {
 		if t.After(end) {
 			end = t
@@ -364,7 +374,7 @@ func cellEnd(dir string, rec *cellRecord) (time.Time, error) {
 		return b, err
 	}
 	fail := func(name string, err error) (time.Time, error) {
-		return time.Time{}, fmt.Errorf("pages: %s: %s: %w", dir, name, err)
+		return time.Time{}, fmt.Errorf("%s: %s: %w", dir, name, err)
 	}
 	if b, err := read(dispatchFile); err != nil {
 		return fail(dispatchFile, err)
