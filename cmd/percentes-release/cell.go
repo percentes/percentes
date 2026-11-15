@@ -480,6 +480,7 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 		return errors.Join(ferr, err)
 	}
 	cell.Outcome, cell.Reasons, cell.LadderStarted = rec.Outcome, rec.Reasons, ladder || ev.dispatched
+	cell.RecordsComplete = ladder || !ev.dispatched
 	cell.Gaps = evidence.StepGaps(res)
 	if ladder {
 		cell.Canary = rec.Canary

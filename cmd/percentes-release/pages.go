@@ -50,6 +50,7 @@ type routeRecords struct {
 	ceiling    probe.CeilingChoice
 	probes     []evidence.FileRef
 	cells      []report.CellRecords
+	outside    []report.CellRecords
 	mismatches []report.ModelMismatch
 	billing    []report.BillingStop
 	close      *evidence.WindowClose
@@ -324,6 +325,8 @@ func buildPages(out, framesRoot string, sched *schedule.Schedule, sum, ledgerPat
 	if rp.files[indexJSON], err = marshalPage(rp.index); err != nil {
 		return nil, err
 	}
+	members := groupMembers(cfgs, sched)
+	histories := map[string]*report.History{}
 	for i, r := range rp.routes {
 		if rp.recs[i].verdict == nil {
 			continue
@@ -332,6 +335,22 @@ func buildPages(out, framesRoot string, sched *schedule.Schedule, sum, ledgerPat
 		if err != nil {
 			return nil, err
 		}
+		g := r.Config.Release.AccountGroup
+		if histories[g] == nil {
+			if histories[g], err = readHistory(out, g, members[g], cfgs, entries, checkPaths); err != nil {
+				return nil, err
+			}
+		}
+		for _, c := range rp.recs[i].outside {
+			if err := st.AddOutside(r.Config, r.Verdict, c); err != nil {
+				return nil, fmt.Errorf("pages: route %s: %w", r.Config.Target.Name, err)
+			}
+		}
+		st.OutsideIncomplete = rp.recs[i].outsideIncomplete
+		if err := st.Attribute(r.Config, r.Verdict, histories[g]); err != nil {
+			return nil, fmt.Errorf("pages: route %s: %w", r.Config.Target.Name, err)
+		}
+		st.BillingStops = rp.recs[i].billing
 		if c := rp.recs[i].close; c != nil {
 			if st.WindowClose, err = report.CompareWindowClose(r.Config.Target.Name, r.Cells, c); err != nil {
 				return nil, fmt.Errorf("pages: %w", err)
@@ -508,8 +527,22 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 		if err != nil {
 			return nil, err
 		}
-		rr.cells = append(rr.cells, report.CellRecords{Cell: cellLabel(rec.Run), Outcome: m.Release.Outcome, Gaps: m.Release.Gaps, Records: recs,
-			Start: m.Release.Run.Start, Docs: report.DocsOf(m)})
+		refreshed, err := readRefreshed(dir, m)
+		if err != nil {
+			return nil, err
+		}
+		epoch := m.StartUTC
+		if rec.EpochUTC != nil {
+			epoch = *rec.EpochUTC
+		}
+		c := report.CellRecords{Cell: cellLabel(rec.Run), Outcome: m.Release.Outcome, Gaps: m.Release.Gaps, Records: recs,
+			Start: m.Release.Run.Start, Docs: report.DocsOf(m), EpochUTC: epoch, ClockAbsOffsetS: m.Clock.AbsOffsetS, Refreshed: refreshed}
+		if rec.Outcome == outcomeCounted && m.Counted() {
+			rr.cells = append(rr.cells, c)
+		} else {
+			c.Outcome = rec.Outcome
+			rr.outside = append(rr.outside, c)
+		}
 	}
 	if rr.verdict == nil && rr.unrecorded == 0 && len(rr.stops) == 0 {
 		return nil, fmt.Errorf("pages: route %s has no cell with a %s under %s", name, evidence.ManifestFile, out)
@@ -756,6 +789,24 @@ func readAttempts(dir string, m *evidence.Manifest) ([]evidence.Record, error) {
 		return nil, fmt.Errorf("pages: %s: %s is not the file the manifest names", dir, evidence.AttemptsFile)
 	}
 	return evidence.ReadRecords(bytes.NewReader(b))
+}
+
+// readRefreshed reads the limits of the refresh record in dir when it is
+// the file m names; nil where the refresh command read none.
+func readRefreshed(dir string, m *evidence.Manifest) ([]evidence.RefreshedLimit, error) {
+	ref := m.Artifact(evidence.RefreshFile)
+	b, err := os.ReadFile(filepath.Join(dir, evidence.RefreshFile))
+	if err != nil {
+		return nil, fmt.Errorf("pages: %w", err)
+	}
+	if sum := sha256.Sum256(b); ref == nil || hex.EncodeToString(sum[:]) != ref.SHA256 {
+		return nil, fmt.Errorf("pages: %s: %s is not the file the manifest names", dir, evidence.RefreshFile)
+	}
+	var rec evidence.StatusRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return nil, fmt.Errorf("pages: %s: %s: %w", dir, evidence.RefreshFile, err)
+	}
+	return rec.Limits, nil
 }
 
 // cellLabel is a run's directory name under its route's.

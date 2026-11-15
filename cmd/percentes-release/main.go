@@ -38,15 +38,16 @@
 // read, one for every check the ledger admits, and public-config writes a
 // route's configuration as published, the file the freeze commits, with
 // each confidential limit's value withheld. Every command reads the
-// configuration as loaded. After
-// the window, pages writes the index page and each route's page from the
-// cells' records, which must carry the SHA-256 of the schedule file
-// given and, across the hosts of a model, one ceiling choice and one set
-// of probe records, pack writes a route's evidence pack, its page files
-// and cell manifests with an inventory of their SHA-256 hashes, and
-// publish-check checks the release publication record against the
-// cells, the pages and the files it names, and the publication page it
-// gives against the one under --pages.
+// configuration as loaded. After the window, pages writes the index page
+// and each route's page from the cells' records, which must carry the
+// SHA-256 of the schedule file given and, across the hosts of a model,
+// one ceiling choice and one set of probe records, each status_429
+// labelled from its account group's sends and the ledger the schedule
+// froze, pack writes a route's evidence pack, its page files and cell
+// manifests with an inventory of their SHA-256 hashes, and publish-check
+// checks the release publication record against the cells, the pages and
+// the files it names, and the publication page it gives against the one
+// under --pages.
 //
 // Before the freeze, rehearse runs the acceptance run: one cell of each
 // of six mock routes, served on loopback by this process in the
