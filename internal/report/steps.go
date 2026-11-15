@@ -187,14 +187,19 @@ type CellStep struct {
 	Curve      []CurvePoint           `json:"completion_incidence,omitempty"`
 	Incidence  *IncidenceQuantiles    `json:"incidence_quantiles,omitempty"`
 	Signals    *Signals               `json:"signals,omitempty"`
+	Refusals   *SegmentRefusals       `json:"status_429,omitempty"`
+	WriteDelay *WriteDelay            `json:"dispatch_to_write,omitempty"`
 }
 
 // CellTable is one cell's per-step table, with its warm-up's status_429
 // responses where it had any and the clock-offset bound its manifest
 // records; refreshed are the limits read at its start (CellRecords).
 type CellTable struct {
-	Cell  string     `json:"cell"`
-	Steps []CellStep `json:"steps"`
+	Cell            string           `json:"cell"`
+	Steps           []CellStep       `json:"steps"`
+	Warmup          *SegmentRefusals `json:"warmup_status_429,omitempty"`
+	ClockAbsOffsetS *float64         `json:"clock_abs_offset_s,omitempty"`
+	refreshed       []evidence.RefreshedLimit
 }
 
 // Pooled is a step's count over the requests its Cells pooled cells
@@ -273,6 +278,17 @@ type PooledStep struct {
 	Curve      []PooledCurvePoint  `json:"completion_incidence,omitempty"`
 	Incidence  *IncidenceQuantiles `json:"incidence_quantiles,omitempty"`
 	Signals    *Signals            `json:"signals,omitempty"`
+	Refusals   *PooledRefusals     `json:"status_429,omitempty"`
+	WriteDelay *WriteDelay         `json:"dispatch_to_write,omitempty"`
+}
+
+// PooledRefusals are a pooled step's status_429 responses summed over
+// its cells per 30 s bin of intended dispatch from the step's start, and
+// their labels once attributed.
+type PooledRefusals struct {
+	Count  int          `json:"count"`
+	Bins   []int        `json:"bins_30s"`
+	Labels *LabelCounts `json:"labels,omitempty"`
 }
 
 // StepTables is one route's per-step tables (SPEC-HOSTED HA3 point 13):
@@ -307,21 +323,76 @@ type PooledStep struct {
 // pages set both, and neither enters a pooled figure, the null reading
 // or the index.
 type StepTables struct {
-	Route           string           `json:"route"`
-	Naming          []string         `json:"naming,omitempty"`
-	CeilingTokens   int              `json:"ceiling_tokens"`
-	LengthValue     string           `json:"length_value"`
-	DeadlineS       int              `json:"deadline_s"`
-	StepS           float64          `json:"step_s"`
-	HardTimeoutS    int              `json:"hard_timeout_s"`
-	Limits          []admission.Step `json:"limits"`
-	Cells           []CellTable      `json:"cells"`
-	FrameCells      int              `json:"frame_cells"`
-	Pooled          []PooledStep     `json:"pooled,omitempty"`
-	DriftChanges    []DriftChange    `json:"drift_changes,omitempty"`
-	DriftParts      []DriftPart      `json:"drift_parts,omitempty"`
-	WindowClose     *WindowClose     `json:"window_close,omitempty"`
-	ModelMismatches []ModelMismatch  `json:"model_mismatch_cells,omitempty"`
+	Route             string           `json:"route"`
+	Naming            []string         `json:"naming,omitempty"`
+	Shape             string           `json:"shape"`
+	BindingRPS        float64          `json:"binding_rps"`
+	Binding           admission.Rate   `json:"binding_limit"`
+	CeilingTokens     int              `json:"ceiling_tokens"`
+	LengthValue       string           `json:"length_value"`
+	DeadlineS         int              `json:"deadline_s"`
+	StepS             float64          `json:"step_s"`
+	HardTimeoutS      int              `json:"hard_timeout_s"`
+	AtGeneration      []int            `json:"at_generation_limits,omitempty"`
+	Limits            []admission.Step `json:"limits"`
+	Cells             []CellTable      `json:"cells"`
+	FrameCells        int              `json:"frame_cells"`
+	Pooled            []PooledStep     `json:"pooled,omitempty"`
+	DriftChanges      []DriftChange    `json:"drift_changes,omitempty"`
+	DriftParts        []DriftPart      `json:"drift_parts,omitempty"`
+	WindowClose       *WindowClose     `json:"window_close,omitempty"`
+	ModelMismatches   []ModelMismatch  `json:"model_mismatch_cells,omitempty"`
+	Null              *NullReading     `json:"null_reading,omitempty"`
+	Attribution       *Attribution     `json:"attribution,omitempty"`
+	BillingStops      []BillingStop    `json:"billing_stops,omitempty"`
+	Outside           []OutsideCell    `json:"outside_frame,omitempty"`
+	OutsideIncomplete int              `json:"outside_frame_records_incomplete,omitempty"`
+}
+
+// OutsideCell is a cell outside the route's frame: its label, its
+// outcome, its warm-up's status_429 responses where it had any and those
+// of each step it attempted.
+type OutsideCell struct {
+	Cell      string           `json:"cell"`
+	Outcome   string           `json:"outcome"`
+	Warmup    *SegmentRefusals `json:"warmup_status_429,omitempty"`
+	Steps     []OutsideStep    `json:"steps"`
+	clockS    *float64
+	refreshed []evidence.RefreshedLimit
+}
+
+// OutsideStep is the status_429 responses of one attempted step.
+type OutsideStep struct {
+	Step     int              `json:"step"`
+	Refusals *SegmentRefusals `json:"status_429"`
+}
+
+// AddOutside adds c, a cell outside the frame whose ladder started and
+// whose records are complete, to t's Outside, its tables built as a
+// counted cell's are.
+func (t *StepTables) AddOutside(cfg *config.Config, v *admission.Verdict, c CellRecords) error {
+	st, err := stepTables(cfg, v, []CellRecords{c})
+	if err != nil {
+		return err
+	}
+	row := st.Cells[0]
+	o := OutsideCell{Cell: c.Cell, Outcome: c.Outcome, Warmup: row.Warmup, Steps: []OutsideStep{}, clockS: row.ClockAbsOffsetS, refreshed: c.Refreshed}
+	for _, s := range row.Steps {
+		if s.State == StepAttempted && s.Refusals != nil {
+			o.Steps = append(o.Steps, OutsideStep{Step: s.Step, Refusals: s.Refusals})
+		}
+	}
+	t.Outside = append(t.Outside, o)
+	return nil
+}
+
+// BillingStop is a cell of the route stopped by responses the target
+// documents as a billing refusal, the operator's billing setting: their
+// count and the stop's reasons. It enters no provider-failure figure.
+type BillingStop struct {
+	Cell      string   `json:"cell"`
+	Responses int      `json:"responses"`
+	Reasons   []string `json:"reasons"`
 }
 
 // ModelMismatch is a cell labelled model_mismatch
@@ -388,6 +459,7 @@ type tables struct {
 	docs          map[int]*config.StatusDoc
 	errorDocs     map[string]*config.ErrorDoc
 	retryRecorded bool
+	fractions     []float64
 	tallies       [][]stepTally
 }
 
@@ -477,12 +549,19 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 	}
 	t := &tables{
 		StepTables: &StepTables{
-			Route: cfg.Target.Name, CeilingTokens: rel.Shape.CeilingTokens, LengthValue: lengthValue(cfg.Target.Adapter),
+			Route: cfg.Target.Name, Shape: rel.Shape.Name, BindingRPS: v.BindingRPS, Binding: v.Solution.Binding,
+			CeilingTokens: rel.Shape.CeilingTokens, LengthValue: lengthValue(cfg.Target.Adapter),
 			DeadlineS: rel.Shape.DeadlineS, StepS: rel.Ladder.StepS, HardTimeoutS: cfg.Client.HTTPTimeoutS, Limits: v.Steps, FrameCells: admission.ReleaseCells,
 		},
 		docs:          map[int]*config.StatusDoc{},
 		errorDocs:     map[string]*config.ErrorDoc{},
 		retryRecorded: config.HeaderAllowed(cfg.Target.ResponseHeaders, "Retry-After"),
+		fractions:     rel.Ladder.StepFractions,
+	}
+	for i := range cfg.Target.Limits {
+		if cfg.Target.Limits[i].OutputAtGeneration {
+			t.AtGeneration = append(t.AtGeneration, i)
+		}
 	}
 	for i := range cfg.Target.StatusDocs {
 		d := cfg.Target.StatusDocs[i]
@@ -531,12 +610,14 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 
 func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []stepTally, error) {
 	rel := cfg.Release
-	steps := rel.Ladder.StepsRPS
-	ct := CellTable{Cell: c.Cell, Steps: make([]CellStep, len(steps))}
+	steps := t.Limits
+	ct := CellTable{Cell: c.Cell, Steps: make([]CellStep, len(steps)), ClockAbsOffsetS: c.ClockAbsOffsetS, refreshed: c.Refreshed}
 	tally := make([]stepTally, len(steps))
 	dispatched := make([]bool, len(steps))
+	segs := make([][]*evidence.Record, len(steps))
+	var warmup []*evidence.Record
 	for k := range steps {
-		ct.Steps[k] = CellStep{Step: k + 1, RPS: steps[k]}
+		ct.Steps[k] = CellStep{Step: k + 1, RPS: steps[k].RPS}
 		tally[k] = newStepTally()
 	}
 	for i := range c.Records {
@@ -546,11 +627,13 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 				r.Index, r.Shape, r.CeilingTokens, rel.Shape.Name, rel.Shape.CeilingTokens)
 		}
 		if r.Warmup {
+			warmup = append(warmup, r)
 			continue
 		}
 		if r.Step < 1 || r.Step > len(steps) {
 			return ct, nil, fmt.Errorf("record %d is at step %d of a %d-step ladder", r.Index, r.Step, len(steps))
 		}
+		segs[r.Step-1] = append(segs[r.Step-1], r)
 		line, err := lineOf(r)
 		if err != nil {
 			return ct, nil, fmt.Errorf("record %d: %w", r.Index, err)
@@ -587,13 +670,16 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 	for _, g := range c.Gaps {
 		copy(tally[g.Step-1].gaps, g.Counts)
 	}
+	if seg, _ := t.segment(warmup, 0, rel.Ladder.WarmupS, c.EpochUTC); seg.Count > 0 {
+		ct.Warmup = seg
+	}
 	later := false
 	for k := len(steps) - 1; k >= 0; k-- {
 		later = later || dispatched[k]
 		s, tl := &ct.Steps[k], &tally[k]
 		switch {
 		case !t.Limits[k].Admitted && dispatched[k]:
-			return ct, nil, fmt.Errorf("step %d (%g rps) is excluded by the ceiling rule and dispatched requests", k+1, steps[k])
+			return ct, nil, fmt.Errorf("step %d (%g rps) is excluded by the ceiling rule and dispatched requests", k+1, steps[k].RPS)
 		case !t.Limits[k].Admitted:
 			s.State = StepExcluded
 		case later:
@@ -629,6 +715,7 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 		s.Throughput = &tp
 		s.Curve = curve(completionTimes(tl), s.Scheduled)
 		s.Incidence = incidence([]*stepTally{tl}, t.HardTimeoutS)
+		s.Refusals, s.WriteDelay = t.segment(segs[k], k+1, t.StepS, c.EpochUTC)
 	}
 	return ct, tally, nil
 }
@@ -686,6 +773,14 @@ func (t *tables) pool(idx []int) []PooledStep {
 			}
 			cs, n = append(cs, &t.tallies[i][k]), append(n, s.Scheduled)
 			ps.Scheduled += s.Scheduled
+			if ps.Refusals == nil {
+				ps.Refusals, ps.WriteDelay = &PooledRefusals{Bins: make([]int, len(s.Refusals.Bins))}, &WriteDelay{}
+			}
+			ps.Refusals.Count += s.Refusals.Count
+			for b, c := range s.Refusals.Bins {
+				ps.Refusals.Bins[b] += c
+			}
+			ps.WriteDelay.add(s.WriteDelay)
 			for _, code := range t.tallies[i][k].codes {
 				codes[code] = true
 			}
@@ -853,6 +948,10 @@ func (t *StepTables) text(frame bool) string {
 	w("")
 	for _, c := range t.Cells {
 		w("-- Cell %s: 95 percent Wilson intervals, treating the step's requests as independent --", c.Cell)
+		if c.Warmup != nil {
+			w("warm-up: %d status_429", c.Warmup.Count)
+			refusalsText(w, c.Warmup, "warm-up")
+		}
 		for _, s := range c.Steps {
 			switch {
 			case s.State == StepExcluded:
@@ -876,6 +975,8 @@ func (t *StepTables) text(frame bool) string {
 					retryAfterText(w, s.Signals, t.Limits[s.Step-1])
 				}
 			}
+			refusalsText(w, s.Refusals, "step")
+			writeDelayText(w, s.WriteDelay)
 			g2Text(w, s.G2)
 			canaryText(w, s.Canary)
 			w("  hosted-G6 (completion within %d s over scheduled): %s [%s, %s] against %.2f: %s (reported, not run-invalidating)",
@@ -958,6 +1059,8 @@ func (t *StepTables) text(frame bool) string {
 					retryAfterText(w, s.Signals, t.Limits[s.Step-1])
 				}
 			}
+			pooledRefusalsText(w, s.Refusals)
+			writeDelayText(w, s.WriteDelay)
 			w("  hosted-G6 (completion within %d s over scheduled): %s against %.2f: %s (reported, not run-invalidating)",
 				t.DeadlineS, pooled(s.G6.InTime), config.PinnedBaselineGoodputMin, passText(s.G6.Pass))
 			if p := s.G6.ExcludingConnectReset; p != nil {

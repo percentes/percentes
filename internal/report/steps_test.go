@@ -723,3 +723,46 @@ func TestStepTablesNaming(t *testing.T) {
 		t.Errorf("a cell's tables carry the naming lines %q", inCell.Naming)
 	}
 }
+
+// A documented billing refusal prints on its own line and enters neither
+// status_429 nor status_other, nor the step's provider refusals.
+func TestBillingRefusalLine(t *testing.T) {
+	cfg, v := stepsConfig(t)
+	cfg.Target.BillingRefusals = []config.BillingRefusal{
+		{Status: 429, BodyContains: "enforced_spend_limit_reached"},
+		{Status: 400, BodyContains: "You have reached your specified"},
+		{Status: 402},
+	}
+	for _, b := range cfg.Target.BillingRefusals {
+		class := loadgen.ErrStatusOther
+		if b.Status == 429 {
+			class = loadgen.ErrStatus429
+		}
+		reqs := []loadgen.Request{{Index: 0, Step: 1, DispatchNs: 1, DoneNs: 2, Outcome: loadgen.OutcomeErrored, ErrClass: class, Status: b.Status, ErrorBody: []byte(b.BodyContains)}}
+		recs := evidence.Records(cfg, &loadgen.Result{Requests: reqs}, evidence.Options{})
+		if !recs[0].BillingRefusal {
+			t.Fatalf("HTTP %d: record not marked a billing refusal", b.Status)
+		}
+		tables, err := stepTables(cfg, v, []CellRecords{{Cell: "weekend-08-a1", Outcome: evidence.CellStopped, Records: recs}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := tables.Cells[0].Steps[0]
+		billed := 0
+		for _, line := range st.Lines {
+			if line.Name == LineBilling {
+				billed = line.Count
+			}
+			if (line.Name == loadgen.ErrStatus429 || line.Name == loadgen.ErrStatusOther) && line.Count > 0 {
+				t.Errorf("billing %d printed as %s %d/%d", b.Status, line.Name, line.Count, line.Scheduled)
+			}
+		}
+		if billed != 1 || st.Refusals.Count != 0 {
+			t.Errorf("HTTP %d billing line=%d provider refusals=%d", b.Status, billed, st.Refusals.Count)
+		}
+	}
+	reqs := []loadgen.Request{{Index: 0, Step: 1, DispatchNs: 1, DoneNs: 2, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrStatus429, Status: 429, ErrorBody: []byte("{}")}}
+	if recs := evidence.Records(cfg, &loadgen.Result{Requests: reqs}, evidence.Options{}); recs[0].BillingRefusal {
+		t.Error("an ordinary 429 marked a billing refusal")
+	}
+}
