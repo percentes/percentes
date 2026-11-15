@@ -254,15 +254,25 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		finish(outcomeStopped, billStop.Error())
 		return rec, r.retain(ctx, ev, rec, nil)
 	}
+	probePrompt, probeOutput := pr.PromptTokens, pr.OutputTokens
+	// A probe over the bounds stops the route on each return that skips
+	// the ladder; after a ladder the post-ladder check covers it.
+	probeBreach := pricingBreach(&cfg.Release.Shape, nil, probePrompt, probeOutput)
+	skipLadder := func(outcome string, reasons ...string) {
+		if probeBreach != nil {
+			outcome, reasons = outcomeStopped, append([]string{probeBreach.Error()}, reasons...)
+		}
+		finish(outcome, reasons...)
+	}
 	if pr.Start.Blocked {
 		stop, err := r.authFault(rec, pr.Request.Status)
 		if err != nil {
 			return rec, err
 		}
 		if stop != nil {
-			finish(outcomeStopped, stop.Error())
+			skipLadder(outcomeStopped, stop.Error())
 		} else {
-			finish(outcomeBlocked, pr.Start.Reason)
+			skipLadder(outcomeBlocked, pr.Start.Reason)
 		}
 		return rec, r.retain(ctx, ev, rec, nil)
 	}

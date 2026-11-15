@@ -139,6 +139,43 @@ func clientExhausted(r *loadgen.Request) error {
 	return nil
 }
 
+// pricingBreach returns the stop for a cell in which a request, its
+// probe's included, reported more prompt tokens than the shape's input
+// bound or more output tokens, reasoning included, than the ceiling, the
+// bounds the ledger prices each request at, or nil. probePrompt and
+// probeOutput are the probe's reported counts, nil where unreported.
+func pricingBreach(sh *config.Shape, reqs []loadgen.Request, probePrompt, probeOutput *int) *routeStop {
+	n, prompt, output := 0, 0, 0
+	note := func(p, o *int) {
+		breach := false
+		if p != nil {
+			prompt, breach = max(prompt, *p), breach || *p > sh.InputBoundTokens
+		}
+		if o != nil {
+			output, breach = max(output, *o), breach || *o > sh.CeilingTokens
+		}
+		if breach {
+			n++
+		}
+	}
+	note(probePrompt, probeOutput)
+	for i := range reqs {
+		var p, o *int
+		if v, ok := reqs[i].PromptTokens(); ok {
+			p = &v
+		}
+		if v, ok := reqs[i].OutputTokens(); ok {
+			o = &v
+		}
+		note(p, o)
+	}
+	if n == 0 {
+		return nil
+	}
+	return &routeStop{fmt.Sprintf("pricing-bound breach: %d of the cell's requests reported more than the %d-token input bound or the %d-token ceiling, reasoning included, that the ledger prices each request at; the largest reported were %s prompt and %s output tokens",
+		n, sh.InputBoundTokens, sh.CeilingTokens, loadgen.TokenCountText(prompt), loadgen.TokenCountText(output))}
+}
+
 // minOpenFiles is the open-file limit a route process requires.
 const minOpenFiles = 65536
 
