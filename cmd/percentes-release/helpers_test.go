@@ -303,21 +303,27 @@ func otherHosts(cfg *config.Config) []string {
 // passedCeiling is a ceiling check record of cfg's request at its
 // configured ceiling, with texts cut at byteCap, admitted in the ledger
 // whose open-line SHA-256 is ledger: ten requests answered 200 with
-// visible content, finish reason "stop" and 1,000 prompt tokens, which
-// pass the ceiling check and the input bound.
+// visible content, finish reason "stop", 1,000 prompt tokens (100 under
+// a lower input bound) and 12 output tokens, which pass the ceiling check
+// and both bounds.
 func passedCeiling(cfg *config.Config, byteCap int, ledger string) *probe.ReleaseRecord {
 	t := &cfg.Target
 	sum := sha256.Sum256([]byte(t.Body))
+	prompt := 1000
+	if cfg.Release.Shape.InputBoundTokens < prompt {
+		prompt = 100
+	}
 	rec := &probe.ReleaseRecord{SchemaVersion: 1, Route: t.Name, Adapter: t.Adapter, EndpointURL: redact.URL(t.EndpointURL),
-		RequestedModel: t.ModelName, ExpectedModel: t.ExpectedModel(), BodySHA256: hex.EncodeToString(sum[:]), ByteCap: byteCap,
+		RequestedModel: t.ModelName, ExpectedModel: t.ExpectedModel(), BodySHA256: hex.EncodeToString(sum[:]), ByteCap: byteCap, Shape: cfg.Release.Shape.Name,
 		Ceiling: probe.CeilingCheck{Ceiling: cfg.Release.Shape.CeilingTokens, LengthValue: probe.LengthValue(t.Adapter), Sent: probe.CeilingRequests,
 			Passed: probe.CeilingRequests, Pass: true},
-		InputBound: probe.InputCheck{BoundTokens: cfg.Release.Shape.InputBoundTokens, Reported: probe.CeilingRequests, MaxPromptTokens: 1000, Pass: true}, LedgerSHA256: ledger}
+		InputBound:  probe.InputCheck{BoundTokens: cfg.Release.Shape.InputBoundTokens, Reported: probe.CeilingRequests, MaxPromptTokens: prompt, Pass: true},
+		OutputBound: probe.OutputCheck{CeilingTokens: cfg.Release.Shape.CeilingTokens, Reported: probe.CeilingRequests, MaxOutputTokens: 12, Pass: true}, LedgerSHA256: ledger}
 	at := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
 	for i := 0; i < probe.CeilingRequests; i++ {
-		n := 1000
+		n, out := prompt, 12
 		rec.Requests = append(rec.Requests, probe.CheckRequest{Index: i, Exchange: probe.Exchange{Status: http.StatusOK, DispatchUTC: at.Add(time.Duration(i) * 4 * time.Second)},
-			Shape: &probe.Shape{Done: true, ContentEvents: 1}, FinishReason: "stop", PromptTokens: &n, Pass: true})
+			Shape: &probe.Shape{Done: true, ContentEvents: 1}, FinishReason: "stop", PromptTokens: &n, CompletionTokens: &out, OutputTokens: &out, Pass: true})
 	}
 	return rec
 }
@@ -329,7 +335,7 @@ func passedCeiling(cfg *config.Config, byteCap int, ledger string) *probe.Releas
 // its last request stopped at the ceiling.
 func hostCeiling(cfg *config.Config, byteCap int, route string, ceiling int, pass bool, ledger string) probe.ReleaseRecord {
 	rec := *passedCeiling(cfg, byteCap, ledger)
-	rec.Route, rec.Ceiling.Ceiling = route, ceiling
+	rec.Route, rec.Ceiling.Ceiling, rec.OutputBound.CeilingTokens = route, ceiling, ceiling
 	if body, err := config.ReleaseBodyAt(cfg.Target.Body, cfg.Target.Adapter, ceiling); err == nil {
 		sum := sha256.Sum256([]byte(body))
 		rec.BodySHA256 = hex.EncodeToString(sum[:])

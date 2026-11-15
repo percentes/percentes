@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -21,21 +22,30 @@ import (
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/mock"
+	"github.com/percentes/percentes/internal/pilot"
 	"github.com/percentes/percentes/internal/probe"
 )
 
 // ceilingFixture is a route's ceiling-check inputs: its configuration
-// file at endpoint, a priced ledger and an env file holding key.
+// file at endpoint, a priced ledger, an env file holding key and the
+// retained copies its limits record (snapshotted).
 type ceilingFixture struct {
-	cfg, ledger, env, out string
+	cfg, ledger, env, out, snapshots string
 }
 
 func newCeilingFixture(t *testing.T, endpoint, key string) *ceilingFixture {
 	t.Helper()
+	return ceilingFixtureAt(t, routeConfigFile(t, "groq", endpoint, "10"), key)
+}
+
+// ceilingFixtureAt is newCeilingFixture for the route configuration at
+// cfgPath.
+func ceilingFixtureAt(t *testing.T, cfgPath, key string) *ceilingFixture {
+	t.Helper()
 	t.Setenv("GROQ_API_KEY", "")
 	dir := t.TempDir()
-	f := &ceilingFixture{cfg: routeConfigFile(t, "groq", endpoint, "10"), ledger: filepath.Join(dir, "ledger.jsonl"),
-		env: writeFile(t, dir, "groq.env", []byte("GROQ_API_KEY="+key+"\n")), out: t.TempDir()}
+	f := &ceilingFixture{cfg: cfgPath, ledger: filepath.Join(dir, "ledger.jsonl"),
+		env: writeFile(t, dir, "groq.env", []byte("GROQ_API_KEY="+key+"\n")), out: t.TempDir(), snapshots: snapshotted(t, cfgPath)}
 	if code, err := ledgerCmd([]string{"create", "--ledger", f.ledger, "--config", f.cfg}); err != nil || code != exitOK {
 		t.Fatalf("ledger create: %d, %v", code, err)
 	}
@@ -47,7 +57,7 @@ func newCeilingFixture(t *testing.T, endpoint, key string) *ceilingFixture {
 }
 
 func (f *ceilingFixture) args() []string {
-	return []string{"--config", f.cfg, "--env", f.env, "--ledger", f.ledger, "--out", f.out, "--byte-cap", "2000"}
+	return []string{"--config", f.cfg, "--env", f.env, "--ledger", f.ledger, "--out", f.out, "--byte-cap", "2000", "--snapshots", f.snapshots}
 }
 
 // record reads the check's one record under out.
@@ -168,8 +178,9 @@ func TestCeilingCheckCmd(t *testing.T) {
 	if sent, reserved := f.probeCharge(t); sent != probe.CeilingRequests || reserved != 0 {
 		t.Fatalf("ledger: %d probe requests, %d reserved", sent, reserved)
 	}
-	// The check is admitted at the highest pinned ceiling.
-	if b, _ := os.ReadFile(f.ledger); !strings.Contains(string(b), `"kind":"admit","route":"groq","input_tokens":1200,"output_tokens":1024,"per_request_usd":"0.0007944","purpose":"probe","reserve":10`) {
+	// The check is admitted at the highest pinned ceiling, its line
+	// naming the ceiling it is sent at and its byte cap.
+	if b, _ := os.ReadFile(f.ledger); !strings.Contains(string(b), `"kind":"admit","route":"groq","input_tokens":1200,"output_tokens":1024,"per_request_usd":"0.0007944","purpose":"probe","account_group":"groq","check_ceiling":512,"byte_cap":2000,"reserve":10`) {
 		t.Fatalf("ledger %s", b)
 	}
 	cfgs, err := loadReleases([]string{f.cfg})
@@ -189,6 +200,99 @@ func TestCeilingCheckCmd(t *testing.T) {
 	if _, _, err := readCeilingProbes(cfgs[0], hosts, []string{path, baseten}, 2000, frozen); err == nil ||
 		!strings.Contains(err.Error(), fmt.Sprintf("route groq at 512: ledger open line sha256 %q; the schedule froze %s", open, frozen)) {
 		t.Fatalf("another ledger: %v", err)
+	}
+}
+
+// shapeRFile is the configuration at cfgPath as a Shape R route at 16
+// whose fallback line is fallback.
+func shapeRFile(t *testing.T, cfgPath string, fallback bool) string {
+	t.Helper()
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, r := range [][2]string{
+		{"    name: S ", "    name: R "},
+		{"    input_bound_tokens: 1200 ", "    input_bound_tokens: 128 "},
+		{"    ceiling_tokens: 512 ", "    ceiling_tokens: 16 "},
+		{`"max_completion_tokens": 512,`, `"max_completion_tokens": 16,`},
+		{"    deadline_s: 30\n", fmt.Sprintf("    deadline_s: 30\n    fallback: %t\n", fallback)},
+	} {
+		if strings.Count(s, r[0]) != 1 {
+			t.Fatalf("configuration: %q not found once", r[0])
+		}
+		s = strings.Replace(s, r[0], r[1], 1)
+	}
+	return writeFile(t, t.TempDir(), filepath.Base(cfgPath), []byte(s))
+}
+
+// A Shape R route's check takes no byte cap, is admitted at the 128-token
+// bound and its 256 fallback, and passes answers stopped at the 16-token
+// ceiling; run reads the record beside its host group's and refuses a
+// record or a host of Shape S.
+func TestCeilingCheckShapeR(t *testing.T) {
+	endpoint := startMock(t, mock.Shape{Key: testKey, Answer: strings.Repeat("ready ", 20)})
+	f := newCeilingFixture(t, endpoint, testKey)
+	sCfg := f.cfg
+	f.cfg = shapeRFile(t, f.cfg, true)
+	f.ledger = filepath.Join(t.TempDir(), "ledger.jsonl")
+	if code, err := ledgerCmd([]string{"create", "--ledger", f.ledger, "--config", f.cfg}); err != nil || code != exitOK {
+		t.Fatalf("ledger create: %d, %v", code, err)
+	}
+	if code, err := ledgerCmd([]string{"price", "--ledger", f.ledger, "--config", f.cfg, "--input", "0.15", "--output", "0.60",
+		"--source", "https://example.test/pricing", "--retrieved", "2026-10-06"}); err != nil || code != exitOK {
+		t.Fatalf("ledger price: %d, %v", code, err)
+	}
+	if code, err := ceilingCheckCmd(context.Background(), append(f.args()[:8:8], "--snapshots", f.snapshots, "--byte-cap", "2000")); err == nil || code != exitError ||
+		!strings.Contains(err.Error(), "Shape R has no ticket byte cap") {
+		t.Fatalf("a byte cap on Shape R: %d, %v", code, err)
+	}
+	code, err := ceilingCheckCmd(context.Background(), append(f.args()[:8:8], "--snapshots", f.snapshots))
+	if err != nil || code != exitOK {
+		t.Fatalf("ceiling-check: %d, %v", code, err)
+	}
+	paths, err := filepath.Glob(filepath.Join(f.out, "ceiling-*", "groq-16", probe.File))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("records %v, %v", paths, err)
+	}
+	b, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec probe.ReleaseRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Shape != config.ShapeR || !rec.Ceiling.Pass || rec.Requests[0].FinishReason != "length" || rec.ByteCap != 0 ||
+		rec.InputBound.BoundTokens != 128 || rec.OutputBound != (probe.OutputCheck{CeilingTokens: 16, Reported: 10, MaxOutputTokens: 16, Pass: true}) {
+		t.Fatalf("shape %q, check %+v, input %+v, output %+v, first finish %q", rec.Shape, rec.Ceiling, rec.InputBound, rec.OutputBound, rec.Requests[0].FinishReason)
+	}
+	if b, _ := os.ReadFile(f.ledger); !strings.Contains(string(b), `"kind":"admit","route":"groq","input_tokens":128,"output_tokens":256,`) {
+		t.Fatalf("ledger %s", b)
+	}
+	cfgs, err := loadReleases([]string{f.cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := ledgerOpenSHA256(t, f.ledger)
+	hosts := byRoute(hostConfigs(t, cfgs[0]))
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 0, "baseten", 16, true, open))
+	choice, _, err := readCeilingProbes(cfgs[0], hosts, []string{paths[0], baseten}, 0, open)
+	if err != nil || !reflect.DeepEqual(choice, probe.CeilingChoice{Ceiling: 16, Reason: "every host passed at 16"}) {
+		t.Fatalf("run reads the record: %+v, %v", choice, err)
+	}
+	sCfgs, err := loadReleases([]string{sCfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapeS := writeCeiling(t, hostCeiling(sCfgs[0], 0, "baseten", 512, true, open))
+	if _, _, err := readCeilingProbes(cfgs[0], hosts, []string{paths[0], shapeS}, 0, open); err == nil || !strings.Contains(err.Error(), `route baseten at 512: Shape "S", want Shape R`) {
+		t.Fatalf("a Shape S record: %v", err)
+	}
+	if _, err := hostTargets(cfgs[0], hostConfigs(t, sCfgs[0]), nil, testReleaseKey); err == nil ||
+		!strings.Contains(err.Error(), "run: --host-config of route baseten: Shape S at ceilings [512 1024]; route groq sends Shape R at [16 256], and a host group has one request shape") {
+		t.Fatalf("a Shape S host: %v", err)
 	}
 }
 
@@ -317,7 +421,7 @@ func TestCeilingCheckWithholds(t *testing.T) {
 	}
 	hosts := byRoute(hostConfigs(t, cfgs[0]))
 	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true, ledgerOpenSHA256(t, f.ledger)))
-	if _, _, err := readCeilingProbes(cfgs[0], hosts, []string{path, baseten}, 2000, ledgerOpenSHA256(t, f.ledger)); err == nil || !strings.Contains(err.Error(), "probe: route groq: the probe was blocked") {
+	if _, _, err := readCeilingProbes(cfgs[0], hosts, []string{path, baseten}, 2000, ledgerOpenSHA256(t, f.ledger)); err == nil || !strings.Contains(err.Error(), "probe: route groq has no check at 512 that was not stopped (1 stopped)") {
 		t.Fatalf("run reads the record: %v", err)
 	}
 	rec.Requests[0].Exchange.Headers["X-Ratelimit-Remaining-Requests"] = []string{"qz7919"}
@@ -342,7 +446,9 @@ func markConfidential(t *testing.T, path string) {
 		t.Fatal("configuration: the lines this test edits not found")
 	}
 	b = bytes.Replace(b, []byte(rateLimitHeaders), []byte(rateLimitHeaders+"  retained_headers: [x-ratelimit-*]\n"), 1)
-	if err := os.WriteFile(path, bytes.Replace(b, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      hmac_sha256:"), 1), 0o600); err != nil {
+	b = bytes.Replace(b, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      hmac_sha256:"), 1)
+	b = bytes.Replace(b, []byte(`hmac_sha256: "`+testSnapshotSHA256()+`"`), []byte(`hmac_sha256: "`+testReleaseKey.Sum(testSnapshot)+`"`), 1)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -475,7 +581,7 @@ func TestCeilingCheckNarrowedHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const tpm = "    - dimension: tokens_per_minute\n      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256: \"0000000000000000000000000000000000000000000000000000000000000000\"\n"
+	tpm := "    - dimension: tokens_per_minute\n      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256: \"" + testSnapshotSHA256() + "\"\n"
 	if !bytes.Contains(orig, []byte(tpm)) || !bytes.Contains(orig, []byte(rateLimitHeaders)) {
 		t.Fatal("configuration: the lines this test edits not found")
 	}
@@ -543,7 +649,7 @@ func TestCeilingCheckLimitsBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const tpm = "    - dimension: tokens_per_minute\n      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256: \"0000000000000000000000000000000000000000000000000000000000000000\"\n"
+	tpm := "    - dimension: tokens_per_minute\n      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256: \"" + testSnapshotSHA256() + "\"\n"
 	if !bytes.Contains(orig, []byte(tpm)) || !bytes.Contains(orig, []byte(rateLimitHeaders)) {
 		t.Fatal("configuration: the lines this test edits not found")
 	}
@@ -604,7 +710,7 @@ func TestCeilingCheckReportedModel(t *testing.T) {
 		t.Fatalf("check %+v, input bound %+v, expected model %q", rec.Ceiling, rec.InputBound, rec.ExpectedModel)
 	}
 	const fault = `the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b", and target.reported_model records no documentation naming both as one build: identifier-not-documented`
-	if line := "groq: REFUSED: run refuses the route (SPEC-HOSTED §2): " + fault + "\n"; !strings.Contains(out, line) {
+	if line := "groq: NOT CHARACTERIZED: run refuses the route, and pages publishes it as excluded (SPEC-HOSTED §2): " + fault + "\n"; !strings.Contains(out, line) {
 		t.Fatalf("output lacks %q:\n%s", line, out)
 	}
 	cfgs, err := loadReleases([]string{f.cfg})
@@ -694,11 +800,10 @@ func TestCeilingCheckCmdRefusals(t *testing.T) {
 			f.ledger = priced512(t, f.cfg)
 			return f.args()
 		}, "no price recorded for groq at 1200 input and 1024 output tokens"},
-		{"fallback priced at 512 only", func(t *testing.T, f *ceilingFixture) []string {
+		{"fallback with no check at 512", func(t *testing.T, f *ceilingFixture) []string {
 			f.cfg = fallbackFile(t, f.cfg)
-			f.ledger = priced512(t, f.cfg)
 			return f.args()
-		}, "no price recorded for groq at 1200 input and 1024 output tokens"},
+		}, "the check at 1024 follows the one at 512, and the route has no check at 512 that decides at byte cap 2000"},
 		{"caps differ", func(t *testing.T, f *ceilingFixture) []string {
 			f.cfg = routeConfigFile(t, "groq", endpoint, "9")
 			return f.args()
@@ -740,9 +845,8 @@ func TestCeilingCheckKeyedHashes(t *testing.T) {
 	endpoint, hits := withHeaders(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), nil)
 	f := newCeilingFixture(t, endpoint, "wrong-"+testKey)
 	markConfidential(t, f.cfg)
-	snapshots := t.TempDir()
-	shot := []byte("console: tokens per minute 250013.5")
-	shotPath := writeFile(t, snapshots, "groq-rate-limits-page.png", shot)
+	shot := testSnapshot
+	shotPath := filepath.Join(f.snapshots, "groq-rate-limits-page.png")
 	var code int
 	var err error
 	sum := stdoutOf(t, func() { code, err = keyCmd([]string{"sum", "--key", testReleaseKeyPath, shotPath}) })
@@ -753,13 +857,11 @@ func TestCeilingCheckKeyedHashes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recorded := `hmac_sha256: "` + strings.Repeat("0", 64) + `"`
-	if strings.Count(string(b), recorded) != 1 {
+	if recorded := `hmac_sha256: "` + testReleaseKey.Sum(shot) + `"`; strings.Count(string(b), recorded) != 1 {
 		t.Fatalf("configuration: %q not found once", recorded)
 	}
-	f.cfg = writeFile(t, t.TempDir(), "groq.yaml", []byte(strings.Replace(string(b), recorded, `hmac_sha256: "`+testReleaseKey.Sum(shot)+`"`, 1)))
 	frames := t.TempDir()
-	args := append(f.args(), "--frames", frames, "--snapshots", snapshots)
+	args := append(f.args(), "--frames", frames)
 
 	if code, err := ceilingCheckCmd(context.Background(), args); err == nil || code != exitError || !strings.Contains(err.Error(), "--release-key is required") {
 		t.Fatalf("without --release-key: %d, %v", code, err)
@@ -816,4 +918,45 @@ func TestCeilingCheckKeyedHashes(t *testing.T) {
 		t.Fatalf("the output carries the release key:\n%s%s", printed, sum)
 	}
 	noReleaseKey(t, f.out, frames)
+}
+
+// The check, the cells and the rehearsal build a route's texts from its
+// shape: Shape S from the byte cap it requires, Shape R with none.
+func TestRouteShape(t *testing.T) {
+	cfg := releaseConfig(t, "https://api.example.test/openai/v1/chat/completions")
+	s, err := routeShape("run", cfg, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := pilot.GenerateShapeS(pilot.ShapeSSeed, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.SHA256() != want.SHA256() || s.UserText(512, 3) != want.UserText(512, 3) {
+		t.Errorf("Shape S set %s, want %s", s.SHA256(), want.SHA256())
+	}
+	r := *cfg
+	rel := *cfg.Release
+	rel.Shape.Name = config.ShapeR
+	r.Release = &rel
+	sr, err := routeShape("run", &r, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sr.UserText(16, 7); got != "cs-16-000007 "+pilot.ShapeRInstruction {
+		t.Errorf("Shape R text %q", got)
+	}
+	for _, tc := range []struct {
+		cfg     *config.Config
+		byteCap int
+		want    string
+	}{
+		{cfg, 0, "run: --byte-cap 0: the Shape S ticket byte cap is required"},
+		{cfg, -1, "run: --byte-cap -1"},
+		{&r, 2000, "run: --byte-cap 2000: Shape R has no ticket byte cap; leave it out"},
+	} {
+		if sh, err := routeShape("run", tc.cfg, tc.byteCap); err == nil || sh != nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("byte cap %d: %v, %v; want %q", tc.byteCap, sh, err, tc.want)
+		}
+	}
 }
