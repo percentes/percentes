@@ -351,7 +351,7 @@ func TestBillingRefusalStopsRoute(t *testing.T) {
 		t.Fatalf("loop: code %d, %v", code, err)
 	}
 	rec := readCell(t, r, run)
-	if rec.Outcome != outcomeStopped || len(rec.Reasons) == 0 || !strings.Contains(rec.Reasons[0], "route stop: HTTP 400, the documented billing refusal: spend limit reached") {
+	if rec.Outcome != outcomeStopped || len(rec.Reasons) == 0 || !strings.Contains(rec.Reasons[0], "route stop: HTTP 400, the operator's billing setting, a documented billing refusal: spend limit reached") {
 		t.Fatalf("cell %+v", rec)
 	}
 	if rec.Interrupted == nil || rec.Interrupted.Unsent == 0 {
@@ -528,7 +528,7 @@ func TestCellStopsAndBlocks(t *testing.T) {
 		{"clock offset", "+75.5", 200, "", "", outcomeStopped, "route stop: clock offset: 75.5 s", 0},
 		{"ledger refusal", "+0.005", 200, "", "1399.99", outcomeStopped, "route stop: admission: cell for groq refused", 0},
 		{"probe 401", "+0.005", 401, "", "", outcomeBlocked, "probe request returned 401", 1},
-		{"probe billing refusal", "+0.005", 402, "", "", outcomeStopped, "route stop: HTTP 402, the documented billing refusal", 1},
+		{"probe billing refusal", "+0.005", 402, "", "", outcomeStopped, "route stop: HTTP 402, the operator's billing setting", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEndpoint(t, func(int64) (int, string) { return tc.status, tc.body })
@@ -819,7 +819,7 @@ func TestCellConfidentialBillingRefusal(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := fmt.Sprintf("route stop: HTTP %d, the documented billing refusal: spend limit reached", status)
+			want := fmt.Sprintf("route stop: HTTP %d, the operator's billing setting, a documented billing refusal: spend limit reached", status)
 			if rec.Outcome != outcomeStopped || len(rec.Reasons) != 1 || !strings.Contains(rec.Reasons[0], want) {
 				t.Fatalf("outcome %s, reasons %q", rec.Outcome, rec.Reasons)
 			}

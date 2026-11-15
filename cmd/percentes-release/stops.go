@@ -13,6 +13,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/probe"
 )
 
 // routeStop is a cause that stops the route's process (SPEC-HOSTED HA3
@@ -27,12 +28,15 @@ func (s *routeStop) Error() string { return "route stop: " + s.reason }
 var errEMFILE = errors.New("a request failed with EMFILE (too many open files)")
 
 // billingRefusal returns the stop for a response the target documents as
-// its spend-limit or exhausted-balance refusal, or nil.
-func billingRefusal(t *config.Target, status int, body []byte) *routeStop {
-	for i := range t.BillingRefusals {
-		if b := &t.BillingRefusals[i]; b.Matches(status, body) {
-			return &routeStop{fmt.Sprintf("HTTP %d, the documented billing refusal: %s (%s, retrieved %s)", status, b.Meaning, b.Source, b.Retrieved)}
-		}
+// its spend-limit or exhausted-balance refusal, the operator's billing
+// setting, by its status and body (probe.BillingReason) or by the in-band
+// error streamErr of a 200 stream (probe.InBandBilling), or nil.
+func billingRefusal(t *config.Target, status int, body []byte, streamErr string) *routeStop {
+	if r := probe.BillingReason(t, status, body); r != "" {
+		return &routeStop{r}
+	}
+	if r := probe.InBandBilling(t, status, streamErr); r != "" {
+		return &routeStop{r}
 	}
 	return nil
 }

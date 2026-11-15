@@ -662,10 +662,10 @@ func TestStopSignals(t *testing.T) {
 	tg := &config.Target{BillingRefusals: []config.BillingRefusal{
 		{Status: 429, BodyContains: "enforced_spend_limit_reached", Meaning: "spend limit", Source: "errors.png", Retrieved: "2026-10-07"},
 	}}
-	if s := billingRefusal(tg, 429, []byte(`{"error":{"type":"enforced_spend_limit_reached"}}`)); s == nil || !strings.Contains(s.Error(), "HTTP 429, the documented billing refusal: spend limit (errors.png, retrieved 2026-10-07)") {
+	if s := billingRefusal(tg, 429, []byte(`{"error":{"type":"enforced_spend_limit_reached"}}`), ""); s == nil || !strings.Contains(s.Error(), "HTTP 429, the operator's billing setting, a documented billing refusal: spend limit (errors.png, retrieved 2026-10-07)") {
 		t.Fatalf("stop %v", s)
 	}
-	if s := billingRefusal(tg, 429, []byte(`{"error":{"type":"rate_limit_error"}}`)); s != nil {
+	if s := billingRefusal(tg, 429, []byte(`{"error":{"type":"rate_limit_error"}}`), ""); s != nil {
 		t.Fatalf("a rate limit stopped the route: %v", s)
 	}
 	if isEMFILE(&loadgen.Request{ErrText: "dial tcp: connection refused"}) || !isEMFILE(&loadgen.Request{ErrText: "socket: too many open files"}) {
