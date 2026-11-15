@@ -11,12 +11,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/schedule"
 )
 
 // releaseLedger is a release ledger ledger create starts for the
-// configurations at paths.
+// configurations at paths, with ledger price recording each route's
+// prices.
 func releaseLedger(t *testing.T, paths ...string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ledger.jsonl")
@@ -27,23 +29,28 @@ func releaseLedger(t *testing.T, paths ...string) string {
 	if code, err := ledgerCmd(args); err != nil || code != exitOK {
 		t.Fatalf("ledger create: %d, %v", code, err)
 	}
+	for _, p := range paths {
+		if code, err := ledgerCmd([]string{"price", "--ledger", path, "--config", p, "--input", "0.15", "--output", "0.60",
+			"--source", "https://example.test/pricing", "--retrieved", "2026-10-06"}); err != nil || code != exitOK {
+			t.Fatalf("ledger price: %d, %v", code, err)
+		}
+	}
 	return path
 }
 
 // schedule writes the schedule its inputs derive for the configurations'
 // routes and the ledger, with the ledger's line count and the SHA-256 of
-// its bytes, which run loads, and never replaces a file.
+// its bytes and each route's binding rate, which run loads, and never
+// replaces a file. The reference route at a US$10 cap and US$0.15 and
+// US$0.60 per million tokens is held by its route cap at 1.755 requests
+// per second, below its 2.429 at the tokens-per-minute limit.
 func TestScheduleCmd(t *testing.T) {
 	groq := routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "10")
 	baseten := routeConfigFile(t, "baseten", "https://api.example.test/v1/chat/completions", "10")
 	ledger := releaseLedger(t, groq, baseten)
-	if code, err := ledgerCmd([]string{"price", "--ledger", ledger, "--config", groq, "--input", "0.15", "--output", "0.60",
-		"--source", "https://example.test/pricing", "--retrieved", "2026-10-06"}); err != nil || code != exitOK {
-		t.Fatalf("ledger price: %d, %v", code, err)
-	}
 	path := filepath.Join(t.TempDir(), "schedule.json")
-	args := []string{"--master-seed", "percentes-release-test", "--first", "2026-10-17", "--last", "2026-10-26",
-		"--config", groq, "--config", baseten, "--ledger", ledger, "--release-key", testReleaseKeyPath, "--schedule", path}
+	args := append(passingChecks(t, ledger, groq, baseten), "--master-seed", "percentes-release-test", "--first", "2026-10-17", "--last", "2026-10-26",
+		"--config", groq, "--config", baseten, "--ledger", ledger, "--release-key", testReleaseKeyPath, "--schedule", path)
 	if code, err := scheduleCmd(args); err != nil || code != exitOK {
 		t.Fatalf("schedule: %d, %v", code, err)
 	}
@@ -69,6 +76,9 @@ func TestScheduleCmd(t *testing.T) {
 		if !ok || got.ConfigSHA256 != hex.EncodeToString(sum[:]) || got.ConfigHMACSHA256 != testReleaseKey.Sum(cfg.Raw) || !slices.Equal(got.HostGroup, []string{"baseten", "groq"}) {
 			t.Errorf("%s: frozen %+v, %t", cfg.Target.Name, got, ok)
 		}
+		if got.BindingRPS != 1.755 || got.BindingLimit != admission.RouteCapDimension || got.BindingWindowS != 0 {
+			t.Errorf("%s: binding rate %g, limit %q over %g s; want 1.755 at %s", cfg.Target.Name, got.BindingRPS, got.BindingLimit, got.BindingWindowS, admission.RouteCapDimension)
+		}
 	}
 	lb, err := os.ReadFile(ledger)
 	if err != nil {
@@ -84,7 +94,7 @@ func TestScheduleCmd(t *testing.T) {
 	}
 
 	other := append(slices.Clone(args[:len(args)-1]), path)
-	other[1] = "another-seed"
+	other[slices.Index(other, "--master-seed")+1] = "another-seed"
 	if code, err := scheduleCmd(other); err == nil || code != exitError {
 		t.Fatalf("an existing schedule replaced: %d, %v", code, err)
 	}
@@ -104,8 +114,9 @@ func TestScheduleCmdConfidential(t *testing.T) {
 	markConfidential(t, groq)
 	baseten := routeConfigFile(t, "baseten", "https://api.example.test/v1/chat/completions", "10")
 	path := filepath.Join(t.TempDir(), "schedule.json")
-	args := []string{"--master-seed", "percentes-release-test", "--first", "2026-10-17", "--last", "2026-10-26",
-		"--config", groq, "--config", baseten, "--ledger", releaseLedger(t, groq, baseten), "--release-key", testReleaseKeyPath, "--schedule", path}
+	ledger := releaseLedger(t, groq, baseten)
+	args := append(passingChecks(t, ledger, groq, baseten), "--master-seed", "percentes-release-test", "--first", "2026-10-17", "--last", "2026-10-26",
+		"--config", groq, "--config", baseten, "--ledger", ledger, "--release-key", testReleaseKeyPath, "--schedule", path)
 	var code int
 	var err error
 	printed := stdoutOf(t, func() { code, err = scheduleCmd(args) })
@@ -247,13 +258,14 @@ func TestScheduleCmdRefusals(t *testing.T) {
 		t.Fatalf("no --schedule: %d, %v", code, err)
 	}
 	path := filepath.Join(t.TempDir(), "schedule.json")
-	if code, err := scheduleCmd(append(both, "--ledger", ledger, "--schedule", path)); err != nil || code != exitOK {
+	if code, err := scheduleCmd(append(append(both, passingChecks(t, ledger, groq, baseten)...), "--ledger", ledger, "--schedule", path)); err != nil || code != exitOK {
 		t.Fatalf("the frozen ledger: %d, %v", code, err)
 	}
 }
 
 // schedule refuses routes whose host groups disagree: an other host not
-// given, at another model, or naming other hosts.
+// given, at another model, of another request shape or permitted
+// ceilings, or naming other hosts.
 func TestScheduleCmdHostGroups(t *testing.T) {
 	groq := routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "10")
 	edited := func(path string, from, to string) string {
@@ -276,7 +288,11 @@ func TestScheduleCmdHostGroups(t *testing.T) {
 			`schedule: route groq: other host baseten at model "openai/gpt-oss-120b"; its configuration sends "openai/gpt-oss-20b"`},
 		"groups differ": {[]string{edited(groq, "  other_hosts:", "  other_hosts:\n    - route: azure\n      model: openai/gpt-oss-120b"), baseten,
 			edited(routeConfigFile(t, "azure", "https://api.example.test/v1/chat/completions", "10"), "    - route: baseten\n", "    - route: groq\n      model: openai/gpt-oss-120b\n    - route: baseten\n")},
-			"schedule: routes groq and baseten name different hosts of their model: [azure baseten groq] and [baseten groq]"},
+			"schedule: routes groq and baseten name different hosts of their host group: [azure baseten groq] and [baseten groq]"},
+		"other host's shape": {[]string{groq, shapeRFile(t, baseten, true)},
+			"schedule: route groq: other host baseten sends Shape R at ceilings [16 256], the route Shape S at [512 1024]; a host group has one request shape"},
+		"other host's fallback": {[]string{shapeRFile(t, groq, false), shapeRFile(t, baseten, true)},
+			"schedule: route groq: other host baseten sends Shape R at ceilings [16 256], the route Shape R at [16]; a host group has one request shape"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "schedule.json")
@@ -285,6 +301,73 @@ func TestScheduleCmdHostGroups(t *testing.T) {
 				args = append(args, "--config", c)
 			}
 			if code, err := scheduleCmd(args); err == nil || code != exitError || err.Error() != tc.want {
+				t.Fatalf("%d, %v; want %q", code, err, tc.want)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("a refused schedule wrote %s: %v", path, err)
+			}
+		})
+	}
+}
+
+// schedule refuses an account group whose routes' caps sum above the
+// spend_per_month_usd limit they record, or whose routes record different
+// ones, and takes each group's caps apart; a group recording none has no
+// test.
+func TestScheduleCmdAccountGroups(t *testing.T) {
+	edited := func(path string, reps ...string) string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		for i := 0; i < len(reps); i += 2 {
+			if strings.Count(s, reps[i]) != 1 {
+				t.Fatalf("%q not found once", reps[i])
+			}
+			s = strings.Replace(s, reps[i], reps[i+1], 1)
+		}
+		return writeFile(t, t.TempDir(), filepath.Base(path), []byte(s))
+	}
+	spend := func(value string) string {
+		return "  limits:\n    - dimension: spend_per_month_usd\n      value: " + value + "\n      marking: public\n      operator_set: true\n" +
+			"      source: budget.png\n      retrieved: 2026-10-07\n      sha256: \"" + strings.Repeat("0", 64) + "\"\n"
+	}
+	groq := routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "10")
+	apart := routeConfigFile(t, "baseten", "https://api.example.test/v1/chat/completions", "10.5")
+	baseten := edited(apart, "account_group: baseten", "account_group: groq")
+	// A third route's offset lets the group's two start 80 minutes apart.
+	third := edited(routeConfigFile(t, "anthropic", "https://api.example.test/v1/chat/completions", "10"),
+		"  other_hosts:              # the host group's other routes: same model and shape\n    - route: baseten\n      model: openai/gpt-oss-120b\n", "")
+	for name, tc := range map[string]struct {
+		configs []string
+		want    string
+	}{
+		"caps within the limit": {[]string{edited(groq, "  limits:\n", spend("20.5")), edited(baseten, "  limits:\n", spend("20.5"))}, ""},
+		"caps above the limit": {[]string{edited(groq, "  limits:\n", spend("20.49")), edited(baseten, "  limits:\n", spend("20.49"))},
+			"schedule: account group groq: route caps groq US$10, baseten US$10.5 sum to US$20.5, above the group's spend_per_month_usd limit (US$20.49, source budget.png)"},
+		"limits differ": {[]string{edited(groq, "  limits:\n", spend("20.5")), edited(baseten, "  limits:\n", spend("30"))},
+			"schedule: account group groq: routes groq and baseten record different spend_per_month_usd limits"},
+		"one route records none": {[]string{edited(groq, "  limits:\n", spend("30")), baseten},
+			"schedule: account group groq: routes groq and baseten record different spend_per_month_usd limits"},
+		"groups apart":      {[]string{edited(groq, "  limits:\n", spend("10")), edited(apart, "  limits:\n", spend("10.5"))}, ""},
+		"no limit recorded": {[]string{groq, baseten}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "schedule.json")
+			ledger := releaseLedger(t, append(tc.configs, third)...)
+			args := append(passingChecks(t, ledger, append(tc.configs, third)...), "--master-seed", "s", "--first", "2026-10-17", "--last", "2026-10-26", "--ledger", ledger, "--release-key", testReleaseKeyPath, "--schedule", path)
+			for _, c := range append(tc.configs, third) {
+				args = append(args, "--config", c)
+			}
+			code, err := scheduleCmd(args)
+			if tc.want == "" {
+				if err != nil || code != exitOK {
+					t.Fatalf("%d, %v", code, err)
+				}
+				return
+			}
+			if err == nil || code != exitError || err.Error() != tc.want {
 				t.Fatalf("%d, %v; want %q", code, err, tc.want)
 			}
 			if _, err := os.Stat(path); !os.IsNotExist(err) {

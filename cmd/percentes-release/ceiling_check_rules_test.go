@@ -46,6 +46,27 @@ func snapshotted(t *testing.T, cfgPath string) string {
 	return dir
 }
 
+// passingChecks are --ceiling-probe flags naming, for the configuration
+// at each of paths, a record of its route's check that passed at its
+// ceiling in the ledger at ledger, at byte cap 2000 for Shape S.
+func passingChecks(t *testing.T, ledger string, paths ...string) []string {
+	t.Helper()
+	cfgs, err := loadReleases(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := ledgerOpenSHA256(t, ledger)
+	var args []string
+	for _, c := range cfgs {
+		byteCap := 0
+		if c.Release.Shape.Name == config.ShapeS {
+			byteCap = 2000
+		}
+		args = append(args, "--ceiling-probe", writeCeiling(t, hostCeiling(c, byteCap, c.Target.Name, c.Release.Shape.CeilingTokens, true, open)))
+	}
+	return args
+}
+
 // repeatCheck refuses a check at a spent byte cap or above it, and lets
 // a check at a lower cap pass a record the spent cap supersedes; a check
 // that passed its input bound and failed its ceiling, at a cap no check

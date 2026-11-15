@@ -154,6 +154,7 @@ func routeConfigFile(t *testing.T, name, endpoint, routeUSD string) string {
 		{"\n    - route: baseten\n", "\n    - route: " + other + "\n"},
 		{"endpoint_url: https://api.groq.com/openai/v1/chat/completions", "endpoint_url: " + endpoint},
 		{`route_usd: "10"`, `route_usd: "` + routeUSD + `"`},
+		{"\n  account_group: groq\n", "\n  account_group: " + name + "\n"},
 	} {
 		if strings.Count(s, r[0]) != 1 {
 			t.Fatalf("reference config: %q not found once", r[0])
@@ -197,7 +198,8 @@ func ledgerOpenSHA256(t *testing.T, path string) string {
 }
 
 // ledgerSchedule is testSchedule freezing also the ledger at path at its
-// current position.
+// current position and the binding rate of each of cfgs whose route the
+// ledger prices (freezeBinding).
 func ledgerSchedule(t *testing.T, path string, cfgs []*config.Config, routes ...string) []byte {
 	t.Helper()
 	in := testSchedule(t, cfgs, routes...).Input
@@ -205,6 +207,19 @@ func ledgerSchedule(t *testing.T, path string, cfgs []*config.Config, routes ...
 	in.LedgerSHA256, in.LedgerLines, in.LedgerHeadSHA256 = st.OpenSHA256, st.Lines, st.HeadSHA256
 	s, err := schedule.New(in)
 	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := ledgerEntries(path, st.OpenSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var priced []*config.Config
+	for _, c := range cfgs {
+		if _, err := routePrice(entries, c.Target.Name); err == nil {
+			priced = append(priced, c)
+		}
+	}
+	if s, err = freezeBinding(s, priced, entries[:st.Lines]); err != nil {
 		t.Fatal(err)
 	}
 	b, err := s.JSON()
@@ -224,6 +239,7 @@ func hostConfigs(t *testing.T, cfg *config.Config) []*config.Config {
 		for _, r := range [][2]string{
 			{"\n  name: " + cfg.Target.Name + "\n", "\n  name: " + h.Route + "\n"},
 			{"\n    - route: " + h.Route + "\n", "\n    - route: " + cfg.Target.Name + "\n"},
+			{"\n  account_group: " + cfg.Release.AccountGroup + "\n", "\n  account_group: " + h.Route + "\n"},
 		} {
 			if strings.Count(s, r[0]) != 1 {
 				t.Fatalf("configuration: %q not found once", r[0])

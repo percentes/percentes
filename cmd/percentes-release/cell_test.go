@@ -751,7 +751,7 @@ func confidentialConfigAt(t *testing.T, endpoint, value string) *config.Config {
 		t.Fatal("reference no longer carries the lines this test edits")
 	}
 	raw = bytes.Replace(raw, []byte(rateLimitHeaders), []byte(rateLimitHeaders+"  retained_headers: [x-ratelimit-*]\n"), 1)
-	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: 250013.5\n      marking: confidential\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      hmac_sha256:"), 1))
+	cfg, err := config.Parse(bytes.Replace(raw, []byte(public), []byte("      value: "+value+"\n      marking: confidential\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      hmac_sha256:"), 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -760,16 +760,19 @@ func confidentialConfigAt(t *testing.T, endpoint, value string) *config.Config {
 }
 
 // rulingConfig is releaseConfig with a postpaid balance_unavailable
-// ruling and the spend_per_month_usd limit that covers it, in the file as
-// loaded.
+// ruling and the spend_per_month_usd limit of US$20 that covers it, with
+// a route cap of US$20, in the file as loaded. Its binding rate is the
+// tokens_per_minute limit's 2.429 requests per second, below the 3.5 the
+// caps admit.
 func rulingConfig(t *testing.T, endpoint string) *config.Config {
 	t.Helper()
 	raw := releaseConfig(t, endpoint).Raw
-	const limits, naming = "  limits:\n", "  naming:\n"
-	if bytes.Count(raw, []byte(limits)) != 1 || bytes.Count(raw, []byte(naming)) != 1 {
+	const limits, naming, routeCap = "  limits:\n", "  naming:\n", `route_usd: "10"`
+	if bytes.Count(raw, []byte(limits)) != 1 || bytes.Count(raw, []byte(naming)) != 1 || bytes.Count(raw, []byte(routeCap)) != 1 {
 		t.Fatal("reference no longer carries the lines this test edits")
 	}
-	limit := "    - dimension: spend_per_month_usd\n      value: 10\n      marking: public\n      operator_set: true\n" +
+	raw = bytes.Replace(raw, []byte(routeCap), []byte(`route_usd: "20"`), 1)
+	limit := "    - dimension: spend_per_month_usd\n      value: 20\n      marking: public\n      operator_set: true\n" +
 		"      source: spend-limit.png\n      retrieved: 2026-10-07\n      sha256: \"" + strings.Repeat("0", 64) + "\"\n"
 	ruling := "  balance_unavailable:\n    kind: postpaid\n    reason: postpaid account\n    ruled: 2026-10-07\n    ruling: rulings.md\n"
 	raw = bytes.Replace(raw, []byte(limits), []byte(limits+limit), 1)
@@ -1840,18 +1843,21 @@ func TestOperatorConfidentialValue(t *testing.T) {
 	}
 }
 
-// On a route of openai/gpt-oss-120b with a confidential limit of 120, an
-// operator record URL naming the model and a note naming it without its
-// provider prefix let the route start and a cell start, its records not
-// held; a note with 120 outside the model's name refuses the route.
+// On a route of openai/gpt-oss-120b with a confidential limit of 120
+// concurrent requests, which its route cap of US$7 and binding rate of
+// 1.226 requests per second keep within, an operator record URL naming
+// the model and a note naming it without its provider prefix let the
+// route start and a cell start, its records not held; a note with 120
+// outside the model's name refuses the route.
 func TestOperatorFixedIdentifier(t *testing.T) {
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
 	enoughOpenFiles(t)
 	raw := confidentialConfig(t, e.url()).Raw
-	const balance = "  # A route whose balance command prints"
-	if bytes.Count(raw, []byte(balance)) != 1 {
+	const balance, routeCap = "  # A route whose balance command prints", `route_usd: "10"`
+	if bytes.Count(raw, []byte(balance)) != 1 || bytes.Count(raw, []byte(routeCap)) != 1 {
 		t.Fatal("reference no longer carries the lines this test edits")
 	}
+	raw = bytes.Replace(raw, []byte(routeCap), []byte(`route_usd: "7"`), 1)
 	cfg, err := config.Parse(bytes.Replace(raw, []byte(balance), []byte("    - dimension: concurrent_requests\n      value: 120\n      marking: confidential\n"+
 		"      source: groq-console-limits.png\n      retrieved: 2026-10-07\n      hmac_sha256: \""+strings.Repeat("ab", 32)+"\"\n"+balance), 1))
 	if err != nil {
