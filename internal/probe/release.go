@@ -1,10 +1,12 @@
 package probe
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/redact"
 	"github.com/percentes/percentes/internal/releasekey"
 )
@@ -41,12 +44,11 @@ func LengthValue(adapter string) string {
 	return LengthChatCompletions
 }
 
-// releaseSpacing is the least time between two dispatches of a release
-// probe: the interval of the ladder's lowest step.
-var releaseSpacing = time.Duration(float64(time.Second) / config.PinnedReleaseStepsRPS[0])
-
 // ReleaseInput is one release probe of one route.
 type ReleaseInput struct {
+	// LowestStepRPS is the rate of the route's lowest ladder step: two
+	// dispatches are at least its interval apart.
+	LowestStepRPS float64
 	// Config is the route's configuration under the release profile; the
 	// probe sends its body at its ceiling.
 	Config *config.Config
@@ -55,7 +57,8 @@ type ReleaseInput struct {
 	// SnapshotDir holds the retained copies of the limits whose source is
 	// a file name; empty skips their hash check.
 	SnapshotDir string
-	// ByteCap is the Shape S ticket byte cap the texts were cut at.
+	// ByteCap is the Shape S ticket byte cap the texts were cut at, 0
+	// for a shape with no ticket.
 	ByteCap int
 	// Key is the release key, required for a route with a confidential
 	// limit: the fingerprints of what its record withholds are keyed
@@ -65,6 +68,9 @@ type ReleaseInput struct {
 	// RootCAs, when set, replaces the system roots in verifying the
 	// target's certificate.
 	RootCAs *x509.CertPool
+	// Snapshots, where set, are the snapshots the record carries, read
+	// before the check was admitted (CheckSnapshots).
+	Snapshots []Snapshot
 }
 
 // ReleaseRecord is one release probe: the ceiling and input-bound checks
@@ -85,14 +91,28 @@ type ReleaseRecord struct {
 	// BodySHA256 is the hash of the configured body before the user text
 	// is placed.
 	BodySHA256 string `json:"body_sha256"`
-	// ByteCap is the Shape S ticket byte cap the texts were cut at.
-	ByteCap    int            `json:"byte_cap"`
-	Requests   []CheckRequest `json:"requests"`
-	Ceiling    CeilingCheck   `json:"ceiling_check"`
-	InputBound InputCheck     `json:"input_bound_check"`
+	// ByteCap is the Shape S ticket byte cap the texts were cut at, 0
+	// for a shape with no ticket.
+	ByteCap int `json:"byte_cap"`
+	// Shape is the request shape the check sent, config.ShapeS or
+	// config.ShapeR.
+	Shape       string         `json:"shape"`
+	Requests    []CheckRequest `json:"requests"`
+	Ceiling     CeilingCheck   `json:"ceiling_check"`
+	InputBound  InputCheck     `json:"input_bound_check"`
+	OutputBound OutputCheck    `json:"output_bound_check"`
 	// LedgerSHA256 is the open-line SHA-256 of the admission ledger the
-	// check was admitted and settled in.
+	// check was admitted and settled in, and LedgerSeq the line of its
+	// admission there.
 	LedgerSHA256 string `json:"ledger_sha256"`
+	LedgerSeq    int    `json:"ledger_seq,omitempty"`
+	// Interrupted says why the check ended before its requests ran their
+	// course: its context ended, or its process ended and the record was
+	// written from the ledger afterwards.
+	Interrupted string `json:"interrupted,omitempty"`
+	// Unreached names the last request, which reached no connection
+	// (Reached), and its error; the check ended there.
+	Unreached string `json:"unreached,omitempty"`
 	// RTTNs are the durations of the inference requests' successful TCP
 	// connects, each one round trip to the endpoint.
 	RTTNs  []int64   `json:"rtt_ns"`
@@ -121,13 +141,22 @@ type CheckRequest struct {
 	FinishReason     string   `json:"finish_reason,omitempty"`
 	PromptTokens     *int     `json:"prompt_tokens,omitempty"`
 	CompletionTokens *int     `json:"completion_tokens,omitempty"`
-	Pass             bool     `json:"pass"`
-	Fail             string   `json:"fail,omitempty"`
+	// OutputTokens is the request's reported output, reasoning included:
+	// the largest of its completion count, its total less its prompt
+	// count and any reasoning count its usage reports. Absent when it
+	// reported no completion count.
+	OutputTokens *int `json:"output_tokens,omitempty"`
+	// InBandStatus is the HTTP status target.error_docs gives the type of
+	// the request's in-band error where it is 429 or 500 to 599 and the
+	// error is not a documented billing refusal (InBandRefusal), or 0.
+	InBandStatus int    `json:"in_band_status,omitempty"`
+	Pass         bool   `json:"pass"`
+	Fail         string `json:"fail,omitempty"`
 }
 
 // CeilingCheck is the ten-request check at one ceiling: it passes when
-// every request returned visible content with a finish reason other than
-// the adapter's length value.
+// every request returned visible content and a finish reason, other than
+// the adapter's length value for Shape S.
 type CeilingCheck struct {
 	Ceiling     int    `json:"ceiling"`
 	LengthValue string `json:"length_value"`
@@ -142,6 +171,16 @@ type InputCheck struct {
 	BoundTokens     int  `json:"bound_tokens"`
 	Reported        int  `json:"reported"`
 	MaxPromptTokens int  `json:"max_prompt_tokens"`
+	Exceeded        int  `json:"exceeded"`
+	Pass            bool `json:"pass"`
+}
+
+// OutputCheck is the output bound: it passes when every request reported
+// its output and none exceeded the ceiling it was sent at.
+type OutputCheck struct {
+	CeilingTokens   int  `json:"ceiling_tokens"`
+	Reported        int  `json:"reported"`
+	MaxOutputTokens int  `json:"max_output_tokens"`
 	Exceeded        int  `json:"exceeded"`
 	Pass            bool `json:"pass"`
 }
@@ -163,67 +202,149 @@ const (
 	LimitsFromHeaders = "response_headers"
 )
 
-// RunRelease probes in.Config's route: CeilingRequests requests one after
-// another at the configured ceiling, then the limits read when
-// configured. A status the start gate blocks on ends the requests. It
-// returns an error, before any request, when the key's variable is empty,
-// a route with a confidential limit has no release key, or the input is
-// not a release probe with its byte cap.
-func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
+// CheckReleaseInput returns the error RunRelease returns before any
+// request: the input is not a release probe with its byte cap, a route
+// with a confidential limit has no release key, its texts number other
+// than CeilingRequests, the key's variable is empty, or it names no
+// lowest step rate.
+func CheckReleaseInput(in ReleaseInput) error {
+	if err := checkShapeInput(in); err != nil {
+		return err
+	}
+	t := &in.Config.Target
+	if len(in.Texts) != CeilingRequests {
+		return fmt.Errorf("probe: %d user texts, want %d", len(in.Texts), CeilingRequests)
+	}
+	if os.Getenv(t.APIKeyEnv) == "" {
+		return fmt.Errorf("probe: %s: environment variable %s is empty", t.Name, t.APIKeyEnv)
+	}
+	if !(in.LowestStepRPS > 0) {
+		return fmt.Errorf("probe: %s: lowest step rate %g: want a positive rate", t.Name, in.LowestStepRPS)
+	}
+	return nil
+}
+
+// CheckSnapshots reads the snapshot of each of in's limits (snapshot) and
+// refuses a file source whose retained copy in in.SnapshotDir is missing,
+// unreadable or does not match its recorded hash. It reads nothing where
+// in.SnapshotDir is empty.
+func CheckSnapshots(in ReleaseInput) ([]Snapshot, error) {
+	if in.SnapshotDir == "" {
+		return nil, nil
+	}
+	t := &in.Config.Target
+	out := []Snapshot{}
+	for _, l := range t.Limits {
+		s := snapshot(l, in.SnapshotDir, in.Key)
+		switch {
+		case s.RetainedError != "":
+			return nil, fmt.Errorf("probe: %s: retained copy %q not read: %s", t.Name, l.Source, s.RetainedError)
+		case s.Retained != nil && !*s.Retained:
+			return nil, fmt.Errorf("probe: %s: retained copy %q does not match its recorded %s", t.Name, l.Source, recordedHash(l))
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// checkShapeInput refuses an input that is not a release probe of a
+// release request shape with its byte cap, or a route with a
+// confidential limit with no release key.
+func checkShapeInput(in ReleaseInput) error {
 	cfg := in.Config
 	if cfg == nil || cfg.Profile != config.ProfileRelease || cfg.Release == nil {
-		return nil, errors.New("probe: a release probe needs a configuration under the release profile")
+		return errors.New("probe: a release probe needs a configuration under the release profile")
 	}
-	if len(in.Texts) != CeilingRequests {
-		return nil, fmt.Errorf("probe: %d user texts, want %d", len(in.Texts), CeilingRequests)
+	shape := cfg.Release.Shape.Name
+	if _, ok := config.LookupShape(shape); !ok {
+		return fmt.Errorf("probe: no release request shape %q", shape)
 	}
-	if in.ByteCap <= 0 {
-		return nil, fmt.Errorf("probe: byte cap %d: the texts' ticket byte cap is required", in.ByteCap)
+	switch ticket := shape == config.ShapeS; {
+	case ticket && in.ByteCap <= 0:
+		return fmt.Errorf("probe: byte cap %d: the texts' ticket byte cap is required", in.ByteCap)
+	case !ticket && in.ByteCap != 0:
+		return fmt.Errorf("probe: byte cap %d: Shape %s texts have no ticket byte cap", in.ByteCap, shape)
 	}
-	t := &cfg.Target
-	if t.Confidential() && in.Key == nil {
-		return nil, fmt.Errorf("probe: %s: a route with a confidential limit needs the release key", t.Name)
+	if t := &cfg.Target; t.Confidential() && in.Key == nil {
+		return fmt.Errorf("probe: %s: a route with a confidential limit needs the release key", t.Name)
 	}
-	key := os.Getenv(t.APIKeyEnv)
-	if key == "" {
-		return nil, fmt.Errorf("probe: %s: environment variable %s is empty", t.Name, t.APIKeyEnv)
-	}
-	m := newMasker(key)
+	return nil
+}
+
+// newReleaseRecord is the record of a check of in's route started at
+// start, with no request.
+func newReleaseRecord(in ReleaseInput, start time.Time) *ReleaseRecord {
+	t := &in.Config.Target
 	sum := sha256.Sum256([]byte(t.Body))
-	rec := &ReleaseRecord{
+	return &ReleaseRecord{
 		SchemaVersion:  1,
 		Route:          t.Name,
 		Adapter:        t.Adapter,
 		EndpointURL:    redact.URL(t.EndpointURL),
 		RequestedModel: t.ModelName,
 		ExpectedModel:  t.ExpectedModel(),
-		StartUTC:       time.Now().UTC(),
+		StartUTC:       start.UTC(),
 		BodySHA256:     hex.EncodeToString(sum[:]),
 		ByteCap:        in.ByteCap,
+		Shape:          in.Config.Release.Shape.Name,
 		Requests:       []CheckRequest{},
 		RTTNs:          []int64{},
 		Snapshots:      []Snapshot{},
 	}
+}
+
+// RunRelease probes in.Config's route: CeilingRequests requests one after
+// another at the configured ceiling, dispatched at least the interval of
+// in.LowestStepRPS apart, then the limits read when configured. A
+// response the start gate blocks on, a configured billing refusal first,
+// by status or in-band (requestGate), ends the requests, and so do a
+// request that reached no connection, which marks the record unreached
+// unless its error is the cancellation (cancelled), and the end of ctx,
+// which marks it interrupted after the requests sent (Sent) unless all
+// CeilingRequests ended and the last not on the cancellation
+// (cancelled). It returns CheckReleaseInput's error before any request.
+func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
+	if err := CheckReleaseInput(in); err != nil {
+		return nil, err
+	}
+	cfg := in.Config
+	t := &cfg.Target
+	shape := cfg.Release.Shape.Name
+	key := os.Getenv(t.APIKeyEnv)
+	spacing := time.Duration(float64(time.Second) / in.LowestStepRPS)
+	m := newMasker(key)
+	rec := newReleaseRecord(in, time.Now())
 	transport := newTransport(1, in.RootCAs)
 	defer transport.CloseIdleConnections()
 	p := &prober{rt: transport, target: t, mask: m, timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second, key: in.Key}
 	length := LengthValue(t.Adapter)
+	stop := stopValue(shape, length)
 
 	for i, text := range in.Texts {
 		if i > 0 {
-			wait := time.NewTimer(time.Until(rec.Requests[i-1].Exchange.DispatchUTC.Add(releaseSpacing)))
-			select {
-			case <-wait.C:
-			case <-ctx.Done():
-				wait.Stop()
+			// Timers run on the monotonic clock; dispatch times are wall times.
+			next := rec.Requests[i-1].Exchange.DispatchUTC.Add(spacing)
+			for d := time.Until(next); d > 0 && ctx.Err() == nil; d = time.Until(next) {
+				wait := time.NewTimer(d)
+				select {
+				case <-wait.C:
+				case <-ctx.Done():
+					wait.Stop()
+				}
 			}
 			if ctx.Err() != nil {
 				break
 			}
 		}
 		r := p.post(ctx, t.EndpointURL, t.ModelName, config.LiteralBody(t.Body, text), key)
-		rec.Requests = append(rec.Requests, checkRequest(i, r, length, m))
-		if rec.Start = Gate(t, r.ex.Status); rec.Start.Blocked {
+		q := checkRequest(i, r, stop, m)
+		q.InBandStatus = InBandRefusal(t, q.Shape)
+		rec.Requests = append(rec.Requests, q)
+		if rec.Start = requestGate(t, &r.ex, r.shape); rec.Start.Blocked {
+			break
+		}
+		if !Reached(&r.ex) && !cancelled(&q) {
+			rec.Unreached = unreachedText(i, &r.ex)
 			break
 		}
 	}
@@ -235,6 +356,16 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 			rec.LimitsFrom = LimitsFromRead
 		}
 	}
+	finishRelease(rec, in)
+	return rec, nil
+}
+
+// finishRelease derives rec's headers, round trips, findings, checks and
+// snapshots from its requests and in, and stamps its end.
+func finishRelease(rec *ReleaseRecord, in ReleaseInput) {
+	cfg := in.Config
+	t := &cfg.Target
+	length := LengthValue(t.Adapter)
 	for _, r := range rec.Requests {
 		if h := rateLimitHeaders(r.Exchange.Headers); h != nil {
 			rec.RateLimitHeaders = h
@@ -255,26 +386,195 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 	}
 	rec.Ceiling = ceilingCheck(rec.Requests, cfg.Release.Shape.CeilingTokens, length)
 	rec.InputBound = inputCheck(rec.Requests, cfg.Release.Shape.InputBoundTokens)
-	for _, l := range t.Limits {
-		s := snapshot(l, in.SnapshotDir, in.Key)
+	rec.OutputBound = outputCheck(rec.Requests, cfg.Release.Shape.CeilingTokens)
+	snaps := in.Snapshots
+	if snaps == nil {
+		for _, l := range t.Limits {
+			snaps = append(snaps, snapshot(l, in.SnapshotDir, in.Key))
+		}
+	}
+	for _, s := range snaps {
 		if s.Retained != nil && !*s.Retained {
-			rec.Findings = append(rec.Findings, fmt.Sprintf("retained copy %q does not match its recorded %s", l.Source, recordedHash(l)))
+			rec.Findings = append(rec.Findings, fmt.Sprintf("retained copy %q does not match its recorded %s", s.Source, recordedHash(s.Limit)))
 		}
 		if s.RetainedError != "" {
-			rec.Findings = append(rec.Findings, fmt.Sprintf("retained copy %q not read: %s", l.Source, s.RetainedError))
+			rec.Findings = append(rec.Findings, fmt.Sprintf("retained copy %q not read: %s", s.Source, s.RetainedError))
 		}
 		rec.Snapshots = append(rec.Snapshots, s)
 	}
 	rec.EndUTC = time.Now().UTC()
-	return rec, nil
 }
 
-// Sent counts the inference requests the probe dispatched. The limits
-// read goes to another URL and is not counted.
+// BillingSetting names a billing refusal's stop as the operator's own.
+const BillingSetting = "the operator's billing setting"
+
+// BillingReason is the stop reason for a response t documents as its
+// spend-limit or exhausted-balance refusal (target.billing_refusals), or
+// "".
+func BillingReason(t *config.Target, status int, body []byte) string {
+	for i := range t.BillingRefusals {
+		if b := &t.BillingRefusals[i]; b.Matches(status, body) {
+			return billingReason(status, b)
+		}
+	}
+	return ""
+}
+
+func billingReason(status int, b *config.BillingRefusal) string {
+	return fmt.Sprintf("HTTP %d, %s, a documented billing refusal: %s (%s, retrieved %s)", status, BillingSetting, b.Meaning, b.Source, b.Retrieved)
+}
+
+// releaseGate is the start decision for one ceiling-check exchange: a
+// configured billing refusal, matched on its status and its body (the
+// retained body where the record withholds it), then Gate.
+func releaseGate(t *config.Target, ex *Exchange) Start {
+	b := ex.Body
+	if ex.Retained != nil && ex.Retained.Body != nil {
+		b = ex.Retained.Body
+	}
+	var body []byte
+	if b != nil && !b.Retained {
+		body = b.raw()
+	}
+	if r := BillingReason(t, ex.Status, body); r != "" {
+		return Start{Blocked: true, Reason: r}
+	}
+	return Gate(t, ex.Status)
+}
+
+// requestGate is releaseGate for one ceiling-check request answered ex
+// with stream s, then a billing refusal its in-band error carries
+// (inBandBilling).
+func requestGate(t *config.Target, ex *Exchange, s *Shape) Start {
+	if st := releaseGate(t, ex); st.Blocked {
+		return st
+	}
+	if r := inBandBilling(t, ex, s); r != "" {
+		return Start{Blocked: true, Reason: r}
+	}
+	return Start{}
+}
+
+// refusing reports whether status refuses a ceiling check: 429 or 500 to
+// 599.
+func refusing(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500 && status <= 599
+}
+
+// Reached reports whether ex's request reached a connection: it has a
+// status or acquired a connection. One that did not sent no byte.
+func Reached(ex *Exchange) bool {
+	return ex.Status != 0 || ex.ConnAcquiredNs > 0
+}
+
+// LeftClient reports whether ex's request left the client: dispatched,
+// and reached a connection (Reached).
+func LeftClient(ex *Exchange) bool {
+	return !ex.DispatchUTC.IsZero() && Reached(ex)
+}
+
+// cancelled reports whether q ended on its context's cancellation: its
+// exchange's error, or its stream's read error, is redact.Cancelled. The
+// mark needs the go1.21.6 transport, which returns ctx.Err(); from go1.23
+// it returns context.Cause(ctx), and a cause such as
+// loadgen.ErrOperatorAbort is not context.Canceled.
+func cancelled(q *CheckRequest) bool {
+	return q.Exchange.Error == redact.Cancelled || q.Shape != nil && q.Shape.ReadError == redact.Cancelled
+}
+
+// unreachedText is ReleaseRecord.Unreached for request i, whose exchange
+// ex reached no connection.
+func unreachedText(i int, ex *Exchange) string {
+	why := ex.Error
+	if why == "" {
+		why = "no error recorded"
+	}
+	return fmt.Sprintf("request %d reached no connection: %s", i, why)
+}
+
+// InBandRefusal is the HTTP status t's target.error_docs give the type of
+// s's in-band error object (its "type" string, at the top level or under
+// "error") where it is 429 or 500 to 599 and the error, at that status,
+// is not one of t's documented billing refusals; 0 otherwise.
+func InBandRefusal(t *config.Target, s *Shape) int {
+	if s == nil || s.Error == "" {
+		return 0
+	}
+	typ := errorType(s.Error)
+	if typ == "" {
+		return 0
+	}
+	for _, d := range t.ErrorDocs {
+		if d.Type == typ && refusing(d.Status) && BillingReason(t, d.Status, []byte(s.Error)) == "" {
+			return d.Status
+		}
+	}
+	return 0
+}
+
+// errorType is the "type" string of an in-band error object's text, at
+// the top level or under "error", or "".
+func errorType(text string) string {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(text), &obj) != nil || obj == nil {
+		return ""
+	}
+	var typ string
+	if json.Unmarshal(obj["type"], &typ) != nil || typ == "error" {
+		var inner map[string]json.RawMessage
+		if json.Unmarshal(obj["error"], &inner) == nil && inner != nil {
+			typ = ""
+			json.Unmarshal(inner["type"], &typ) //nolint:errcheck
+		}
+	}
+	return typ
+}
+
+// inBandBilling is InBandBilling for a stream ex answered whose in-band
+// error is in s, its retained text where the record withholds it.
+func inBandBilling(t *config.Target, ex *Exchange, s *Shape) string {
+	if s == nil || s.Error == "" {
+		return ""
+	}
+	text := s.Error
+	if ex.Retained != nil && ex.Retained.StreamError != "" {
+		text = ex.Retained.StreamError
+	}
+	return InBandBilling(t, ex.Status, text)
+}
+
+// InBandBilling is the stop reason for a response of status 200 whose
+// in-band error text t documents as one of its billing refusals at the
+// status target.error_docs give its type, or "".
+func InBandBilling(t *config.Target, status int, text string) string {
+	if status != http.StatusOK || text == "" {
+		return ""
+	}
+	typ := errorType(text)
+	for _, d := range t.ErrorDocs {
+		if typ == "" || d.Type != typ {
+			continue
+		}
+		for i := range t.BillingRefusals {
+			if b := &t.BillingRefusals[i]; b.Matches(d.Status, []byte(text)) {
+				return inBandBillingReason(d.Status, b)
+			}
+		}
+	}
+	return ""
+}
+
+func inBandBillingReason(status int, b *config.BillingRefusal) string {
+	return fmt.Sprintf("HTTP %d in-band, %s, a documented billing refusal: %s (%s, retrieved %s)", status, BillingSetting, b.Meaning, b.Source, b.Retrieved)
+}
+
+// Sent counts the inference requests the probe dispatched that reached a
+// connection (Reached). The limits read goes to another URL and is not
+// counted.
 func (r *ReleaseRecord) Sent() int {
 	n := 0
 	for _, q := range r.Requests {
-		if !q.Exchange.DispatchUTC.IsZero() {
+		if !q.Exchange.DispatchUTC.IsZero() && Reached(&q.Exchange) {
 			n++
 		}
 	}
@@ -357,9 +657,19 @@ func modelFault(want string, documented bool, recs []*ReleaseRecord) string {
 	return ""
 }
 
+// stopValue is the finish reason that fails a request of shape's ceiling
+// check: the adapter's length value for Shape S, none for Shape R.
+func stopValue(shape, length string) string {
+	if shape == config.ShapeR {
+		return ""
+	}
+	return length
+}
+
 // checkRequest reads one request's finish reason and token counts and
-// applies the ceiling check to it.
-func checkRequest(i int, r posted, length string, m masker) CheckRequest {
+// applies the ceiling check to it, failing a finish reason equal to
+// stop (stopValue).
+func checkRequest(i int, r posted, stop string, m masker) CheckRequest {
 	c := CheckRequest{Index: i, Exchange: r.ex, Shape: r.shape}
 	s := r.shape
 	if s != nil {
@@ -373,14 +683,71 @@ func checkRequest(i int, r posted, length string, m masker) CheckRequest {
 				break
 			}
 		}
+		if n, ok := outputTokens(s, c.PromptTokens, c.CompletionTokens); ok {
+			c.OutputTokens = &n
+		}
 	}
-	c.Fail = ceilingFail(r.ex.Status, s, c.FinishReason, length)
+	c.Fail = ceilingFail(r.ex.Status, s, c.FinishReason, stop)
 	c.Pass = c.Fail == ""
 	return c
 }
 
+// outputTokens is the stream's output token count, reasoning included,
+// from its prompt and completion counts: the largest of the completion
+// count, total_tokens less the prompt count (math.MaxInt where
+// total_tokens is math.MaxInt), and a reasoning_tokens count at any depth
+// of the usage. It is false without a completion count.
+func outputTokens(s *Shape, prompt, completion *int) (int, bool) {
+	if completion == nil {
+		return 0, false
+	}
+	n := *completion
+	if total, ok := s.tokens("total_tokens"); ok && total == math.MaxInt {
+		n = math.MaxInt
+	} else if ok && prompt != nil {
+		n = max(n, total-*prompt)
+	}
+	for _, v := range s.usage {
+		n = max(n, reasoningTokens(v))
+	}
+	return n, true
+}
+
+// reasoningTokens is the largest count (loadgen.TokenCount) under a key
+// named reasoning_tokens at any depth of v, or 0.
+func reasoningTokens(v json.RawMessage) int {
+	var x any
+	dec := json.NewDecoder(bytes.NewReader(v))
+	dec.UseNumber()
+	if dec.Decode(&x) != nil {
+		return 0
+	}
+	n := 0
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case map[string]any:
+			for k, e := range t {
+				if c, ok := e.(json.Number); ok && k == "reasoning_tokens" {
+					if i, ok := loadgen.TokenCount(json.RawMessage(c)); ok {
+						n = max(n, i)
+					}
+				}
+				walk(e)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(x)
+	return n
+}
+
 // ceilingFail is the first reason a request with status, stream shape s
-// and recorded finish reason fails the ceiling check, or "".
+// and recorded finish reason fails the ceiling check, or "". A finish
+// reason of length fails it unless length is "".
 func ceilingFail(status int, s *Shape, finish, length string) string {
 	switch {
 	case status != http.StatusOK && status != 0:
@@ -397,7 +764,7 @@ func ceilingFail(status int, s *Shape, finish, length string) string {
 		return "no visible content"
 	case finish == "":
 		return "no finish reason"
-	case finish == length:
+	case length != "" && finish == length:
 		return fmt.Sprintf("finish reason %q: stopped at the ceiling", length)
 	}
 	return ""
@@ -474,7 +841,7 @@ func promptTokens(s *Shape) (int, bool) {
 func ceilingCheck(reqs []CheckRequest, ceiling int, length string) CeilingCheck {
 	c := CeilingCheck{Ceiling: ceiling, LengthValue: length}
 	for _, r := range reqs {
-		if !r.Exchange.DispatchUTC.IsZero() {
+		if !r.Exchange.DispatchUTC.IsZero() && Reached(&r.Exchange) {
 			c.Sent++
 		}
 		if r.Pass {
@@ -494,6 +861,22 @@ func inputCheck(reqs []CheckRequest, bound int) InputCheck {
 		c.Reported++
 		c.MaxPromptTokens = max(c.MaxPromptTokens, *r.PromptTokens)
 		if *r.PromptTokens > bound {
+			c.Exceeded++
+		}
+	}
+	c.Pass = c.Reported == CeilingRequests && c.Exceeded == 0
+	return c
+}
+
+func outputCheck(reqs []CheckRequest, ceiling int) OutputCheck {
+	c := OutputCheck{CeilingTokens: ceiling}
+	for _, r := range reqs {
+		if r.OutputTokens == nil || *r.OutputTokens < 0 {
+			continue
+		}
+		c.Reported++
+		c.MaxOutputTokens = max(c.MaxOutputTokens, *r.OutputTokens)
+		if *r.OutputTokens > ceiling {
 			c.Exceeded++
 		}
 	}

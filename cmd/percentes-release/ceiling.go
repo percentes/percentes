@@ -141,7 +141,7 @@ func sendCeiling(ctx context.Context, ledger *admission.Ledger, cfg *config.Conf
 	if err != nil {
 		return nil, err
 	}
-	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: snapshots, ByteCap: byteCap, Key: key})
+	rec, err := probe.RunRelease(ctx, probe.ReleaseInput{Config: cfg, Texts: texts, SnapshotDir: snapshots, ByteCap: byteCap, Key: key, LowestStepRPS: config.PinnedReleaseStepsRPS[0]})
 	sent := 0
 	if rec != nil {
 		sent, rec.LedgerSHA256 = rec.Sent(), ledger.Bound()

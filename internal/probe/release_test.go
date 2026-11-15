@@ -93,8 +93,13 @@ func newKey(t *testing.T) *releasekey.Key {
 	return k
 }
 
+// releaseProbe runs in, at testStepRPS where in names no lowest step
+// rate.
 func releaseProbe(t *testing.T, in ReleaseInput) *ReleaseRecord {
 	t.Helper()
+	if in.LowestStepRPS == 0 {
+		in.LowestStepRPS = testStepRPS
+	}
 	rec, err := RunRelease(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
@@ -102,11 +107,15 @@ func releaseProbe(t *testing.T, in ReleaseInput) *ReleaseRecord {
 	return rec
 }
 
+// testStepRPS is the lowest step rate releaseProbe runs at: anthropic-R's
+// 0.25 step of 75.454 rps.
+var testStepRPS = 18.863
+
 // noSpacing removes the spacing between dispatches for the test.
 func noSpacing(t *testing.T) {
-	d := releaseSpacing
-	releaseSpacing = 0
-	t.Cleanup(func() { releaseSpacing = d })
+	d := testStepRPS
+	testStepRPS = 1e9
+	t.Cleanup(func() { testStepRPS = d })
 }
 
 func startShaped(t *testing.T, sh mock.Shape) string {
@@ -441,8 +450,9 @@ func TestReleaseProbeFailures(t *testing.T) {
 	ln.Close()
 	cfg = releaseConfig(t, "http://"+closed+"/v1/chat/completions")
 	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
-	if rec.Ceiling.Sent != 10 || rec.Requests[0].Fail != "no response" || rec.Requests[0].Exchange.Error == "" || len(rec.RTTNs) != 0 || rec.Start.Blocked {
-		t.Errorf("refused dial: %+v, rtt %v, start %+v", rec.Requests[0], rec.RTTNs, rec.Start)
+	if rec.Ceiling.Sent != 0 || len(rec.Requests) != 1 || rec.Requests[0].Fail != "no response" || rec.Requests[0].Exchange.Error == "" || len(rec.RTTNs) != 0 || rec.Start.Blocked ||
+		!strings.HasPrefix(rec.Unreached, "request 0 reached no connection: ") {
+		t.Errorf("refused dial: %+v, rtt %v, start %+v, unreached %q", rec.Requests, rec.RTTNs, rec.Start, rec.Unreached)
 	}
 }
 
@@ -558,12 +568,11 @@ func TestReleaseProbeHardTimeout(t *testing.T) {
 	}
 }
 
-// Requests go one at a time, no sooner than the spacing after the last
-// dispatch; the connect durations are the RTT record.
+// Requests go one at a time, no sooner than the lowest step's interval
+// after the last dispatch; the connect durations are the RTT record.
 func TestReleaseProbeSpacingAndRTT(t *testing.T) {
-	d := releaseSpacing
-	releaseSpacing = 300 * time.Millisecond
-	defer func() { releaseSpacing = d }()
+	stepRPS := 3.333
+	spacing := time.Duration(float64(time.Second) / stepRPS)
 	var hits, inFlight, most atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -576,13 +585,13 @@ func TestReleaseProbeSpacingAndRTT(t *testing.T) {
 	}))
 	defer srv.Close()
 	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
-	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, LowestStepRPS: stepRPS})
 	if hits.Load() != 10 || most.Load() != 1 {
 		t.Fatalf("%d requests, at most %d in flight", hits.Load(), most.Load())
 	}
 	for i := 1; i < len(rec.Requests); i++ {
-		if gap := rec.Requests[i].Exchange.DispatchUTC.Sub(rec.Requests[i-1].Exchange.DispatchUTC); gap < releaseSpacing {
-			t.Fatalf("requests %d and %d dispatched %s apart, want at least %s", i-1, i, gap, releaseSpacing)
+		if gap := rec.Requests[i].Exchange.DispatchUTC.Sub(rec.Requests[i-1].Exchange.DispatchUTC); gap < spacing {
+			t.Fatalf("requests %d and %d dispatched %s apart, want at least %s", i-1, i, gap, spacing)
 		}
 	}
 	if len(rec.RTTNs) != 10 {
@@ -1222,23 +1231,29 @@ func TestReleaseProbeNeverRecordsTheKey(t *testing.T) {
 	}
 }
 
-// Nothing is sent without the key or the byte cap, under another
-// profile, or with a text count other than CeilingRequests.
+// Nothing is sent without the key or the byte cap of Shape S, with a
+// byte cap on Shape R, under another profile, with a text count other
+// than CeilingRequests, or without a positive lowest step rate.
 func TestReleaseProbeRefusesItsInput(t *testing.T) {
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
 	defer srv.Close()
 	cfg := releaseConfig(t, srv.URL+"/v1/chat/completions")
+	shapeR := releaseConfig(t, srv.URL+"/v1/chat/completions")
+	shapeR.Release.Shape = config.Shape{Name: config.ShapeR, InputBoundTokens: 128, CeilingTokens: 16, DeadlineS: 30, Fallback: new(bool)}
 	pilot, err := config.LoadFile("../../configs/pilot.reference.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for name, in := range map[string]ReleaseInput{
-		"no config":     {Texts: texts(0), ByteCap: byteCap},
-		"pilot profile": {Config: pilot, Texts: texts(0), ByteCap: byteCap},
-		"nine texts":    {Config: cfg, Texts: texts(0)[:9], ByteCap: byteCap},
-		"eleven texts":  {Config: cfg, Texts: append(texts(0), "x"), ByteCap: byteCap},
-		"no byte cap":   {Config: cfg, Texts: texts(0)},
+		"no config":          {Texts: texts(0), ByteCap: byteCap},
+		"pilot profile":      {Config: pilot, Texts: texts(0), ByteCap: byteCap},
+		"nine texts":         {Config: cfg, Texts: texts(0)[:9], ByteCap: byteCap},
+		"eleven texts":       {Config: cfg, Texts: append(texts(0), "x"), ByteCap: byteCap},
+		"no byte cap":        {Config: cfg, Texts: texts(0)},
+		"Shape R byte cap":   {Config: shapeR, Texts: texts(0), ByteCap: byteCap},
+		"no step rate":       {Config: cfg, Texts: texts(0), ByteCap: byteCap},
+		"negative step rate": {Config: cfg, Texts: texts(0), ByteCap: byteCap, LowestStepRPS: -1},
 	} {
 		if rec, err := RunRelease(context.Background(), in); err == nil || rec != nil {
 			t.Errorf("%s: %v, %v", name, rec, err)
