@@ -175,10 +175,6 @@ const (
 	PinnedReleaseHardTimeoutS   = 90
 	PinnedReleaseConnections    = 32
 
-	// The HA3 pins stay until every caller reads the HA4 ones.
-	PinnedReleaseShape            = "S"
-	PinnedReleaseInputBoundTokens = 1200
-
 	// SPEC-HOSTED HA3 point 6: the rate a route runs at most under a
 	// ruling on a documented dimension with no published value.
 	PinnedReleaseUnpublishedCapRPS = 0.5
@@ -196,10 +192,6 @@ var (
 	// SPEC-HOSTED HA4: the ladder's steps in ascending order, as fractions
 	// of the route's binding rate.
 	PinnedReleaseStepFractions = []float64{0.25, 0.5, 0.75, 0.9, 1}
-
-	// The HA3 pins stay until every caller reads the HA4 ones.
-	PinnedReleaseStepsRPS = []float64{0.25, 0.5, 1, 2, 4}
-	PinnedReleaseCeilings = []int{512, 1024}
 
 	// SPEC-HOSTED HA3 point 7 and HA4: each request shape's input bound,
 	// its output ceiling and its one fallback. A Shape R route declares

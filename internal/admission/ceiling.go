@@ -47,9 +47,6 @@ type Plan struct {
 	ProbeRequests  int         `json:"probe_requests"`
 	Attempts       []Attempt   `json:"attempts,omitempty"`
 	ChecksUTC      []time.Time `json:"checks_utc,omitempty"`
-
-	// DayCells stays until every caller reads Attempts.
-	DayCells int `json:"-"`
 }
 
 // Attempt is one scheduled cell attempt: its scheduled start, and
@@ -158,9 +155,6 @@ type Demand struct {
 	ResetDay string  `json:"reset_day,omitempty"`
 	Attempts int     `json:"attempts,omitempty"`
 	Pass     bool    `json:"pass"`
-
-	// Half stays until every caller reads the window tests.
-	Half bool `json:"-"`
 }
 
 // Step is one ladder step's verdict. A step that fails a test names its

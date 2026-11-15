@@ -59,9 +59,6 @@ type Ladder struct {
 	WarmupS       float64   `yaml:"warmup_s" json:"warmup_s"`
 	StepS         float64   `yaml:"step_s" json:"step_s"`
 	DrainS        float64   `yaml:"drain_s" json:"drain_s"`
-
-	// StepsRPS stays until every caller reads StepFractions.
-	StepsRPS []float64 `yaml:"-" json:"-"`
 }
 
 // StepRates are the ladder's step rates at bindingRPS: the binding rate
