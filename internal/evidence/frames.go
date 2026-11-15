@@ -38,9 +38,12 @@ type FrameRecord struct {
 	// DroppedBytes counts 200 body bytes read and not kept.
 	DroppedBytes int64  `json:"dropped_bytes,omitempty"`
 	ErrorBody    *Bytes `json:"error_body,omitempty"`
-	// StreamError is the in-band error text the attempts file withholds
-	// on a target with a confidential limit.
+	// StreamError is the in-band error text, and ErrorCode and
+	// ErrorStatus the error body's code and status string, that the
+	// attempts file withholds on a target with a confidential limit.
 	StreamError string `json:"stream_error,omitempty"`
+	ErrorCode   string `json:"error_code,omitempty"`
+	ErrorStatus string `json:"error_status,omitempty"`
 }
 
 // Frame is one read of a 200 body; Ns is its return time as a nanosecond
@@ -115,11 +118,12 @@ func FramesDir(root string, epoch time.Time) string {
 }
 
 // WriteRunFrames writes the frame records of res, keeping the 200 bodies
-// where target t keeps model output and the in-band error text where t
-// records a confidential limit, to FramesFile in the run's frame
-// directory under root, readable by the owner only, and returns the
-// file's path. It refuses a root inside the instrument's source tree and
-// an existing file. A nil res writes nothing and returns "".
+// where target t keeps model output and the in-band error text and the
+// error body's code and status string where t records a confidential
+// limit, to FramesFile in the run's frame directory under root,
+// readable by the owner only, and returns the file's path. It refuses a
+// root inside the instrument's source tree and an existing file. A nil
+// res writes nothing and returns "".
 func WriteRunFrames(root string, t *config.Target, res *loadgen.Result) (string, error) {
 	if res == nil {
 		return "", nil
@@ -131,7 +135,8 @@ func WriteRunFrames(root string, t *config.Target, res *loadgen.Result) (string,
 	recs := FrameRecords(res, t.KeepsModelOutput())
 	if t.Confidential() {
 		for i := range recs {
-			recs[i].StreamError = res.Requests[i].StreamError
+			q := &res.Requests[i]
+			recs[i].StreamError, recs[i].ErrorCode, recs[i].ErrorStatus = q.StreamError, q.ErrorCode, q.ErrorStatus
 		}
 	}
 	var b bytes.Buffer

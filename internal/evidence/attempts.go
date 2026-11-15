@@ -69,6 +69,13 @@ type Record struct {
 	// WriteDenied marks a dispatch the release write limit refused before
 	// its first byte; it sent nothing.
 	WriteDenied bool `json:"write_denied,omitempty"`
+	// ErrorType, ErrorCode and ErrorStatus are the type, code and status
+	// string of a non-200 body's error object as received; on a target
+	// with a confidential limit only the type is kept here, and the frame
+	// store keeps the rest.
+	ErrorType   string `json:"error_type,omitempty"`
+	ErrorCode   string `json:"error_code,omitempty"`
+	ErrorStatus string `json:"error_status,omitempty"`
 	// ContentEvents counts chunks carrying visible content.
 	ContentEvents int `json:"content_events"`
 	// CompletionTokens is present only when the stream carried a usage
@@ -179,6 +186,9 @@ func record(r *loadgen.Request, cfg *config.Config, key *releasekey.Key) Record 
 		ConnAcquiredNs:    r.ConnAcquiredNs,
 		WroteRequestNs:    r.WroteRequestNs,
 		WriteDenied:       r.WriteDenied,
+		ErrorType:         r.ErrorType,
+		ErrorCode:         r.ErrorCode,
+		ErrorStatus:       r.ErrorStatus,
 		ContentEvents:     r.Tokens,
 		Usage:             r.Usage,
 		FinishReason:      r.FinishReason,
@@ -196,6 +206,9 @@ func record(r *loadgen.Request, cfg *config.Config, key *releasekey.Key) Record 
 		if key != nil {
 			rec.StreamErrorHMACSHA256 = key.Sum([]byte(r.StreamError))
 		}
+	}
+	if cfg.Target.Confidential() {
+		rec.ErrorCode, rec.ErrorStatus = "", ""
 	}
 	if len(cfg.Target.Shape().Refusal) > 0 {
 		refused := r.RefusalBytes > 0
@@ -290,8 +303,9 @@ func scoreOf(s *score.Scorer, a score.Attempt) *Score {
 
 // Request is the request rec records. The fields the per-attempt record
 // does not carry are zero: inter-token gaps, replica, reasoning and
-// refusal text, the non-200 body, the frames, and a release request's
-// answer. A withheld in-band error is its stand-in.
+// refusal text, the non-200 body, the frames, a release request's answer
+// and, on a target with a confidential limit, the error code and status
+// string. A withheld in-band error is its stand-in.
 func (rec *Record) Request() loadgen.Request {
 	r := loadgen.Request{
 		Index:             rec.Index,
@@ -324,6 +338,9 @@ func (rec *Record) Request() loadgen.Request {
 		WroteRequestNs:    rec.WroteRequestNs,
 		WriteDenied:       rec.WriteDenied,
 		ErrText:           rec.ErrText,
+		ErrorType:         rec.ErrorType,
+		ErrorCode:         rec.ErrorCode,
+		ErrorStatus:       rec.ErrorStatus,
 	}
 	if rec.CompletionTokens != nil {
 		r.CompletionTokens, r.UsageSeen = *rec.CompletionTokens, true
