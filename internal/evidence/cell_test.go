@@ -556,7 +556,7 @@ func TestManifestReleaseGates(t *testing.T) {
 		return l
 	}
 	g6 := func(step, in, n int) validity.Gate { return validity.ReleaseG6(step, in, n, 30) }
-	stopped := []string{"route stop: HTTP 402, the documented billing refusal: balance exhausted"}
+	stopped := []string{"route stop: HTTP 402, the operator's billing setting, a documented billing refusal: balance exhausted"}
 	for _, tc := range []struct {
 		name        string
 		res         loadgen.Result
@@ -643,7 +643,7 @@ func TestCheckReleaseLabelledCell(t *testing.T) {
 		}
 		return refOf(name, b)
 	}
-	stop := []string{"route stop: HTTP 402, the documented billing refusal: balance exhausted"}
+	stop := []string{"route stop: HTTP 402, the operator's billing setting, a documented billing refusal: balance exhausted"}
 	// labelled is a release run stopped with its label; before the ladder
 	// it has empty attempts and frame files.
 	labelled := func(t *testing.T, ladder bool) *releaseRun {

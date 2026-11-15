@@ -20,6 +20,7 @@ import (
 
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/probe"
 	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/score"
 )
@@ -39,6 +40,10 @@ type Record struct {
 	DoneNs     int64           `json:"done_ns"`
 	Outcome    loadgen.Outcome `json:"outcome"`
 	ErrClass   string          `json:"err_class,omitempty"`
+	// BillingRefusal marks a release response the target documents as its
+	// spend-limit or exhausted-balance refusal (target.billing_refusals),
+	// by its status and body or by a 200 stream's in-band error.
+	BillingRefusal bool `json:"billing_refusal,omitempty"`
 	// Shape and CeilingTokens are a release request's shape and output
 	// ceiling, Step its 1-based ladder step and Warmup whether it was sent
 	// in the warm-up (SPEC-HOSTED HA3 point 15). InTime and Late split its
@@ -220,6 +225,7 @@ func record(r *loadgen.Request, cfg *config.Config, key *releasekey.Key) Record 
 	}
 	if cfg.Profile == config.ProfileRelease && cfg.Release != nil {
 		rec.Shape, rec.CeilingTokens = cfg.Release.Shape.Name, cfg.Release.Shape.CeilingTokens
+		rec.BillingRefusal = probe.BillingReason(&cfg.Target, r.Status, r.ErrorBody) != "" || probe.InBandBilling(&cfg.Target, r.Status, r.StreamError) != ""
 		rec.InTime = r.Outcome == loadgen.OutcomeCompleted && !r.Late
 		rec.ReasoningTokens = reasoningTokens(r.Usage)
 		return rec

@@ -22,6 +22,9 @@ const (
 	LineLate     = "completed_late"
 	LineCensored = "censored"
 	LineUnsent   = "unsent"
+	// LineBilling is a documented billing refusal, which enters no
+	// provider-failure figure (SPEC-HOSTED HA4).
+	LineBilling = "billing_refusal"
 )
 
 // errClasses are the error classes in print order.
@@ -384,6 +387,9 @@ func lineOf(r *evidence.Record) (string, error) {
 	case loadgen.OutcomeCensored:
 		return LineCensored, nil
 	case loadgen.OutcomeErrored:
+		if r.BillingRefusal {
+			return LineBilling, nil
+		}
 		if slices.Contains(errClasses, r.ErrClass) {
 			return r.ErrClass, nil
 		}
@@ -602,8 +608,9 @@ func (t *tables) cellTable(cfg *config.Config, c CellRecords) (CellTable, []step
 
 // lines builds a step's outcome lines in print order, the two
 // LineCompleted sub-lines after completed_late, a status line per code
-// after status_other, a finish-reason line per label after empty_stream
-// and an in-band error line per label after malformed_stream.
+// after status_other, a finish-reason line per label after empty_stream,
+// an in-band error line per label after malformed_stream and, where any
+// response was one, the billing_refusal line last.
 func (t *tables) lines(c *stepTally, rate func(int) Rate) []Line {
 	var out []Line
 	for _, name := range stepLines {
@@ -629,6 +636,9 @@ func (t *tables) lines(c *stepTally, rate func(int) Rate) []Line {
 				out = append(out, Line{Name: name, InBand: label, ErrorDoc: t.errorDocs[label], Rate: rate(c.inBand[label])})
 			}
 		}
+	}
+	if n := c.lines[LineBilling]; n > 0 {
+		out = append(out, Line{Name: LineBilling, Rate: rate(n)})
 	}
 	return out
 }

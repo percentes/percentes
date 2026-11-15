@@ -83,6 +83,9 @@ func newStepTally() stepTally {
 // unsent request is censored at the horizon.
 func (t *timing) add(line string, r *evidence.Record, horizonUs int64) error {
 	switch line {
+	case LineBilling:
+		t.sent++
+		return nil
 	case LineUnsent:
 		t.obs = append(t.obs, collect.Obs{TimeUs: horizonUs, Kind: collect.ObsCensored})
 	case LineCensored:

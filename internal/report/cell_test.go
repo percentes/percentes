@@ -45,7 +45,7 @@ func cellManifest(t *testing.T, outcome string, reasons []string, ladder bool) (
 // cell's report says it enters the frame. Records whose run failures
 // are not the manifest's are refused.
 func TestCellReport(t *testing.T) {
-	stop := []string{"route stop: HTTP 402, the documented billing refusal: balance exhausted (errors.png, retrieved 2026-10-07)"}
+	stop := []string{"route stop: HTTP 402, the operator's billing setting, a documented billing refusal: balance exhausted (errors.png, retrieved 2026-10-07)"}
 	m, cfg := cellManifest(t, evidence.CellStopped, stop, false)
 	raw, text, err := cellReport(m, cfg, nil)
 	if err != nil {
