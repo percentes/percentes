@@ -90,3 +90,26 @@ func TestGCPauseP99BucketEdges(t *testing.T) {
 		t.Fatalf("no pause: got [%v, %v)", lo, hi)
 	}
 }
+
+// One refused write fails the send-skew gate and the step, with every
+// dispatch on time and the other gates passing.
+func TestWriteDeniedFailsSendSkewGate(t *testing.T) {
+	var samples []cpuSample
+	for i := int64(0); i < 10; i++ {
+		samples = append(samples, cpuSample{atNs: i * 1e9, pct: 10})
+	}
+	for _, denied := range []bool{true, false} {
+		reqs := []Request{{Index: 0, IntendedNs: 1e9, DispatchNs: 1e9, WriteDenied: denied}}
+		rep := evaluateGates(pinnedValidity(), reqs, samples, 0.1, 0.5, 0, 10e9)
+		if !rep.UndispatchedPass || !rep.CPUPass || !rep.GCPass || rep.SendSkewP99Us != 0 || rep.SendSkewMaxUs != 0 {
+			t.Fatalf("denied %t: other gates %+v", denied, rep)
+		}
+		want := 0
+		if denied {
+			want = 1
+		}
+		if rep.WritesDenied != want || rep.SendSkewPass == denied || rep.Pass == denied {
+			t.Errorf("denied %t: writes denied %d, send skew pass %t, pass %t", denied, rep.WritesDenied, rep.SendSkewPass, rep.Pass)
+		}
+	}
+}

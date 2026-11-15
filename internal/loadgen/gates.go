@@ -16,11 +16,14 @@ import (
 // GateReport is the §2 client-validity gate outcome, run-failing, with
 // every threshold pinned in config (enforced equal to SPEC.md values).
 type GateReport struct {
-	SendSkewP99Us    int64 `json:"send_skew_p99_us"`
-	SendSkewMaxUs    int64 `json:"send_skew_max_us"`
-	SendSkewPass     bool  `json:"send_skew_pass"`
-	Undispatched     int   `json:"undispatched"`
-	UndispatchedPass bool  `json:"undispatched_pass"`
+	SendSkewP99Us int64 `json:"send_skew_p99_us"`
+	SendSkewMaxUs int64 `json:"send_skew_max_us"`
+	SendSkewPass  bool  `json:"send_skew_pass"`
+	// WritesDenied counts requests whose first byte the release write
+	// limit refused; any fails the send-skew gate.
+	WritesDenied     int  `json:"writes_denied,omitempty"`
+	Undispatched     int  `json:"undispatched"`
+	UndispatchedPass bool `json:"undispatched_pass"`
 
 	// CPUMeasured is false when the platform provided no host central
 	// processing unit (CPU) samples (e.g. darwin built without cgo) or
@@ -71,6 +74,9 @@ func evaluateGates(cfg *config.Config, requests []Request, samples []cpuSample, 
 	var skews []int64
 	for i := range requests {
 		r := &requests[i]
+		if r.WriteDenied {
+			rep.WritesDenied++
+		}
 		if r.DispatchNs == 0 {
 			rep.Undispatched++
 			continue
@@ -86,7 +92,7 @@ func evaluateGates(cfg *config.Config, requests []Request, samples []cpuSample, 
 		rep.SendSkewP99Us, rep.SendSkewMaxUs = p99Ns/1000, maxNs/1000
 	}
 	// Compared in nanoseconds; the report fields round down to microseconds.
-	rep.SendSkewPass = p99Ns <= int64(v.SendSkewP99Ms)*1_000_000 &&
+	rep.SendSkewPass = rep.WritesDenied == 0 && p99Ns <= int64(v.SendSkewP99Ms)*1_000_000 &&
 		maxNs <= int64(v.SendSkewMaxMs)*1_000_000
 	rep.UndispatchedPass = rep.Undispatched == 0
 

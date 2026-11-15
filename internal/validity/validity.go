@@ -283,8 +283,8 @@ func G2(step int, cg *loadgen.GateReport) Gate {
 		return g
 	}
 	g.Observed, g.Pass = true, cg.Pass
-	g.Detail = fmt.Sprintf("skew p99=%dus/max=%dus; undispatched=%d; cpu_measured=%v worst=%.1f%%; %s",
-		cg.SendSkewP99Us, cg.SendSkewMaxUs, cg.Undispatched, cg.CPUMeasured, cg.CPUWorstWindowPct, cg.GCPauseText())
+	g.Detail = fmt.Sprintf("skew p99=%dus/max=%dus; undispatched=%d; writes_denied=%d; cpu_measured=%v worst=%.1f%%; %s",
+		cg.SendSkewP99Us, cg.SendSkewMaxUs, cg.Undispatched, cg.WritesDenied, cg.CPUMeasured, cg.CPUWorstWindowPct, cg.GCPauseText())
 	return g
 }
 

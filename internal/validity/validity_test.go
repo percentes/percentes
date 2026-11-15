@@ -351,3 +351,12 @@ func TestG7HostedNotApplicable(t *testing.T) {
 		t.Fatalf("hosted G7 must be not applicable, got %+v", g)
 	}
 }
+
+// A step's G2 detail counts refused writes, and G2 takes the step
+// report's pass.
+func TestG2DetailWritesDenied(t *testing.T) {
+	g := G2(2, &loadgen.GateReport{SendSkewP99Us: 900, SendSkewMaxUs: 9888, WritesDenied: 5, CPUMeasured: true, UndispatchedPass: true, CPUPass: true, GCPass: true})
+	if g.Pass || !strings.Contains(g.Detail, "skew p99=900us/max=9888us; undispatched=0; writes_denied=5; cpu_measured=true") {
+		t.Fatalf("G2 at step 2: pass %t, %q", g.Pass, g.Detail)
+	}
+}
