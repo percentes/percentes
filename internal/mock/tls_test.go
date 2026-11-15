@@ -44,3 +44,43 @@ func TestStartTLS(t *testing.T) {
 		t.Errorf("client without the pool: %v, want a certificate error", err)
 	}
 }
+
+// SetRateLimit refuses with 429 each request that finds the limit's
+// requests admitted in the window before it, admits again once the
+// window has passed them, counts the refusals under outcome 429, and
+// limits nothing once removed.
+func TestRateLimit(t *testing.T) {
+	cfg := baseMockCfg()
+	cfg.TTFT, cfg.ITL = fixed(1), fixed(1)
+	s := startServer(t, cfg)
+	base := "http://" + s.Addr()
+	s.SetRateLimit(2, 300*time.Millisecond)
+	var got []int
+	for i := 0; i < 3; i++ {
+		got = append(got, doStream(t, base, 1).status)
+	}
+	time.Sleep(350 * time.Millisecond)
+	got = append(got, doStream(t, base, 1).status)
+	s.SetRateLimit(0, 0)
+	for i := 0; i < 3; i++ {
+		got = append(got, doStream(t, base, 1).status)
+	}
+	if want := []int{200, 200, 429, 200, 200, 200, 200}; !equalInts(got, want) {
+		t.Errorf("statuses %v, want %v", got, want)
+	}
+	if m := metricsText(t, base); !strings.Contains(m, `percentes_mock_requests_total{outcome="429"} 1`) {
+		t.Errorf("metrics do not count one 429:\n%s", m)
+	}
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

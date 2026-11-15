@@ -130,6 +130,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		s.requestsTotal.WithLabelValues("rst").Inc()
 		rst(w)
 		return
+	case !s.limit.admit(time.Now()):
+		s.requestsTotal.WithLabelValues("429").Inc()
+		s.writeError(w, http.StatusTooManyRequests, "rate limit: request rate above the mock's limit")
+		return
 	}
 
 	s.activeStreams.Inc()

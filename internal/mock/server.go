@@ -4,7 +4,9 @@
 // (ITL), and scriptable fault modes: stall, error, throttle (429),
 // stream-abort, silent-hang and slow-reload-on-reschedule. A silent hang
 // sends no Transmission Control Protocol (TCP) reset (RST). NewShaped
-// serves the hosted-provider stream form a Shape describes.
+// serves the hosted-provider stream form a Shape describes, StartTLS
+// serves over Transport Layer Security (TLS), and SetRateLimit refuses
+// requests above a rate with 429.
 //
 // The data plane is /v1/chat/completions (or, for a Messages Shape,
 // /v1/messages and /anthropic/v1/messages) and /health. /admin and /metrics
@@ -41,6 +43,7 @@ type Server struct {
 	done     chan struct{}
 
 	reqCounter atomic.Int64
+	limit      rateLimit
 
 	registry      *prometheus.Registry
 	requestsTotal *prometheus.CounterVec
