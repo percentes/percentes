@@ -17,12 +17,14 @@ var PublicationStatements = []string{
 
 // PublicationPage is what the release publishes from its publication
 // record (SPEC-HOSTED §9): each route's notice and window dates and its
-// responses, the corrections log, the providers told of the measurement
-// before the notices and PublicationStatements. Recipients, account
-// identifiers and the files the record keeps are left out, except the
-// text of a response published verbatim with the provider's consent.
+// responses, the dates no window counted as working days, the
+// corrections log, the providers told of the measurement before the
+// notices and PublicationStatements. Recipients, account identifiers
+// and the files the record keeps are left out, except the text of a
+// response published verbatim with the provider's consent.
 type PublicationPage struct {
 	Routes         []PageRoute      `json:"routes"`
+	NonWorkingDays []string         `json:"non_working_days"`
 	CorrectionsLog []PageCorrection `json:"corrections_log"`
 	ToldBefore     []PageDisclosure `json:"told_before"`
 	Statements     []string         `json:"statements"`
@@ -77,7 +79,7 @@ func (d PageDisclosure) String() string {
 func (p *Publication) Page() (*PublicationPage, error) {
 	var problems []string
 	fail := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
-	pg := &PublicationPage{Routes: []PageRoute{}, CorrectionsLog: []PageCorrection{}, ToldBefore: p.toldBefore(),
+	pg := &PublicationPage{Routes: []PageRoute{}, NonWorkingDays: append([]string{}, p.NonWorkingDays...), CorrectionsLog: []PageCorrection{}, ToldBefore: p.toldBefore(),
 		Statements: slices.Clone(PublicationStatements)}
 	routes := slices.Clone(p.Routes)
 	slices.SortStableFunc(routes, func(a, b RoutePublication) int { return strings.Compare(a.Route, b.Route) })
@@ -117,7 +119,11 @@ func (pg *PublicationPage) Markdown() string {
 	add := func(format string, a ...any) { paras = append(paras, fmt.Sprintf(format, a...)) }
 	add("# Publication record")
 	add("## Notices")
-	add("Each notice carried its route's evidence pack. The factual-accuracy window closed at the end of the date shown, UTC.")
+	uncounted := "none"
+	if len(pg.NonWorkingDays) > 0 {
+		uncounted = strings.Join(pg.NonWorkingDays, ", ")
+	}
+	add("Each notice carried its route's evidence pack. The factual-accuracy window closed at the end of the date shown, UTC. Its working days are the weekdays after the notice's date, apart from these dates: %s.", uncounted)
 	table := "| Route | Notice sent | Window closed | Named with written permission |\n| --- | --- | --- | --- |"
 	for _, r := range pg.Routes {
 		named := "no"

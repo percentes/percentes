@@ -437,7 +437,7 @@ func TestPublicationPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	const want = "# Publication record\n\n## Notices\n\n" +
-		"Each notice carried its route's evidence pack. The factual-accuracy window closed at the end of the date shown, UTC.\n\n" +
+		"Each notice carried its route's evidence pack. The factual-accuracy window closed at the end of the date shown, UTC. Its working days are the weekdays after the notice's date, apart from these dates: none.\n\n" +
 		"| Route | Notice sent | Window closed | Named with written permission |\n| --- | --- | --- | --- |\n" +
 		"| azure | 2026-10-27 | 2026-11-02 | yes |\n| bedrock | 2026-10-27 | 2026-11-02 | no |\n| groq | 2026-10-27 | 2026-11-02 | no |\n\n" +
 		"## Responses\n\n### azure\n\nReceived 2026-10-30; corrections made: 1, in the corrections log.\n\n" +
@@ -502,6 +502,41 @@ func TestPublicationPage(t *testing.T) {
 	put(t, f.dir, "responses/groq.txt", "edited")
 	if _, err := p.Page(); err == nil || !strings.Contains(err.Error(), "evidence: publication page: route groq: responses[0].text: responses/groq.txt has SHA-256 "+shaOf([]byte("edited"))) {
 		t.Errorf("text edited after the check: %v", err)
+	}
+}
+
+// The publication page names each date the record's non_working_days
+// leaves out of a window's working days, in the notices paragraph and in
+// its JSON, and prints none where the record names none.
+func TestPublicationPageNamesUncountedDays(t *testing.T) {
+	f := newPublicationFixture(t)
+	f.p.NonWorkingDays = []string{"2026-10-29"}
+	for i := range f.p.Routes {
+		f.p.Routes[i].Notice.WindowCloses = "2026-11-03"
+	}
+	f.s.Now = time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
+	p := f.load(t)
+	if err := p.Check(f.s); err != nil {
+		t.Fatal(err)
+	}
+	pg, err := p.Page()
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, err := json.Marshal(pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const line = "Its working days are the weekdays after the notice's date, apart from these dates: 2026-10-29.\n\n"
+	if md := pg.Markdown(); !strings.Contains(md, line) || !strings.Contains(string(js), `"non_working_days":["2026-10-29"]`) {
+		t.Fatalf("markdown:\n%s\nJSON:\n%s", md, js)
+	}
+	f = newPublicationFixture(t)
+	if pg, err = f.load(t).Page(); err != nil {
+		t.Fatal(err)
+	}
+	if js, err = json.Marshal(pg); err != nil || !strings.Contains(string(js), `"non_working_days":[]`) || !strings.Contains(pg.Markdown(), "apart from these dates: none.\n\n") {
+		t.Fatalf("no non-working day: %v\n%s", err, js)
 	}
 }
 
