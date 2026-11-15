@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"syscall"
 	"time"
 
@@ -116,11 +117,18 @@ type Entry struct {
 	Note string `json:"note,omitempty"`
 
 	// admit, refused
-	Purpose string    `json:"purpose,omitempty"`
-	Reserve int       `json:"reserve,omitempty"`
-	Before  *Position `json:"before,omitempty"`
-	After   *Position `json:"after,omitempty"`
-	Reason  string    `json:"reason,omitempty"`
+	Purpose string `json:"purpose,omitempty"`
+	// AccountGroup is the account group of a ceiling check's route, on
+	// its probe admission; CheckCeiling and ByteCap are the ceiling the
+	// check is sent at and its Shape S ticket byte cap, 0 on a line
+	// written before they were recorded and ByteCap 0 for Shape R.
+	AccountGroup string    `json:"account_group,omitempty"`
+	CheckCeiling int       `json:"check_ceiling,omitempty"`
+	ByteCap      int       `json:"byte_cap,omitempty"`
+	Reserve      int       `json:"reserve,omitempty"`
+	Before       *Position `json:"before,omitempty"`
+	After        *Position `json:"after,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
 
 	// settle: the admit line it settles and the requests sent.
 	Admit   int     `json:"admit,omitempty"`
@@ -285,13 +293,15 @@ type State struct {
 	routeCaps    map[string]*big.Rat
 }
 
-// Admission is one admitted reservation.
+// Admission is one admitted reservation; Group is a ceiling check's
+// account group.
 type Admission struct {
 	Seq     int
 	Route   string
 	Purpose string
 	Reserve int
 	Tokens  Tokens
+	Group   string
 }
 
 // Total is the charge across routes.
@@ -709,21 +719,55 @@ func (l *Ledger) RecordHosting(usd, note string) error {
 // global liability cap. The admit line carries the price its requests
 // count at.
 func (l *Ledger) Admit(route, purpose string, n int, tok Tokens) (Admission, error) {
-	return l.admit(route, purpose, n, tok, nil)
+	return l.admit(route, purpose, n, tok, nil, "", 0, 0)
 }
 
 // AdmitAt is Admit for a caller that checked the route's price at
 // revision rev (State.PriceRevision): where the ledger's revision differs
 // it returns a *PriceChanged and writes no line.
 func (l *Ledger) AdmitAt(route, purpose string, n int, tok Tokens, rev int) (Admission, error) {
-	return l.admit(route, purpose, n, tok, &rev)
+	return l.admit(route, purpose, n, tok, &rev, "", 0, 0)
 }
 
-func (l *Ledger) admit(route, purpose string, n int, tok Tokens, rev *int) (Admission, error) {
+// AdmitCheck is Admit of a ceiling check of route, whose account group
+// is group: n probe requests. It returns an error and writes no line
+// while the ledger holds an unsettled probe admission on group.
+func (l *Ledger) AdmitCheck(route, group string, n int, tok Tokens) (Admission, error) {
+	if group == "" {
+		return Admission{}, errors.New("admission: a ceiling check needs its account group")
+	}
+	return l.admit(route, PurposeProbe, n, tok, nil, group, 0, 0)
+}
+
+// AdmitCeilingCheck is AdmitCheck recording on its line the ceiling the
+// check is sent at and its Shape S ticket byte cap, 0 for Shape R.
+func (l *Ledger) AdmitCeilingCheck(route, group string, n int, tok Tokens, ceiling, byteCap int) (Admission, error) {
+	switch {
+	case group == "":
+		return Admission{}, errors.New("admission: a ceiling check needs its account group")
+	case ceiling < 1 || byteCap < 0:
+		return Admission{}, fmt.Errorf("admission: a ceiling check at ceiling %d and byte cap %d", ceiling, byteCap)
+	}
+	return l.admit(route, PurposeProbe, n, tok, nil, group, ceiling, byteCap)
+}
+
+func (l *Ledger) admit(route, purpose string, n int, tok Tokens, rev *int, group string, ceiling, byteCap int) (Admission, error) {
 	var a Admission
 	_, err := l.update(func(st *State) (*Entry, error) {
 		if route == "" {
 			return nil, errors.New("admission: empty route")
+		}
+		if group != "" {
+			var held []int
+			for seq, o := range st.Open {
+				if o.Purpose == PurposeProbe && (o.Group == group || o.Route == route) {
+					held = append(held, seq)
+				}
+			}
+			if len(held) > 0 {
+				slices.Sort(held)
+				return nil, fmt.Errorf("admission: ledger line %d holds an unsettled ceiling check of route %s on account group %s", held[0], st.Open[held[0]].Route, group)
+			}
 		}
 		if have := st.PriceRevision(route); rev != nil && have != *rev {
 			return nil, &PriceChanged{Route: route, Checked: *rev, Ledger: have}
@@ -773,9 +817,9 @@ func (l *Ledger) admit(route, purpose string, n int, tok Tokens, rev *int) (Admi
 		if reason != "" {
 			return refusal(before, after, reason)
 		}
-		a = Admission{Seq: st.Lines + 1, Route: route, Purpose: purpose, Reserve: n, Tokens: tok}
+		a = Admission{Seq: st.Lines + 1, Route: route, Purpose: purpose, Reserve: n, Tokens: tok, Group: group}
 		return &Entry{Kind: KindAdmit, Route: route, InputTokens: tok.Input, OutputTokens: tok.Output, PerRequestUSD: decimalString(st.price(route, tok)),
-			Purpose: purpose, Reserve: n, Before: before, After: after}, nil
+			Purpose: purpose, AccountGroup: group, CheckCeiling: ceiling, ByteCap: byteCap, Reserve: n, Before: before, After: after}, nil
 	})
 	if err != nil {
 		return Admission{}, err
@@ -951,6 +995,12 @@ func (st *State) apply(e *Entry) error {
 		if err := checkCounts(e.Purpose, Counts{}); err != nil {
 			return err
 		}
+		if e.AccountGroup != "" && e.Purpose != PurposeProbe {
+			return fmt.Errorf("a %s admission names account group %q", e.Purpose, e.AccountGroup)
+		}
+		if (e.CheckCeiling != 0 || e.ByteCap != 0) && (e.Purpose != PurposeProbe || e.CheckCeiling < 1 || e.ByteCap < 0) {
+			return fmt.Errorf("a %s admission names ceiling %d and byte cap %d", e.Purpose, e.CheckCeiling, e.ByteCap)
+		}
 		tok := Tokens{e.InputTokens, e.OutputTokens}
 		if p := st.price(e.Route, tok); p == nil || e.PerRequestUSD != decimalString(p) {
 			return fmt.Errorf("admit at %d input and %d output tokens: per_request_usd %q, not the route's highest price there", tok.Input, tok.Output, e.PerRequestUSD)
@@ -958,7 +1008,7 @@ func (st *State) apply(e *Entry) error {
 		u := st.usage(e.Route)
 		u.Reserved += e.Reserve
 		u.charged[tok] += e.Reserve
-		st.Open[e.Seq] = Admission{Seq: e.Seq, Route: e.Route, Purpose: e.Purpose, Reserve: e.Reserve, Tokens: tok}
+		st.Open[e.Seq] = Admission{Seq: e.Seq, Route: e.Route, Purpose: e.Purpose, Reserve: e.Reserve, Tokens: tok, Group: e.AccountGroup}
 	case KindRefused:
 	case KindSettle:
 		a, ok := st.Open[e.Admit]
