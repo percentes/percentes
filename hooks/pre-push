@@ -10,8 +10,8 @@ set -u
 GOTOOLCHAIN=${GOTOOLCHAIN:-go1.21.6}
 export GOTOOLCHAIN
 
-printf 'pre-push: go test -race -short ./...\n'
-go test -race -short ./... -count=1 || {
+printf 'pre-push: go test -race -short ./... -count=1 -timeout 30m\n'
+go test -race -short ./... -count=1 -timeout 30m || {
 	printf '\npre-push: unit tests failed, push aborted\n\n' >&2
 	exit 1
 }

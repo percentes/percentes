@@ -108,9 +108,10 @@ The two hosted binaries are needed only for the hosted measurement.
 
 `make hooks` points git at `hooks/`: gofmt, build and golangci-lint on
 commit (`go vet` when the linter is absent), and the race unit suite on
-push, so a change fails locally before it fails CI. `hooks/commit-msg`
-requires a subject line of 55 characters or fewer in lowercase
-conventional style, with no body.
+push, with the 30-minute test timeout CI gives it, so a change fails
+locally before it fails CI. `hooks/commit-msg` requires a subject line
+of 55 characters or fewer in lowercase conventional style, with no
+body.
 
 The full gate's last four stages build a Docker image. Three of them
 drive a kind cluster; the process-kill stage runs the mock in a local

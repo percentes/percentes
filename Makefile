@@ -56,7 +56,7 @@ percentes-release-linux:
 	GOOS=linux GOARCH=$(RELEASE_LINUX_ARCH) CGO_ENABLED=0 $(GO) build -o $(RELEASE_LINUX_BIN) ./cmd/percentes-release
 
 test-unit:
-	$(GO) test -race -short ./... -count=1
+	$(GO) test -race -short ./... -count=1 -timeout 30m
 
 # The AC suite runs real load with timing-precise gates, so it runs
 # without the race detector (which distorts scheduling). The full
