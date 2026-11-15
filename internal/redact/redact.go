@@ -72,9 +72,13 @@ func Scrub(s string) string {
 	return urlToken.ReplaceAllStringFunc(s, URL)
 }
 
-// ErrorText prints err in full only when its type cannot carry response
-// bytes; any other error is named by type. timeout is reported for a
-// deadline or a timing-out net.Error.
+// Cancelled is ErrorText's text for a cancellation.
+const Cancelled = "cancelled"
+
+// ErrorText prints err only when its type cannot carry response bytes, a
+// network error without its source address; any other error is named by
+// type. timeout is reported for a deadline or a timing-out net.Error, and
+// a cancellation as Cancelled.
 func ErrorText(err error, timeout time.Duration) string {
 	var op *net.OpError
 	var cert *tls.CertificateVerificationError
@@ -89,6 +93,8 @@ func ErrorText(err error, timeout time.Duration) string {
 		return cert.Error()
 	case errors.Is(err, context.DeadlineExceeded):
 		return fmt.Sprintf("timed out after %s", timeout)
+	case errors.Is(err, context.Canceled):
+		return Cancelled
 	case errors.As(err, &ne) && ne.Timeout():
 		return fmt.Sprintf("timed out after %s", timeout)
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):

@@ -142,3 +142,13 @@ func TestScrubRedactsEndpointsInText(t *testing.T) {
 		t.Fatalf("text without a URL changed: %q", got)
 	}
 }
+
+// A cancellation, wrapped or not, prints as "cancelled" and carries none
+// of the wrapping text.
+func TestErrorTextCancelled(t *testing.T) {
+	for _, err := range []error{context.Canceled, fmt.Errorf("Location: /?key=%s: %w", secret, context.Canceled)} {
+		if got := ErrorText(err, time.Second); got != "cancelled" || strings.Contains(got, secret) {
+			t.Errorf("ErrorText(%v) %q", err, got)
+		}
+	}
+}
