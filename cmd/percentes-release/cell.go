@@ -277,8 +277,8 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		OnDone: func(q *loadgen.Request) {
 			if s := billingRefusal(t, q.Status, q.ErrorBody, q.StreamError); s != nil {
 				stop(s)
-			} else if isEMFILE(q) {
-				stop(errEMFILE)
+			} else if e := clientExhausted(q); e != nil {
+				stop(e)
 			}
 		},
 	})

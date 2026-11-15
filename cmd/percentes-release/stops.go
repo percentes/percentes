@@ -23,9 +23,12 @@ type routeStop struct{ reason string }
 
 func (s *routeStop) Error() string { return "route stop: " + s.reason }
 
-// errEMFILE ends a ladder whose process ran out of file descriptors; the
-// cell is client-invalid.
-var errEMFILE = errors.New("a request failed with EMFILE (too many open files)")
+// errEMFILE and errEADDRNOTAVAIL end a ladder whose process ran out of
+// file descriptors or local ports; the cell is client-invalid.
+var (
+	errEMFILE        = errors.New("a request failed with EMFILE (too many open files)")
+	errEADDRNOTAVAIL = errors.New("a request failed with EADDRNOTAVAIL (no local port left)")
+)
 
 // billingRefusal returns the stop for a response the target documents as
 // its spend-limit or exhausted-balance refusal, the operator's billing
@@ -116,6 +119,24 @@ func (r *route) authFault(rec *cellRecord, status int) (*routeStop, error) {
 // descriptor.
 func isEMFILE(r *loadgen.Request) bool {
 	return r.ErrText != "" && strings.Contains(r.ErrText, syscall.EMFILE.Error())
+}
+
+// isEADDRNOTAVAIL reports whether a request failed for want of a local
+// port.
+func isEADDRNOTAVAIL(r *loadgen.Request) bool {
+	return r.ErrText != "" && strings.Contains(r.ErrText, syscall.EADDRNOTAVAIL.Error())
+}
+
+// clientExhausted is the error that ends a ladder for a request that
+// failed for want of a file descriptor or a local port, or nil.
+func clientExhausted(r *loadgen.Request) error {
+	switch {
+	case isEMFILE(r):
+		return errEMFILE
+	case isEADDRNOTAVAIL(r):
+		return errEADDRNOTAVAIL
+	}
+	return nil
 }
 
 // minOpenFiles is the open-file limit a route process requires.
