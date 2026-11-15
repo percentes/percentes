@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -782,10 +783,139 @@ func CheckPublished(cfg *config.Config, v *Verdict) error {
 			check(k, s, s.Binding)
 		}
 	}
+	if v.Solution.Binding.Dimension == "" {
+		problems = append(problems, "solution: no binding limit")
+	}
+	rates := append(slices.Clone(v.Solution.Rates), v.Solution.Binding)
+	for i, x := range rates {
+		if x.Dimension == "" {
+			continue
+		}
+		if x.Unpublished || x.Limit == -1 && x.Dimension == RouteCapDimension {
+			continue
+		}
+		fail := func(format string, a ...any) {
+			problems = append(problems, fmt.Sprintf("solution, %s: ", x.Dimension)+fmt.Sprintf(format, a...))
+		}
+		l := limit(fail, x.Limit, x.Dimension, x.WindowS)
+		switch {
+		case l == nil:
+		case l.Marking == config.MarkingConfidential:
+			fail("target.limits[%d] is confidential and sets no rate", x.Limit)
+		case x.WindowS > 0:
+			allowance := r.allowance(l, dec(l.Value), x.WindowS)
+			exact := new(big.Rat).Quo(ratInt(int(allowance)), r.span(l, x.WindowS))
+			rate, _ := exact.Float64()
+			if x.Allowance != allowance || x.RPS != rate {
+				fail("allowance %d and rate %g rps in %g s, target.limits[%d] admits %d at %g", x.Allowance, x.RPS, x.WindowS, x.Limit, allowance, rate)
+			}
+			if i == len(rates)-1 {
+				if want := float64(floorInt(mul(exact, ratInt(1000)))) / 1000; v.Solution.BindingRPS != want {
+					fail("binding rate %g rps, the binding limit admits %g", v.Solution.BindingRPS, want)
+				}
+			}
+		}
+	}
+	if b := v.Solution.Binding; b.Dimension != "" {
+		switch {
+		case !slices.Contains(v.Solution.Rates, b):
+			problems = append(problems, "solution: the binding limit is not among its rates")
+		case v.Solution.BindingRPS > b.RPS:
+			problems = append(problems, fmt.Sprintf("solution: binding rate %g rps above the binding limit's %g", v.Solution.BindingRPS, b.RPS))
+		}
+		for _, x := range v.Solution.Rates {
+			if x.RPS < b.RPS {
+				problems = append(problems, fmt.Sprintf("solution: %s at %g rps is below the binding limit's %g", x.Dimension, x.RPS, b.RPS))
+				break
+			}
+		}
+	}
+	problems = append(problems, recomputed(cfg, price, v)...)
 	if len(problems) > 0 {
 		return errors.New("admission: published verdict: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// recomputed lists every part of v that differs from the ceiling rule's
+// verdict under cfg at v's plan, price and binding rate.
+func recomputed(cfg *config.Config, price *big.Rat, v *Verdict) []string {
+	if cfg.Release == nil {
+		return []string{"not a release configuration"}
+	}
+	// The rule reads the pinned ladder and hard timeout, whatever a cell's configured ones.
+	c, rel := *cfg, *cfg.Release
+	rel.Ladder = config.Ladder{StepFractions: slices.Clone(config.PinnedReleaseStepFractions),
+		WarmupS: config.PinnedReleaseWarmupS, StepS: config.PinnedReleaseStepS, DrainS: config.PinnedReleaseDrainS}
+	c.Release = &rel
+	r, err := ruleAt(&c, price, v.Plan)
+	if err == nil {
+		err = r.needAttempts()
+	}
+	if err != nil {
+		return []string{err.Error()}
+	}
+	r.hardTimeoutS = config.PinnedReleaseHardTimeoutS
+	if !(v.BindingRPS > 0) || config.RoundDownRPS(v.BindingRPS) != v.BindingRPS {
+		return []string{fmt.Sprintf("binding rate %g: want a positive rate rounded down to 0.001 requests per second", v.BindingRPS)}
+	}
+	w := r.verdict(v.BindingRPS)
+	var out []string
+	if v.InputTokens != w.InputTokens || v.CeilingTokens != w.CeilingTokens {
+		out = append(out, fmt.Sprintf("tokens %d and %d, the configuration's %d and %d", v.InputTokens, v.CeilingTokens, w.InputTokens, w.CeilingTokens))
+	}
+	if !reflect.DeepEqual(v.Solution, w.Solution) {
+		out = append(out, fmt.Sprintf("solution %+v, the rule gives %+v", v.Solution, w.Solution))
+	}
+	if len(v.Steps) != len(w.Steps) {
+		out = append(out, fmt.Sprintf("%d steps, the ladder %d", len(v.Steps), len(w.Steps)))
+	} else {
+		for k := range w.Steps {
+			if !reflect.DeepEqual(v.Steps[k], w.Steps[k]) {
+				out = append(out, fmt.Sprintf("step %d is not the rule's at %g rps", k+1, w.Steps[k].RPS))
+			}
+		}
+	}
+	if v.TopRPS != w.TopRPS || v.CellUSD != w.CellUSD || v.EditionUSD != w.EditionUSD {
+		out = append(out, fmt.Sprintf("top %g rps, cell US$%s, edition US$%s; the rule gives %g, US$%s, US$%s", v.TopRPS, v.CellUSD, v.EditionUSD, w.TopRPS, w.CellUSD, w.EditionUSD))
+	}
+	return out
+}
+
+// WindowAllowances are the requests cfg's rate, token and spend-window
+// limits admit in each of their evaluation windows, by its length in
+// seconds, the least over the limits sharing a window: each limit's
+// share at one request's nominal demand under v's token bounds and
+// per-request price, rounded down. A limit that counts output at
+// generation also gives its allowance for each window w under the key
+// w plus client.http_timeout_s. A confidential limit counts at the value
+// cfg holds.
+func WindowAllowances(cfg *config.Config, v *Verdict) (map[float64]int64, error) {
+	price, err := decimal(v.PerRequestUSD)
+	if err != nil {
+		return nil, fmt.Errorf("admission: window allowances: per_request_usd: %w", err)
+	}
+	r := &rule{cfg: cfg, in: v.InputTokens, ceiling: v.CeilingTokens, c: price}
+	out := map[float64]int64{}
+	for i := range cfg.Target.Limits {
+		l := &cfg.Target.Limits[i]
+		switch l.Dimension {
+		case config.LimitRPM, config.LimitRPS, config.LimitTPM, config.LimitInputTPM, config.LimitOutputTPM, config.LimitSpendWindow:
+			for _, w := range l.WindowsS() {
+				a := r.allowance(l, dec(l.Value), w)
+				keys := []float64{w}
+				if l.OutputAtGeneration {
+					keys = append(keys, w+float64(cfg.Client.HTTPTimeoutS))
+				}
+				for _, k := range keys {
+					if have, ok := out[k]; !ok || a < have {
+						out[k] = a
+					}
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // tokens is one request's count under l's counting.

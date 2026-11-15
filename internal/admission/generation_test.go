@@ -125,3 +125,83 @@ func TestCheckPublishedOutputAtGeneration(t *testing.T) {
 		t.Errorf("a pass over 60.1 s alone: %v", err)
 	}
 }
+
+// A token limit that counts output at generation gives its 60 s
+// allowance a second window of 60 s plus the 90 s hard timeout: azure-S
+// admits 146 requests over 150 s at 512 and 112 at 1,024.
+func TestWindowAllowancesOutputAtGeneration(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		cfg     func(*testing.T) *config.Config
+		rps     float64
+		span150 int64
+	}{
+		{"azure-S512", azureAt("azure-S", config.ShapeS, 512, "280"), 0.972, 146},
+		{"azure-S1024", azureAt("azure-S", config.ShapeS, 1024, "280"), 0.746, 112},
+	} {
+		cfg := c.cfg(t)
+		s, v := solved(t, cfg, anthropicPrice, nil, nil)
+		if s.BindingRPS != c.rps {
+			t.Fatalf("%s: binding %g rps, want %g", c.name, s.BindingRPS, c.rps)
+		}
+		got, err := WindowAllowances(cfg, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 4 || got[1] != 4 || got[10] != 41 || got[60] != c.span150 || got[150] != c.span150 {
+			t.Errorf("%s: allowances %v, want 4 over 1 s, 41 over 10 s and %d over 60 s and 150 s", c.name, got, c.span150)
+		}
+		plain, err := WindowAllowances(azure("azure-S", config.ShapeS, 512, "280")(t), v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := plain[150]; ok {
+			t.Errorf("%s unflagged: allowances %v, want no 150 s window", c.name, plain)
+		}
+	}
+}
+
+// CheckPublished tests a public window demand's pass and rate over the
+// limit's span: a verdict solved without the hard timeout fails under a
+// configuration whose token limit counts output at generation.
+func TestCheckPublishedPublicGenerationSpan(t *testing.T) {
+	flagged := azureAt("azure-S", config.ShapeS, 512, "280")(t)
+	plain := azure("azure-S", config.ShapeS, 512, "280")(t)
+	v := at(t, plain, anthropicPrice, 2.429, nil, nil)
+	if !v.Steps[4].Admitted {
+		t.Fatalf("unflagged top step at 2.429 rps not admitted")
+	}
+	if err := CheckPublished(plain, v); err != nil {
+		t.Fatalf("the unflagged rule's own verdict: %v", err)
+	}
+	err := CheckPublished(flagged, v)
+	if err == nil || !strings.Contains(err.Error(), "pass false against the recorded value, published true") || !strings.Contains(err.Error(), "rate ") {
+		t.Errorf("an unflagged verdict under a flagged limit: %v", err)
+	}
+	w := at(t, flagged, anthropicPrice, 0.972, nil, nil)
+	if err := CheckPublished(flagged, w); err != nil {
+		t.Fatalf("the flagged rule's own verdict: %v", err)
+	}
+	for i := range w.Steps[4].Demands {
+		if d := &w.Steps[4].Demands[i]; d.Dimension == config.LimitTPM {
+			d.RateRPS *= 1.5
+		}
+	}
+	if err := CheckPublished(flagged, w); err == nil || !strings.Contains(err.Error(), "step 5, "+config.LimitTPM+": rate ") {
+		t.Errorf("a public rate over 60.1 s alone: %v", err)
+	}
+	// A solution whose token rate and binding rate leave out the hard timeout.
+	x := at(t, flagged, anthropicPrice, 0.972, nil, nil)
+	for i := range x.Solution.Rates {
+		if r := &x.Solution.Rates[i]; r.Dimension == config.LimitTPM {
+			r.RPS = 2.429
+		}
+	}
+	x.Solution.Binding.RPS, x.Solution.BindingRPS = 2.429, 2.429
+	err = CheckPublished(flagged, x)
+	for _, want := range []string{"solution, " + config.LimitTPM + ": allowance 146 and rate 2.429 rps in 60 s", "binding rate 2.429 rps, the binding limit admits 0.972"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("a solution over 60.1 s alone: want %q, got %v", want, err)
+		}
+	}
+}

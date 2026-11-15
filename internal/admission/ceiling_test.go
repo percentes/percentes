@@ -710,11 +710,57 @@ func TestCheckPublished(t *testing.T) {
 			b.Pass = true
 			stepAt(t, v, 0.9).Binding = &b
 		}, "step 4, tokens_per_minute: pass false against the recorded value, published true"},
+		{"solution", func(v *Verdict) {
+			v.Solution.Rates = append(v.Solution.Rates, Rate{Dimension: config.LimitTPM, Limit: 1, WindowS: 60, Allowance: 46, RPS: 0.765})
+		}, "solution, tokens_per_minute: target.limits[1] is confidential and sets no rate"},
+		{"no solution", func(v *Verdict) { v.Solution = Solution{} }, "solution: no binding limit"},
+		{"solution window", func(v *Verdict) { v.Solution.Rates[0].WindowS = 10 }, "solution, requests_per_minute: target.limits[0] is requests_per_minute with window tests over [1 60] s"},
 	} {
 		v := at(t, cfg, groq, 1, nil, nil)
 		tc.mutate(v)
 		if err := CheckPublished(cfg, v); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: must fail naming %q, got %v", tc.name, tc.want, err)
 		}
+	}
+}
+
+// A ceiling check is paced from the binding rate over every limit but the
+// daily ones, which need the frozen schedule's attempts: Gemini at 512 is
+// then held by its auto-reload threshold at 4.011 requests per second,
+// where Solve refuses a plan with no attempts; a route with no daily
+// limit gets its binding rate, Baseten's 0.249.
+func TestCheckRPS(t *testing.T) {
+	g := gemini(512)(t)
+	if _, err := Solve(g, geminiPrice, ExpectedPlan(g, 1)); err == nil || !strings.Contains(err.Error(), "the plan holds none") {
+		t.Fatalf("Solve with no attempts: %v", err)
+	}
+	if rps, err := CheckRPS(g, geminiPrice); err != nil || rps != 4.011 {
+		t.Fatalf("gemini-S512: %g, %v; want 4.011", rps, err)
+	}
+	b := basetenCfg(512)(t)
+	s, err := Solve(b, basetenPrice, ExpectedPlan(b, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rps, err := CheckRPS(b, basetenPrice); err != nil || rps != s.BindingRPS || rps != 0.249 {
+		t.Fatalf("baseten-S512: %g, %v; want its binding rate 0.249", rps, err)
+	}
+}
+
+// WindowAllowances gives each evaluation window the least allowance of
+// the limits evaluated over it, a confidential limit's included.
+func TestWindowAllowances(t *testing.T) {
+	sha := strings.Repeat("ab", 32)
+	groq := price("0.15", "0.60")
+	cfg := releaseConfig(t, "groq", 512, "10", windows(lim(config.LimitRPM, 1000), 1, 60), confidential(lim(config.LimitTPM, 80001), sha))
+	v := at(t, cfg, groq, 1, nil, nil)
+	got, err := WindowAllowances(cfg, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1,000 requests a minute admit 16 in 1 s; 80,001 tokens a minute
+	// admit 46 requests at 1,712 a request, below the 1,000 in 60 s.
+	if len(got) != 2 || got[1] != 16 || got[60] != 46 {
+		t.Fatalf("allowances %v, want 16 over 1 s and 46 over 60 s", got)
 	}
 }
