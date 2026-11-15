@@ -30,13 +30,13 @@
 // starts the release ledger with the routes' caps, schedule writes the
 // committed schedule of the routes whose configurations it is given,
 // with each configuration's SHA-256 as published, its HMAC-SHA256 as
-// loaded under the release key and its host group, and the ledger's
-// open-line SHA-256, which a route's run must match, ledger price
-// records a route's prices at the token bounds of its cells and of its
-// ceiling check, ceiling-check sends a route's ceiling check, admitted in the ledger,
-// and writes the record run reads with --ceiling-probe, and
-// public-config writes a route's configuration as published, the file
-// the freeze commits, with
+// loaded under the release key, its host group and its binding rate, and
+// the ledger's open-line SHA-256, which a route's run must match, ledger
+// price records a route's prices at the token bounds of its cells and of
+// its ceiling check, ceiling-check sends a route's ceiling check,
+// admitted in the ledger, and writes the record run, schedule and pages
+// read, one for every check the ledger admits, and public-config writes a
+// route's configuration as published, the file the freeze commits, with
 // each confidential limit's value withheld. Every command reads the
 // configuration as loaded. After
 // the window, pages writes the index page and each route's page from the
@@ -59,6 +59,7 @@
 //	percentes-release ledger create --ledger FILE --config FILE ...
 //	percentes-release schedule --master-seed SEED --first DATE --last DATE
 //	    --config FILE ... --ledger FILE --release-key FILE --schedule FILE
+//	    --ceiling-probe FILE ... [--excluded ROUTE ...]
 //	percentes-release ledger price --ledger FILE --config FILE --input USD
 //	    --output USD --source URL --retrieved DATE
 //	percentes-release ceiling-check --config FILE --env FILE --ledger FILE

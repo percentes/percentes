@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 
 	"github.com/percentes/percentes/internal/admission"
@@ -68,4 +71,24 @@ func lateChecks(entries []admission.Entry, frozen int, group string, routes []st
 		}
 	}
 	return nil
+}
+
+// readCheckRecord reads the ceiling-check record at path, which must be
+// byte for byte the probe.Encode encoding of the record it decodes to,
+// with no field probe.ReleaseRecord does not define.
+func readCheckRecord(path string) (*probe.ReleaseRecord, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rec probe.ReleaseRecord
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&rec); err != nil {
+		return nil, fmt.Errorf("ceiling probe %s: %w", path, err)
+	}
+	if canon, err := probe.Encode(&rec); err != nil || !bytes.Equal(b, canon) {
+		return nil, fmt.Errorf("ceiling probe %s: not the record as ceiling-check writes it", path)
+	}
+	return &rec, nil
 }

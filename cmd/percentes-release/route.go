@@ -507,7 +507,8 @@ func bindingSolution(cfg *config.Config, sched *schedule.Schedule, entries []adm
 
 // hostTargets are the targets of hostCfgs by route: one configuration of
 // each route in cfg's release.other_hosts and of no other, each frozen by
-// the schedule (checkFrozen).
+// the schedule (checkFrozen) and of cfg's request shape and ceilings
+// (sameShape).
 func hostTargets(cfg *config.Config, hostCfgs []*config.Config, sched *schedule.Schedule, key *releasekey.Key) (map[string]*config.Target, error) {
 	out := map[string]*config.Target{}
 	for _, h := range hostCfgs {
@@ -519,6 +520,9 @@ func hostTargets(cfg *config.Config, hostCfgs []*config.Config, sched *schedule.
 			return nil, fmt.Errorf("run: --host-config of route %s, which release.other_hosts does not list", name)
 		case out[name] != nil:
 			return nil, fmt.Errorf("run: --host-config of route %s given twice", name)
+		case !sameShape(h, cfg):
+			return nil, fmt.Errorf("run: --host-config of route %s: Shape %s at ceilings %v; route %s sends Shape %s at %v, and a host group has one request shape",
+				name, h.Release.Shape.Name, h.Release.Shape.Ceilings(), cfg.Target.Name, cfg.Release.Shape.Name, cfg.Release.Shape.Ceilings())
 		}
 		if err := checkFrozen(h, sched, key); err != nil {
 			return nil, err

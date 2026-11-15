@@ -942,6 +942,38 @@ func TestCheckTimes(t *testing.T) {
 	}
 }
 
+// freezeBinding writes each route's binding rate into the schedule's
+// input, which Load then derives, and refuses a route with no price or
+// whose binding rate puts a step at 0 requests per second.
+func TestFreezeBinding(t *testing.T) {
+	cfg := releaseConfig(t, "https://api.example.test/openai/v1/chat/completions")
+	f := newFixture(t, cfg, "+0.005")
+	b, err := os.ReadFile(f.in.schedulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := schedule.Load(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := s.Config("groq"); c.BindingRPS != 1.755 || c.BindingLimit != admission.RouteCapDimension {
+		t.Fatalf("frozen %+v, want 1.755 rps at %s", c, admission.RouteCapDimension)
+	}
+	entries, err := ledgerEntries(f.ledger, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := freezeBinding(s, []*config.Config{cfg}, entries[:1]); err == nil || !strings.Contains(err.Error(), "no price recorded for route groq") {
+		t.Errorf("no price: %v", err)
+	}
+	low := *cfg
+	low.Target.Limits = slices.Clone(cfg.Target.Limits)
+	low.Target.Limits[0].Value = 0.1
+	if _, err := freezeBinding(s, []*config.Config{&low}, entries); err == nil || !strings.Contains(err.Error(), "binding rate 0 rps, binding limit requests_per_minute, puts a step at [0 0 0 0 0] rps") {
+		t.Errorf("a step at 0 rps: %v", err)
+	}
+}
+
 // A ceiling check is paced at the lowest step of the rate the route's
 // limits admit at its newest price: the reference route's 0.438 requests
 // per second, the 0.25 step of 1.755. A route with no price is refused.
