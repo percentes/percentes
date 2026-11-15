@@ -233,7 +233,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	if ev.ledger, err = evidence.ReadLedger(r.ledgerPath); err != nil {
 		return rec, err
 	}
-	if pr, err = probe.Run(ctx, probe.Input{Target: t, CaseText: r.shape.UserText(run.Seed, len(offsets)), Timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second, Key: r.key}); err != nil {
+	if pr, err = probe.Run(ctx, probe.Input{Target: t, CaseText: r.shape.UserText(run.Seed, len(offsets)), Timeout: time.Duration(cfg.Client.HTTPTimeoutS) * time.Second, Key: r.key, RootCAs: r.roots}); err != nil {
 		return rec, err
 	}
 	pr.PromptTokens, pr.OutputTokens = pr.Shape.Reported()
@@ -281,10 +281,23 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	}
 	interval := time.Duration(float64(time.Second) / cfg.Release.Ladder.StepRates(cfg.Release.BindingRPS)[0])
 	if werr := waitUntil(ctx, pr.Request.DispatchUTC.Add(interval)); werr != nil {
-		finish(outcomeStopped, "stopped before the first dispatch: "+werr.Error())
+		if terminated(ctx) && probeBreach == nil {
+			finish(outcomeInterrupted, terminatedReason)
+			return rec, nil
+		}
+		skipLadder(outcomeStopped, "stopped before the first dispatch: "+werr.Error())
+		return rec, r.retain(ctx, ev, rec, nil)
+	}
+	due := r.dueAt(run)
+	if now := r.now(); now.Sub(due) > schedule.StartTolerance {
+		skipLadder(outcomeMissed, fmt.Sprintf("ladder not started: its epoch would fall %s after the cell's scheduled start at %s, beyond the %s start tolerance (SPEC-HOSTED §4); %s",
+			now.Sub(due).Round(time.Second), due.Format(time.RFC3339), schedule.StartTolerance, probeSentNote(pr)))
 		return rec, r.retain(ctx, ev, rec, nil)
 	}
 
+	if r.overLimits {
+		allowances = nil
+	}
 	cellCtx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 	var (
@@ -294,11 +307,16 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	)
 	running := *rec
 	res, runErr := loadgen.Run(cellCtx, cfg, &loadgen.Hooks{
+		LatestEpoch:     due.Add(schedule.StartTolerance),
 		WriteAllowances: allowances,
 		Cases:           cases,
+		RootCAs:         r.roots,
 		OnEpoch: func(e time.Time) {
 			ev.live.setEpoch(e)
 			canary, canaryErr = loadgen.StartCanary(cellCtx, e)
+			if r.onEpoch != nil {
+				r.onEpoch(e)
+			}
 		},
 		OnDispatch: ev.live.dispatched,
 		OnDone: func(q *loadgen.Request) {
@@ -316,6 +334,11 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 			}
 		},
 	})
+	if errors.Is(runErr, loadgen.ErrLateEpoch) {
+		skipLadder(outcomeMissed, fmt.Sprintf("ladder not started: its epoch fell beyond the %s start tolerance after the cell's scheduled start at %s (SPEC-HOSTED §4); %s",
+			schedule.StartTolerance, due.Format(time.RFC3339), probeSentNote(pr)))
+		return rec, r.retain(ctx, ev, rec, nil)
+	}
 	var streams []loadgen.CanaryStream
 	if canary != nil {
 		streams = canary.Stop()
@@ -421,8 +444,9 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 			return err
 		}
 	}
+	began := rec.Outcome != outcomeMissed || ev.live != nil
 	var statusEnd, balanceEnd string
-	if rec.Outcome != outcomeMissed {
+	if began {
 		var serr, berr error
 		ctx := context.WithoutCancel(ctx)
 		if statusEnd, serr = evidence.WriteStatus(ev.dir, evidence.StatusEndFile, evidence.ReadStatus(ctx, r.status)); serr != nil {
@@ -471,7 +495,7 @@ func (r *route) retain(ctx context.Context, ev *cellFiles, rec *cellRecord, res 
 	if ev.live == nil {
 		end, to = ev.lastUTC, ev.lastUTC
 	}
-	if rec.Outcome != outcomeMissed {
+	if began {
 		if rec.Concurrent, err = r.concurrent(rec.StartUTC, to); err != nil {
 			return errors.Join(ferr, err)
 		}
@@ -692,6 +716,15 @@ func terminated(ctx context.Context) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// probeSentNote says whether pr's probe counts as sent, as the ledger
+// settles it.
+func probeSentNote(pr *probe.Record) string {
+	if admission.ProbeSent(pr) > 0 {
+		return "the probe was sent"
+	}
+	return "the probe reached no connection"
 }
 
 // cellOutcome classifies a run that reached the ladder. cause is the

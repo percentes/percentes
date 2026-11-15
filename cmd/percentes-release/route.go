@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -155,6 +156,14 @@ type route struct {
 	// close writes the window-close record; windowClose unless a test
 	// replaces it.
 	close func(ctx context.Context, st *routeState) error
+	// roots, when set, replaces the system roots in verifying the
+	// target's certificate; onEpoch, when set, is called once a cell's
+	// ladder epoch is anchored, before its first dispatch; overLimits
+	// marks a ladder above the verdict's top rate, whose writes are capped
+	// at its own top rate alone. Only the rehearsal sets them.
+	roots      *x509.CertPool
+	onEpoch    func(epoch time.Time)
+	overLimits bool
 }
 
 // runCmd reads the route's inputs, refuses to start on any defect, and
@@ -1114,6 +1123,14 @@ func (r *route) scheduleOf(path string, rec *cellRecord) error {
 		return fmt.Errorf("run: %s: the cell ran under schedule sha256 %q; --schedule has sha256 %s", path, rec.ScheduleSHA256, r.scheduleSHA256)
 	}
 	return nil
+}
+
+// dueAt is when run is due to start (route.due).
+func (r *route) dueAt(run schedule.Run) time.Time {
+	if r.due != nil {
+		return r.due(run)
+	}
+	return run.Start
 }
 
 func (r *route) hasAttempt2(label string) bool {

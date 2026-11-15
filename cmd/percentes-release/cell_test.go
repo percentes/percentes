@@ -136,6 +136,73 @@ func ledgerState(t *testing.T, path string) *admission.State {
 	return st
 }
 
+// SPEC-HOSTED §4: a ladder whose epoch would fall more than the start
+// tolerance after the cell's scheduled start is not started, checked
+// after the probe and the first step's interval: the cell is missed, its
+// probe sent and settled, with its end records and a labelled manifest
+// whose ladder never started; one within the tolerance runs. The route
+// starts at the binding rate the schedule froze, 1.755 requests per
+// second, its first step 0.438.
+func TestCellEpochDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		late   time.Duration
+		missed bool
+	}{
+		{"beyond the tolerance", schedule.StartTolerance + time.Second, true},
+		{"within it", schedule.StartTolerance - time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEndpoint(t, always200)
+			r, f := newTestRoute(t, releaseConfig(t, e.url()), "+0.005032")
+			if got := r.cfg.Release.Ladder.StepRates(r.cfg.Release.BindingRPS); got[0] != 0.438 || r.cfg.Release.BindingRPS != 1.755 {
+				t.Fatalf("binding rate %g, steps %v", r.cfg.Release.BindingRPS, got)
+			}
+			shortLadder(r)
+			due := time.Now().Add(-tc.late)
+			r.due = func(schedule.Run) time.Time { return due }
+			run := r.runs[0]
+			rec, err := r.runCell(context.Background(), run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.missed {
+				if rec.Outcome == outcomeMissed || rec.Ladder == nil || e.hits.Load() < 2 {
+					t.Fatalf("outcome %s %q, ladder %v, %d requests", rec.Outcome, rec.Reasons, rec.Ladder != nil, e.hits.Load())
+				}
+				return
+			}
+			if rec.Outcome != outcomeMissed || len(rec.Reasons) != 1 || !strings.HasPrefix(rec.Reasons[0], "ladder not started: its epoch would fall 15m") ||
+				!strings.Contains(rec.Reasons[0], "after the cell's scheduled start at "+due.Format(time.RFC3339)+", beyond the 15m0s start tolerance (SPEC-HOSTED §4); the probe was sent") {
+				t.Fatalf("outcome %s, reasons %q", rec.Outcome, rec.Reasons)
+			}
+			if rec.EpochUTC != nil || rec.Ladder != nil || e.hits.Load() != 1 || rec.Sent != (admission.Counts{Probe: 1}) {
+				t.Fatalf("epoch %v, ladder %v, %d requests, sent %+v", rec.EpochUTC, rec.Ladder, e.hits.Load(), rec.Sent)
+			}
+			if u := ledgerState(t, f.ledger).Routes["groq"]; u == nil || u.Reserved != 0 || u.Probe != 1 || u.Warmup+u.Measured != 0 {
+				t.Fatalf("ledger usage %+v", u)
+			}
+			dir := r.cellDir(run)
+			for _, name := range []string{evidence.StatusEndFile, evidence.BalanceEndFile, evidence.ManifestFile, probe.File} {
+				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+					t.Error(err)
+				}
+			}
+			m, _ := checkRetained(t, r, run)
+			if m.Counted() || m.Release.Outcome != outcomeMissed || m.Release.LadderStarted || !slices.Equal(m.Release.Reasons, rec.Reasons) {
+				t.Fatalf("manifest: outcome %s, ladder started %t, reasons %q", m.Release.Outcome, m.Release.LadderStarted, m.Release.Reasons)
+			}
+			st, err := r.state()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(st.unlabelled) != 0 || st.records[runKey(run)].Outcome != outcomeMissed {
+				t.Fatalf("state: %d unlabelled, record %+v", len(st.unlabelled), st.records[runKey(run)])
+			}
+		})
+	}
+}
+
 // A cell runs the ladder at the admitted steps only, with Shape S texts
 // under the run's seed, settles what it sent, and writes its evidence:
 // the attempts without answer text, the probe, the final dispatch
@@ -1133,14 +1200,14 @@ func TestCellPriceChangedAtAdmission(t *testing.T) {
 	}{
 		{"spend limit no longer covers", func(f *fixture, cfg *config.Config) map[int]func() error {
 			return map[int]func() error{1: raise(f, cfg, "0.30", "1.20", "2026-10-08")}
-		}, 3, outcomeStopped, "route stop: the limits read at the cell's start, at the price retrieved 2026-10-08, no longer admit step 3 (1 rps) of the 3 the route runs: " +
-			"spend_per_month_usd recorded 10, read 10: nominal demand 13.3093824 above it; the route keeps its steps (SPEC-HOSTED §4)", "", ""},
+		}, 3, outcomeStopped, "route stop: the limits read at the cell's start, at the price retrieved 2026-10-08, no longer admit step 5 (2.429 rps) of the 5 the route runs: " +
+			"spend_per_month_usd recorded 20, read 20: nominal demand 27.585264 above it; the route keeps its binding rate and step rates (SPEC-HOSTED §4)", "", ""},
 		{"balance no longer covers", func(f *fixture, cfg *config.Config) map[int]func() error {
 			return map[int]func() error{1: raise(f, cfg, "0.20", "0.80", "2026-10-08")}
 		}, 3, outcomeBlocked, "is below the cell's reservation of US$", "", ""},
 		{"changed twice", func(f *fixture, cfg *config.Config) map[int]func() error {
 			return map[int]func() error{1: raise(f, cfg, "0.16", "0.64", "2026-10-08"), 2: raise(f, cfg, "0.17", "0.68", "2026-10-09")}
-		}, 3, outcomeBlocked, priceChangedReason + ": admission: groq's last price line is line 7; the admission checked line 5", "", "0.0155904"},
+		}, 3, outcomeBlocked, priceChangedReason + ": admission: groq's last price line is line 7; the admission checked line 5", "", "0.06599936"},
 		{"another route", func(f *fixture, cfg *config.Config) map[int]func() error {
 			return map[int]func() error{1: other(f, cfg)}
 		}, 2, outcomeBlocked, "probe request returned 401", "0.0004872", ""},
