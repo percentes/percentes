@@ -294,6 +294,23 @@ func newReleaseRecord(in ReleaseInput, start time.Time) *ReleaseRecord {
 	}
 }
 
+// InterruptedRecord is the record of in's route's check admitted at
+// start whose process ended before it wrote one: no request, and
+// Interrupted set to reason. Its checks and snapshots are derived as
+// RunRelease derives them.
+func InterruptedRecord(in ReleaseInput, start time.Time, reason string) (*ReleaseRecord, error) {
+	if err := checkShapeInput(in); err != nil {
+		return nil, err
+	}
+	if reason == "" {
+		return nil, errors.New("probe: an interrupted record needs its reason")
+	}
+	rec := newReleaseRecord(in, start)
+	rec.Interrupted = reason
+	finishRelease(rec, in)
+	return rec, nil
+}
+
 // RunRelease probes in.Config's route: CeilingRequests requests one after
 // another at the configured ceiling, dispatched at least the interval of
 // in.LowestStepRPS apart, then the limits read when configured. A
@@ -348,6 +365,9 @@ func RunRelease(ctx context.Context, in ReleaseInput) (*ReleaseRecord, error) {
 			rec.Unreached = unreachedText(i, &r.ex)
 			break
 		}
+	}
+	if n := len(rec.Requests); ctx.Err() != nil && !rec.Start.Blocked && rec.Unreached == "" && (n < CeilingRequests || cancelled(&rec.Requests[n-1])) {
+		rec.Interrupted = fmt.Sprintf(interruptedForm+": %s", rec.Sent(), CeilingRequests, CauseText(context.Cause(ctx)))
 	}
 
 	if t.Probe != nil && t.Probe.LimitsURL != "" {
@@ -934,6 +954,11 @@ func (r *ReleaseRecord) Verify(t *config.Target, length string, bound int) error
 	}
 	return nil
 }
+
+// interruptedForm is the start of the reason RunRelease gives an
+// interrupted check: its requests sent (Sent), CeilingRequests, then the
+// context's cause.
+const interruptedForm = "the check's context ended after %d of %d requests"
 
 // promptTokens is the stream's reported prompt token count: a
 // chat-completions prompt_tokens, or a Messages input_tokens plus its two
