@@ -1,6 +1,7 @@
 package report
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -269,6 +270,17 @@ type LabelCounts struct {
 	AtOrBelow  int `json:"at_or_below"`
 	Above      int `json:"above"`
 	Unresolved int `json:"unresolved"`
+}
+
+func (c *LabelCounts) add(label string) {
+	switch label {
+	case LabelAtOrBelow:
+		c.AtOrBelow++
+	case LabelAbove:
+		c.Above++
+	case LabelUnresolved:
+		c.Unresolved++
+	}
 }
 
 // binS is the width of a refusal bin.
@@ -700,6 +712,198 @@ func (ix *historyIndex) attribute(ref *Refusal, cfg *config.Config, read []bool,
 	return nil
 }
 
+// Attribute labels every status_429 of the tables' cells, and of the
+// cells outside the frame, from h, the history of cfg's account group,
+// against cfg's public limits (SPEC-HOSTED HA4, §5 status_429), each at
+// the value the refresh command read at the refused cell's start, a
+// limit it read as unavailable at its recorded value (cellLimits); it
+// counts the labels per step and per pooled step, and sets each daily
+// limit's reset days under v's plan beside what the group sent. A label
+// above names every window whose recorded sends exceed the limit's
+// share; otherwise any window the history leaves incomplete labels the
+// refusal unresolved. A window of a limit that counts output at
+// generation never reads above: where its sends, with those written
+// before it that may have ended in it, exceed the share, it reads
+// unresolved.
+func (t *StepTables) Attribute(cfg *config.Config, v *admission.Verdict, h *History) error {
+	switch {
+	case h == nil:
+		return errors.New("report: attribution: no account-group history")
+	case cfg.Release == nil || h.Group != cfg.Release.AccountGroup:
+		return fmt.Errorf("report: attribution: history of account group %q, route %s's is another", h.Group, t.Route)
+	case !slices.Contains(h.Routes, t.Route):
+		return fmt.Errorf("report: attribution: route %s is not among the history's routes %q", t.Route, h.Routes)
+	case v == nil:
+		return errors.New("report: attribution: no ceiling-rule verdict")
+	}
+	ix, err := newHistoryIndex(h)
+	if err != nil {
+		return err
+	}
+	at := &Attribution{Group: h.Group, Routes: slices.Clone(h.Routes), Sends: len(h.Sends), Gaps: h.Gaps, Unadmitted: h.Unadmitted}
+	for _, l := range cfg.Target.Limits {
+		switch {
+		case l.Marking == config.MarkingConfidential:
+			at.Confidential++
+		case l.OutputAtGeneration:
+			at.AtGeneration = append(at.AtGeneration, l.Dimension)
+			at.HardTimeoutS = cfg.Client.HTTPTimeoutS
+		}
+	}
+	label := func(cell string, refreshed []evidence.RefreshedLimit, clock *float64, segs ...*SegmentRefusals) error {
+		cellCfg, read, err := cellLimits(cfg, refreshed)
+		if err != nil {
+			return fmt.Errorf("report: attribution: cell %s: %w", cell, err)
+		}
+		clockS := float64(config.PinnedClockOffsetMaxS)
+		if clock != nil {
+			clockS = *clock
+		}
+		for _, seg := range segs {
+			if seg == nil {
+				continue
+			}
+			seg.Labels = &LabelCounts{}
+			for i := range seg.Refusals {
+				if err := ix.attribute(&seg.Refusals[i], cellCfg, read, clockS); err != nil {
+					return err
+				}
+				seg.Labels.add(seg.Refusals[i].Label)
+			}
+		}
+		return nil
+	}
+	for ci := range t.Cells {
+		c := &t.Cells[ci]
+		segs := []*SegmentRefusals{c.Warmup}
+		for k := range c.Steps {
+			segs = append(segs, c.Steps[k].Refusals)
+		}
+		if err := label(c.Cell, c.refreshed, c.ClockAbsOffsetS, segs...); err != nil {
+			return err
+		}
+	}
+	for ci := range t.Outside {
+		c := &t.Outside[ci]
+		segs := []*SegmentRefusals{c.Warmup}
+		for _, s := range c.Steps {
+			segs = append(segs, s.Refusals)
+		}
+		if err := label(c.Cell, c.refreshed, c.clockS, segs...); err != nil {
+			return err
+		}
+	}
+	poolLabels := func(steps []PooledStep, cells []string) {
+		for k := range steps {
+			if steps[k].Refusals == nil {
+				continue
+			}
+			steps[k].Refusals.Labels = &LabelCounts{}
+			for _, c := range t.Cells {
+				if !slices.Contains(cells, c.Cell) || c.Steps[k].Refusals == nil {
+					continue
+				}
+				for _, r := range c.Steps[k].Refusals.Refusals {
+					steps[k].Refusals.Labels.add(r.Label)
+				}
+			}
+		}
+	}
+	var all []string
+	for _, c := range t.Cells {
+		all = append(all, c.Cell)
+	}
+	poolLabels(t.Pooled, all)
+	for i := range t.DriftParts {
+		poolLabels(t.DriftParts[i].Pooled, t.DriftParts[i].Cells)
+	}
+	for i := range cfg.Target.Limits {
+		l := &cfg.Target.Limits[i]
+		if l.Marking != config.MarkingPublic || l.Dimension != config.LimitRPD && l.Dimension != config.LimitTPD {
+			continue
+		}
+		days, err := admission.Reservations(cfg, v.Plan, i)
+		if err != nil {
+			return err
+		}
+		loc, err := time.LoadLocation(l.ResetZone)
+		if err != nil {
+			return fmt.Errorf("report: target.limits[%d] reset zone: %w", i, err)
+		}
+		for _, d := range days {
+			start, err := time.ParseInLocation(time.DateOnly, d.Date, loc)
+			if err != nil {
+				return err
+			}
+			next := time.Date(start.Year(), start.Month(), start.Day()+1, 0, 0, 0, 0, loc)
+			rd := ResetDaySent{Dimension: l.Dimension, Zone: l.ResetZone, Reservation: d, Counting: tokenCounting(l)}
+			sum := new(big.Rat)
+			for j := range h.Sends {
+				s := &h.Sends[j]
+				if s.WroteUTC == nil {
+					if s.DispatchUTC.Before(next) && !s.LatestUTC.Before(start) {
+						rd.Incomplete = true
+					}
+					continue
+				}
+				if s.WroteUTC.Before(start) || !s.WroteUTC.Before(next) {
+					continue
+				}
+				u, atBound := ix.demand(l, s)
+				rd.SentRequests++
+				sum.Add(sum, u)
+				if atBound {
+					rd.AtBound++
+				}
+				if saturated(l, s) {
+					rd.Saturated++
+				}
+			}
+			rd.Sent, _ = sum.Float64()
+			if rd.Saturated > 0 && new(big.Rat).SetFloat64(rd.Sent).Cmp(sum) > 0 {
+				rd.Sent = math.Nextafter(rd.Sent, math.Inf(-1))
+			}
+			for _, g := range h.Gaps {
+				if g.FromUTC.Before(next) && (g.ToUTC == nil || g.ToUTC.After(start)) {
+					rd.Incomplete = true
+				}
+			}
+			at.ResetDays = append(at.ResetDays, rd)
+		}
+	}
+	t.Attribution = at
+	return nil
+}
+
+// cellLimits is cfg with each public limit at the value refreshed, a
+// cell's refresh record, read at its start, and read marking those
+// limits; a limit read as unavailable, or withheld as confidential,
+// keeps its recorded value.
+func cellLimits(cfg *config.Config, refreshed []evidence.RefreshedLimit) (*config.Config, []bool, error) {
+	read := make([]bool, len(cfg.Target.Limits))
+	if refreshed == nil {
+		return cfg, read, nil
+	}
+	if len(refreshed) != len(cfg.Target.Limits) {
+		return nil, nil, fmt.Errorf("the refresh record holds %d limits, target.limits %d", len(refreshed), len(cfg.Target.Limits))
+	}
+	c := *cfg
+	c.Target.Limits = slices.Clone(cfg.Target.Limits)
+	for i, r := range refreshed {
+		l := &c.Target.Limits[i]
+		switch {
+		case r.Dimension != l.Dimension:
+			return nil, nil, fmt.Errorf("refresh limits[%d] is %q, target.limits[%d] %q", i, r.Dimension, i, l.Dimension)
+		case l.Marking != config.MarkingPublic || r.Confidential || r.Unavailable != "":
+		case !(r.Value > 0):
+			return nil, nil, fmt.Errorf("refresh limits[%d] %s holds no value and no unavailable reason", i, r.Dimension)
+		default:
+			l.Value, read[i] = r.Value, true
+		}
+	}
+	return &c, read, nil
+}
+
 // refusalsText writes a segment's status_429 context: the 30 s bins, the
 // first bin on its own line, each refusal with its label, window counts,
 // error fields as received and rate-limit headers.
@@ -805,6 +1009,52 @@ func writeDelayText(w func(string, ...any), d *WriteDelay) {
 		return
 	}
 	w("  dispatch to write: largest %s over %d written requests; %d dispatched with no write time", msText(d.MaxNs), d.Written, d.Unwritten)
+}
+
+// attributionText writes the account-group history the refusals are
+// attributed from and each reset day's sends beside its reservation.
+func attributionText(w func(string, ...any), a *Attribution) {
+	if a == nil {
+		w("-- Account-group history: not read; no status_429 is labelled --")
+		w("")
+		return
+	}
+	w("-- Account group %s: %d recorded sends of routes %s, by write time, attribute each status_429 --", a.Group, a.Sends, strings.Join(a.Routes, ", "))
+	w("The counts are this client's recorded sends; provider receipt times and the limiter's type and state are unknown, and the labels assume that the account carries no traffic from outside the instrument.")
+	w("Each window's share is of the limit's value the refresh command read at the refused cell's start, or of its recorded value where the command read none.")
+	for _, g := range a.Gaps {
+		w("  the history may lack sends of route %s from %s: %s", g.Route, gapSpan(g), g.Reason)
+	}
+	if a.Unadmitted > 0 {
+		w("  %d recorded sends fall in no ledger admission of their route", a.Unadmitted)
+	}
+	if a.Confidential > 0 {
+		w("  %d confidential recorded limits take no window count", a.Confidential)
+	}
+	if len(a.AtGeneration) > 0 {
+		verb := "count"
+		if len(a.AtGeneration) == 1 {
+			verb = "counts"
+		}
+		w("  %s %s output at generation: each window also counts the sends written before it whose interval from write to end reaches into it. A ladder or warm-up send ends at its done time where it got a status other than 200, completed or returned an empty stream; a probe or ceiling-check send ends at its done time where it got a status other than 200 or its stream's terminator arrived with no read error. Any other send ends %d s after its dispatch, at the hard timeout. The provider is taken to stop counting a request when it ends.",
+			strings.Join(a.AtGeneration, " and "), verb, a.HardTimeoutS)
+	}
+	for _, d := range a.ResetDays {
+		line := fmt.Sprintf("  reset day %s (%s), %s: %s reserved for %d attempts and %d ceiling-check requests; %d requests sent by the account group",
+			d.Date, d.Zone, d.Dimension, decimalText(d.Reserved), d.Attempts, d.Checks, d.SentRequests)
+		if d.Dimension == config.LimitTPD {
+			sent := decimalText(d.Sent)
+			if d.Saturated > 0 {
+				sent = "at least " + sent
+			}
+			line += fmt.Sprintf(", %s tokens %s%s", sent, d.Counting, countNotes(d.AtBound, d.Saturated))
+		}
+		if d.Incomplete {
+			line += "; the history may lack sends of this day"
+		}
+		w("%s", line)
+	}
+	w("")
 }
 
 // pooledRefusalsText writes a pooled step's status_429 bins and labels.

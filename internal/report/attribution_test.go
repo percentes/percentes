@@ -48,6 +48,27 @@ func ruled(t *testing.T, cfg *config.Config, plan *admission.Plan) (*config.Conf
 	return cfg, v
 }
 
+// refused is a status_429 record at step, dispatched at atS seconds from
+// the epoch and written 2 ms later where written is set.
+func refused(step int, atS float64, written bool) evidence.Record {
+	r := evidence.Record{Step: step, IntendedNs: secs(atS), DispatchNs: secs(atS), DoneNs: secs(atS + 0.01),
+		Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrStatus429, Status: 429}
+	if written {
+		r.WroteRequestNs = secs(atS) + 2_000_000
+	}
+	return r
+}
+
+// timedCell is a counted cell of recs from epoch, indexed in order.
+func timedCell(label string, epoch time.Time, recs ...evidence.Record) CellRecords {
+	c := CellRecords{Cell: label, Outcome: evidence.CellCounted, EpochUTC: epoch}
+	for i, r := range recs {
+		r.Index, r.Shape, r.CeilingTokens = int64(i), "S", 512
+		c.Records = append(c.Records, r)
+	}
+	return c
+}
+
 // A cell's records give one send each dispatched request, at the epoch
 // plus its offsets, its write time where recorded and its reported prompt
 // count; a probe or ceiling-check exchange gives one where it was

@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -30,6 +31,34 @@ func TestConfidentialGenerationLimitNamesSpan(t *testing.T) {
 	}
 	if strings.Contains(text, "admits over 60 s (") {
 		t.Errorf("an entry names the window alone:\n%s", text)
+	}
+}
+
+// The account-group section names one limit counted at generation with
+// "counts" and two with "count", and states where a send ends.
+func TestAttributionTextAtGeneration(t *testing.T) {
+	text := func(dims ...string) string {
+		var b strings.Builder
+		attributionText(func(f string, a ...any) { fmt.Fprintf(&b, f+"\n", a...) },
+			&Attribution{Group: "g", Routes: []string{"azure"}, AtGeneration: dims, HardTimeoutS: 90})
+		return b.String()
+	}
+	one := text(config.LimitTPM)
+	for _, want := range []string{
+		"tokens_per_minute counts output at generation:",
+		"A ladder or warm-up send ends at its done time where it got a status other than 200, completed or returned an empty stream;",
+		"a probe or ceiling-check send ends at its done time where it got a status other than 200 or its stream's terminator arrived with no read error.",
+		"Any other send ends 90 s after its dispatch, at the hard timeout.",
+	} {
+		if !strings.Contains(one, want) {
+			t.Errorf("missing %q in:\n%s", want, one)
+		}
+	}
+	if strings.Contains(one, "gives up") {
+		t.Errorf("text says the client gives up:\n%s", one)
+	}
+	if two := text(config.LimitOutputTPM, config.LimitTPM); !strings.Contains(two, "output_tokens_per_minute and tokens_per_minute count output at generation:") {
+		t.Errorf("two limits:\n%s", two)
 	}
 }
 

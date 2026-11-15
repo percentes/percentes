@@ -49,6 +49,27 @@ func TestGenerationWindowEarlierSends(t *testing.T) {
 	}
 }
 
+// The attribution names each public limit that counts output at
+// generation and the hard timeout a send's end takes.
+func TestAttributionNamesGenerationLimits(t *testing.T) {
+	cfg, _ := stepsConfig(t)
+	cfg.Target.Limits[1].OutputAtGeneration = true
+	cfg, v := ruled(t, cfg, nil)
+	epoch := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	cell := timedCell("weekday-12", epoch, sent(1, 1, 100), refused(1, 1.5, true))
+	st, err := NewStepTables(cfg, v, []CellRecords{cell})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &History{Group: "groq", Routes: []string{"groq"}, Sends: RecordSends("groq", "weekday-12", epoch, cell.Records, 1200, 90)}
+	if err := st.Attribute(cfg, v, h); err != nil {
+		t.Fatal(err)
+	}
+	if a := st.Attribution; !slices.Equal(a.AtGeneration, []string{cfg.Target.Limits[1].Dimension}) || a.HardTimeoutS != cfg.Client.HTTPTimeoutS || a.HardTimeoutS == 0 {
+		t.Fatalf("attribution: at generation %q, hard timeout %d s", a.AtGeneration, a.HardTimeoutS)
+	}
+}
+
 // A completed record's nonnegative reasoning count enters the step's
 // reasoning figures.
 func TestStepFiguresKeepReasoningTokens(t *testing.T) {

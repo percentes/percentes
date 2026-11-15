@@ -1015,6 +1015,27 @@ func (t *StepTables) text(frame bool) string {
 	if !frame {
 		return b.String()
 	}
+	for _, c := range t.Outside {
+		w("-- Cell %s, %s, outside the frame: its status_429 responses, in no pooled figure --", c.Cell, c.Outcome)
+		refusalsText(w, c.Warmup, "warm-up")
+		for _, s := range c.Steps {
+			w("  step %d status_429: %d", s.Step, s.Refusals.Count)
+			refusalsText(w, s.Refusals, "step")
+		}
+		w("")
+	}
+	if n := t.OutsideIncomplete; n > 0 {
+		w("-- %d cells outside the frame started their ladder and lack complete records; their status_429 responses take no label --", n)
+		w("")
+	}
+	attributionText(w, t.Attribution)
+	if len(t.BillingStops) > 0 {
+		w("-- Billing stops: the operator's billing setting, outside every provider-failure figure --")
+		for _, s := range t.BillingStops {
+			w("cell %s: %d responses documented as a billing refusal; %s", s.Cell, s.Responses, strings.Join(s.Reasons, "; "))
+		}
+		w("")
+	}
 	for _, c := range t.DriftChanges {
 		w("-- Change of limits or documentation, first observed at cell %s, started %s --", c.Cell, c.StartUTC.Format(time.DateOnly))
 		for _, d := range c.Removed {
