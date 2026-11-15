@@ -37,15 +37,21 @@ func releaseLedger(t *testing.T, cfgs ...*config.Config) (*Ledger, string) {
 
 // shapePrice is p taken at the release shape's input bound and ceiling.
 func shapePrice(p Price, ceiling int) Price {
-	p.InputTokens, p.OutputTokens = config.PinnedReleaseInputBoundTokens, ceiling
+	p.InputTokens, p.OutputTokens = shapeSBound, ceiling
 	return p
 }
+
+// shapeSBound is Shape S's pinned input bound.
+var shapeSBound = func() int {
+	p, _ := config.LookupShape(config.ShapeS)
+	return p.InputBoundTokens
+}()
 
 // at512 and at1024 are a release request's token bounds at each pinned
 // ceiling.
 var (
-	at512  = Tokens{config.PinnedReleaseInputBoundTokens, 512}
-	at1024 = Tokens{config.PinnedReleaseInputBoundTokens, 1024}
+	at512  = Tokens{shapeSBound, 512}
+	at1024 = Tokens{shapeSBound, 1024}
 )
 
 // A release ledger's caps come from the routes' configurations: each
