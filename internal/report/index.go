@@ -31,20 +31,22 @@ type IndexCount struct {
 	Count int    `json:"count"`
 }
 
-// IndexRow is one route at one offered-load step. Binding names the
-// limit that excluded a step the ceiling rule did not admit.
-// HighestAttempted is the route's highest step any cell attempted, 0
-// where none did. Cells counts the cells that attempted the step with
-// requests scheduled. Counts has one entry per stepLines line, summed
-// over those cells; the entries sum to Scheduled. Cells, Scheduled and
-// Counts are the route's pooled figures: zero and nil for an incomplete
-// frame (HA3 point 9) and for a frame the drift rule splits, whose
-// DriftParts counts the parts its route page pools apart. Counts is also
-// nil for an excluded step and a step no cell attempted.
+// IndexRow is one route at one offered-load step; Shape is the route's
+// request shape. Binding names the limit that excluded a step the
+// ceiling rule did not admit. HighestAttempted is the route's highest
+// step any cell attempted, 0 where none did. Cells counts the cells
+// that attempted the step with requests scheduled. Counts has one entry
+// per stepLines line, summed over those cells; the entries sum to
+// Scheduled. Cells, Scheduled and Counts are the route's pooled
+// figures: zero and nil for an incomplete frame (HA3 point 9) and for a
+// frame the drift rule splits, whose DriftParts counts the parts its
+// route page pools apart. Counts is also nil for an excluded step and a
+// step no cell attempted.
 type IndexRow struct {
 	Provider         string       `json:"provider"`
 	Route            string       `json:"route"`
 	Model            string       `json:"model"`
+	Shape            string       `json:"shape"`
 	Step             int          `json:"step"`
 	RPS              float64      `json:"rps"`
 	Admitted         bool         `json:"admitted"`
@@ -60,9 +62,9 @@ type IndexRow struct {
 	Page             string       `json:"page"`
 }
 
-// Index is the release's index table: one row per route and step, in
-// alphabetical order of provider, then route, then step ascending. No
-// row order depends on a measured value.
+// Index is the release's index table: one row per route, request shape
+// and step, in alphabetical order of provider, then route, then step
+// ascending. No row order depends on a measured value.
 type Index struct {
 	Rows []IndexRow `json:"rows"`
 }
@@ -184,10 +186,10 @@ func indexRows(provider, model, page string, st *StepTables) []IndexRow {
 func (ix *Index) Markdown() string {
 	var b strings.Builder
 	w := func(cells []string) { fmt.Fprintf(&b, "| %s |\n", strings.Join(cells, " | ")) }
-	b.WriteString("One row per route and offered-load step, alphabetical by provider and route, then by step. ")
+	b.WriteString("One row per route, request shape and offered-load step, alphabetical by provider and route, then by step. ")
 	b.WriteString("Each count is over the step's scheduled requests in the cells that attempted the step. ")
 	b.WriteString("Rates and their uncertainty are on each route's page.\n\n")
-	head := []string{"Provider", "Route", "Model", "Step", "Offered load (rps)", "Admission", "Highest attempted step",
+	head := []string{"Provider", "Route", "Model", "Shape", "Step", "Offered load (rps)", "Admission", "Highest attempted step",
 		"Ceiling (tokens)", "Cells attempted", "Scheduled"}
 	head = append(head, stepLines...)
 	head = append(head, "Route page")
@@ -216,7 +218,7 @@ func (ix *Index) Markdown() string {
 			cells = fmt.Sprintf("split in %d parts by a change of limits or documentation; counts on the route page", r.DriftParts)
 			scheduled = ""
 		}
-		row := []string{r.Provider, r.Route, r.Model, fmt.Sprint(r.Step), fmt.Sprintf("%g", r.RPS), adm, highest,
+		row := []string{r.Provider, r.Route, r.Model, r.Shape, fmt.Sprint(r.Step), fmt.Sprintf("%g", r.RPS), adm, highest,
 			fmt.Sprint(r.CeilingTokens), cells, scheduled}
 		for i := range stepLines {
 			c := ""

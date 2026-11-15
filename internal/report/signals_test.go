@@ -68,17 +68,17 @@ func TestCompareRetryAfter(t *testing.T) {
 }
 
 // The status_429 context reads the largest fraction among the public
-// half tests only, and states the bound of the confidential ones.
+// window tests only, and states the bound of the confidential ones.
 func TestRetryAfterContext(t *testing.T) {
 	var lines []string
 	w := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
 	lim := admission.Step{Demands: []admission.Demand{
-		{Dimension: "requests_per_minute", Fraction: 0.1, Half: true},
+		{Dimension: "requests_per_minute", Fraction: 0.1, WindowS: 60},
 		{Dimension: admission.RouteCapDimension, Fraction: 0.9},
-		{Dimension: "tokens_per_minute", Fraction: 0.3, Half: true},
+		{Dimension: "tokens_per_minute", Fraction: 0.3, WindowS: 60},
 	}}
 	retryAfterText(w, &Signals{}, lim)
-	confidential := admission.Demand{Dimension: "tokens_per_day", Half: true, Confidential: true}
+	confidential := admission.Demand{Dimension: "requests_per_second", WindowS: 1, Confidential: true}
 	lim.Demands = append(lim.Demands, confidential)
 	retryAfterText(w, &Signals{}, lim)
 	lim.Demands = []admission.Demand{lim.Demands[1], confidential}
@@ -86,10 +86,10 @@ func TestRetryAfterContext(t *testing.T) {
 	lim.Demands = lim.Demands[:1]
 	retryAfterText(w, &Signals{}, lim)
 	want := []string{
-		"    nominal demand at most 30.0% of each half-tested recorded limit; no cause inferred",
-		"    nominal demand at most 30.0% of each public half-tested recorded limit and at most half of each confidential one; no cause inferred",
-		"    nominal demand at most half of each half-tested recorded limit, each confidential; no cause inferred",
-		"    no half-tested limit recorded; no cause inferred",
+		"    nominal demand at most 30.0% of each window-tested recorded limit; no cause inferred",
+		"    nominal demand at most 30.0% of each public window-tested recorded limit and within each confidential one; no cause inferred",
+		"    nominal demand within each window-tested recorded limit, each confidential; no cause inferred",
+		"    no window-tested limit recorded; no cause inferred",
 	}
 	if !slices.Equal(lines, want) {
 		t.Errorf("lines %q, want %q", lines, want)
@@ -221,7 +221,7 @@ func TestStepTablesSignals(t *testing.T) {
 	text := st.Text()
 	for _, frag := range []string{
 		"  status_429             3/17 17.65% [",
-		"\n    nominal demand at most 10.3% of each half-tested recorded limit; no cause inferred\n" +
+		"\n    nominal demand at most 32.1% of each window-tested recorded limit; no cause inferred\n" +
 			"    Retry-After on 2 of 3 status_429 responses, not honoured: \"2\" x1, \"10\" x1\n" +
 			"  status_other ",
 		"\n  malformed_stream (none) 1/17 5.88% [",

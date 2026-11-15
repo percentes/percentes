@@ -171,9 +171,9 @@ type G2 struct {
 
 // CellStep is one step of a cell. An attempted step with scheduled
 // requests carries its lines, hosted-G6, throughput, completion-incidence
-// curve with its quantiles, and signals. In a cell report, each step the
-// ladder ran carries G2, and the loopback canary's summary where its
-// manifest records one.
+// curve with its quantiles, signals, status_429 responses and delay from
+// dispatch to write. In a cell report, each step the ladder ran carries
+// G2, and the loopback canary's summary where its manifest records one.
 type CellStep struct {
 	Step       int                    `json:"step"`
 	RPS        float64                `json:"rps"`
@@ -189,7 +189,9 @@ type CellStep struct {
 	Signals    *Signals               `json:"signals,omitempty"`
 }
 
-// CellTable is one cell's per-step table.
+// CellTable is one cell's per-step table, with its warm-up's status_429
+// responses where it had any and the clock-offset bound its manifest
+// records; refreshed are the limits read at its start (CellRecords).
 type CellTable struct {
 	Cell  string     `json:"cell"`
 	Steps []CellStep `json:"steps"`
@@ -290,7 +292,20 @@ type PooledStep struct {
 // answer. StepS is the configured step window throughput is over.
 // Naming is the route's naming lines (config Naming.Lines), which the
 // route's page prints and a cell's report does not carry. ModelMismatches
-// lists the route's model_mismatch cells, which the pages set.
+// lists the route's model_mismatch cells, which the pages set. Shape is
+// the route's request shape, and BindingRPS and Binding its binding rate
+// and binding limit. AtGeneration indexes the target.limits entries that
+// count output at generation, whose window tests span the hard timeout
+// as well. Null is a complete frame's null reading, which a
+// drift split states per part. Attribution is the account-group history
+// the status_429 labels come from (Attribute) and BillingStops the
+// route's cells stopped by a documented billing refusal, both of which
+// the pages set. Outside are the status_429 responses of the route's
+// cells outside the frame whose ladder started and whose records are
+// complete (AddOutside), and OutsideIncomplete counts those whose ladder
+// started with records incomplete, whose responses take no label; the
+// pages set both, and neither enters a pooled figure, the null reading
+// or the index.
 type StepTables struct {
 	Route           string           `json:"route"`
 	Naming          []string         `json:"naming,omitempty"`
@@ -325,14 +340,21 @@ type ModelMismatch struct {
 // histograms its manifest records (evidence.Cell) and the records of its
 // attempts file. Start is the attempt's scheduled start and Docs the
 // documentation state its manifest records (DocsOf); the drift rule
-// reads both.
+// reads both. EpochUTC is the run epoch the records' offsets count from,
+// zero where unknown, and ClockAbsOffsetS the clock-offset bound the
+// manifest records. Refreshed are the limits the refresh command read at
+// the cell's start, as its published refresh record carries them, in
+// target.limits order; nil where none was read.
 type CellRecords struct {
-	Cell    string
-	Outcome string
-	Gaps    []evidence.GapHistogram
-	Records []evidence.Record
-	Start   time.Time
-	Docs    []DocRecord
+	Cell            string
+	Outcome         string
+	Gaps            []evidence.GapHistogram
+	Records         []evidence.Record
+	Start           time.Time
+	Docs            []DocRecord
+	EpochUTC        time.Time
+	ClockAbsOffsetS *float64
+	Refreshed       []evidence.RefreshedLimit
 }
 
 // stepTally counts one step's requests per line, the status_other
@@ -358,8 +380,9 @@ type stepTally struct {
 }
 
 // tables carries the status and error documentation, whether
-// Retry-After could be recorded, and each cell's tallies, in the order
-// of the cell tables, while the tables are built.
+// Retry-After could be recorded, the ladder's step fractions, and each
+// cell's tallies, in the order of the cell tables, while the tables are
+// built.
 type tables struct {
 	*StepTables
 	docs          map[int]*config.StatusDoc
@@ -399,8 +422,9 @@ func lineOf(r *evidence.Record) (string, error) {
 }
 
 // NewStepTables builds a release route's per-step tables from the
-// ceiling rule's verdict v and each cell's records. Warm-up records are
-// left out. A step is attempted when it or a later step dispatched a
+// ceiling rule's verdict v, whose steps are the ladder's step rates at
+// v's binding rate, and each cell's records. Warm-up records are left
+// out. A step is attempted when it or a later step dispatched a
 // request; a step v excludes must have dispatched none. Every cell must
 // be counted: a labelled cell never enters the route's frame.
 func NewStepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (*StepTables, error) {
@@ -422,10 +446,13 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 		return nil, errors.New("report: step tables: not a release configuration")
 	}
 	rel := cfg.Release
-	steps := rel.Ladder.StepsRPS
-	switch {
-	case v == nil:
+	if v == nil {
 		return nil, errors.New("report: step tables: no ceiling-rule verdict")
+	}
+	steps := rel.Ladder.StepRates(v.BindingRPS)
+	switch {
+	case !(v.BindingRPS > 0) || config.RoundDownRPS(v.BindingRPS) != v.BindingRPS:
+		return nil, fmt.Errorf("report: step tables: verdict binding rate %g rps: want a positive rate rounded down to 0.001", v.BindingRPS)
 	case v.Route != cfg.Target.Name || v.CeilingTokens != rel.Shape.CeilingTokens:
 		return nil, fmt.Errorf("report: step tables: verdict for route %q at %d, the configuration's %q at %d",
 			v.Route, v.CeilingTokens, cfg.Target.Name, rel.Shape.CeilingTokens)
@@ -434,16 +461,16 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 	case !(rel.Ladder.StepS > 0):
 		return nil, fmt.Errorf("report: step tables: a step window of %g s", rel.Ladder.StepS)
 	}
-	if err := admission.CheckPublished(cfg, v); err != nil {
-		return nil, fmt.Errorf("report: step tables: %w", err)
-	}
 	for k := range steps {
 		switch s := v.Steps[k]; {
 		case s.RPS != steps[k]:
-			return nil, fmt.Errorf("report: step tables: verdict step %d is %g rps, the ladder's %g", k+1, s.RPS, steps[k])
+			return nil, fmt.Errorf("report: step tables: verdict step %d is %g rps, the ladder's %g at the binding rate %g", k+1, s.RPS, steps[k], v.BindingRPS)
 		case !s.Admitted && s.Binding == nil:
 			return nil, fmt.Errorf("report: step tables: verdict step %d is excluded with no binding limit", k+1)
 		}
+	}
+	if err := admission.CheckPublished(cfg, v); err != nil {
+		return nil, fmt.Errorf("report: step tables: %w", err)
 	}
 	if len(cells) > admission.ReleaseCells {
 		return nil, fmt.Errorf("report: step tables: %d cells, a frame holds %d", len(cells), admission.ReleaseCells)

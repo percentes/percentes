@@ -77,7 +77,7 @@ func TestDesignEffect(t *testing.T) {
 }
 
 // stepsConfig is the release reference with documented 429 and 529
-// statuses. At 1,712 tokens a request against 250,000 tokens per minute,
+// statuses and 160,000 tokens per minute. At 1,712 tokens a request,
 // steps 1 to 3 are admitted and steps 4 and 5 are not.
 func stepsConfig(t *testing.T) (*config.Config, *admission.Verdict) {
 	t.Helper()
@@ -89,6 +89,7 @@ func stepsConfig(t *testing.T) (*config.Config, *admission.Verdict) {
 		{Status: 429, Meaning: "rate limit reached", Source: "https://example.test/errors", Retrieved: "2026-10-07"},
 		{Status: 529, Meaning: "overloaded", Source: "errors.png", Retrieved: "2026-10-07"},
 	}
+	cfg.Target.Limits[1].Value = 80000
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -246,8 +247,8 @@ func TestStepTablesCell(t *testing.T) {
 	text := st.Text()
 	for _, frag := range []string{
 		"== Per-step tables: route groq, ceiling 512 tokens, deadline 30 s ==",
-		"step 1, 0.25 rps: admitted; requests_per_minute 1.5% of 1000 (half test: pass); tokens_per_minute 10.3% of 250000 (half test: pass); route_cap_usd ",
-		"step 4, 2 rps: excluded, binding limit tokens_per_minute; requests_per_minute 12.0% of 1000 (half test: pass); tokens_per_minute 82.2% of 250000 (half test: FAIL)",
+		"step 1, 0.25 rps: admitted; requests_per_minute 1.5% of 1000 (window test over 60 s: pass); tokens_per_minute 32.1% of 80000 (window test over 60 s: pass); route_cap_usd ",
+		"step 4, 0.9 rps: excluded, binding limit tokens_per_minute; requests_per_minute 5.4% of 1000 (window test over 60 s: pass); tokens_per_minute 115.6% of 80000 (window test over 60 s: FAIL)",
 		"-- Cell weekday-00: 95 percent Wilson intervals, treating the step's requests as independent --",
 		"step 1, 0.25 rps, 114 scheduled:",
 		fmt.Sprintf("  completed_in_time      100/114 87.72%% [%.2f%%, %.2f%%]\n", 100*newRate(100, 114).Lo, 100*newRate(100, 114).Hi),
@@ -259,8 +260,8 @@ func TestStepTablesCell(t *testing.T) {
 		"  hosted-G6 (completion within 30 s over scheduled): 87.72% [",
 		"against 0.99: FAIL (reported, not run-invalidating)",
 		"  hosted-G6 excluding connect and reset: 100/112 89.29% [",
-		"step 3, 1 rps: not attempted (the cell's ladder ended before this step)",
-		"step 5, 4 rps: excluded by the ceiling rule",
+		"step 3, 0.75 rps: not attempted (the cell's ladder ended before this step)",
+		"step 5, 1 rps: excluded by the ceiling rule",
 		"-- Incomplete frame: 1 of 12 cells; no pooled figures --",
 	} {
 		if !strings.Contains(text, frag) {
@@ -349,8 +350,8 @@ func TestStepTablesPooled(t *testing.T) {
 		"step 1, 0.25 rps, 12 of 12 cells, 1440 scheduled:",
 		"  status_429             12/1440 0.83%; cell rates 0.00% to 10.00%; 1 of 12 cells with events; DEFF 12.10; effective n 119.0; 95% Wilson [0.15%, 4.60%]; 429 documented as",
 		"  censored               0/1440 0.00%; cell rates 0.00% to 0.00%; 0 of 12 cells with events; DEFF 1.00, assumes independent requests; effective n 1440.0; 95% Wilson [0.00%, 0.27%]",
-		"step 3, 1 rps, 10 of 12 cells, 4800 scheduled:",
-		"step 4, 2 rps: excluded by the ceiling rule",
+		"step 3, 0.75 rps, 10 of 12 cells, 4800 scheduled:",
+		"step 4, 0.9 rps: excluded by the ceiling rule",
 	} {
 		if !strings.Contains(text, frag) {
 			t.Errorf("text lacks %q:\n%s", frag, text)
@@ -558,9 +559,21 @@ func TestStepTablesRefusals(t *testing.T) {
 			return v
 		}, "verdict has 4 steps, the ladder 5"},
 		{"verdict rate", func(_ *config.Config, v *admission.Verdict, _ *[]CellRecords) *admission.Verdict {
-			v.Steps[2].RPS = 1.5
+			v.Steps[2].RPS = 0.6
 			return v
-		}, "verdict step 3 is 1.5 rps, the ladder's 1"},
+		}, "verdict step 3 is 0.6 rps, the ladder's 0.75"},
+		{"verdict binding rate", func(_ *config.Config, v *admission.Verdict, _ *[]CellRecords) *admission.Verdict {
+			v.BindingRPS = 2
+			return v
+		}, "verdict step 1 is 0.25 rps, the ladder's 0.5 at the binding rate 2"},
+		{"binding rate unrounded", func(_ *config.Config, v *admission.Verdict, _ *[]CellRecords) *admission.Verdict {
+			v.BindingRPS = 1.0005
+			return v
+		}, "verdict binding rate 1.0005 rps: want a positive rate rounded down to 0.001"},
+		{"no binding rate", func(_ *config.Config, v *admission.Verdict, _ *[]CellRecords) *admission.Verdict {
+			v.BindingRPS = 0
+			return v
+		}, "verdict binding rate 0 rps"},
 		{"no binding", func(_ *config.Config, v *admission.Verdict, _ *[]CellRecords) *admission.Verdict {
 			v.Steps[4].Binding = nil
 			return v
@@ -628,7 +641,7 @@ func TestStepTablesRefusals(t *testing.T) {
 			(*cs)[0].Records[4].DispatchNs = 1
 			(*cs)[0].Records[4].Outcome = loadgen.OutcomeCensored
 			return v
-		}, "step 4 (2 rps) is excluded by the ceiling rule and dispatched requests"},
+		}, "step 4 (0.9 rps) is excluded by the ceiling rule and dispatched requests"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cfg, v := stepsConfig(t)
@@ -652,7 +665,7 @@ func TestStepTablesRefusals(t *testing.T) {
 func TestStepTablesConfidential(t *testing.T) {
 	cfg, _ := stepsConfig(t)
 	tpm := &cfg.Target.Limits[1]
-	tpm.Value, tpm.Marking, tpm.Source, tpm.SHA256, tpm.HMACSHA256 = 300001, config.MarkingConfidential, "console.png", "", strings.Repeat("ab", 32)
+	tpm.Value, tpm.Marking, tpm.Source, tpm.SHA256, tpm.HMACSHA256 = 80001, config.MarkingConfidential, "console.png", "", strings.Repeat("ab", 32)
 	cfg.Target.RetainedHeaders = []string{"x-ratelimit-*"}
 	v, err := admission.CeilingRule(cfg, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test/pricing", Retrieved: "2026-10-07"}, admission.ExpectedPlan(cfg, 1), 1)
 	if err != nil {
@@ -666,11 +679,11 @@ func TestStepTablesConfidential(t *testing.T) {
 	hash := strings.Repeat("ab", 32)
 	text := st.Text()
 	for _, frag := range []string{
-		"step 1, 0.25 rps: admitted; requests_per_minute 1.5% of 1000 (half test: pass); tokens_per_minute confidential (console.png, hmac-sha256 " + hash +
-			"): nominal demand at most half of it (half test: pass); route_cap_usd ",
-		"step 4, 2 rps: excluded, binding limit tokens_per_minute, confidential (console.png, hmac-sha256 " + hash + "); requests_per_minute 12.0% of 1000 (half test: pass); " +
-			"tokens_per_minute confidential (console.png, hmac-sha256 " + hash + "): nominal demand above half of it (half test: FAIL)",
-		"    nominal demand at most 1.5% of each public half-tested recorded limit and at most half of each confidential one; no cause inferred",
+		"step 1, 0.25 rps: admitted; requests_per_minute 1.5% of 1000 (window test over 60 s: pass); tokens_per_minute confidential (console.png, hmac-sha256 " + hash +
+			"): step rate at most the rate it admits over 60 s (window test over 60 s: pass); route_cap_usd ",
+		"step 4, 0.9 rps: excluded, binding limit tokens_per_minute, confidential (console.png, hmac-sha256 " + hash + "); requests_per_minute 5.4% of 1000 (window test over 60 s: pass); " +
+			"tokens_per_minute confidential (console.png, hmac-sha256 " + hash + "): step rate above the rate it admits over 60 s (window test over 60 s: FAIL)",
+		"    nominal demand at most 1.5% of each public window-tested recorded limit and within each confidential one; no cause inferred",
 	} {
 		if !strings.Contains(text, frag) {
 			t.Errorf("text lacks %q:\n%s", frag, text)

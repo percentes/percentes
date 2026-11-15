@@ -333,14 +333,14 @@ func compareRetryAfter(a, b string) int {
 	return strings.Compare(a, b)
 }
 
-// maxHalfFraction is the largest fraction of a public half-tested limit
-// among a step's demands, ok false when no demand takes that test, and
-// whether a demand takes the half test of a confidential limit, whose
-// fraction is not published.
-func maxHalfFraction(s admission.Step) (f float64, ok, confidential bool) {
+// maxWindowFraction is the largest fraction of a public window-tested
+// limit among a step's demands, ok false when no demand takes that test,
+// and whether a demand takes the window test of a confidential limit,
+// whose fraction is not published.
+func maxWindowFraction(s admission.Step) (f float64, ok, confidential bool) {
 	for _, d := range s.Demands {
 		switch {
-		case !d.Half:
+		case d.WindowS == 0:
 		case d.Confidential:
 			confidential = true
 		case !ok || d.Fraction > f:
@@ -418,18 +418,18 @@ func tokenCountsText(c Counts) string {
 }
 
 // retryAfterText renders a step's status_429 context: the largest
-// fraction of a public half-tested limit its nominal demand reached, at
-// most half of each confidential one, and its Retry-After record.
+// fraction of a public window-tested limit its nominal demand reached,
+// within each confidential one, and its Retry-After record.
 func retryAfterText(w func(string, ...any), s *Signals, lim admission.Step) {
-	switch f, ok, confidential := maxHalfFraction(lim); {
+	switch f, ok, confidential := maxWindowFraction(lim); {
 	case ok && confidential:
-		w("    nominal demand at most %.1f%% of each public half-tested recorded limit and at most half of each confidential one; no cause inferred", 100*f)
+		w("    nominal demand at most %.1f%% of each public window-tested recorded limit and within each confidential one; no cause inferred", 100*f)
 	case ok:
-		w("    nominal demand at most %.1f%% of each half-tested recorded limit; no cause inferred", 100*f)
+		w("    nominal demand at most %.1f%% of each window-tested recorded limit; no cause inferred", 100*f)
 	case confidential:
-		w("    nominal demand at most half of each half-tested recorded limit, each confidential; no cause inferred")
+		w("    nominal demand within each window-tested recorded limit, each confidential; no cause inferred")
 	default:
-		w("    no half-tested limit recorded; no cause inferred")
+		w("    no window-tested limit recorded; no cause inferred")
 	}
 	ra := s.RetryAfter
 	switch {

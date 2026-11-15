@@ -37,16 +37,16 @@ func TestStepTablesThroughputCell(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.StepS != 480 {
+	if st.StepS != 240 {
 		t.Fatalf("step window %g s", st.StepS)
 	}
 	s := st.Cells[0].Steps
 	tp := s[0].Throughput
-	if tp == nil || tp.WindowS != 480 || tp.Completions != 120 || !near(tp.PerS, 0.25) || tp.TokenCompletions != 96 ||
-		tp.Tokens != 24000 || tp.TokensPerS == nil || !near(*tp.TokensPerS, 50) {
+	if tp == nil || tp.WindowS != 240 || tp.Completions != 120 || !near(tp.PerS, 0.5) || tp.TokenCompletions != 96 ||
+		tp.Tokens != 24000 || tp.TokensPerS == nil || !near(*tp.TokensPerS, 100) {
 		t.Fatalf("step 1 throughput %+v", tp)
 	}
-	if tp := s[1].Throughput; tp == nil || tp.Completions != 240 || !near(tp.PerS, 0.5) || tp.TokenCompletions != 0 || tp.TokensPerS != nil {
+	if tp := s[1].Throughput; tp == nil || tp.Completions != 240 || !near(tp.PerS, 1) || tp.TokenCompletions != 0 || tp.TokensPerS != nil {
 		t.Errorf("step 2 throughput %+v", tp)
 	}
 	if s[2].Throughput != nil {
@@ -54,15 +54,15 @@ func TestStepTablesThroughputCell(t *testing.T) {
 	}
 	text := st.Text()
 	for _, frag := range []string{
-		"  throughput over the step's configured 480 s window: 120 completions, 0.250 per second; 24000 provider-reported completion tokens from 96 of 120 completions, 50.00 per second\n",
-		"  throughput over the step's configured 480 s window: 240 completions, 0.500 per second; no completion carried provider-reported completion tokens\n",
+		"  throughput over the step's configured 240 s window: 120 completions, 0.500 per second; 24000 provider-reported completion tokens from 96 of 120 completions, 100.00 per second\n",
+		"  throughput over the step's configured 240 s window: 240 completions, 1.000 per second; no completion carried provider-reported completion tokens\n",
 	} {
 		if !strings.Contains(text, frag) {
 			t.Errorf("text lacks %q:\n%s", frag, text)
 		}
 	}
 	b, _ := json.Marshal(st.Cells[0].Steps[1])
-	if !strings.Contains(string(b), `"throughput":{"window_s":480,"completions":240,"completions_per_s":0.5,"completions_with_tokens":0,"completion_tokens":0}`) {
+	if !strings.Contains(string(b), `"throughput":{"window_s":240,"completions":240,"completions_per_s":1,"completions_with_tokens":0,"completion_tokens":0}`) {
 		t.Errorf("step 2 JSON: %s", b)
 	}
 
@@ -97,11 +97,11 @@ func TestStepTablesThroughputPooled(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := st.Pooled[0].Throughput
-	if p == nil || p.WindowS != 12*480 || p.Completions != 1374 || !near(p.PerS, 1374.0/5760) || !near(p.CellMin, 109.0/480) ||
-		!near(p.CellMax, 0.25) || p.TokenCompletions != 30 || p.Tokens != 3000 || p.TokensPerS == nil || !near(*p.TokensPerS, 3000.0/5760) {
+	if p == nil || p.WindowS != 12*240 || p.Completions != 1374 || !near(p.PerS, 1374.0/2880) || !near(p.CellMin, 109.0/240) ||
+		!near(p.CellMax, 0.5) || p.TokenCompletions != 30 || p.Tokens != 3000 || p.TokensPerS == nil || !near(*p.TokensPerS, 3000.0/2880) {
 		t.Fatalf("step 1 pooled throughput %+v", p)
 	}
-	if p := st.Pooled[2].Throughput; p == nil || p.WindowS != 10*480 || p.Completions != 4800 || !near(p.PerS, 1) || p.TokensPerS != nil {
+	if p := st.Pooled[2].Throughput; p == nil || p.WindowS != 10*240 || p.Completions != 4800 || !near(p.PerS, 2) || p.TokensPerS != nil {
 		t.Errorf("step 3 pooled throughput %+v", p)
 	}
 	if p := st.Pooled[3].Throughput; p != nil {
@@ -109,8 +109,8 @@ func TestStepTablesThroughputPooled(t *testing.T) {
 	}
 	text := st.Text()
 	for _, frag := range []string{
-		"  throughput over 12 configured step windows of 480 s: 1374 completions, 0.239 per second; cell values 0.227 to 0.250 per second; 3000 provider-reported completion tokens from 30 of 1374 completions, 0.52 per second\n",
-		"  throughput over 10 configured step windows of 480 s: 4800 completions, 1.000 per second; cell values 1.000 to 1.000 per second; no completion carried provider-reported completion tokens\n",
+		"  throughput over 12 configured step windows of 240 s: 1374 completions, 0.477 per second; cell values 0.454 to 0.500 per second; 3000 provider-reported completion tokens from 30 of 1374 completions, 1.04 per second\n",
+		"  throughput over 10 configured step windows of 240 s: 4800 completions, 2.000 per second; cell values 2.000 to 2.000 per second; no completion carried provider-reported completion tokens\n",
 	} {
 		if !strings.Contains(text, frag) {
 			t.Errorf("text lacks %q:\n%s", frag, text)

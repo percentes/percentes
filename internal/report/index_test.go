@@ -123,11 +123,11 @@ func TestIndexRows(t *testing.T) {
 
 	md := ix.Markdown()
 	for _, frag := range []string{
-		"| Provider | Route | Model | Step | Offered load (rps) | Admission | Highest attempted step | Ceiling (tokens) | Cells attempted | Scheduled | completed_in_time | completed_late | status_429 | status_other | connect | reset | empty_stream | malformed_stream | censored | unsent | Route page |\n",
-		"| Groq | groq | openai/gpt-oss-120b | 1 | 0.25 | admitted | 3 | 512 | 12 of 12 | 1440 | 1320/1440 | 48/1440 | 24/1440 | 12/1440 | 0/1440 | 0/1440 | 0/1440 | 12/1440 | 24/1440 | 0/1440 | [groq](routes/groq.html) |\n",
-		"| Groq | groq | openai/gpt-oss-120b | 3 | 1 | admitted | 3 | 512 | 10 of 12 | 4800 | 4790/4800 | 0/4800 | 0/4800 | 0/4800 | 0/4800 | 10/4800 | 0/4800 | 0/4800 | 0/4800 | 0/4800 | [groq](routes/groq.html) |\n",
-		"| Groq | groq | openai/gpt-oss-120b | 4 | 2 | excluded, binding limit tokens_per_minute | 3 | 512 | 0 of 12 | 0 |  |  |  |  |  |  |  |  |  |  | [groq](routes/groq.html) |\n",
-		"| Anthropic | solo | openai/gpt-oss-120b | 1 | 0.25 | admitted | 1 | 512 | incomplete frame, 1 of 12 cells recorded |  |  |  |  |  |  |  |  |  |  |  | [solo](routes/solo.html) |\n",
+		"| Provider | Route | Model | Shape | Step | Offered load (rps) | Admission | Highest attempted step | Ceiling (tokens) | Cells attempted | Scheduled | completed_in_time | completed_late | status_429 | status_other | connect | reset | empty_stream | malformed_stream | censored | unsent | Route page |\n",
+		"| Groq | groq | openai/gpt-oss-120b | S | 1 | 0.25 | admitted | 3 | 512 | 12 of 12 | 1440 | 1320/1440 | 48/1440 | 24/1440 | 12/1440 | 0/1440 | 0/1440 | 0/1440 | 12/1440 | 24/1440 | 0/1440 | [groq](routes/groq.html) |\n",
+		"| Groq | groq | openai/gpt-oss-120b | S | 3 | 0.75 | admitted | 3 | 512 | 10 of 12 | 4800 | 4790/4800 | 0/4800 | 0/4800 | 0/4800 | 0/4800 | 10/4800 | 0/4800 | 0/4800 | 0/4800 | 0/4800 | [groq](routes/groq.html) |\n",
+		"| Groq | groq | openai/gpt-oss-120b | S | 4 | 0.9 | excluded, binding limit tokens_per_minute | 3 | 512 | 0 of 12 | 0 |  |  |  |  |  |  |  |  |  |  | [groq](routes/groq.html) |\n",
+		"| Anthropic | solo | openai/gpt-oss-120b | S | 1 | 0.25 | admitted | 1 | 512 | incomplete frame, 1 of 12 cells recorded |  |  |  |  |  |  |  |  |  |  |  | [solo](routes/solo.html) |\n",
 	} {
 		if !strings.Contains(md, frag) {
 			t.Errorf("page lacks %q:\n%s", frag, md)

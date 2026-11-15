@@ -260,7 +260,7 @@ func TestIndexDrift(t *testing.T) {
 			t.Errorf("step %d: %+v", row.Step, row)
 		}
 	}
-	frag := "| Groq | groq | openai/gpt-oss-120b | 1 | 0.25 | admitted | 3 | 512 | split in 3 parts by a change of limits or documentation; counts on the route page |  |  |  |  |  |  |  |  |  |  |  | [groq](routes/groq.html) |\n"
+	frag := "| Groq | groq | openai/gpt-oss-120b | S | 1 | 0.25 | admitted | 3 | 512 | split in 3 parts by a change of limits or documentation; counts on the route page |  |  |  |  |  |  |  |  |  |  |  | [groq](routes/groq.html) |\n"
 	if md := ix.Markdown(); !strings.Contains(md, frag) {
 		t.Errorf("index lacks %q:\n%s", frag, md)
 	}

@@ -74,7 +74,7 @@ func TestCellReport(t *testing.T) {
 		"Outcome: stopped; a labelled record, outside the route's frame of 12 cells\n  " + stop[0] + "\n",
 		"The ladder did not start; the attempts file is empty.\n",
 		"step 1, 0.25 rps: not attempted (the cell's ladder ended before this step)\n",
-		"step 4, 2 rps: excluded by the ceiling rule\n",
+		"step 4, 0.9 rps: excluded by the ceiling rule\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text lacks %q:\n%s", want, text)
@@ -175,9 +175,9 @@ func TestCellReportG2(t *testing.T) {
 	for _, want := range []string{
 		line + "pass; " + g2[0].Detail + " (run-failing)\n  hosted-G6 (completion within 30 s over scheduled): 100.00%",
 		line + "FAIL; " + g2[1].Detail + " (run-failing)\n  hosted-G6 (completion within 30 s over scheduled): 100.00%",
-		"step 3, 1 rps: not attempted (the cell's ladder ended before this step)\n" +
+		"step 3, 0.75 rps: not attempted (the cell's ladder ended before this step)\n" +
 			line + "not observed, so not passed; no verdict: the run stopped before the step's drain ended (run-failing)\n",
-		"step 4, 2 rps: excluded by the ceiling rule\nstep 5,",
+		"step 4, 0.9 rps: excluded by the ceiling rule\nstep 5,",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text lacks %q:\n%s", want, text)
@@ -253,7 +253,7 @@ func TestCellReportCanary(t *testing.T) {
 		" (run-failing)\n" + line + "4 of 4 streams completed, 32 tokens at 20 ms TTFT and 10 ms ITL; event lag p99 1.10 ms, max 1.50 ms; " +
 			"TTFT deviation p50 0.30 ms, max 0.90 ms; ITL deviation p50 0.08 ms, p99 0.40 ms, max 0.70 ms (reported, not run-invalidating)\n  hosted-G6",
 		"; event lag p99 1.10 ms, max 2.25 ms; ",
-		"step 3, 1 rps: not attempted (the cell's ladder ended before this step)\n" +
+		"step 3, 0.75 rps: not attempted (the cell's ladder ended before this step)\n" +
 			"  G2 (client validity at the step's drain end): not observed, so not passed; no verdict: the run stopped before the step's drain ended (run-failing)\n" +
 			line + "0 of 1 streams completed, so no bound on read-loop lag\nstep 4,",
 	} {
