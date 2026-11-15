@@ -3,6 +3,7 @@ package loadgen
 import (
 	"math"
 	"math/rand"
+	"slices"
 
 	"github.com/percentes/percentes/internal/config"
 )
@@ -60,6 +61,15 @@ type Ladder struct {
 	EndNs int64
 }
 
+// TopRPS is the rate of the ladder's top step.
+func (l *Ladder) TopRPS() float64 {
+	var top float64
+	for _, st := range l.Steps {
+		top = max(top, st.RateRPS)
+	}
+	return top
+}
+
 // LadderStep is one step: requests [First, End) of the schedule fall
 // in [StartNs, EndNs), and the drain runs from EndNs to DrainEndNs.
 type LadderStep struct {
@@ -70,19 +80,25 @@ type LadderStep struct {
 	First, End int
 }
 
-// BuildLadder returns the release ladder of cfg, or nil when cfg has no
-// release section or no steps. Arrivals restart at each window's start
-// from one generator seeded by the run seed.
+// BuildLadder returns the release ladder of cfg at the step rates of its
+// binding rate (config.Ladder.StepRates of release.BindingRPS), or nil
+// when cfg has no release section, no steps or a step rate of zero.
+// Arrivals restart at each window's start from one generator seeded by
+// the run seed.
 func BuildLadder(cfg *config.Config) *Ladder {
-	if cfg.Release == nil || len(cfg.Release.Ladder.StepsRPS) == 0 {
+	if cfg.Release == nil || len(cfg.Release.Ladder.StepFractions) == 0 {
 		return nil
 	}
 	ld := cfg.Release.Ladder
+	rates := ld.StepRates(cfg.Release.BindingRPS)
+	if slices.Min(rates) <= 0 {
+		return nil
+	}
 	rng := rand.New(rand.NewSource(cfg.Run.Seed))
 	l := &Ladder{}
-	l.Offsets = arrivals(l.Offsets, cfg.Load.ArrivalProcess, rng, ld.StepsRPS[0], 0, secondsNs(ld.WarmupS))
+	l.Offsets = arrivals(l.Offsets, cfg.Load.ArrivalProcess, rng, rates[0], 0, secondsNs(ld.WarmupS))
 	t := secondsNs(ld.WarmupS)
-	for _, rate := range ld.StepsRPS {
+	for _, rate := range rates {
 		st := LadderStep{RateRPS: rate, StartNs: t, EndNs: t + secondsNs(ld.StepS), First: len(l.Offsets)}
 		st.DrainEndNs = st.EndNs + secondsNs(ld.DrainS)
 		l.Offsets = arrivals(l.Offsets, cfg.Load.ArrivalProcess, rng, rate, st.StartNs, st.EndNs)

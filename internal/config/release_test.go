@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -23,13 +24,49 @@ func TestReleaseReferenceLoads(t *testing.T) {
 	if got := c.Target.Limits[0].Retrieved; got != "2026-10-07" {
 		t.Errorf("retrieved %q", got)
 	}
-	if got := c.ReleaseConnectionProvision(); got != 752 {
-		t.Errorf("connection provision %d, want 2 x 4 rps x 90 s + 32 = 752", got)
+	if got := c.ReleaseConnectionProvision(75.454); got != 13613 {
+		t.Errorf("connection provision %d, want int(2 x 75.454 rps x 90 s) + 32 = 13613", got)
+	}
+	if c.Release.AccountGroup != "groq" || c.Load.ArrivalProcess != PinnedReleaseArrivalProcess || c.Release.Ladder.StepS != 240 {
+		t.Errorf("account group %q, arrival process %q, step %g s", c.Release.AccountGroup, c.Load.ArrivalProcess, c.Release.Ladder.StepS)
 	}
 	c.Release.Shape.CeilingTokens = 1024
 	c.Target.Body = strings.Replace(c.Target.Body, `"max_completion_tokens": 512`, `"max_completion_tokens": 1024`, 1)
 	if err := c.Validate(); err != nil {
 		t.Errorf("fallback ceiling 1024: %v", err)
+	}
+}
+
+// Step rates are each fraction of the binding rate frozen rounded down,
+// rounded down to 0.001 requests per second.
+func TestReleaseStepRates(t *testing.T) {
+	l := Ladder{StepFractions: PinnedReleaseStepFractions}
+	for _, tc := range []struct {
+		route string
+		exact float64
+		want  []float64
+	}{
+		{"anthropic-R 16", 75.454545, []float64{18.863, 37.727, 56.590, 67.908, 75.454}},
+		{"azure-S 512", 2.429285, []float64{0.607, 1.214, 1.821, 2.186, 2.429}},
+		{"azure-S 1024", 1.863561, []float64{0.465, 0.931, 1.397, 1.676, 1.863}},
+		{"azure-R 16", 3.636364, []float64{0.909, 1.818, 2.727, 3.272, 3.636}},
+		{"gemini-S 512, k = 3", 4.010028, []float64{1.002, 2.005, 3.007, 3.609, 4.010}},
+		{"gemini-S 1024", 2.385631, []float64{0.596, 1.192, 1.788, 2.146, 2.385}},
+		{"baseten-S", 0.249584, []float64{0.062, 0.124, 0.186, 0.224, 0.249}},
+	} {
+		if got := l.StepRates(tc.exact); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: step rates %v, want %v", tc.route, got, tc.want)
+		}
+		if got := l.StepRates(tc.want[4]); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: step rates at the frozen %g: %v, want %v", tc.route, tc.want[4], got, tc.want)
+		}
+	}
+	for _, tc := range []struct{ in, want float64 }{
+		{75.454545, 75.454}, {12.819987, 12.819}, {2.429, 2.429}, {0.0009, 0}, {-1, 0}, {math.NaN(), 0}, {math.Inf(1), 0},
+	} {
+		if got := RoundDownRPS(tc.in); got != tc.want {
+			t.Errorf("RoundDownRPS(%g) = %g, want %g", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -64,9 +101,10 @@ func TestReleaseRefusals(t *testing.T) {
 		want   string
 	}{
 		{"no release section", func(c *Config) { c.Release = nil }, "release: required"},
-		{"four steps", func(c *Config) { c.Release.Ladder.StepsRPS = []float64{0.25, 0.5, 1, 2} }, "release.ladder.steps_rps: pinned [0.25 0.5 1 2 4]"},
-		{"descending steps", func(c *Config) { c.Release.Ladder.StepsRPS = []float64{4, 2, 1, 0.5, 0.25} }, "release.ladder.steps_rps"},
-		{"step 8 rps", func(c *Config) { c.Release.Ladder.StepsRPS[4] = 8 }, "release.ladder.steps_rps"},
+		{"four steps", func(c *Config) { c.Release.Ladder.StepFractions = []float64{0.25, 0.5, 0.75, 0.9} }, "release.ladder.step_fractions: pinned [0.25 0.5 0.75 0.9 1]"},
+		{"descending steps", func(c *Config) { c.Release.Ladder.StepFractions = []float64{1, 0.9, 0.75, 0.5, 0.25} }, "release.ladder.step_fractions"},
+		{"HA3 rates", func(c *Config) { c.Release.Ladder.StepFractions = []float64{0.25, 0.5, 1, 2, 4} }, "release.ladder.step_fractions"},
+		{"step above the binding rate", func(c *Config) { c.Release.Ladder.StepFractions[4] = 1.1 }, "release.ladder.step_fractions"},
 		{"warm-up", func(c *Config) { c.Release.Ladder.WarmupS = 30 }, "release.ladder.warmup_s: pinned 60"},
 		{"step window 480", func(c *Config) { c.Release.Ladder.StepS = 480 }, "release.ladder.step_s: pinned 240"},
 		{"drain", func(c *Config) { c.Release.Ladder.DrainS = 30 }, "release.ladder.drain_s: pinned 90"},

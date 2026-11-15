@@ -193,8 +193,11 @@ var (
 	PinnedSensitivityWindowS  = []int{5, 10, 20}
 	PinnedSensitivityHoldS    = []int{15, 30, 60}
 
-	// SPEC-HOSTED HA3 points 5 and 7: the ladder's steps in ascending
-	// order, and the output ceiling with its one fallback.
+	// SPEC-HOSTED HA4: the ladder's steps in ascending order, as fractions
+	// of the route's binding rate.
+	PinnedReleaseStepFractions = []float64{0.25, 0.5, 0.75, 0.9, 1}
+
+	// The HA3 pins stay until every caller reads the HA4 ones.
 	PinnedReleaseStepsRPS = []float64{0.25, 0.5, 1, 2, 4}
 	PinnedReleaseCeilings = []int{512, 1024}
 )

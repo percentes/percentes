@@ -654,6 +654,13 @@ func TestCellProbeWithholds(t *testing.T) {
 // rate-limit headers retained.
 func confidentialConfig(t *testing.T, endpoint string) *config.Config {
 	t.Helper()
+	return confidentialConfigAt(t, endpoint, "250013.5")
+}
+
+// confidentialConfigAt is confidentialConfig with the confidential
+// tokens_per_minute limit at value.
+func confidentialConfigAt(t *testing.T, endpoint, value string) *config.Config {
+	t.Helper()
 	raw := releaseConfig(t, endpoint).Raw
 	const public = "      value: 250000\n      marking: public\n      counting: input_and_output\n      source: groq-rate-limits-page.png\n      retrieved: 2026-10-07\n      sha256:"
 	if !bytes.Contains(raw, []byte(public)) || !bytes.Contains(raw, []byte(rateLimitHeaders)) {

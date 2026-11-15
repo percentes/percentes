@@ -52,7 +52,7 @@ const slotLength = 4 * time.Hour
 
 // CellLength is one cell's ladder under the release pins: the warm-up,
 // then every step's measured window and drain.
-var CellLength = time.Duration(config.PinnedReleaseWarmupS+len(config.PinnedReleaseStepsRPS)*(config.PinnedReleaseStepS+config.PinnedReleaseDrainS)) * time.Second
+var CellLength = time.Duration(config.PinnedReleaseWarmupS+len(config.PinnedReleaseStepFractions)*(config.PinnedReleaseStepS+config.PinnedReleaseDrainS)) * time.Second
 
 // maxCounter bounds the re-derivation counter.
 const maxCounter = 10000

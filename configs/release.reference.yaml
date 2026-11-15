@@ -35,8 +35,9 @@ client_validity:
   go_gc_pause_p99_ms: 1
 
 release:
-  ladder:                   # pinned (HA3 point 5)
-    steps_rps: [0.25, 0.5, 1, 2, 4]
+  ladder:                   # pinned (HA4)
+    # fractions of the route's binding rate
+    step_fractions: [0.25, 0.5, 0.75, 0.9, 1]
     warmup_s: 60
     step_s: 240
     drain_s: 90

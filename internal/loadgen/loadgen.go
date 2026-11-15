@@ -497,7 +497,7 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 	// every request blackholing simultaneously.
 	provision := int(cfg.Load.RateRPS*float64(config.PinnedClientTimeoutS)*2) + cfg.Load.Connections
 	if ladder != nil {
-		provision = cfg.ReleaseConnectionProvision()
+		provision = cfg.ReleaseConnectionProvision(ladder.TopRPS())
 	}
 	transport := NewTransport(provision)
 	defer transport.CloseIdleConnections()

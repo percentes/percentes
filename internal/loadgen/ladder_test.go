@@ -15,19 +15,39 @@ import (
 	"github.com/percentes/percentes/internal/schedule"
 )
 
-// The reference ladder: a 60 s warm-up at 0.25 rps, then five 480 s
-// windows each followed by a 90 s drain, 48.5 minutes in all.
+// The reference ladder at azure-S's binding rate at 512, 2.429 requests
+// per second: a 60 s warm-up at the first step, then five 240 s windows
+// at 0.607, 1.214, 1.821, 2.186 and 2.429 requests per second, each
+// followed by a 90 s drain, 28.5 minutes and 2,015 requests in all.
+// Paced arrivals send floor(r*T) requests per segment, at its start plus
+// i/r, whatever the seed. A configuration with no binding rate builds no
+// ladder.
 func TestReleaseLadderSchedule(t *testing.T) {
 	cfg, err := config.LoadFile("../../configs/release.reference.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.Run.Seed = 7
+	if l := BuildLadder(cfg); l != nil || BuildSchedule(cfg) != nil {
+		t.Fatalf("a ladder with no binding rate: %+v", l)
+	}
+	cfg.Release.BindingRPS = 0.003
+	if l := BuildLadder(cfg); l != nil {
+		t.Fatalf("a ladder with a step at 0 rps: %+v", l)
+	}
+	cfg.Release.BindingRPS = 2.429
 	l := BuildLadder(cfg)
 	if l == nil || len(l.Steps) != 5 {
 		t.Fatalf("ladder %+v", l)
 	}
-	if time.Duration(l.EndNs) != schedule.CellLength || l.EndNs != 2910e9 {
+	counts := []int{l.Steps[0].First}
+	for _, st := range l.Steps {
+		counts = append(counts, st.End-st.First)
+	}
+	if want := []int{36, 145, 291, 437, 524, 582}; !slices.Equal(counts, want) || len(l.Offsets) != 2015 {
+		t.Fatalf("warm-up and step counts %v of %d, want %v of 2015", counts, len(l.Offsets), want)
+	}
+	if time.Duration(l.EndNs) != schedule.CellLength || l.EndNs != 1710e9 {
 		t.Fatalf("cell ends at %v, want %v", time.Duration(l.EndNs), schedule.CellLength)
 	}
 	if !slices.Equal(BuildSchedule(cfg), l.Offsets) || !slices.Equal(BuildLadder(cfg).Offsets, l.Offsets) {
@@ -36,34 +56,36 @@ func TestReleaseLadderSchedule(t *testing.T) {
 	if !slices.IsSorted(l.Offsets) {
 		t.Fatal("offsets not ascending")
 	}
-	within := func(name string, got int, want float64) {
+	paced := func(name string, offs []int64, startNs int64, rate, seconds float64) {
 		t.Helper()
-		if math.Abs(float64(got)-want) > 6*math.Sqrt(want) {
-			t.Errorf("%s: %d requests, expected about %g", name, got, want)
+		if want := int(math.Floor(rate * seconds)); len(offs) != want {
+			t.Fatalf("%s: %d requests, want floor(%g x %g) = %d", name, len(offs), rate, seconds, want)
+		}
+		for i, off := range offs {
+			if want := startNs + int64(float64(i)*1e9/rate); off != want {
+				t.Fatalf("%s: request %d at %d ns, want %d", name, i, off, want)
+			}
 		}
 	}
-	for _, off := range l.Offsets[:l.Steps[0].First] {
-		if off < 0 || off >= 60e9 {
-			t.Fatalf("warm-up request at %d ns", off)
-		}
+	steps := []float64{0.607, 1.214, 1.821, 2.186, 2.429}
+	if got := cfg.Release.Ladder.StepRates(cfg.Release.BindingRPS); !slices.Equal(got, steps) {
+		t.Fatalf("step rates %v, want %v", got, steps)
 	}
-	within("warm-up", l.Steps[0].First, 15)
-	limits := []int{45, 90, 180, 360, 720}
+	paced("warm-up", l.Offsets[:l.Steps[0].First], 0, steps[0], 60)
+	var limits []int
+	for _, r := range steps {
+		limits = append(limits, int(2*r*90))
+	}
 	rec := newLadderRecord(cfg, l)
 	for k, st := range l.Steps {
-		start := int64(60e9) + int64(k)*570e9
-		if st.RateRPS != config.PinnedReleaseStepsRPS[k] || st.StartNs != start || st.EndNs != start+480e9 || st.DrainEndNs != start+570e9 {
+		start := int64(60e9) + int64(k)*330e9
+		if st.RateRPS != steps[k] || st.StartNs != start || st.EndNs != start+240e9 || st.DrainEndNs != start+330e9 {
 			t.Fatalf("step %d: %+v", k+1, st)
 		}
 		if k > 0 && st.First != l.Steps[k-1].End {
 			t.Fatalf("step %d starts at request %d, step %d ended at %d", k+1, st.First, k, l.Steps[k-1].End)
 		}
-		for _, off := range l.Offsets[st.First:st.End] {
-			if off < st.StartNs || off >= st.EndNs {
-				t.Fatalf("step %d request at %d ns, outside [%d, %d)", k+1, off, st.StartNs, st.EndNs)
-			}
-		}
-		within("step", st.End-st.First, st.RateRPS*480)
+		paced("step", l.Offsets[st.First:st.End], st.StartNs, st.RateRPS, 240)
 		if sr := rec.Steps[k]; sr.Scheduled != st.End-st.First || sr.InFlightLimit != limits[k] || sr.Attempted {
 			t.Fatalf("step %d record %+v", k+1, sr)
 		}
@@ -74,10 +96,13 @@ func TestReleaseLadderSchedule(t *testing.T) {
 	if w := newLadderTripwire(cfg, l).report(); !slices.Equal(w.InFlightLimits, limits) || w.InFlightLimit != 0 || w.Scheduled != len(l.Offsets) {
 		t.Fatalf("tripwires %+v", w)
 	}
+	if top := l.TopRPS(); top != steps[4] {
+		t.Fatalf("top step %g rps, want %g", top, steps[4])
+	}
 
 	cfg.Run.Seed = 8
-	if slices.Equal(BuildSchedule(cfg), l.Offsets) {
-		t.Fatal("a different seed gave the same schedule")
+	if !slices.Equal(BuildSchedule(cfg), l.Offsets) {
+		t.Fatal("paced arrivals moved with the seed")
 	}
 }
 
@@ -160,8 +185,9 @@ func recordGates(fail gateCall, mu *sync.Mutex, calls *[]gateCall) gateFunc {
 	}
 }
 
-// A ladder of len(steps) steps: a 1 s warm-up, 2 s windows and 1.5 s
-// drains, deterministic arrivals, a 1 s hard timeout.
+// A ladder of len(steps) steps at a binding rate of 1 request per
+// second, each step's rate its fraction: a 1 s warm-up, 2 s windows and
+// 1.5 s drains, deterministic arrivals, a 1 s hard timeout.
 func ladderRunCfg(baseURL string, steps ...float64) *config.Config {
 	cfg := &config.Config{Profile: config.ProfileRelease, Target: config.Target{BaseURL: baseURL}}
 	cfg.Load.ArrivalProcess = "deterministic"
@@ -169,8 +195,9 @@ func ladderRunCfg(baseURL string, steps ...float64) *config.Config {
 	cfg.Load.MaxTokens = 8
 	cfg.Client.HTTPTimeoutS = 1
 	cfg.Release = &config.Release{
-		Ladder: config.Ladder{StepsRPS: steps, WarmupS: 1, StepS: 2, DrainS: 1.5},
-		Shape:  config.Shape{DeadlineS: 1},
+		Ladder:     config.Ladder{StepFractions: steps, WarmupS: 1, StepS: 2, DrainS: 1.5},
+		Shape:      config.Shape{DeadlineS: 1},
+		BindingRPS: 1,
 	}
 	return cfg
 }
@@ -326,7 +353,7 @@ func TestTripwireEndsLadder(t *testing.T) {
 	var hits atomic.Int64
 	srv := statusByHit(t, &hits, func(int64) int { return http.StatusOK })
 	cfg := ladderRunCfg(srv.URL, 2, 4)
-	cfg.Release.Ladder = config.Ladder{StepsRPS: []float64{2, 4}, WarmupS: 0.5, StepS: 0.5, DrainS: 0.5}
+	cfg.Release.Ladder = config.Ladder{StepFractions: []float64{2, 4}, WarmupS: 0.5, StepS: 0.5, DrainS: 0.5}
 	l := BuildLadder(cfg)
 	var mu sync.Mutex
 	var calls []gateCall

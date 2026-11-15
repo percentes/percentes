@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	_ "time/tzdata"
@@ -28,6 +29,10 @@ type Release struct {
 	// request shape, its host group. The ceiling rule chooses one ceiling
 	// from a check of every host (SPEC-HOSTED HA3 point 7 and HA4).
 	OtherHosts []ModelHost `yaml:"other_hosts,omitempty" json:"other_hosts,omitempty"`
+	// BindingRPS is the route's binding rate as the committed schedule
+	// froze it, set when the route starts; no file sets it. The ladder
+	// runs at Ladder.StepRates(BindingRPS).
+	BindingRPS float64 `yaml:"-" json:"-"`
 }
 
 // ModelHost is a route of the target's model: its route name and the
@@ -47,12 +52,56 @@ type LedgerCaps struct {
 
 // Ladder is the offered-load ladder: open-loop paced arrivals at each
 // step in ascending order, a warm-up at the first step, then per step a
-// measured window followed by a drain that dispatches nothing.
+// measured window followed by a drain that dispatches nothing. Each step
+// is a fraction of the route's binding rate (SPEC-HOSTED HA4).
 type Ladder struct {
-	StepsRPS []float64 `yaml:"steps_rps" json:"steps_rps"`
-	WarmupS  float64   `yaml:"warmup_s" json:"warmup_s"`
-	StepS    float64   `yaml:"step_s" json:"step_s"`
-	DrainS   float64   `yaml:"drain_s" json:"drain_s"`
+	StepFractions []float64 `yaml:"step_fractions" json:"step_fractions"`
+	WarmupS       float64   `yaml:"warmup_s" json:"warmup_s"`
+	StepS         float64   `yaml:"step_s" json:"step_s"`
+	DrainS        float64   `yaml:"drain_s" json:"drain_s"`
+
+	// StepsRPS stays until every caller reads StepFractions.
+	StepsRPS []float64 `yaml:"-" json:"-"`
+}
+
+// StepRates are the ladder's step rates at bindingRPS: the binding rate
+// rounded down to 0.001 requests per second, and each step's fraction of
+// it rounded down the same way (SPEC-HOSTED HA4).
+func (l Ladder) StepRates(bindingRPS float64) []float64 {
+	b := new(big.Rat).SetInt64(milliRPS(decimal(bindingRPS)))
+	out := make([]float64, len(l.StepFractions))
+	for i, f := range l.StepFractions {
+		out[i] = float64(floor(new(big.Rat).Mul(decimal(f), b))) / 1000
+	}
+	return out
+}
+
+// RoundDownRPS is rps rounded down to 0.001 requests per second.
+func RoundDownRPS(rps float64) float64 {
+	return float64(milliRPS(decimal(rps))) / 1000
+}
+
+// decimal is x at its shortest decimal form, exactly; 0 for NaN or an
+// infinity.
+func decimal(x float64) *big.Rat {
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(x, 'g', -1, 64))
+	if !ok {
+		return new(big.Rat)
+	}
+	return r
+}
+
+// milliRPS is r in requests per second times 1,000, rounded down.
+func milliRPS(r *big.Rat) int64 {
+	return floor(new(big.Rat).Mul(r, big.NewRat(1000, 1)))
+}
+
+// floor is r rounded down to an integer; 0 for a negative r.
+func floor(r *big.Rat) int64 {
+	if r.Sign() <= 0 {
+		return 0
+	}
+	return new(big.Int).Quo(r.Num(), r.Denom()).Int64()
 }
 
 // Shape is the request shape. The hard timeout is client.http_timeout_s;
@@ -374,13 +423,12 @@ var releaseParams = map[string][]string{
 	AdapterMessages:        {"thinking", "output_config"},
 }
 
-// ReleaseConnectionProvision is the release transport provision: two
-// times the top step's rate times the hard timeout, plus
+// ReleaseConnectionProvision is the release transport provision at the
+// top step's rate topRPS: two times topRPS times the hard timeout, plus
 // load.connections. The config must have passed Validate under the
 // release profile.
-func (c *Config) ReleaseConnectionProvision() int {
-	top := slices.Max(c.Release.Ladder.StepsRPS)
-	return int(2*top*float64(c.Client.HTTPTimeoutS)) + c.Load.Connections
+func (c *Config) ReleaseConnectionProvision(topRPS float64) int {
+	return int(2*topRPS*float64(c.Client.HTTPTimeoutS)) + c.Load.Connections
 }
 
 func (c *Config) validateRelease(v *validator) {
@@ -396,7 +444,7 @@ func (c *Config) validateRelease(v *validator) {
 
 	l := c.Load
 	if l.RateRPS != 0 {
-		v.errf("load.rate_rps: must be absent under the release profile; release.ladder.steps_rps sets the rates, got %g", l.RateRPS)
+		v.errf("load.rate_rps: must be absent under the release profile; the binding rate and release.ladder.step_fractions set the rates, got %g", l.RateRPS)
 	}
 	if l.ArrivalProcess != PinnedReleaseArrivalProcess {
 		v.errf("load.arrival_process: pinned %q under the release profile (SPEC-HOSTED HA4), got %q", PinnedReleaseArrivalProcess, l.ArrivalProcess)
@@ -448,8 +496,8 @@ func (c *Config) validateRelease(v *validator) {
 			v.errf("%s: pinned %g under the release profile (SPEC-HOSTED HA3 and HA4), got %g", field, want, got)
 		}
 	}
-	if !slices.Equal(r.Ladder.StepsRPS, PinnedReleaseStepsRPS) {
-		v.errf("release.ladder.steps_rps: pinned %v under the release profile (SPEC-HOSTED HA3 point 5), got %v", PinnedReleaseStepsRPS, r.Ladder.StepsRPS)
+	if !slices.Equal(r.Ladder.StepFractions, PinnedReleaseStepFractions) {
+		v.errf("release.ladder.step_fractions: pinned %v under the release profile (SPEC-HOSTED HA4), got %v", PinnedReleaseStepFractions, r.Ladder.StepFractions)
 	}
 	pin("release.ladder.warmup_s", r.Ladder.WarmupS, PinnedReleaseWarmupS)
 	pin("release.ladder.step_s", r.Ladder.StepS, PinnedReleaseStepS)
