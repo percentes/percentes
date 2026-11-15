@@ -526,7 +526,7 @@ func TestCellStopsAndBlocks(t *testing.T) {
 		probes  int
 	}{
 		{"clock offset", "+75.5", 200, "", "", outcomeStopped, "route stop: clock offset: 75.5 s", 0},
-		{"ledger refusal", "+0.005", 200, "", "1299.99", outcomeStopped, "route stop: admission: cell for groq refused", 0},
+		{"ledger refusal", "+0.005", 200, "", "1399.99", outcomeStopped, "route stop: admission: cell for groq refused", 0},
 		{"probe 401", "+0.005", 401, "", "", outcomeBlocked, "probe request returned 401", 1},
 		{"probe billing refusal", "+0.005", 402, "", "", outcomeStopped, "route stop: HTTP 402, the documented billing refusal", 1},
 	} {

@@ -47,7 +47,7 @@ release:
     deadline_s: 30
   caps:                     # admission ledger caps, US$
     route_usd: "10"
-    global_usd: "1300"      # the same in every route's file
+    global_usd: "1400"      # the same in every route's file
   # The provider account or deployment the route is recorded against;
   # routes of one group share its limits and spend limit.
   account_group: groq

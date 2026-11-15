@@ -36,7 +36,7 @@ func TestLedgerCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(st.Caps, want) || st.Caps.RouteLiabilityUSD["baseten"] != "25" || st.Caps.LiabilityUSD != "1300" {
+	if !reflect.DeepEqual(st.Caps, want) || st.Caps.RouteLiabilityUSD["baseten"] != "25" || st.Caps.LiabilityUSD != "1400" {
 		t.Fatalf("caps %+v, want %+v", st.Caps, want)
 	}
 	for _, cfg := range cfgs {
