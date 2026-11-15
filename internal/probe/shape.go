@@ -26,7 +26,9 @@ type Shape struct {
 	// message_stop on a Messages stream); Done says it arrived.
 	Events int  `json:"events"`
 	Done   bool `json:"done"`
-	// Undecodable counts events that are not a JSON object.
+	// Undecodable counts events that are not a JSON object. A pending
+	// event an error cut (sse.EventsCut) that does not decode counts in
+	// neither field.
 	Undecodable int `json:"undecodable,omitempty"`
 	// ReadError is the redacted error that ended the stream early.
 	ReadError     string `json:"read_error,omitempty"`
@@ -108,7 +110,10 @@ func readShape(r io.Reader, adapter string, sh config.ResponseShape, m masker, s
 	if messages {
 		s.EventTypes, s.DeltaTypes = map[string]int{}, map[string]int{}
 	}
-	_, dropped, err := sse.Events(r, eventLimit, func(payload []byte) bool {
+	lastUndecodable := false
+	_, dropped, cut, err := sse.EventsCut(r, eventLimit, func(payload []byte) bool {
+		u := s.Undecodable
+		defer func() { lastUndecodable = s.Undecodable > u }()
 		if messages {
 			return s.messagesEvent(payload, m, since)
 		}
@@ -119,6 +124,11 @@ func readShape(r io.Reader, adapter string, sh config.ResponseShape, m masker, s
 		s.event(payload, sh, m, since)
 		return false
 	})
+	// A pending event an error cut, where it does not decode, is not counted.
+	if cut && lastUndecodable {
+		s.Events--
+		s.Undecodable--
+	}
 	s.DroppedEvents = dropped
 	if err != nil {
 		s.ReadError = redact.ErrorText(err, timeout)
