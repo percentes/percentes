@@ -92,11 +92,11 @@ func stepsConfig(t *testing.T) (*config.Config, *admission.Verdict) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	v, err := admission.CeilingRule(cfg, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test/pricing", Retrieved: "2026-10-07"}, admission.ExpectedPlan(cfg))
+	v, err := admission.CeilingRule(cfg, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test/pricing", Retrieved: "2026-10-07"}, admission.ExpectedPlan(cfg, 1), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := v.Admitted(); !slices.Equal(got, []float64{0.25, 0.5, 1}) {
+	if got := v.Admitted(); !slices.Equal(got, []float64{0.25, 0.5, 0.75}) {
 		t.Fatalf("admitted steps %v", got)
 	}
 	return cfg, v
@@ -654,7 +654,7 @@ func TestStepTablesConfidential(t *testing.T) {
 	tpm := &cfg.Target.Limits[1]
 	tpm.Value, tpm.Marking, tpm.Source, tpm.SHA256, tpm.HMACSHA256 = 300001, config.MarkingConfidential, "console.png", "", strings.Repeat("ab", 32)
 	cfg.Target.RetainedHeaders = []string{"x-ratelimit-*"}
-	v, err := admission.CeilingRule(cfg, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test/pricing", Retrieved: "2026-10-07"}, admission.ExpectedPlan(cfg))
+	v, err := admission.CeilingRule(cfg, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test/pricing", Retrieved: "2026-10-07"}, admission.ExpectedPlan(cfg, 1), 1)
 	if err != nil {
 		t.Fatal(err)
 	}

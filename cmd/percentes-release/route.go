@@ -345,7 +345,7 @@ func newRoute(in routeInput) (*route, error) {
 	if err != nil {
 		return nil, err
 	}
-	if r.verdict, err = admission.CeilingRule(cfg, price, plan); err != nil {
+	if r.verdict, err = admission.CeilingRule(cfg, price, plan, cfg.Release.BindingRPS); err != nil {
 		return nil, err
 	}
 	rc, rel := *cfg, *cfg.Release
@@ -383,7 +383,7 @@ func newRoute(in routeInput) (*route, error) {
 // each step's count and the warm-up's are the largest over every cell
 // attempt's ladder.
 func exactPlan(cfg *config.Config, sched *schedule.Schedule) (admission.Plan, error) {
-	p := admission.ExpectedPlan(cfg)
+	p := admission.ExpectedPlan(cfg, cfg.Release.BindingRPS)
 	p.WarmupRequests = 0
 	p.StepRequests = make([]int, len(p.StepRequests))
 	for _, c := range sched.Cells {

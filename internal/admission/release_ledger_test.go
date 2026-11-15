@@ -300,32 +300,33 @@ func TestAdmitAtPriceRevision(t *testing.T) {
 	}
 }
 
-// The ledger covers a ceiling rule verdict only with prices at both the
-// cells' and the ceiling check's token bounds, each at least the
-// verdict's.
+// The ledger covers a ceiling rule verdict only with a price at the
+// cells' token bounds at least the verdict's.
 func TestCovers(t *testing.T) {
 	cfg := routeConfig(t, "groq", "10", "1300")
 	l, _ := releaseLedger(t, cfg)
 	verdict := func(p Price) *Verdict {
 		t.Helper()
-		v, err := CeilingRule(cfg, p, ExpectedPlan(cfg))
+		v, err := CeilingRule(cfg, p, ExpectedPlan(cfg, 1), 1)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return v
 	}
-	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 512)))
-	if err := state(t, l).Covers(cfg, verdict(groqPrice)); err == nil || !strings.Contains(err.Error(), "no price recorded for groq at 1200 input and 1024 output tokens") {
-		t.Fatalf("priced at 512 only: %v", err)
+	if err := state(t, l).Covers(cfg, verdict(groqPrice)); err == nil || !strings.Contains(err.Error(), "no price recorded for groq at 1200 input and 512 output tokens") {
+		t.Fatalf("no price: %v", err)
 	}
 	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 1024)))
+	if err := state(t, l).Covers(cfg, verdict(groqPrice)); err == nil || !strings.Contains(err.Error(), "no price recorded for groq at 1200 input and 512 output tokens") {
+		t.Fatalf("priced at 1024 only: %v", err)
+	}
+	must(t, l.RecordPrice("groq", shapePrice(groqPrice, 512)))
 	must(t, state(t, l).Covers(cfg, verdict(groqPrice)))
 	newer := price("0.20", "0.80")
-	must(t, l.RecordPrice("groq", shapePrice(newer, 512)))
-	if err := state(t, l).Covers(cfg, verdict(newer)); err == nil || !strings.Contains(err.Error(), "US$0.0007944 a request at 1200 input and 1024 output tokens, under the ceiling rule's US$0.0010592") {
-		t.Fatalf("1,024 price older than the 512 one: %v", err)
+	if err := state(t, l).Covers(cfg, verdict(newer)); err == nil || !strings.Contains(err.Error(), "US$0.0004872 a request at 1200 input and 512 output tokens, under the ceiling rule's US$0.000649600") && !strings.Contains(err.Error(), "under the ceiling rule's US$0.0006496") {
+		t.Fatalf("512 price older than the verdict's: %v", err)
 	}
-	must(t, l.RecordPrice("groq", shapePrice(newer, 1024)))
+	must(t, l.RecordPrice("groq", shapePrice(newer, 512)))
 	must(t, state(t, l).Covers(cfg, verdict(newer)))
 	must(t, state(t, l).Covers(cfg, verdict(groqPrice)))
 }

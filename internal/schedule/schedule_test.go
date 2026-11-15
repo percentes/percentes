@@ -648,8 +648,11 @@ func TestEdition(t *testing.T) {
 	if MaxReruns != admission.ReleaseReruns {
 		t.Errorf("%d re-runs, admission plans %d", MaxReruns, admission.ReleaseReruns)
 	}
-	if len(SlotHoursUTC) != admission.ReleaseDayCells {
-		t.Errorf("%d slots a day, admission plans %d cells a day", len(SlotHoursUTC), admission.ReleaseDayCells)
+	if StartTolerance != admission.ReleaseStartTolerance {
+		t.Errorf("start tolerance %v, admission takes an attempt's interval at %v", StartTolerance, admission.ReleaseStartTolerance)
+	}
+	if last := 4 * OffsetStep; last+StartTolerance+CellLength != 203*time.Minute+30*time.Second {
+		t.Errorf("five routes end by %v", last+StartTolerance+CellLength)
 	}
 	if CellLength != 28*time.Minute+30*time.Second {
 		t.Errorf("cell length %v, want 28m30s", CellLength)

@@ -34,7 +34,7 @@ func (r *route) limitsStop(read []evidence.RefreshedLimit, entries []admission.E
 	if err != nil {
 		return nil, err
 	}
-	v, err := admission.CeilingRule(&c, price, r.rule.plan)
+	v, err := admission.CeilingRule(&c, price, r.rule.plan, c.Release.BindingRPS)
 	if err != nil {
 		return nil, err
 	}

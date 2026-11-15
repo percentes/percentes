@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -540,14 +539,12 @@ func TestExactPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := admission.ExpectedPlan(cfg)
-	if p.Cells != want.Cells || p.DayCells != want.DayCells || p.ProbeRequests != want.ProbeRequests {
-		t.Fatalf("plan %+v", p)
+	want := admission.ExpectedPlan(cfg, 2.429)
+	if p.Cells != want.Cells || p.ProbeRequests != want.ProbeRequests || p.WarmupRequests != want.WarmupRequests || !slices.Equal(p.StepRequests, want.StepRequests) {
+		t.Fatalf("plan %+v, want the counts of %+v", p, want)
 	}
-	for k, n := range p.StepRequests {
-		if e := float64(want.StepRequests[k]); float64(n) < e || float64(n) > e+8*math.Sqrt(e) {
-			t.Errorf("step %d: %d requests, expected the largest of 24 draws around %g", k+1, n, e)
-		}
+	if p.WarmupRequests != 36 || !slices.Equal(p.StepRequests, []int{145, 291, 437, 524, 582}) {
+		t.Fatalf("warm-up %d and steps %v, want 36 and [145 291 437 524 582]", p.WarmupRequests, p.StepRequests)
 	}
 	found := false
 	for _, c := range sched.Cells {

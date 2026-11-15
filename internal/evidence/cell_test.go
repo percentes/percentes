@@ -30,20 +30,32 @@ func releaseCfg(t *testing.T) *config.Config {
 	return cfg
 }
 
+// verdictFor is the ceiling rule's verdict for cfg at twice its binding
+// rate, whose upper steps fail tokens_per_minute.
+func verdictFor(cfg *config.Config) *admission.Verdict {
+	p := admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test", Retrieved: "2026-10-07"}
+	sol, err := admission.Solve(cfg, p, admission.ExpectedPlan(cfg, 1))
+	if err != nil {
+		panic(err)
+	}
+	rps := config.RoundDownRPS(2 * sol.BindingRPS)
+	v, err := admission.CeilingRule(cfg, p, admission.ExpectedPlan(cfg, rps), rps)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
 // releaseCell is a cell record that agrees with the reference release
 // configuration.
 func releaseCell(cfg *config.Config) *Cell {
 	start := time.Date(2026, 10, 17, 8, 40, 0, 0, time.UTC)
-	tpm := admission.Demand{Dimension: config.LimitTPM, Limit: 1, Value: 250000, Demand: 205440, Fraction: 0.82176, Half: true}
 	return withDispatch(&Cell{
-		Run:            schedule.Run{Route: cfg.Target.Name, Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start, Seed: 7},
-		OffsetMinutes:  40,
-		ScheduleSHA256: "5c0e1d2b3a4f5e6d7c8b9a0f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d",
-		Concurrent:     []schedule.Run{{Route: "baseten", Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start.Add(10 * time.Minute), Seed: 8}},
-		Admission: &admission.Verdict{Route: cfg.Target.Name, InputTokens: 1200, CeilingTokens: 512, TopRPS: 1, Steps: []admission.Step{
-			{RPS: 0.25, Admitted: true}, {RPS: 0.5, Admitted: true}, {RPS: 1, Admitted: true},
-			{RPS: 2, Binding: &tpm, Demands: []admission.Demand{tpm}}, {RPS: 4, Binding: &tpm},
-		}},
+		Run:               schedule.Run{Route: cfg.Target.Name, Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start, Seed: 7},
+		OffsetMinutes:     40,
+		ScheduleSHA256:    "5c0e1d2b3a4f5e6d7c8b9a0f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0d",
+		Concurrent:        []schedule.Run{{Route: "baseten", Label: "weekend-08", Attempt: 1, Date: "2026-10-17", Start: start.Add(10 * time.Minute), Seed: 8}},
+		Admission:         verdictFor(cfg),
 		CeilingTokens:     512,
 		Ceiling:           probe.CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"},
 		Probes:            []FileRef{refOf("probe-groq-512.json", []byte("{}"))},
@@ -352,7 +364,7 @@ func TestManifestCellRefusals(t *testing.T) {
 		"no verdict":                 func(c *Cell) { c.Admission = nil },
 		"verdict of another route":   func(c *Cell) { c.Admission.Route = "baseten" },
 		"verdict at another ceiling": func(c *Cell) { c.Admission.CeilingTokens = 1024 },
-		"verdict off the limits":     func(c *Cell) { c.Admission.Steps[3].Demands[0].Value = 1 },
+		"verdict off the limits":     func(c *Cell) { c.Admission.Steps[3].Demands[1].Value = 1 },
 		"account date":               func(c *Cell) { c.AccountCreated = "15 Sep 2026" },
 		"negative volume":            func(c *Cell) { c.PreWindowRequests = -1 },
 		"no dispatch aggregate":      func(c *Cell) { c.Dispatch = nil },
@@ -1051,21 +1063,6 @@ func confidentialCfg(t *testing.T) *config.Config {
 // demands as published against cfg's confidential limit.
 func confidentialCell(cfg *config.Config) *Cell {
 	c := releaseCell(cfg)
-	l := cfg.Target.Limits[1]
-	hide := func(d *admission.Demand) {
-		d.Value, d.Fraction, d.Confidential, d.Source, d.HMACSHA256 = 0, 0, true, l.Source, l.HMACSHA256
-	}
-	for k := range c.Admission.Steps {
-		s := &c.Admission.Steps[k]
-		for i := range s.Demands {
-			hide(&s.Demands[i])
-		}
-		if s.Binding != nil {
-			b := *s.Binding
-			hide(&b)
-			s.Binding = &b
-		}
-	}
 	return c
 }
 
@@ -1133,7 +1130,7 @@ func TestConfidentialConfig(t *testing.T) {
 	if bytes.Contains(b, []byte(`"bytes": `+fmt.Sprint(len(frames)))) {
 		t.Errorf("manifest carries the frame store's size:\n%s", b)
 	}
-	in.Release.Admission.Steps[3].Demands[0].Value = 300001
+	in.Release.Admission.Steps[3].Demands[1].Value = 300001
 	if _, err := NewManifest(in); err == nil || !strings.Contains(err.Error(), "a confidential limit published with its value") {
 		t.Errorf("verdict with the value: %v", err)
 	}
@@ -1209,11 +1206,11 @@ func TestConfidentialConfig(t *testing.T) {
 			}
 		}, "config copy: " + ConfigCopyFile + " is not the configuration given"},
 		{"value published", func(t *testing.T, r *releaseRun) {
-			r.m.Release.Admission.Steps[3].Demands[0].Value = 300001
+			r.m.Release.Admission.Steps[3].Demands[1].Value = 300001
 			r.write(t)
 		},
 			"cell record: admission: published verdict: step 4, tokens_per_minute: a confidential limit published with its value or fraction"},
-		{"pass off the value", func(t *testing.T, r *releaseRun) { r.m.Release.Admission.Steps[3].Demands[0].Pass = true; r.write(t) },
+		{"pass off the value", func(t *testing.T, r *releaseRun) { r.m.Release.Admission.Steps[3].Demands[1].Pass = true; r.write(t) },
 			"step 4, tokens_per_minute: pass false against the recorded value, published true"},
 		{"frame store by SHA-256", func(t *testing.T, r *releaseRun) {
 			ref := refOf(r.m.Frames.Name, mustRead(t, filepath.Join(r.root, filepath.FromSlash(r.m.Frames.Name))))
