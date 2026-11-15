@@ -39,7 +39,7 @@ func tpmRefresh(tpm string) string {
 }
 
 // SPEC-HOSTED §4: limits read at a cell's start that no longer admit a
-// step the route runs stop the route before admission, naming the step
+// step rate the route runs stop the route before admission, naming the step
 // and the limit, with no ledger line and no request; limits that still
 // admit it, or that could not be read, let the cell go on (to its probe,
 // which the endpoint answers 401). A confidential limit is named by its
@@ -56,11 +56,11 @@ func TestCellLimitsStop(t *testing.T) {
 		tpm          string
 		stop         string
 	}{
-		{"lowered", false, `"value":200000`, "route stop: the limits read at the cell's start, at the price retrieved 2026-10-06, no longer admit step 3 (1 rps) of the 3 the route runs: " +
-			"tokens_per_minute recorded 250000, read 200000: nominal demand 102720 above half of it; the route keeps its steps (SPEC-HOSTED §4)"},
+		{"lowered", false, `"value":100013`, "route stop: the limits read at the cell's start, at the price retrieved 2026-10-06, no longer admit step 3 (1.316 rps) of the 5 the route runs: " +
+			"tokens_per_minute recorded 250000, read 100013: step rate above the rate it admits over 60 s; the route keeps its binding rate and step rates (SPEC-HOSTED §4)"},
 		{"raised", false, `"value":300000`, ""},
 		{"unavailable", false, `"unavailable":"console only"`, ""},
-		{"confidential lowered", true, `"value":200000`, ""},
+		{"confidential lowered", true, `"value":100013`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEndpoint(t, func(int64) (int, string) { return http.StatusUnauthorized, "" })
@@ -75,15 +75,15 @@ func TestCellLimitsStop(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := r.verdict.Admitted(); len(got) != 3 {
+			if got := r.verdict.Admitted(); len(got) != 5 {
 				t.Fatalf("admitted %v", got)
 			}
 			shortLadder(r)
 			want := tc.stop
 			if tc.confidential {
 				l := cfg.Target.Limits[1]
-				want = "route stop: the limits read at the cell's start, at the price retrieved 2026-10-06, no longer admit step 3 (1 rps) of the 3 the route runs: " +
-					"tokens_per_minute confidential (" + l.Source + ", hmac-sha256 " + l.HMACSHA256 + "): nominal demand 102720 above half of it; the route keeps its steps (SPEC-HOSTED §4)"
+				want = "route stop: the limits read at the cell's start, at the price retrieved 2026-10-06, no longer admit step 3 (1.316 rps) of the 5 the route runs: " +
+					"tokens_per_minute confidential (" + l.Source + ", hmac-sha256 " + l.HMACSHA256 + "): step rate above the rate it admits over 60 s; the route keeps its binding rate and step rates (SPEC-HOSTED §4)"
 			}
 			before, err := ledgerEntries(f.ledger, "")
 			if err != nil {
@@ -125,14 +125,14 @@ func TestCellLimitsStop(t *testing.T) {
 				t.Fatalf("published limits %+v", published.Limits)
 			}
 			if !tc.confidential {
-				if published.Limits[1].Value != 200000 || published.Stdout.Text != tpmRefresh(tc.tpm)+"\n" {
+				if published.Limits[1].Value != 100013 || published.Stdout.Text != tpmRefresh(tc.tpm)+"\n" {
 					t.Fatalf("published refresh record %s", pub)
 				}
 				return
 			}
 
 			held := filepath.Join(r.framesRoot, filepath.Dir(m.Frames.Name), evidence.RefreshFile)
-			if b, err := os.ReadFile(held); err != nil || !bytes.Contains(b, []byte("200000")) {
+			if b, err := os.ReadFile(held); err != nil || !bytes.Contains(b, []byte("100013")) {
 				t.Fatalf("retained refresh record %s: %v", b, err)
 			}
 			st, err := r.state()
@@ -147,7 +147,7 @@ func TestCellLimitsStop(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if b, err := os.ReadFile(filepath.Join(r.framesRoot, w.Copies, evidence.RefreshFile)); err != nil || !bytes.Contains(b, []byte("200000")) {
+			if b, err := os.ReadFile(filepath.Join(r.framesRoot, w.Copies, evidence.RefreshFile)); err != nil || !bytes.Contains(b, []byte("100013")) {
 				t.Fatalf("retained window-close refresh record %s: %v", b, err)
 			}
 			opCopy, err := os.ReadFile(filepath.Join(r.framesRoot, w.Copies, evidence.OperatorCopyFile))
@@ -162,7 +162,7 @@ func TestCellLimitsStop(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				for _, v := range []string{recorded, "200000", "2e+05"} {
+				for _, v := range []string{recorded, "100013", "1.00013e+05"} {
 					if bytes.Contains(b, []byte(v)) {
 						t.Errorf("%s carries %s", p, v)
 					}
@@ -184,8 +184,8 @@ func TestCellPriceStop(t *testing.T) {
 	for _, tc := range []struct {
 		name, in, out, stop string
 	}{
-		{"raised", "0.30", "1.20", "route stop: the limits read at the cell's start, at the price retrieved 2026-10-08, no longer admit step 3 (1 rps) of the 3 the route runs: " +
-			"spend_per_month_usd recorded 10, read 10: nominal demand 13.3093824 above it; the route keeps its steps (SPEC-HOSTED §4)"},
+		{"raised", "0.30", "1.20", "route stop: the limits read at the cell's start, at the price retrieved 2026-10-08, no longer admit step 5 (2.429 rps) of the 5 the route runs: " +
+			"spend_per_month_usd recorded 20, read 20: nominal demand 27.585264 above it; the route keeps its binding rate and step rates (SPEC-HOSTED §4)"},
 		{"covered", "0.20", "0.80", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,7 +196,7 @@ func TestCellPriceStop(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := r.verdict.Admitted(); len(got) != 3 {
+			if got := r.verdict.Admitted(); len(got) != 5 {
 				t.Fatalf("admitted %v", got)
 			}
 			shortLadder(r)
@@ -243,8 +243,8 @@ func TestRestartKeepsFrozenVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name, in, out, stop string
 	}{
-		{"raised", "0.30", "1.20", "route stop: the limits read at the cell's start, at the price retrieved 2026-10-08, no longer admit step 3 (1 rps) of the 3 the route runs: " +
-			"spend_per_month_usd recorded 10, read 10: nominal demand 13.3093824 above it; the route keeps its steps (SPEC-HOSTED §4)"},
+		{"raised", "0.30", "1.20", "route stop: the limits read at the cell's start, at the price retrieved 2026-10-08, no longer admit step 5 (2.429 rps) of the 5 the route runs: " +
+			"spend_per_month_usd recorded 20, read 20: nominal demand 27.585264 above it; the route keeps its binding rate and step rates (SPEC-HOSTED §4)"},
 		{"lowered", "0.05", "0.20", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,7 +268,7 @@ func TestRestartKeepsFrozenVerdict(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := r.verdict.Admitted(); len(got) != 3 || !reflect.DeepEqual(r.verdict, first.verdict) {
+			if got := r.verdict.Admitted(); len(got) != 5 || !reflect.DeepEqual(r.verdict, first.verdict) {
 				t.Fatalf("admitted %v at US$%s a request; the first start admitted %v at US$%s", got, r.verdict.PerRequestUSD, first.verdict.Admitted(), first.verdict.PerRequestUSD)
 			}
 			shortLadder(r)
@@ -464,7 +464,7 @@ func TestWindowCloseRecord(t *testing.T) {
 	}
 
 	pages := t.TempDir()
-	args := []string{"--out", r.out, "--frames", r.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--pages", pages}
+	args := []string{"--out", r.out, "--ledger", r.ledgerPath, "--frames", r.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath, "--pages", pages}
 	if code, err := pagesCmd(args); code != exitOK || err != nil {
 		t.Fatalf("pages: exit %d: %v", code, err)
 	}

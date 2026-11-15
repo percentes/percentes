@@ -14,15 +14,20 @@ import (
 	"github.com/percentes/percentes/internal/report"
 )
 
-// limitsStop applies the ceiling rule again with the limits the refresh
-// command read at a cell's start in place of the recorded ones, an
-// unavailable limit keeping its recorded value, and at the route's
-// newest price in entries, the ledger as the cell starts (routePrice),
-// and returns the route stop when it no longer admits a step the route
-// runs: the route keeps its steps (SPEC-HOSTED §4) and stops instead. The
-// stop names the lowest such step, the price's retrieval date and the
-// binding limit.
-func (r *route) limitsStop(read []evidence.RefreshedLimit, entries []admission.Entry) (*routeStop, error) {
+// limitsStop tests the step rates of the binding rate the schedule froze
+// again (SPEC-HOSTED HA4, limits read at a cell's start): the ceiling rule
+// at that rate, over the same evaluation windows, caps and reset-day test
+// and the schedule's counts, with the limits the refresh command read at
+// the cell's start in place of the recorded ones, an unavailable limit
+// keeping its recorded value, and at the route's newest price in entries,
+// the ledger as the cell starts (routePrice). It returns the route stop
+// when a step rate the route runs fails a test: the binding rate and the
+// step rates are not solved again, and the route stops instead. The stop
+// names the lowest such step, the price's retrieval date and the limit
+// that failed. allowances are the requests each evaluation window admits
+// (admission.WindowAllowances), the least under the recorded limits at
+// the route's verdict and under the limits read at that price.
+func (r *route) limitsStop(read []evidence.RefreshedLimit, entries []admission.Entry) (stop *routeStop, allowances map[float64]int64, err error) {
 	c := *r.rule.cfg
 	c.Target.Limits = slices.Clone(c.Target.Limits)
 	for i, l := range read {
@@ -32,40 +37,55 @@ func (r *route) limitsStop(read []evidence.RefreshedLimit, entries []admission.E
 	}
 	price, err := routePrice(entries, c.Target.Name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	v, err := admission.CeilingRule(&c, price, r.rule.plan, c.Release.BindingRPS)
+	v, err := admission.CeilingRule(&c, price, r.rule.plan, r.rule.bindingRPS)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if allowances, err = admission.WindowAllowances(r.rule.cfg, r.verdict); err != nil {
+		return nil, nil, err
+	}
+	atStart, err := admission.WindowAllowances(&c, v)
+	if err != nil {
+		return nil, nil, err
+	}
+	for w, a := range atStart {
+		if have, ok := allowances[w]; !ok || a < have {
+			allowances[w] = a
+		}
 	}
 	for k, s := range r.verdict.Steps {
 		if !s.Admitted || v.Steps[k].Admitted {
 			continue
 		}
-		return &routeStop{fmt.Sprintf("the limits read at the cell's start, at the price retrieved %s, no longer admit step %d (%g rps) of the %d the route runs: %s; the route keeps its steps (SPEC-HOSTED §4)",
-			price.Retrieved, k+1, s.RPS, r.steps, bindingText(r.rule.cfg.Target.Limits, v.Steps[k].Binding, read))}, nil
+		return &routeStop{fmt.Sprintf("the limits read at the cell's start, at the price retrieved %s, no longer admit step %d (%g rps) of the %d the route runs: %s; the route keeps its binding rate and step rates (SPEC-HOSTED §4)",
+			price.Retrieved, k+1, s.RPS, r.steps, bindingText(r.rule.cfg.Target.Limits, v.Steps[k].Binding, read))}, allowances, nil
 	}
-	return nil, nil
+	return nil, allowances, nil
 }
 
 // bindingText names b, a binding demand against target.limits, with the
 // recorded and the read value of a public limit, and the source and hash
-// of a confidential one.
+// of a confidential one. A window of a limit that counts output at
+// generation is named with the pinned hard timeout its span adds.
 func bindingText(limits []config.Limit, b *admission.Demand, read []evidence.RefreshedLimit) string {
-	bound := "half of it"
-	if !b.Half {
-		bound = "it"
+	test := "nominal demand " + strconv.FormatFloat(b.Demand, 'f', -1, 64) + " above it"
+	if b.WindowS > 0 {
+		test = fmt.Sprintf("step rate above the rate it admits over %g s", b.WindowS)
+		if b.Limit >= 0 && b.Limit < len(limits) && limits[b.Limit].OutputAtGeneration {
+			test += fmt.Sprintf(" plus the %d s hard timeout", config.PinnedReleaseHardTimeoutS)
+		}
 	}
-	demand := strconv.FormatFloat(b.Demand, 'f', -1, 64)
 	if b.Limit < 0 || b.Limit >= len(limits) {
-		return fmt.Sprintf("%s: nominal demand %s above %s", b.Dimension, demand, bound)
+		return fmt.Sprintf("%s: %s", b.Dimension, test)
 	}
 	l := &limits[b.Limit]
 	if l.Marking == config.MarkingConfidential {
-		return fmt.Sprintf("%s confidential (%s, hmac-sha256 %s): nominal demand %s above %s", l.Dimension, l.Source, l.HMACSHA256, demand, bound)
+		return fmt.Sprintf("%s confidential (%s, hmac-sha256 %s): %s", l.Dimension, l.Source, l.HMACSHA256, test)
 	}
-	return fmt.Sprintf("%s recorded %s, read %s: nominal demand %s above %s", l.Dimension,
-		strconv.FormatFloat(l.Value, 'f', -1, 64), strconv.FormatFloat(read[b.Limit].Value, 'f', -1, 64), demand, bound)
+	return fmt.Sprintf("%s recorded %s, read %s: %s", l.Dimension,
+		strconv.FormatFloat(l.Value, 'f', -1, 64), strconv.FormatFloat(read[b.Limit].Value, 'f', -1, 64), test)
 }
 
 // windowCloseErrorHeld stands in a window-close error, on a route with a

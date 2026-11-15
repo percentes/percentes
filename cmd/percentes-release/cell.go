@@ -142,7 +142,10 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	for i := range cases {
 		cases[i] = r.shape.UserText(run.Seed, i)
 	}
-	var a admission.Admission
+	var (
+		a          admission.Admission
+		allowances map[float64]int64
+	)
 	for check := 1; ; check++ {
 		var (
 			entries   []admission.Entry
@@ -154,7 +157,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 			return rec, err
 		}
 		if opFault == "" {
-			if limitStop, err = r.limitsStop(read, entries); err != nil {
+			if limitStop, allowances, err = r.limitsStop(read, entries); err != nil {
 				return rec, err
 			}
 		}
@@ -291,7 +294,8 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	)
 	running := *rec
 	res, runErr := loadgen.Run(cellCtx, cfg, &loadgen.Hooks{
-		Cases: cases,
+		WriteAllowances: allowances,
+		Cases:           cases,
 		OnEpoch: func(e time.Time) {
 			ev.live.setEpoch(e)
 			canary, canaryErr = loadgen.StartCanary(cellCtx, e)
