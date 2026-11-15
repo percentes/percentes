@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -658,6 +659,36 @@ func inBandBillingReason(status int, b *config.BillingRefusal) string {
 	return fmt.Sprintf("HTTP %d in-band, %s, a documented billing refusal: %s (%s, retrieved %s)", status, BillingSetting, b.Meaning, b.Source, b.Retrieved)
 }
 
+// Spent are the Shape S ticket byte caps recs spent, each with the first
+// record in ledger order that spent it: a cap at which a record that ran
+// reports a prompt above the shape's input bound on a request.
+func Spent(recs []*ReleaseRecord) map[int]*ReleaseRecord {
+	p, _ := config.LookupShape(config.ShapeS)
+	out := map[int]*ReleaseRecord{}
+	for _, r := range recs {
+		if r.Shape != config.ShapeS || r.Outcome() != CheckRan || inputCheck(r.Requests, p.InputBoundTokens).Exceeded == 0 {
+			continue
+		}
+		if o := out[r.ByteCap]; o == nil || r.LedgerSeq < o.LedgerSeq {
+			out[r.ByteCap] = r
+		}
+	}
+	return out
+}
+
+// RepeatQuiet is the least time from a refused check's end to the start
+// of its repeat on t's route: t's longest limit window plus the release's
+// hard timeout.
+func RepeatQuiet(t *config.Target) time.Duration {
+	var w float64
+	for i := range t.Limits {
+		for _, s := range t.Limits[i].WindowsS() {
+			w = max(w, s)
+		}
+	}
+	return time.Duration(w*float64(time.Second)) + config.PinnedReleaseHardTimeoutS*time.Second
+}
+
 // Sent counts the inference requests the probe dispatched that reached a
 // connection (Reached). The limits read goes to another URL and is not
 // counted.
@@ -1152,9 +1183,9 @@ func snapshot(l config.Limit, dir string, key *releasekey.Key) Snapshot {
 	return s
 }
 
-// CeilingChoice is the ceiling one model runs at on every host, or its
-// exclusion with the reason. LeftOut lists the hosts the choice was made
-// without.
+// CeilingChoice is the ceiling one host group runs at on every host, or
+// its exclusion with the reason. LeftOut lists the hosts the choice was
+// made without.
 type CeilingChoice struct {
 	Ceiling  int       `json:"ceiling,omitempty"`
 	Excluded bool      `json:"excluded,omitempty"`
@@ -1162,7 +1193,7 @@ type CeilingChoice struct {
 	LeftOut  []LeftOut `json:"left_out,omitempty"`
 }
 
-// LeftOut is a host left out of its model's ceiling choice, with the
+// LeftOut is a host left out of its host group's ceiling choice, with the
 // fault in its records' reported model ids (hostModelFault). Its own
 // route's run refuses it on that fault (ModelFault).
 type LeftOut struct {
@@ -1170,25 +1201,49 @@ type LeftOut struct {
 	Fault string `json:"model_fault"`
 }
 
-// ChooseCeiling applies the ceiling rule (SPEC-HOSTED HA3 point 7) to the
-// release probe records of hosts, every route of one model: 512 when
-// every host passed the check at 512; otherwise 1,024 when every host
-// passed it at 1,024; otherwise the model is excluded. A host whose
-// records report a model id other than the one they expect, or expect a
-// recorded target.reported_model that none reported, is left out of the
-// choice; the model is excluded when every host is. It returns an error
-// when a record is of no host, or a record of a host not left out was
-// blocked at the start gate or failed the input bound, a host has two
-// records at one ceiling, or a record the rule needs is missing.
+// ChooseCeiling keeps its HA3 form until run passes the request shape.
 func ChooseCeiling(hosts []string, recs []*ReleaseRecord) (CeilingChoice, error) {
-	low, high := config.PinnedReleaseCeilings[0], config.PinnedReleaseCeilings[1]
+	return ChooseCeilingAt(&config.Shape{Name: config.ShapeS}, hosts, recs, nil)
+}
+
+// ChooseCeilingAt applies the ceiling rule (SPEC-HOSTED HA3 point 7 and
+// HA4) to the release probe records of hosts, every route of one host
+// group, whose request shape is s: the first of the ceilings s permits
+// (config.Shape.Ceilings) at which every host passed the check and the
+// output bound, and for Shape R the input bound; the group is excluded
+// when every host does at none. A host whose records report a model id
+// other than the one they expect, or expect a recorded
+// target.reported_model that none reported, is left out of the choice;
+// the group is excluded when every host is. A stopped record
+// (CheckStopped) decides nothing, and nor does a Shape S record at a
+// byte cap in superseded. At each ceiling a host's deciding record is
+// its only other one, or the repeat that follows a refused check in
+// ledger order (Decisive). At the first ceiling the rule reaches where a
+// host's deciding Shape S record that ran reports a prompt above the
+// input bound, or a host has no deciding record and its latest
+// superseded one there does, the group is excluded on the input bound;
+// where a host's deciding record was refused, it is excluded as
+// inconclusive, with a reason ending in that clause. A host whose
+// deciding record left a prompt count unreported fails there, and the
+// reason names the input bound unreported. Ceilings, byte caps and the
+// bound print as Number does. A choice of a ceiling names each repeat
+// of a refused check that decided at a ceiling the rule reached. It
+// returns an error when a record is of no host, or a record of a host
+// not left out is of another shape or a ceiling s does not permit, a
+// host's records at one ceiling have no deciding record (Decisive), or
+// a record the rule needs is missing.
+func ChooseCeilingAt(s *config.Shape, hosts []string, recs []*ReleaseRecord, superseded []int) (CeilingChoice, error) {
+	ceilings := s.Ceilings()
+	if len(ceilings) == 0 {
+		return CeilingChoice{}, fmt.Errorf("probe: no release request shape %q", s.Name)
+	}
 	if len(hosts) == 0 {
 		return CeilingChoice{}, errors.New("probe: no hosts")
 	}
 	byHost := map[string][]*ReleaseRecord{}
 	for _, r := range recs {
 		if !slices.Contains(hosts, r.Route) {
-			return CeilingChoice{}, fmt.Errorf("probe: route %s is not a host of the model (%s)", r.Route, strings.Join(hosts, ", "))
+			return CeilingChoice{}, fmt.Errorf("probe: route %s is not a host of the host group (%s)", r.Route, strings.Join(hosts, ", "))
 		}
 		byHost[r.Route] = append(byHost[r.Route], r)
 	}
@@ -1205,9 +1260,14 @@ func ChooseCeiling(hosts []string, recs []*ReleaseRecord) (CeilingChoice, error)
 		}
 		routes = append(routes, rt)
 	}
-	choice := func(c CeilingChoice) CeilingChoice {
+	choice := func(c CeilingChoice, inconclusive bool) CeilingChoice {
 		if len(left) > 0 {
-			c.Reason += fmt.Sprintf("; %s left out on the reported model id", strings.Join(leftNames, ", "))
+			clause := fmt.Sprintf("%s left out on the reported model id", strings.Join(leftNames, ", "))
+			if inconclusive {
+				c.Reason = clause + "; " + c.Reason
+			} else {
+				c.Reason += "; " + clause
+			}
 			c.LeftOut = left
 		}
 		return c
@@ -1215,56 +1275,179 @@ func ChooseCeiling(hosts []string, recs []*ReleaseRecord) (CeilingChoice, error)
 	if len(routes) == 0 {
 		return CeilingChoice{Excluded: true, Reason: fmt.Sprintf("%s left out on the reported model id", strings.Join(leftNames, ", ")), LeftOut: left}, nil
 	}
-	at := map[int]map[string]*ReleaseRecord{low: {}, high: {}}
+	byCeiling := map[int]map[string][]*ReleaseRecord{}
+	stopped, aside := map[int]map[string]int{}, map[int]map[string][]*ReleaseRecord{}
+	for _, c := range ceilings {
+		byCeiling[c], stopped[c], aside[c] = map[string][]*ReleaseRecord{}, map[string]int{}, map[string][]*ReleaseRecord{}
+	}
 	for _, r := range recs {
 		if !slices.Contains(routes, r.Route) {
 			continue
 		}
-		if r.Start.Blocked {
-			return CeilingChoice{}, fmt.Errorf("probe: route %s: the probe was blocked (%s); it is not a ceiling check", r.Route, r.Start.Reason)
+		if r.Shape != s.Name {
+			return CeilingChoice{}, fmt.Errorf("probe: route %s: a check of Shape %q; the host group sends Shape %s", r.Route, r.Shape, s.Name)
 		}
-		byRoute, ok := at[r.Ceiling.Ceiling]
-		if !ok {
-			return CeilingChoice{}, fmt.Errorf("probe: route %s: ceiling %d is not one of %v", r.Route, r.Ceiling.Ceiling, config.PinnedReleaseCeilings)
+		c := r.Ceiling.Ceiling
+		if _, ok := byCeiling[c]; !ok {
+			return CeilingChoice{}, fmt.Errorf("probe: route %s: ceiling %d is not one of %v", r.Route, c, ceilings)
 		}
-		if ib := r.InputBound; !ib.Pass {
-			return CeilingChoice{}, fmt.Errorf("probe: route %s: the input bound failed at ceiling %d: %d of %d requests reported, %d above %d tokens",
-				r.Route, r.Ceiling.Ceiling, ib.Reported, CeilingRequests, ib.Exceeded, ib.BoundTokens)
+		switch {
+		case r.Outcome() == CheckStopped:
+			stopped[c][r.Route]++
+		case r.Shape == config.ShapeS && slices.Contains(superseded, r.ByteCap):
+			aside[c][r.Route] = append(aside[c][r.Route], r)
+		default:
+			byCeiling[c][r.Route] = append(byCeiling[c][r.Route], r)
 		}
-		if byRoute[r.Route] != nil {
-			return CeilingChoice{}, fmt.Errorf("probe: route %s: two records at ceiling %d", r.Route, r.Ceiling.Ceiling)
-		}
-		byRoute[r.Route] = r
 	}
-	failed := func(ceiling int) []string {
-		var out []string
+	at := map[int]map[string]*ReleaseRecord{}
+	for _, c := range ceilings {
+		at[c] = map[string]*ReleaseRecord{}
 		for _, rt := range routes {
-			if !at[ceiling][rt].Ceiling.Pass {
-				out = append(out, rt)
+			rs := byCeiling[c][rt]
+			if len(rs) == 0 {
+				continue
+			}
+			r, err := Decisive(rs)
+			if err != nil {
+				return CeilingChoice{}, fmt.Errorf("probe: route %s at ceiling %d: %w", rt, c, err)
+			}
+			at[c][rt] = r
+		}
+	}
+	exceeds := func(r *ReleaseRecord) bool {
+		return s.Name == config.ShapeS && r.Outcome() == CheckRan && r.InputBound.Exceeded > 0
+	}
+	inputFail := func(rt string, c int, r *ReleaseRecord) string {
+		ib := r.InputBound
+		return fmt.Sprintf("%s: the input bound failed at %s at byte cap %s: %d of %d requests reported, %d above %s tokens",
+			rt, Number(c), Number(r.ByteCap), ib.Reported, CeilingRequests, ib.Exceeded, Number(ib.BoundTokens))
+	}
+	var prior, repeats, last []string
+	for i, c := range ceilings {
+		var exceeded, refused, failed, unreported []string
+		by := map[string][]string{}
+		for _, rt := range routes {
+			r := at[c][rt]
+			if r == nil {
+				if x := latest(aside[c][rt]); x != nil && exceeds(x) {
+					exceeded = append(exceeded, inputFail(rt, c, x))
+					continue
+				}
+				msg := fmt.Sprintf("probe: route %s has no check at %d", rt, c)
+				switch n, m := stopped[c][rt], len(aside[c][rt]); {
+				case m > 0:
+					msg += fmt.Sprintf(" that was not stopped or superseded (%d stopped, %d superseded)", n, m)
+				case n > 0:
+					msg += fmt.Sprintf(" that was not stopped (%d stopped)", n)
+				}
+				if i > 0 {
+					msg += "; " + strings.Join(prior, "; ")
+				}
+				return CeilingChoice{}, errors.New(msg)
+			}
+			if rs := byCeiling[c][rt]; len(rs) == 2 {
+				first := rs[0]
+				if r == first {
+					first = rs[1]
+				}
+				repeats = append(repeats, fmt.Sprintf("%s: the check refused at %s (ledger line %d) was repeated", rt, Number(c), first.LedgerSeq))
+			}
+			switch {
+			case exceeds(r):
+				exceeded = append(exceeded, inputFail(rt, c, r))
+			case r.Outcome() == CheckRefused:
+				if by[r.RefusedBy()] == nil {
+					refused = append(refused, r.RefusedBy())
+				}
+				by[r.RefusedBy()] = append(by[r.RefusedBy()], rt)
+			case !r.Ceiling.Pass || !r.OutputBound.Pass || !r.InputBound.Pass:
+				failed = append(failed, rt)
+				if ib := r.InputBound; !ib.Pass && ib.Exceeded == 0 {
+					unreported = append(unreported, fmt.Sprintf("%s: the input bound unreported at %s: %d of %d requests reported", rt, Number(c), ib.Reported, CeilingRequests))
+				}
 			}
 		}
-		return out
-	}
-	need := func(ceiling int) error {
-		for _, rt := range routes {
-			if at[ceiling][rt] == nil {
-				return fmt.Errorf("probe: route %s has no check at %d", rt, ceiling)
-			}
+		if len(exceeded) > 0 {
+			return choice(CeilingChoice{Excluded: true, Reason: strings.Join(append(prior, exceeded...), "; ")}, false), nil
 		}
-		return nil
+		if len(refused) > 0 {
+			var clauses []string
+			for _, why := range refused {
+				clauses = append(clauses, fmt.Sprintf("%s: ceiling check inconclusive, %s at %s", strings.Join(by[why], ", "), why, Number(c)))
+			}
+			return choice(CeilingChoice{Excluded: true, Reason: strings.Join(append(prior, clauses...), "; ")}, true), nil
+		}
+		if len(failed) == 0 {
+			reason := strings.Join(append(append(prior, "every host passed at "+Number(c)), repeats...), "; ")
+			return choice(CeilingChoice{Ceiling: c, Reason: reason}, false), nil
+		}
+		last = append([]string{fmt.Sprintf("%s failed at %s", strings.Join(failed, ", "), Number(c))}, unreported...)
+		prior = append(prior, last...)
 	}
-	if err := need(low); err != nil {
-		return CeilingChoice{}, err
+	reason := strings.Join(last, "; ")
+	if p, _ := config.LookupShape(s.Name); len(ceilings) == 1 && p.DeclaresFallback {
+		reason += fmt.Sprintf("; the %s-token fallback is declared absent", Number(p.Fallback))
 	}
-	lowFailed := failed(low)
-	if len(lowFailed) == 0 {
-		return choice(CeilingChoice{Ceiling: low, Reason: fmt.Sprintf("every host passed at %d", low)}), nil
+	return choice(CeilingChoice{Excluded: true, Reason: reason}, false), nil
+}
+
+// Number prints n as a page does, with a comma between each group of
+// three digits.
+func Number(n int) string {
+	s := strconv.Itoa(n)
+	for i := len(s) - 3; i > 0 && s[i-1] != '-'; i -= 3 {
+		s = s[:i] + "," + s[i:]
 	}
-	if err := need(high); err != nil {
-		return CeilingChoice{}, fmt.Errorf("%w; %s failed at %d", err, strings.Join(lowFailed, ", "), low)
+	return s
+}
+
+// latest is the record of rs admitted last, or nil.
+func latest(rs []*ReleaseRecord) *ReleaseRecord {
+	var out *ReleaseRecord
+	for _, r := range rs {
+		if out == nil || r.LedgerSeq > out.LedgerSeq {
+			out = r
+		}
 	}
-	if f := failed(high); len(f) > 0 {
-		return choice(CeilingChoice{Excluded: true, Reason: fmt.Sprintf("%s failed at %d", strings.Join(f, ", "), high)}), nil
+	return out
+}
+
+// Decisive is the record that decides one host's check at one ceiling
+// among rs, its records there that were not stopped: the only one, or the
+// second in ledger order (ReleaseRecord.LedgerSeq) where the first was
+// refused. It refuses no record, more than two, two that do not name
+// distinct ledger lines, and a second after one that was not refused.
+func Decisive(rs []*ReleaseRecord) (*ReleaseRecord, error) {
+	switch len(rs) {
+	case 0:
+		return nil, errors.New("no check")
+	case 1:
+		return rs[0], nil
+	case 2:
+	default:
+		return nil, fmt.Errorf("%d checks not stopped; a refused check is repeated once", len(rs))
 	}
-	return choice(CeilingChoice{Ceiling: high, Reason: fmt.Sprintf("%s failed at %d; every host passed at %d", strings.Join(lowFailed, ", "), low, high)}), nil
+	a, b := rs[0], rs[1]
+	if a.LedgerSeq == 0 || b.LedgerSeq == 0 || a.LedgerSeq == b.LedgerSeq {
+		return nil, fmt.Errorf("two checks not stopped, at ledger lines %d and %d, not two distinct admissions", a.LedgerSeq, b.LedgerSeq)
+	}
+	if b.LedgerSeq < a.LedgerSeq {
+		a, b = b, a
+	}
+	if a.Outcome() != CheckRefused {
+		return nil, fmt.Errorf("the check admitted at ledger line %d was not refused and decides; the check at line %d repeats it", a.LedgerSeq, b.LedgerSeq)
+	}
+	return b, nil
+}
+
+// CauseText names a context's cause: one of loadgen's safety stops by its
+// own text, any other error as redact.ErrorText does.
+func CauseText(err error) string {
+	for _, s := range []error{loadgen.ErrOperatorAbort, loadgen.ErrLedgerCap} {
+		if errors.Is(err, s) {
+			return s.Error()
+		}
+	}
+	return redact.ErrorText(err, 0)
 }

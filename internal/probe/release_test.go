@@ -1268,11 +1268,19 @@ func TestReleaseProbeRefusesItsInput(t *testing.T) {
 	}
 }
 
-// checked is route's record at ceiling with passed of the ten requests
-// passing the ceiling check and every one the input bound.
+// checked is route's Shape S record at ceiling with passed of the ten
+// requests passing the ceiling check and every one both bounds.
 func checked(route string, ceiling, passed int) *ReleaseRecord {
-	return &ReleaseRecord{Route: route, Ceiling: CeilingCheck{Ceiling: ceiling, Sent: 10, Passed: passed, Pass: passed == 10},
-		InputBound: InputCheck{BoundTokens: 1200, Reported: 10, MaxPromptTokens: 1100, Pass: true}}
+	return &ReleaseRecord{Route: route, Shape: config.ShapeS, Ceiling: CeilingCheck{Ceiling: ceiling, Sent: 10, Passed: passed, Pass: passed == 10},
+		InputBound:  InputCheck{BoundTokens: 1200, Reported: 10, MaxPromptTokens: 1100, Pass: true},
+		OutputBound: OutputCheck{CeilingTokens: ceiling, Reported: 10, MaxOutputTokens: 300, Pass: true}}
+}
+
+// checkedR is checked for Shape R, under the 128-token input bound.
+func checkedR(route string, ceiling, passed int) *ReleaseRecord {
+	r := checked(route, ceiling, passed)
+	r.Shape, r.InputBound.BoundTokens, r.InputBound.MaxPromptTokens, r.OutputBound.MaxOutputTokens = config.ShapeR, 128, 20, min(ceiling, 12)
+	return r
 }
 
 // reporting is route's record at ceiling with passed of the ten requests
@@ -1289,8 +1297,10 @@ func reporting(route string, ceiling, passed int, expected string, models ...str
 
 // The model runs at 512 when every host passes there, at 1,024 when any
 // failed at 512 and every host passes at 1,024, and is excluded when any
-// host fails at 1,024. A record of no host, one whose input bound failed
-// and a host with no record refuse the choice. A host whose records
+// host fails at 1,024 or reports a prompt above the input bound; a
+// record short of prompt reports fails the check at its ceiling. A record
+// of no host and a host with no record refuse the choice; a blocked
+// record decides nothing. A host whose records
 // report a model id other than the one they expect, or expect a recorded
 // reported_model none reported, or expect two ids, is left out of the
 // choice, its records unread, and the choice names it; the model is
@@ -1307,6 +1317,10 @@ func TestChooseCeiling(t *testing.T) {
 	undocumented := `the ceiling check reported model "openai/gpt-oss-120b-v2", the requested "openai/gpt-oss-120b", and target.reported_model records no documentation naming both as one build: identifier-not-documented`
 	silent := reporting("baseten", 512, 0, documented)
 	silent.Start = Start{Blocked: true, Reason: "probe request returned 401"}
+	outOver := checked("baseten", 512, 10)
+	outOver.OutputBound = OutputCheck{CeilingTokens: 512, Reported: 10, MaxOutputTokens: 530, Exceeded: 2}
+	outUnreported := checked("baseten", 512, 10)
+	outUnreported.OutputBound = OutputCheck{CeilingTokens: 512, Reported: 9, MaxOutputTokens: 300}
 	for _, c := range []struct {
 		name  string
 		hosts []string
@@ -1321,9 +1335,9 @@ func TestChooseCeiling(t *testing.T) {
 		{"512 passes, a 1024 record is not needed", gpt, []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 10), checked("groq", 1024, 0)},
 			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512"}, ""},
 		{"one fails at 512, all pass at 1024", gpt, []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 9), checked("groq", 1024, 10), checked("baseten", 1024, 10)},
-			CeilingChoice{Ceiling: 1024, Reason: "baseten failed at 512; every host passed at 1024"}, ""},
+			CeilingChoice{Ceiling: 1024, Reason: "baseten failed at 512; every host passed at 1,024"}, ""},
 		{"one fails at 1024", gpt, []*ReleaseRecord{checked("groq", 512, 0), checked("baseten", 512, 10), checked("groq", 1024, 10), checked("baseten", 1024, 9)},
-			CeilingChoice{Excluded: true, Reason: "baseten failed at 1024"}, ""},
+			CeilingChoice{Excluded: true, Reason: "baseten failed at 1,024"}, ""},
 		{"a host passing at 512 still needs 1024", gpt, []*ReleaseRecord{checked("groq", 512, 0), checked("baseten", 512, 10), checked("groq", 1024, 10)},
 			CeilingChoice{}, "probe: route baseten has no check at 1024; groq failed at 512"},
 		{"a host without 512", gpt, []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 1024, 10)},
@@ -1331,15 +1345,15 @@ func TestChooseCeiling(t *testing.T) {
 		{"a host without records", gpt, []*ReleaseRecord{checked("groq", 512, 10)},
 			CeilingChoice{}, "probe: route baseten has no check at 512"},
 		{"a record of no host", []string{"groq"}, []*ReleaseRecord{checked("groq", 512, 10), checked("baseten", 512, 0)},
-			CeilingChoice{}, "probe: route baseten is not a host of the model (groq)"},
+			CeilingChoice{}, "probe: route baseten is not a host of the host group (groq)"},
 		{"input bound exceeded", gpt, []*ReleaseRecord{checked("groq", 512, 10), over},
-			CeilingChoice{}, "probe: route baseten: the input bound failed at ceiling 512: 10 of 10 requests reported, 1 above 1200 tokens"},
+			CeilingChoice{Excluded: true, Reason: "baseten: the input bound failed at 512 at byte cap 0: 10 of 10 requests reported, 1 above 1,200 tokens"}, ""},
 		{"input bound unreported", gpt, []*ReleaseRecord{checked("groq", 512, 0), checked("baseten", 512, 10), checked("groq", 1024, 10), unreported},
-			CeilingChoice{}, "probe: route baseten: the input bound failed at ceiling 1024: 9 of 10 requests reported, 0 above 1200 tokens"},
-		{"blocked", claude, []*ReleaseRecord{checked("anthropic", 512, 10), blocked},
-			CeilingChoice{}, "probe: route bedrock: the probe was blocked (probe request returned 401); it is not a ceiling check"},
+			CeilingChoice{Excluded: true, Reason: "baseten failed at 1,024; baseten: the input bound unreported at 1,024: 9 of 10 requests reported"}, ""},
+		{"blocked decides nothing", claude, []*ReleaseRecord{checked("anthropic", 512, 10), blocked},
+			CeilingChoice{}, "probe: route bedrock has no check at 512 that was not stopped (1 stopped)"},
 		{"two at one ceiling", gpt, []*ReleaseRecord{checked("groq", 512, 10), checked("groq", 512, 0)},
-			CeilingChoice{}, "probe: route groq: two records at ceiling 512"},
+			CeilingChoice{}, "probe: route groq at ceiling 512: two checks not stopped, at ledger lines 0 and 0, not two distinct admissions"},
 		{"other ceiling", gpt, []*ReleaseRecord{checked("groq", 256, 10)},
 			CeilingChoice{}, "probe: route groq: ceiling 256 is not one of [512 1024]"},
 		{"no records", gpt, nil, CeilingChoice{}, "probe: route baseten has no check at 512"},
@@ -1353,13 +1367,19 @@ func TestChooseCeiling(t *testing.T) {
 			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512; baseten left out on the reported model id",
 				LeftOut: []LeftOut{{Route: "baseten", Fault: `target.reported_model "openai/gpt-oss-120b-2026" is recorded and no response of the ceiling check reported a model`}}}, ""},
 		{"a fault at the fallback's 1024", gpt, []*ReleaseRecord{checked("groq", 512, 0), checked("groq", 1024, 10), reporting("baseten", 512, 10, ""), reporting("baseten", 1024, 10, "", v2)},
-			CeilingChoice{Ceiling: 1024, Reason: "groq failed at 512; every host passed at 1024; baseten left out on the reported model id",
+			CeilingChoice{Ceiling: 1024, Reason: "groq failed at 512; every host passed at 1,024; baseten left out on the reported model id",
 				LeftOut: []LeftOut{{Route: "baseten", Fault: undocumented}}}, ""},
 		{"records expecting two ids", gpt, []*ReleaseRecord{checked("groq", 512, 10), reporting("baseten", 512, 0, "", "openai/gpt-oss-120b"), reporting("baseten", 1024, 10, documented, documented)},
 			CeilingChoice{Ceiling: 512, Reason: "every host passed at 512; baseten left out on the reported model id",
 				LeftOut: []LeftOut{{Route: "baseten", Fault: `the ceiling-check records expect model "openai/gpt-oss-120b" and "openai/gpt-oss-120b-2026"`}}}, ""},
 		{"every host left out", []string{"groq"}, []*ReleaseRecord{reporting("groq", 512, 10, "", v2)},
 			CeilingChoice{Excluded: true, Reason: "groq left out on the reported model id", LeftOut: []LeftOut{{Route: "groq", Fault: undocumented}}}, ""},
+		{"output over the ceiling at 512", gpt, []*ReleaseRecord{checked("groq", 512, 10), outOver, checked("groq", 1024, 10), checked("baseten", 1024, 10)},
+			CeilingChoice{Ceiling: 1024, Reason: "baseten failed at 512; every host passed at 1,024"}, ""},
+		{"output unreported at 512", gpt, []*ReleaseRecord{checked("groq", 512, 10), outUnreported},
+			CeilingChoice{}, "probe: route baseten has no check at 1024; baseten failed at 512"},
+		{"a Shape R record", gpt, []*ReleaseRecord{checked("groq", 512, 10), checkedR("baseten", 512, 10)},
+			CeilingChoice{}, `probe: route baseten: a check of Shape "R"; the host group sends Shape S`},
 	} {
 		got, err := ChooseCeiling(c.hosts, c.recs)
 		if !reflect.DeepEqual(got, c.want) || fmt.Sprint(err) != map[bool]string{true: "<nil>", false: c.err}[c.err == ""] {
