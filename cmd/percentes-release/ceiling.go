@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -36,28 +37,49 @@ import (
 // --frames. On a route with a confidential limit the record's
 // fingerprints of what it withholds, and the limits' retained copies'
 // check, are keyed by the release key. The record names the ledger by
-// its open-line SHA-256; run refuses it unless the schedule froze that
-// ledger. A record reporting a model id on which run refuses the route
-// (probe.ModelFault) is refused here too.
+// its open-line SHA-256 and its admission by its line; run refuses it
+// unless the schedule froze that ledger. A record reporting a model id on
+// which run refuses the route (probe.ModelFault) is refused here too. A
+// limit with a file source needs --snapshots, and every retained copy
+// there must match its recorded hash before the check is admitted
+// (probe.CheckSnapshots). The record is written before the admission is
+// settled; where the write fails the admission is settled at the
+// requests sent, and the record goes to standard error after the
+// outcome line. Where the record is written and what it withholds is
+// not, the error names the record's path.
+//
+// Every earlier ceiling check of the route on the ledger must have its
+// record under --out (ledgerChecks), each verified under the route's
+// configuration (frozenVerify). A check is not sent once the ledger
+// admits run's traffic, while the ledger holds an unsettled ceiling check
+// on the route's account group, at a Shape S byte cap other than the one
+// the records decide at (releaseCapCheck), or at a ceiling where an
+// earlier check decides, after a ceiling the route has not failed or at
+// a byte cap a check spent (repeatCheck). With --recover it sends
+// nothing: each unsettled ceiling check of the route, whose process has
+// ended, is settled and keeps a record (recoverChecks), or with --record
+// the record a check printed is written (installRecord).
 func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 	fs := flag.NewFlagSet("ceiling-check", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "the route's release configuration at the ceiling checked (required)")
 	envFile := fs.String("env", "", "env file holding the target's api_key_env (required)")
 	ledgerPath := fs.String("ledger", "", "the release admission ledger the schedule freezes, holding the route's price (required)")
 	out := fs.String("out", "", "output directory; the check writes ceiling-<UTC time>/<route>-<ceiling>/"+probe.File+" under it (required)")
-	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required)")
-	snapshots := fs.String("snapshots", "", "directory of the retained limit copies the configuration names by file name")
+	byteCap := fs.Int("byte-cap", 0, "Shape S ticket byte cap (required for a Shape S route; absent for Shape R)")
+	snapshots := fs.String("snapshots", "", "directory of the retained limit copies the configuration names by file name (required when a limit's source is a file)")
 	keyPath := fs.String("release-key", "", "the release key file key create wrote (required when the configuration records a confidential limit)")
 	framesRoot := fs.String("frames", "", "raw-frame store directory outside the source tree; the check writes ceiling-<UTC time>/<route>-<ceiling>/"+probe.RetainedFile+
 		" under it (required when the configuration sets target.retained_headers or target.probe.limits_retained, or records a confidential limit)")
+	recoverOnly := fs.Bool("recover", false, "send nothing; settle the route's unsettled ceiling checks whose process ended and write the record each lacks")
+	recordPath := fs.String("record", "", "with --recover: a record a check printed on standard error when its write failed; it is written under --out as its admission's record, with none of the values it withholds under --frames")
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
 	if *cfgPath == "" || *ledgerPath == "" || *out == "" {
 		return exitError, errors.New("ceiling-check: --config, --ledger and --out are required")
 	}
-	if *byteCap <= 0 {
-		return exitError, fmt.Errorf("ceiling-check: --byte-cap %d: the Shape S ticket byte cap is required", *byteCap)
+	if *recordPath != "" && !*recoverOnly {
+		return exitError, errors.New("ceiling-check: --record is read with --recover only")
 	}
 	cfgs, err := loadReleases([]string{*cfgPath})
 	if err != nil {
@@ -109,6 +131,12 @@ func ceilingCheckCmd(ctx context.Context, args []string) (int, error) {
 		return exitError, err
 	}
 	prior := routeChecks(all, name)
+	if *recoverOnly {
+		if *recordPath != "" {
+			return installRecord(ledger, cfg, entries, prior, *out, *framesRoot, *recordPath)
+		}
+		return recoverChecks(ledger, cfg, entries, prior, *out, *framesRoot, *snapshots, *byteCap, key)
+	}
 	if e, ok := runAdmitted(entries); ok {
 		return exitError, fmt.Errorf("ceiling-check: ledger line %d admits run's traffic of route %s: the schedule is frozen, and a ceiling check after it blocks the pages", e.Seq, e.Route)
 	}
@@ -645,6 +673,139 @@ func refusalHead(why string) string {
 		return "a request answered 200 carried an in-band error its provider documents as " + strings.TrimSuffix(why, " in-band")
 	}
 	return "a request was answered " + why
+}
+
+// interruptedReason is the reason a recovered check's record carries.
+const interruptedReason = "the check's process ended before it wrote its record; the ledger settles its whole reservation as sent"
+
+// recoverChecks settles each unsettled ceiling check of cfg's route in
+// ledger, holding the route's lock, which a running check holds: at the
+// requests its record under out sent where prior holds one, or else at
+// its reservation, writing an interrupted record of it at cfg's ceiling
+// (probe.InterruptedRecord) under out and framesRoot. It refuses, before
+// settling any, where an admission's line records a ceiling or byte cap
+// other than cfg's ceiling and byteCap.
+func recoverChecks(ledger *admission.Ledger, cfg *config.Config, entries []admission.Entry, prior map[int]priorCheck, out, framesRoot, snapshots string, byteCap int, key *releasekey.Key) (int, error) {
+	name := cfg.Target.Name
+	owner, err := ledger.LockRoute(name)
+	if err != nil {
+		return exitError, fmt.Errorf("ceiling-check: --recover: %w", err)
+	}
+	defer owner.Close()
+	st, err := ledger.State()
+	if err != nil {
+		return exitError, err
+	}
+	var unsettled []admission.Entry
+	for _, e := range probeAdmissions(entries, []string{name}) {
+		if _, open := st.Open[e.Seq]; !open {
+			continue
+		}
+		if c := cfg.Release.Shape.CeilingTokens; e.CheckCeiling != 0 && (e.CheckCeiling != c || e.ByteCap != byteCap) {
+			return exitError, fmt.Errorf("ceiling-check: --recover: ledger line %d admits the check at ceiling %d and byte cap %d; --config runs at %d and --byte-cap is %d",
+				e.Seq, e.CheckCeiling, e.ByteCap, c, byteCap)
+		}
+		unsettled = append(unsettled, e)
+	}
+	n := 0
+	for _, e := range unsettled {
+		a := st.Open[e.Seq]
+		sent := a.Reserve
+		if p, ok := prior[e.Seq]; ok {
+			sent = p.rec.Sent()
+		} else {
+			rec, err := probe.InterruptedRecord(probe.ReleaseInput{Config: cfg, SnapshotDir: snapshots, ByteCap: byteCap, Key: key}, e.Time, interruptedReason)
+			if err != nil {
+				return exitError, err
+			}
+			rec.LedgerSHA256, rec.LedgerSeq = ledger.Bound(), e.Seq
+			path, err := writeCheck(out, framesRoot, rec)
+			if err != nil {
+				return exitError, err
+			}
+			fmt.Printf("%s: ledger line %d: interrupted record written %s\n", name, e.Seq, path)
+		}
+		if err := ledger.Settle(a, admission.Counts{Probe: sent}); err != nil {
+			return exitError, err
+		}
+		fmt.Printf("%s: ledger line %d settled at %d requests sent\n", name, e.Seq, sent)
+		n++
+	}
+	if n == 0 {
+		if as := probeAdmissions(entries, []string{name}); len(as) > 0 {
+			e := as[len(as)-1]
+			if p, ok := prior[e.Seq]; ok {
+				fmt.Printf("%s: ledger line %d, the route's newest ceiling check, is settled; its record %s reads %s\n", name, e.Seq, p.path, p.rec.Outcome())
+			} else {
+				fmt.Printf("%s: ledger line %d, the route's newest ceiling check, is settled and has no record under --out\n", name, e.Seq)
+			}
+		}
+		return exitError, fmt.Errorf("ceiling-check: --recover: the ledger holds no unsettled ceiling check of route %s", name)
+	}
+	return exitOK, nil
+}
+
+// installRecord writes the record at path, one a check of cfg's route
+// printed when its write failed, under out and framesRoot as the record
+// of its admission among entries, holding the route's lock, and settles
+// the admission at its requests sent where it is open. It refuses a
+// record of another route, ledger or shape, one whose admission is not
+// a ceiling check of the route, already has a record in prior or records
+// another ceiling or byte cap, and one that fails
+// probe.ReleaseRecord.Verify.
+func installRecord(ledger *admission.Ledger, cfg *config.Config, entries []admission.Entry, prior map[int]priorCheck, out, framesRoot, path string) (int, error) {
+	name := cfg.Target.Name
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return exitError, fmt.Errorf("ceiling-check: --record: %w", err)
+	}
+	var rec probe.ReleaseRecord
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&rec); err != nil {
+		return exitError, fmt.Errorf("ceiling-check: --record %s: %w", path, err)
+	}
+	owner, err := ledger.LockRoute(name)
+	if err != nil {
+		return exitError, fmt.Errorf("ceiling-check: --record: %w", err)
+	}
+	defer owner.Close()
+	i := slices.IndexFunc(probeAdmissions(entries, []string{name}), func(e admission.Entry) bool { return e.Seq == rec.LedgerSeq })
+	switch {
+	case rec.Route != name || rec.Shape != cfg.Release.Shape.Name:
+		return exitError, fmt.Errorf("ceiling-check: --record %s: a record of route %s, Shape %s; --config is route %s, Shape %s", path, rec.Route, rec.Shape, name, cfg.Release.Shape.Name)
+	case rec.LedgerSHA256 != ledger.Bound():
+		return exitError, fmt.Errorf("ceiling-check: --record %s: admitted in the ledger of open-line sha256 %q, not %s", path, rec.LedgerSHA256, ledger.Bound())
+	case i < 0:
+		return exitError, fmt.Errorf("ceiling-check: --record %s: ledger line %d admits no ceiling check of route %s", path, rec.LedgerSeq, name)
+	}
+	e := probeAdmissions(entries, []string{name})[i]
+	if p, ok := prior[e.Seq]; ok {
+		return exitError, fmt.Errorf("ceiling-check: --record %s: ledger line %d already has its record %s", path, e.Seq, p.path)
+	}
+	if e.CheckCeiling != 0 && (e.CheckCeiling != rec.Ceiling.Ceiling || e.ByteCap != rec.ByteCap) {
+		return exitError, fmt.Errorf("ceiling-check: --record %s: ledger line %d admits the check at ceiling %d and byte cap %d; the record is at %d and %d",
+			path, e.Seq, e.CheckCeiling, e.ByteCap, rec.Ceiling.Ceiling, rec.ByteCap)
+	}
+	if err := rec.Verify(&cfg.Target, probe.LengthValue(rec.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+		return exitError, fmt.Errorf("ceiling-check: --record %s: %w", path, frozenVerify(err))
+	}
+	written, err := writeCheck(out, framesRoot, &rec)
+	if err != nil {
+		return exitError, err
+	}
+	fmt.Printf("%s: ledger line %d: record written %s\n", name, e.Seq, written)
+	st, err := ledger.State()
+	if err != nil {
+		return exitError, err
+	}
+	if a, open := st.Open[e.Seq]; open {
+		if err := ledger.Settle(a, admission.Counts{Probe: rec.Sent()}); err != nil {
+			return exitError, err
+		}
+		fmt.Printf("%s: ledger line %d settled at %d requests sent\n", name, e.Seq, rec.Sent())
+	}
+	return exitOK, nil
 }
 
 // routeShape is the frozen request set of cfg's route (pilot.NewShape):
