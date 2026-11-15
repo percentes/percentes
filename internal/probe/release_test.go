@@ -451,7 +451,7 @@ func TestReleaseProbeFailures(t *testing.T) {
 	cfg = releaseConfig(t, "http://"+closed+"/v1/chat/completions")
 	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	if rec.Ceiling.Sent != 0 || len(rec.Requests) != 1 || rec.Requests[0].Fail != "no response" || rec.Requests[0].Exchange.Error == "" || len(rec.RTTNs) != 0 || rec.Start.Blocked ||
-		!strings.HasPrefix(rec.Unreached, "request 0 reached no connection: ") {
+		!strings.HasPrefix(rec.Unreached, "request 0 reached no connection: ") || rec.Outcome() != CheckStopped {
 		t.Errorf("refused dial: %+v, rtt %v, start %+v, unreached %q", rec.Requests, rec.RTTNs, rec.Start, rec.Unreached)
 	}
 }

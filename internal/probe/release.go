@@ -455,10 +455,100 @@ func requestGate(t *config.Target, ex *Exchange, s *Shape) Start {
 	return Start{}
 }
 
+// Outcomes of a ceiling check (ReleaseRecord.Outcome).
+const (
+	// CheckStopped is a check the start gate blocked, on a billing
+	// refusal, a setup defect or an account-side limit, or one that was
+	// interrupted, or ended at a request that reached no connection,
+	// before any request refused it (RefusedBy). It decides nothing and
+	// may be sent again.
+	CheckStopped = "stopped"
+	// CheckRefused is a check a request refused (RefusedBy) that the
+	// start gate did not block. It may be repeated once at its ceiling
+	// after RepeatQuiet; a refused check that decides excludes the host
+	// group.
+	CheckRefused = "refused"
+	// CheckRan is any other check: its pass and bounds decide.
+	CheckRan = "ran"
+)
+
+// Outcome is how r's check ended: CheckStopped, CheckRefused or
+// CheckRan.
+func (r *ReleaseRecord) Outcome() string {
+	switch {
+	case r.Start.Blocked:
+		return CheckStopped
+	case r.RefusedBy() != "":
+		return CheckRefused
+	case r.Interrupted != "" || r.Unreached != "":
+		return CheckStopped
+	}
+	return CheckRan
+}
+
+// Labels RefusedBy gives a request answered 200 whose stream refuses the
+// check.
+const (
+	// RefusedStreamCut is a stream a transport error ended before its
+	// terminator (StreamCut).
+	RefusedStreamCut = "stream cut"
+	// RefusedEndedEarly is a stream that ended before its terminator with
+	// no read error and no in-band error (EndedEarly).
+	RefusedEndedEarly = "stream ended early"
+	// refusedInBand is the label of an in-band error the provider
+	// documents as a refusing status (CheckRequest.InBandStatus).
+	refusedInBand = "HTTP %d in-band"
+)
+
+// RefusedBy names the first of r's requests answered HTTP 429 or 500 to
+// 599 by its status ("HTTP 529"), a request that reached a connection
+// (Reached) and got no status ("no response"), or one answered 200 whose
+// stream carries an in-band error of a refusing status ("HTTP 529
+// in-band"), was cut (RefusedStreamCut) or ended early
+// (RefusedEndedEarly), the last three only on a stream with no
+// undecodable or dropped event. The last request of an interrupted check
+// whose error is the cancellation (cancelled) refuses it neither by no
+// response nor by a stream that was cut or ended early. It is "" where
+// none was.
+func (r *ReleaseRecord) RefusedBy() string {
+	for i, q := range r.Requests {
+		s := q.Exchange.Status
+		cutByStop := r.Interrupted != "" && i == len(r.Requests)-1 && cancelled(&q)
+		switch {
+		case s == http.StatusTooManyRequests || s >= 500 && s <= 599:
+			return fmt.Sprintf("HTTP %d", s)
+		case s == 0 && !q.Exchange.DispatchUTC.IsZero() && Reached(&q.Exchange):
+			if !cutByStop {
+				return "no response"
+			}
+		case s != http.StatusOK || q.Shape == nil || q.Shape.Undecodable > 0 || q.Shape.DroppedEvents > 0:
+		case refusing(q.InBandStatus):
+			return fmt.Sprintf(refusedInBand, q.InBandStatus)
+		case StreamCut(q.Shape) && !cutByStop:
+			return RefusedStreamCut
+		case EndedEarly(q.Shape) && !cutByStop:
+			return RefusedEndedEarly
+		}
+	}
+	return ""
+}
+
 // refusing reports whether status refuses a ceiling check: 429 or 500 to
 // 599.
 func refusing(status int) bool {
 	return status == http.StatusTooManyRequests || status >= 500 && status <= 599
+}
+
+// StreamCut reports whether s, a 200 stream, ended on a read error
+// before its terminator.
+func StreamCut(s *Shape) bool {
+	return s != nil && !s.Done && s.ReadError != ""
+}
+
+// EndedEarly reports whether s, a 200 stream, ended before its
+// terminator with no read error and no in-band error.
+func EndedEarly(s *Shape) bool {
+	return s != nil && !s.Done && s.ReadError == "" && s.Error == ""
 }
 
 // Reached reports whether ex's request reached a connection: it has a
