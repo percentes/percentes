@@ -1,7 +1,10 @@
 package report
 
 import (
+	"fmt"
 	"time"
+
+	"github.com/percentes/percentes/internal/admission"
 )
 
 // NullReading is a route's null reading at its two top steps, the 0.9
@@ -47,4 +50,15 @@ type NullCell struct {
 	StartUTC  time.Time `json:"start_utc"`
 	Scheduled int       `json:"scheduled"`
 	Hi        float64   `json:"wilson_hi,omitempty"`
+}
+
+// bindingText names a binding limit with its window.
+func bindingText(b admission.Rate) string {
+	switch {
+	case b.WindowS > 0:
+		return fmt.Sprintf("%s over %g s", b.Dimension, b.WindowS)
+	case b.ResetDay != "":
+		return fmt.Sprintf("%s over the reset day %s", b.Dimension, b.ResetDay)
+	}
+	return b.Dimension
 }

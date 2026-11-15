@@ -159,7 +159,7 @@ func indexRows(provider, model, page string, st *StepTables) []IndexRow {
 	var rows []IndexRow
 	for k, lim := range st.Limits {
 		row := IndexRow{
-			Provider: provider, Route: st.Route, Model: model, Step: k + 1, RPS: lim.RPS, Admitted: lim.Admitted,
+			Provider: provider, Route: st.Route, Model: model, Shape: st.Shape, Step: k + 1, RPS: lim.RPS, Admitted: lim.Admitted,
 			HighestAttempted: highest, CeilingTokens: st.CeilingTokens, FrameCells: st.FrameCells,
 			RecordedCells: len(st.Cells), Page: page,
 		}

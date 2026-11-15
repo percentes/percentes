@@ -873,6 +873,23 @@ func (t *tables) pool(idx []int) []PooledStep {
 // Text renders the tables. Rates print as percentages.
 func (t *StepTables) Text() string { return t.text(true) }
 
+// windowText is an evaluation window of w seconds of a limit, with the
+// hard timeout where the limit counts output at generation.
+func (t *StepTables) windowText(limit int, unpublished bool, w float64) string {
+	if !unpublished && slices.Contains(t.AtGeneration, limit) {
+		return fmt.Sprintf("%g s plus the %d s hard timeout", w, t.HardTimeoutS)
+	}
+	return fmt.Sprintf("%g s", w)
+}
+
+// bindingText names the binding limit with its window.
+func (t *StepTables) bindingText() string {
+	if b := t.Binding; b.WindowS > 0 {
+		return fmt.Sprintf("%s over %s", b.Dimension, t.windowText(b.Limit, b.Unpublished, b.WindowS))
+	}
+	return bindingText(t.Binding)
+}
+
 // text renders the tables, with the frame's pooled figures or the
 // incomplete-frame line when frame is set.
 func (t *StepTables) text(frame bool) string {
@@ -917,6 +934,10 @@ func (t *StepTables) text(frame bool) string {
 	}
 
 	w("== Per-step tables: route %s, ceiling %d tokens, deadline %d s ==", t.Route, t.CeilingTokens, t.DeadlineS)
+	w("Request shape %s; binding rate %g requests per second (rps), binding limit %s; paced arrivals.", t.Shape, t.BindingRPS, t.bindingText())
+	if t.Shape == config.ShapeR {
+		w("Shape R is a short request that probes request-count limits; its timings describe no Shape S request.")
+	}
 	w("Each rate is a count over the step's scheduled requests; no figure pools across steps or routes.")
 	for _, l := range t.Naming {
 		w("%s", l)
@@ -926,12 +947,12 @@ func (t *StepTables) text(frame bool) string {
 	for k, s := range t.Limits {
 		var parts []string
 		for _, d := range s.Demands {
-			test := "half test"
-			if !d.Half {
-				test = "cover test"
+			test := "cover test"
+			if d.WindowS > 0 {
+				test = "window test over " + t.windowText(d.Limit, d.Unpublished, d.WindowS)
 			}
 			if d.Confidential {
-				parts = append(parts, fmt.Sprintf("%s %s (%s: %s)", d.Dimension, confidentialText(d), test, passText(d.Pass)))
+				parts = append(parts, fmt.Sprintf("%s %s (%s: %s)", d.Dimension, confidentialText(d, t.windowText(d.Limit, d.Unpublished, d.WindowS)), test, passText(d.Pass)))
 				continue
 			}
 			parts = append(parts, fmt.Sprintf("%s %.1f%% of %g (%s: %s)", d.Dimension, 100*d.Fraction, d.Value, test, passText(d.Pass)))
@@ -1117,17 +1138,16 @@ func canaryText(w func(string, ...any), c *loadgen.CanarySummary) {
 
 // confidentialText states a demand against a confidential limit without
 // its value: the limit's source and hash, and whether the demand was
-// within the test's bound.
-func confidentialText(d admission.Demand) string {
-	bound := "half of it"
-	if !d.Half {
-		bound = "it"
-	}
+// within the test's bound over span, the window as windowText names it.
+func confidentialText(d admission.Demand, span string) string {
 	within := "at most"
 	if !d.Pass {
 		within = "above"
 	}
-	return fmt.Sprintf("confidential (%s, hmac-sha256 %s): nominal demand %s %s", d.Source, d.HMACSHA256, within, bound)
+	if d.WindowS > 0 {
+		return fmt.Sprintf("confidential (%s, hmac-sha256 %s): step rate %s the rate it admits over %s", d.Source, d.HMACSHA256, within, span)
+	}
+	return fmt.Sprintf("confidential (%s, hmac-sha256 %s): nominal demand %s it", d.Source, d.HMACSHA256, within)
 }
 
 func passText(pass bool) string {

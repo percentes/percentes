@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
@@ -27,6 +28,24 @@ func sent(step int, atS float64, prompt int) evidence.Record {
 		r.Usage = json.RawMessage(fmt.Sprintf(`{"prompt_tokens":%d}`, prompt))
 	}
 	return r
+}
+
+// ruled is cfg validated, with the ceiling rule's verdict at a binding
+// rate of 1 over plan, the expected plan where plan is nil.
+func ruled(t *testing.T, cfg *config.Config, plan *admission.Plan) (*config.Config, *admission.Verdict) {
+	t.Helper()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p := admission.ExpectedPlan(cfg, 1)
+	if plan != nil {
+		p = *plan
+	}
+	v, err := admission.CeilingRule(cfg, admission.Price{InputUSDPerMTok: "0.15", OutputUSDPerMTok: "0.6", Source: "https://example.test/pricing", Retrieved: "2026-10-07"}, p, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg, v
 }
 
 // A cell's records give one send each dispatched request, at the epoch
@@ -117,6 +136,24 @@ func TestHistorySends(t *testing.T) {
 	}
 	if _, ok := ExchangeSend("groq", "probe", SendProbe, 1, &probe.Exchange{}, nil, nil, 1200, 512, 90); ok {
 		t.Error("an undispatched exchange gave a send")
+	}
+}
+
+// A Shape R route's page says that its timings describe no Shape S
+// request; a Shape S page does not.
+func TestShapeRHeading(t *testing.T) {
+	cfg, v := stepsConfig(t)
+	st, err := NewStepTables(cfg, v, []CellRecords{cellOf("weekday-00", outcome{1, LineInTime, 0, 10})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const line = "Shape R is a short request that probes request-count limits; its timings describe no Shape S request.\n"
+	if text := st.Text(); !strings.Contains(text, "Request shape S; binding rate 1 requests per second (rps), binding limit ") || strings.Contains(text, line) {
+		t.Errorf("Shape S page:\n%s", text)
+	}
+	st.Shape = config.ShapeR
+	if text := st.Text(); !strings.Contains(text, "Request shape R; binding rate 1 requests per second (rps), binding limit ") || !strings.Contains(text, line) {
+		t.Errorf("Shape R page:\n%s", text)
 	}
 }
 
