@@ -409,7 +409,7 @@ func TestPublishedFixedIdentifiers(t *testing.T) {
 		name, value, line string
 		edits             [][2]string
 	}{
-		{"4 in gpt-4o-mini", "4", "Groq allows 4 requests at once.", [][2]string{{model, "gpt-4o-mini"}}},
+		{"8 in llama-3.1-8b-instant", "8", "Groq allows 8 requests at once.", [][2]string{{model, "llama-3.1-8b-instant"}}},
 		{"1 in an endpoint with /v1/", "1", "Groq allows 1 request at once.", [][2]string{{provider, `section one: "Outputs are Customer Data"`}}},
 		{"70 in llama-3.3-70b-versatile", "70", "Groq allows 70 requests at once.", [][2]string{{model, "llama-3.3-70b-versatile"}, {"  limits:\n", reported}}},
 		{"3225 beside qwen3-32", "3225", "Served as qwen3-3225.", [][2]string{{model, "qwen3-32"}}},

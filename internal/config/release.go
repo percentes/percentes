@@ -14,8 +14,8 @@ import (
 )
 
 // Release is the release profile's ladder, request shape (SPEC-HOSTED
-// HA3 points 5 and 7) and ledger caps. One configuration file holds one
-// route: its target is the top-level target.
+// HA3 points 5 and 7, HA4) and ledger caps. One configuration file holds
+// one route: its target is the top-level target.
 type Release struct {
 	Ladder Ladder     `yaml:"ladder" json:"ladder"`
 	Shape  Shape      `yaml:"shape" json:"shape"`
@@ -45,7 +45,7 @@ type LedgerCaps struct {
 	GlobalUSD string `yaml:"global_usd" json:"global_usd"`
 }
 
-// Ladder is the offered-load ladder: open-loop Poisson arrivals at each
+// Ladder is the offered-load ladder: open-loop paced arrivals at each
 // step in ascending order, a warm-up at the first step, then per step a
 // measured window followed by a drain that dispatches nothing.
 type Ladder struct {
@@ -398,8 +398,8 @@ func (c *Config) validateRelease(v *validator) {
 	if l.RateRPS != 0 {
 		v.errf("load.rate_rps: must be absent under the release profile; release.ladder.steps_rps sets the rates, got %g", l.RateRPS)
 	}
-	if l.ArrivalProcess != "poisson" {
-		v.errf("load.arrival_process: pinned \"poisson\" under the release profile (SPEC-HOSTED HA3 point 5), got %q", l.ArrivalProcess)
+	if l.ArrivalProcess != PinnedReleaseArrivalProcess {
+		v.errf("load.arrival_process: pinned %q under the release profile (SPEC-HOSTED HA4), got %q", PinnedReleaseArrivalProcess, l.ArrivalProcess)
 	}
 	if l.InputLengthTokens != 0 || l.MaxTokens != 0 {
 		v.errf("load.input_length_tokens, load.max_tokens: must be absent under the release profile; release.shape and target.body carry the input bound and the ceiling")
@@ -445,7 +445,7 @@ func (c *Config) validateRelease(v *validator) {
 	}
 	pin := func(field string, got, want float64) {
 		if got != want {
-			v.errf("%s: pinned %g under the release profile (SPEC-HOSTED HA3), got %g", field, want, got)
+			v.errf("%s: pinned %g under the release profile (SPEC-HOSTED HA3 and HA4), got %g", field, want, got)
 		}
 	}
 	if !slices.Equal(r.Ladder.StepsRPS, PinnedReleaseStepsRPS) {

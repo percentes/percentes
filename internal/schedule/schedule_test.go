@@ -533,7 +533,7 @@ func TestEdition(t *testing.T) {
 	if len(SlotHoursUTC) != admission.ReleaseDayCells {
 		t.Errorf("%d slots a day, admission plans %d cells a day", len(SlotHoursUTC), admission.ReleaseDayCells)
 	}
-	if CellLength != 48*time.Minute+30*time.Second {
-		t.Errorf("cell length %v, want 48m30s", CellLength)
+	if CellLength != 28*time.Minute+30*time.Second {
+		t.Errorf("cell length %v, want 28m30s", CellLength)
 	}
 }

@@ -163,19 +163,21 @@ const (
 	// count.
 	PinnedClockOffsetMaxS = 60
 
-	// SPEC-HOSTED HA3 points 5 and 7: a 60 s warm-up at the first step,
-	// 480 s measured per step, a 90 s drain after every step; Shape S
-	// with a 1,200-token input bound, a 30 s deadline and a 90 s hard
-	// timeout; load.connections 32 added to the provision from the top
-	// step.
-	PinnedReleaseWarmupS          = 60
-	PinnedReleaseStepS            = 480
-	PinnedReleaseDrainS           = 90
+	// SPEC-HOSTED HA3 points 5 and 7 as HA4 amends them: paced arrivals,
+	// a 60 s warm-up at the first step, 240 s measured per step, a 90 s
+	// drain after every step; a 30 s deadline and a 90 s hard timeout;
+	// load.connections 32 added to the provision from the top step.
+	PinnedReleaseArrivalProcess = "deterministic"
+	PinnedReleaseWarmupS        = 60
+	PinnedReleaseStepS          = 240
+	PinnedReleaseDrainS         = 90
+	PinnedReleaseDeadlineS      = 30
+	PinnedReleaseHardTimeoutS   = 90
+	PinnedReleaseConnections    = 32
+
+	// The HA3 pins stay until every caller reads the HA4 ones.
 	PinnedReleaseShape            = "S"
 	PinnedReleaseInputBoundTokens = 1200
-	PinnedReleaseDeadlineS        = 30
-	PinnedReleaseHardTimeoutS     = 90
-	PinnedReleaseConnections      = 32
 
 	// SPEC-HOSTED HA3 point 6: the rate a route runs at most under a
 	// ruling on a documented dimension with no published value.
