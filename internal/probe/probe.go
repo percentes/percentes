@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -325,10 +326,49 @@ func Write(dir string, rec any) (string, error) {
 		return "", fmt.Errorf("probe: %w", err)
 	}
 	path := filepath.Join(dir, File)
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	if err := writeSynced(path, b, 0o644, false); err != nil {
 		return "", fmt.Errorf("probe: %w", err)
 	}
 	return path, nil
+}
+
+// writeSynced writes b to path with mode perm through a temporary file
+// in its directory, synced and then renamed, or linked where exclusive,
+// which refuses an existing path, into place, and syncs the directory. A
+// failed write leaves no temporary file.
+func writeSynced(path string, b []byte, perm os.FileMode, exclusive bool) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".probe-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Chmod(perm)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	switch {
+	case err != nil:
+	case exclusive:
+		err = os.Link(tmp, path)
+	default:
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
 }
 
 // RetainedRecord is what a probe record withholds, by exchange:
@@ -390,15 +430,7 @@ func WriteRetained(dir string, rec any) (string, error) {
 		return "", fmt.Errorf("probe: %w", err)
 	}
 	path := filepath.Join(dir, RetainedFile)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("probe: %w", err)
-	}
-	if _, err := f.Write(b.Bytes()); err != nil {
-		f.Close()
-		return "", fmt.Errorf("probe: %w", err)
-	}
-	if err := f.Close(); err != nil {
+	if err := writeSynced(path, b.Bytes(), 0o600, true); err != nil {
 		return "", fmt.Errorf("probe: %w", err)
 	}
 	return path, nil
