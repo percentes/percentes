@@ -13,6 +13,7 @@
 package mock
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -82,7 +83,14 @@ func New(cfg config.Mock) *Server {
 
 // Start listens on cfg.ListenAddr, anchors the monotonic clock, arms the
 // config-scripted fault schedule, and serves in the background.
-func (s *Server) Start() error {
+func (s *Server) Start() error { return s.listen(nil) }
+
+// StartTLS is Start serving HTTP/1.1 over TLS under cert.
+func (s *Server) StartTLS(cert tls.Certificate) error {
+	return s.listen(&tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"http/1.1"}, MinVersion: tls.VersionTLS12})
+}
+
+func (s *Server) listen(tc *tls.Config) error {
 	if s.shape != nil {
 		if err := s.shape.validate(); err != nil {
 			return fmt.Errorf("mock: shape: %w", err)
@@ -91,6 +99,9 @@ func (s *Server) Start() error {
 	l, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("mock: listen %s: %w", s.cfg.ListenAddr, err)
+	}
+	if tc != nil {
+		l = tls.NewListener(l, tc)
 	}
 	s.listener = l
 	s.start = time.Now()

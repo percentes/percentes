@@ -1,6 +1,7 @@
 package mock
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -384,6 +385,9 @@ func rst(w http.ResponseWriter) {
 	if err != nil {
 		// No hijack support: abort the stream the strongest way available.
 		panic(http.ErrAbortHandler)
+	}
+	if tc, ok := conn.(*tls.Conn); ok {
+		conn = tc.NetConn()
 	}
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		tcp.SetLinger(0) //nolint:errcheck
