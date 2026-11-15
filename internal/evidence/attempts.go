@@ -61,6 +61,14 @@ type Record struct {
 	ErrText    string              `json:"err_text,omitempty"`
 	PeerAddr   string              `json:"peer_addr,omitempty"`
 	ConnReused bool                `json:"conn_reused,omitempty"`
+	// ConnAcquiredNs and WroteRequestNs are when the request's connection
+	// was acquired and the request written in full; absent where it did
+	// not happen, never zero.
+	ConnAcquiredNs int64 `json:"conn_acquired_ns,omitempty"`
+	WroteRequestNs int64 `json:"wrote_request_ns,omitempty"`
+	// WriteDenied marks a dispatch the release write limit refused before
+	// its first byte; it sent nothing.
+	WriteDenied bool `json:"write_denied,omitempty"`
 	// ContentEvents counts chunks carrying visible content.
 	ContentEvents int `json:"content_events"`
 	// CompletionTokens is present only when the stream carried a usage
@@ -168,6 +176,9 @@ func record(r *loadgen.Request, cfg *config.Config, key *releasekey.Key) Record 
 		ErrText:           r.ErrText,
 		PeerAddr:          r.PeerAddr,
 		ConnReused:        r.ConnReused,
+		ConnAcquiredNs:    r.ConnAcquiredNs,
+		WroteRequestNs:    r.WroteRequestNs,
+		WriteDenied:       r.WriteDenied,
 		ContentEvents:     r.Tokens,
 		Usage:             r.Usage,
 		FinishReason:      r.FinishReason,
@@ -309,6 +320,9 @@ func (rec *Record) Request() loadgen.Request {
 		Headers:           rec.Headers,
 		PeerAddr:          rec.PeerAddr,
 		ConnReused:        rec.ConnReused,
+		ConnAcquiredNs:    rec.ConnAcquiredNs,
+		WroteRequestNs:    rec.WroteRequestNs,
+		WriteDenied:       rec.WriteDenied,
 		ErrText:           rec.ErrText,
 	}
 	if rec.CompletionTokens != nil {

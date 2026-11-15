@@ -132,8 +132,17 @@ type Request struct {
 	// ("" = none obtained); ConnReused says it came from the idle pool.
 	PeerAddr   string `json:"peer_addr,omitempty"`
 	ConnReused bool   `json:"conn_reused,omitempty"`
-	// ErrText is the redacted Go error string of a transport or stream
-	// failure.
+	// ConnAcquiredNs is when the connection that carried the request was
+	// acquired and WroteRequestNs when the socket accepted its last byte;
+	// zero where it did not happen.
+	ConnAcquiredNs int64 `json:"conn_acquired_ns,omitempty"`
+	WroteRequestNs int64 `json:"wrote_request_ns,omitempty"`
+	// WriteDenied marks a request whose first byte the run's write limit
+	// refused: dispatched, with no byte sent.
+	WriteDenied bool `json:"write_denied,omitempty"`
+	// ErrText is redact.ErrorText's text for a transport or stream
+	// failure: a network error's text without its source address, or a
+	// fixed text that names the failure.
 	ErrText string `json:"err_text,omitempty"`
 	// ErrorBody is the first errorBodyLimit bytes of a non-200 body with
 	// credentials masked, held for the raw-frame store; never in JSON.
@@ -410,6 +419,8 @@ type gen struct {
 	expected string
 	apiKey   string
 	trip     *tripwire
+	// writeWindows is a release run's write limit; nil limits nothing.
+	writeWindows *writeWindows
 	// cases are a pilot run's user texts by request index.
 	cases []string
 	// gates evaluates the client-validity gate; a ladder step's verdict
@@ -431,8 +442,15 @@ type gateFunc func(cfg *config.Config, requests []Request, samples []cpuSample, 
 // now returns nanoseconds since the run epoch (monotonic).
 func (g *gen) now() int64 { return time.Since(g.epoch).Nanoseconds() }
 
-// Hooks are optional run-lifecycle callbacks.
+// Hooks are optional run-lifecycle callbacks and run settings.
 type Hooks struct {
+	// LatestEpoch, when set, is the last permitted start of a release
+	// ladder; a later epoch returns ErrLateEpoch with nothing sent.
+	LatestEpoch time.Time
+	// WriteAllowances are the requests the target's limits admit in each
+	// evaluation window, by its length in seconds; a release run's
+	// request writes in any such window stay within them.
+	WriteAllowances map[float64]int64
 	// OnEpoch fires once the run epoch is anchored, before the first
 	// dispatch; the orchestrator uses it to pre-arm T_inject.
 	OnEpoch func(epoch time.Time)
@@ -526,6 +544,11 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 	}
 	if ladder != nil {
 		g.trip = newLadderTripwire(cfg, ladder)
+		var allowances map[float64]int64
+		if hooks != nil {
+			allowances = hooks.WriteAllowances
+		}
+		g.writeWindows = newWriteWindows(cfg, ladder.TopRPS(), allowances, g.now)
 	}
 
 	res := NewResult(cfg)
@@ -805,7 +828,7 @@ func interruption(cause error, stopNs int64, requests []Request) *Interruption {
 // in-flight request holds its own connection. A non-nil empty
 // TLSNextProto stops the transport from offering h2 in the TLS handshake.
 func NewTransport(provision int) *http.Transport {
-	return &http.Transport{
+	tr := &http.Transport{
 		ForceAttemptHTTP2:   false,
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
 		MaxIdleConns:        provision,
@@ -814,6 +837,8 @@ func NewTransport(provision int) *http.Transport {
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  true,
 	}
+	instrumentWrites(tr)
+	return tr
 }
 
 // checkProtocols fails a hosted run in which any response arrived over

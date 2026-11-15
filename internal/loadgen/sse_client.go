@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -48,9 +49,20 @@ func (g *gen) execute(r *Request) bool {
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	conns := 0
+	payload := g.requestBody(r)
+	var denied atomic.Bool
+	var observation atomic.Pointer[WriteObservation]
+	defer func() {
+		o := observation.Load()
+		r.WroteRequestNs, r.WriteDenied = o.Nanoseconds(), denied.Load() || o.Denied()
+	}()
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			r.PeerAddr, r.ConnReused = info.Conn.RemoteAddr().String(), info.Reused
+			if o := observation.Load(); o.Denied() {
+				denied.Store(true)
+			}
+			observation.Store(watchRelease(info.Conn, len(payload), g.now, g.writeWindows, writePermitWaitNs))
+			r.PeerAddr, r.ConnReused, r.ConnAcquiredNs = info.Conn.RemoteAddr().String(), info.Reused, g.now()
 			// Each further connection for this request is a further send.
 			if conns++; conns > 1 {
 				g.trip.send(g.now(), r.Step)
@@ -58,7 +70,7 @@ func (g *gen) execute(r *Request) bool {
 		},
 	})
 
-	req, err := g.newRequest(ctx, g.requestBody(r))
+	req, err := g.newRequest(ctx, payload)
 	if err != nil {
 		r.Outcome, r.ErrClass, r.DoneNs = OutcomeErrored, ErrConnect, g.now()
 		r.ErrText = redact.ErrorText(err, timeout)

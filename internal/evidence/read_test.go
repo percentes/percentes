@@ -145,3 +145,19 @@ func TestReadManifest(t *testing.T) {
 		}
 	}
 }
+
+// A refused write is kept in its record and read back from it.
+func TestRecordWriteDenied(t *testing.T) {
+	cfg := &config.Config{}
+	res := &loadgen.Result{Requests: []loadgen.Request{
+		{Index: 0, DispatchNs: 10, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrConnect, WriteDenied: true},
+		{Index: 1, DispatchNs: 20, Outcome: loadgen.OutcomeCompleted},
+	}}
+	recs := Records(cfg, res, Options{})
+	if !recs[0].WriteDenied || recs[1].WriteDenied {
+		t.Fatalf("records %+v", recs)
+	}
+	if q := recs[0].Request(); !q.WriteDenied {
+		t.Fatalf("request read back %+v", q)
+	}
+}
