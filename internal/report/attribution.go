@@ -14,7 +14,36 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
+	"github.com/percentes/percentes/internal/probe"
 )
+
+// Kinds of a Send.
+const (
+	SendLadder = "ladder"
+	SendWarmup = "warmup"
+	SendProbe  = "probe"
+	SendCheck  = "ceiling_check"
+)
+
+// Send is one request in an account group's history. WroteUTC is when
+// it was written in full, nil where its record has none; LatestUTC then
+// bounds when it could have been written. EndUTC is when it ended: its
+// done time where a status other than 200 or the stream's terminator
+// arrived, else the hard timeout after its dispatch. PromptTokens is the
+// provider-reported prompt count, nil where unreported.
+type Send struct {
+	Route        string     `json:"route"`
+	Source       string     `json:"source"`
+	Kind         string     `json:"kind"`
+	Index        int64      `json:"index"`
+	DispatchUTC  time.Time  `json:"dispatch_utc"`
+	WroteUTC     *time.Time `json:"wrote_utc,omitempty"`
+	LatestUTC    time.Time  `json:"latest_utc"`
+	EndUTC       time.Time  `json:"end_utc"`
+	PromptTokens *int       `json:"prompt_tokens,omitempty"`
+	InputBound   int        `json:"input_bound_tokens"`
+	Ceiling      int        `json:"ceiling_tokens"`
+}
 
 // HistoryGap is a period in which an account group's history may lack
 // sends of Route; ToUTC nil leaves it open.
@@ -23,6 +52,95 @@ type HistoryGap struct {
 	FromUTC time.Time  `json:"from_utc"`
 	ToUTC   *time.Time `json:"to_utc,omitempty"`
 	Reason  string     `json:"reason"`
+}
+
+// RoutePrice is a route's price per request at one pair of token bounds,
+// in effect from RecordedUTC, when the ledger recorded it.
+type RoutePrice struct {
+	Route         string    `json:"route"`
+	InputTokens   int       `json:"input_tokens"`
+	OutputTokens  int       `json:"output_tokens"`
+	PerRequestUSD string    `json:"per_request_usd"`
+	RecordedUTC   time.Time `json:"recorded_utc"`
+}
+
+// History is one account group's recorded sends: every ladder, warm-up,
+// probe and ceiling-check request of its routes, of counted and labelled
+// cells, with the periods the records or the ledger leave incomplete.
+// Unadmitted counts the sends no ledger admission of their route
+// brackets.
+type History struct {
+	Group      string
+	Routes     []string
+	Sends      []Send
+	Gaps       []HistoryGap
+	Prices     []RoutePrice
+	Unadmitted int
+}
+
+// RecordSends are the sends of a cell's attempts file: each dispatched
+// record the write limit did not refuse, at epoch plus its offsets, of
+// route's shape input bound. A record with no done time can have been
+// written until the hard timeout after its dispatch. A send ends at its
+// done time where it completed, returned an empty stream (status 200 and
+// the terminator with no content) or got a status other than 200, and
+// otherwise at the hard timeout after its dispatch.
+func RecordSends(route, source string, epoch time.Time, recs []evidence.Record, inputBound, hardTimeoutS int) []Send {
+	var out []Send
+	at := func(ns int64) time.Time { return epoch.Add(time.Duration(ns)).UTC() }
+	for i := range recs {
+		r := &recs[i]
+		if r.DispatchNs == 0 || r.WriteDenied {
+			continue
+		}
+		s := Send{Route: route, Source: source, Kind: SendLadder, Index: r.Index, DispatchUTC: at(r.DispatchNs),
+			InputBound: inputBound, Ceiling: r.CeilingTokens}
+		if r.Warmup {
+			s.Kind = SendWarmup
+		}
+		if r.WroteRequestNs > 0 {
+			w := at(r.WroteRequestNs)
+			s.WroteUTC = &w
+		}
+		s.LatestUTC = s.DispatchUTC.Add(time.Duration(hardTimeoutS) * time.Second)
+		s.EndUTC = s.LatestUTC
+		if r.DoneNs >= r.DispatchNs && r.DoneNs > 0 {
+			s.LatestUTC = at(r.DoneNs)
+			if r.Outcome == loadgen.OutcomeCompleted || r.Status != 0 && r.Status != http.StatusOK ||
+				r.Status == http.StatusOK && r.ErrClass == loadgen.ErrEmptyStream {
+				s.EndUTC = s.LatestUTC
+			}
+		}
+		if n, ok := promptTokens(r.Usage); ok {
+			s.PromptTokens = &n
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// ExchangeSend is the send of a probe or ceiling-check exchange, whose
+// stream read as sh where it streamed, ok false where it was never
+// dispatched.
+func ExchangeSend(route, source, kind string, index int64, ex *probe.Exchange, sh *probe.Shape, prompt *int, inputBound, ceiling, hardTimeoutS int) (Send, bool) {
+	if ex == nil || ex.DispatchUTC.IsZero() {
+		return Send{}, false
+	}
+	d := ex.DispatchUTC.UTC()
+	s := Send{Route: route, Source: source, Kind: kind, Index: index, DispatchUTC: d, PromptTokens: prompt,
+		InputBound: inputBound, Ceiling: ceiling, LatestUTC: d.Add(time.Duration(hardTimeoutS) * time.Second)}
+	s.EndUTC = s.LatestUTC
+	if ex.WroteRequestNs > 0 {
+		w := d.Add(time.Duration(ex.WroteRequestNs))
+		s.WroteUTC = &w
+	}
+	if ex.DoneNs > 0 {
+		s.LatestUTC = d.Add(time.Duration(ex.DoneNs))
+		if ex.Status != 0 && ex.Status != http.StatusOK || ex.Status == http.StatusOK && sh != nil && sh.Done && sh.ReadError == "" {
+			s.EndUTC = s.LatestUTC
+		}
+	}
+	return s, true
 }
 
 // Values of a Refusal's Label.
