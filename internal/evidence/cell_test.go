@@ -63,6 +63,9 @@ func releaseCell(cfg *config.Config) *Cell {
 		PreWindowRequests: 25,
 		Outcome:           CellCounted,
 		LadderStarted:     true,
+		RecordsComplete:   true,
+		Shape:             cfg.Release.Shape.Name,
+		AccountGroup:      cfg.Release.AccountGroup,
 		Gaps:              []GapHistogram{},
 	}, 3)
 }
@@ -447,6 +450,7 @@ func TestManifestCellLabel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := releaseCell(cfg)
 			c.Outcome, c.Reasons, c.LadderStarted = tc.outcome, tc.reasons, tc.ladder
+			c.RecordsComplete = tc.outcome != CellInterrupted || !tc.ladder
 			res := base
 			if !tc.requests {
 				res.Requests = nil
@@ -712,11 +716,17 @@ func TestCheckReleaseLabelledCell(t *testing.T) {
 	r = labelled(t, false)
 	c := withDispatch(r.m.Release, 3)
 	c.Dispatch.Sources[0].Final = false
-	c.Outcome, c.LadderStarted = CellInterrupted, true
+	c.Outcome, c.LadderStarted, c.RecordsComplete = CellInterrupted, true, false
 	r.write(t)
-	if m, err := r.check(); err != nil || m.Counted() || !m.Release.LadderStarted {
+	if m, err := r.check(); err != nil || m.Counted() || !m.Release.LadderStarted || m.Release.RecordsComplete {
 		t.Errorf("interrupted cell: %v", err)
 	}
+	c.RecordsComplete = true
+	r.write(t)
+	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "records_complete true with outcome interrupted and ladder_started true") {
+		t.Errorf("an interrupted cell's lost requests read as complete: %v", err)
+	}
+	c.RecordsComplete = false
 	c.Outcome = CellStopped
 	r.write(t)
 	if _, err := r.check(); err == nil || !strings.Contains(err.Error(), "the cell's own series is not final") ||

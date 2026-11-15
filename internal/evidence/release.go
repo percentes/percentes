@@ -74,7 +74,10 @@ func WriteConfigCopy(dir string, cfg *config.Config) error {
 // loaded: the manifest names the file as published
 // (config.Config.Published), a release cell's ceiling-rule verdict must
 // be the one published from r.Config's limits
-// (admission.CheckPublished), and where the two files differ the run's
+// (admission.CheckPublished), its shape and account group and each
+// attempt's shape and ceiling must be r.Config's, each attempt's
+// connection and write times must follow its dispatch in order
+// (recordProblems), and where the two files differ the run's
 // frame directory keeps r.Config as ConfigCopyFile. Otherwise it
 // returns an error naming every missing item and every mismatch.
 func CheckRelease(r Release) (*Manifest, error) {
@@ -215,6 +218,14 @@ func CheckRelease(r Release) (*Manifest, error) {
 			case cfg != nil:
 				if err := admission.CheckPublished(cfg, c.Admission); err != nil {
 					fail("cell record: %v", err)
+				}
+			}
+			if cfg != nil && cfg.Release != nil {
+				for _, p := range c.groupProblems(cfg) {
+					fail("cell record: %s", p)
+				}
+				for _, p := range recordProblems(cfg, recs) {
+					fail("%s", p)
 				}
 			}
 			if !c.LadderStarted && len(recs) > 0 {

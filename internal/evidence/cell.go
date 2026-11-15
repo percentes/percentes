@@ -50,6 +50,18 @@ type Cell struct {
 	Outcome       string   `json:"outcome"`
 	Reasons       []string `json:"reasons,omitempty"`
 	LadderStarted bool     `json:"ladder_started"`
+	// RecordsComplete says the attempts file holds every ladder request
+	// the cell dispatched; it is false only for an interrupted cell whose
+	// ladder started, whose requests went with the process.
+	RecordsComplete bool `json:"records_complete"`
+	// BillingRefusals counts the cell's responses, its probe's included,
+	// that the target documents as a billing refusal: the operator's
+	// billing setting, which stops the route.
+	BillingRefusals int `json:"billing_refusals"`
+	// Shape is the request shape the cell sent and AccountGroup the
+	// provider account or deployment it is recorded against.
+	Shape        string `json:"shape"`
+	AccountGroup string `json:"account_group"`
 	// Concurrent lists the other routes' runs from the same client host
 	// whose cells overlap this one.
 	Concurrent []schedule.Run `json:"concurrent_runs"`
@@ -210,6 +222,7 @@ func checkCell(cfg *config.Config, t *config.Target, c *Cell, gates []validity.G
 			fail("concurrent run %q: another route's run is required", r.Route)
 		}
 	}
+	problems = append(problems, c.groupProblems(cfg)...)
 	ceiling := cfg.Release.Shape.CeilingTokens
 	switch {
 	case c.CeilingTokens != ceiling:
@@ -293,10 +306,59 @@ func (c *Cell) checkLabel(runValid bool, invalid []string, gates []validity.Gate
 	if (c.Outcome == CellBlocked || c.Outcome == CellMissed) && c.LadderStarted {
 		fail("%s after its ladder started", c.Outcome)
 	}
+	if lost := c.Outcome == CellInterrupted && c.LadderStarted; c.RecordsComplete == lost {
+		fail("records_complete %t with outcome %s and ladder_started %t", c.RecordsComplete, c.Outcome, c.LadderStarted)
+	}
+	switch {
+	case c.BillingRefusals < 0:
+		fail("billing_refusals %d is negative", c.BillingRefusals)
+	case c.BillingRefusals > 0 && c.Outcome != CellStopped:
+		fail("%d billing refusals in a %s cell", c.BillingRefusals, c.Outcome)
+	}
 	if len(problems) > 0 {
 		return errors.New("evidence: cell label: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// groupProblems reports every way c's request shape and account group
+// disagree with the route's configuration.
+func (c *Cell) groupProblems(cfg *config.Config) []string {
+	var problems []string
+	if s := cfg.Release.Shape.Name; c.Shape != s {
+		problems = append(problems, fmt.Sprintf("shape %q, the configuration's %q", c.Shape, s))
+	}
+	if g := cfg.Release.AccountGroup; c.AccountGroup != g {
+		problems = append(problems, fmt.Sprintf("account_group %q, the configuration's %q", c.AccountGroup, g))
+	}
+	return problems
+}
+
+// recordProblems reports every way a release cell's attempts disagree
+// with the route's configuration: each record's shape and ceiling, and
+// connection and write times that fall before the dispatch or the
+// connection they follow.
+func recordProblems(cfg *config.Config, recs []Record) []string {
+	var problems []string
+	fail := func(format string, a ...any) {
+		problems = append(problems, fmt.Sprintf("%s: ", AttemptsFile)+fmt.Sprintf(format, a...))
+	}
+	sh := cfg.Release.Shape
+	for i := range recs {
+		r := &recs[i]
+		if r.Shape != sh.Name || r.CeilingTokens != sh.CeilingTokens {
+			fail("attempt %d is shape %q at %d, the configuration's %q at %d", r.Index, r.Shape, r.CeilingTokens, sh.Name, sh.CeilingTokens)
+		}
+		switch {
+		case r.ConnAcquiredNs < 0 || r.WroteRequestNs < 0:
+			fail("attempt %d has a negative connection or write time", r.Index)
+		case r.ConnAcquiredNs > 0 && (r.DispatchNs == 0 || r.ConnAcquiredNs < r.DispatchNs):
+			fail("attempt %d acquired its connection at %d ns, before its dispatch at %d ns", r.Index, r.ConnAcquiredNs, r.DispatchNs)
+		case r.WroteRequestNs > 0 && (r.ConnAcquiredNs == 0 || r.WroteRequestNs < r.ConnAcquiredNs):
+			fail("attempt %d was written at %d ns, before its connection at %d ns", r.Index, r.WroteRequestNs, r.ConnAcquiredNs)
+		}
+	}
+	return problems
 }
 
 // Counted reports whether m is a release cell that enters its route's

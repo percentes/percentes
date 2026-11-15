@@ -35,9 +35,10 @@ func newReleaseRun(t *testing.T, profile config.Profile) *releaseRun {
 	t.Helper()
 	r := &releaseRun{dir: t.TempDir(), root: t.TempDir(), cfg: []byte("profile: " + string(profile) + "\n")}
 	expected := ""
+	var shape config.Shape
 	if profile == config.ProfileRelease {
 		cfg := releaseCfg(t)
-		r.cfg, expected = cfg.Raw, cfg.Target.ExpectedModel()
+		r.cfg, expected, shape = cfg.Raw, cfg.Target.ExpectedModel(), cfg.Release.Shape
 	}
 	r.runDir = filepath.Join(r.root, releaseRunDir)
 	measured := int64(config.PinnedPilotWarmupS) * int64(time.Second)
@@ -48,6 +49,9 @@ func newReleaseRun(t *testing.T, profile config.Profile) *releaseRun {
 			Score: &Score{Expected: "billing", Class: score.Success, Route: "billing"}},
 		{Index: 2, IntendedNs: measured + 10, DispatchNs: measured + 11, DoneNs: measured + 12, Outcome: loadgen.OutcomeCompleted, Answer: &answer,
 			Score: &Score{Expected: "account", Class: score.WrongLabel, Route: "billing"}},
+	}
+	for i := range recs {
+		recs[i].Shape, recs[i].CeilingTokens = shape.Name, shape.CeilingTokens
 	}
 	var attempts bytes.Buffer
 	if err := Write(&attempts, recs); err != nil {

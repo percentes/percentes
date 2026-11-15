@@ -405,3 +405,99 @@ func TestFrameStorePlacement(t *testing.T) {
 		t.Error("existing frame store overwritten")
 	}
 }
+
+// A non-200 body's error type, code and status string reach the attempts
+// file, with the connection and write times, and read back; on a target
+// with a confidential limit the attempts file keeps the type alone and the
+// frame store the code and status string.
+func TestErrorFieldsAndWriteTimes(t *testing.T) {
+	res := &loadgen.Result{EpochWall: time.Date(2026, 10, 17, 8, 20, 0, 0, time.UTC), Requests: []loadgen.Request{
+		{Index: 0, DispatchNs: 10, ConnAcquiredNs: 15, WroteRequestNs: 21, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrStatus429, Status: 429,
+			ErrorBody: []byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`), ErrorType: "rate_limit_error", ErrorCode: "429", ErrorStatus: "RESOURCE_EXHAUSTED"},
+		{Index: 1, DispatchNs: 30, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrConnect},
+	}}
+	key, err := releasekey.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name                 string
+		cfg                  *config.Config
+		code, status         string
+		keptCode, keptStatus string
+	}{
+		{"public", releaseCfg(t), "429", "RESOURCE_EXHAUSTED", "", ""},
+		{"confidential", confidentialCfg(t), "", "", "429", "RESOURCE_EXHAUSTED"},
+	} {
+		path, err := WriteRun(t.TempDir(), tc.cfg, res, Options{Key: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs, err := ReadRecords(bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		framesPath, err := WriteRunFrames(t.TempDir(), &tc.cfg.Target, res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		frames := readFrames(t, framesPath)
+		r := recs[0]
+		if r.ErrorType != "rate_limit_error" || r.ErrorCode != tc.code || r.ErrorStatus != tc.status || frames[0].ErrorCode != tc.keptCode || frames[0].ErrorStatus != tc.keptStatus {
+			t.Errorf("%s: attempts %q %q %q, frame store %q %q", tc.name, r.ErrorType, r.ErrorCode, r.ErrorStatus, frames[0].ErrorCode, frames[0].ErrorStatus)
+		}
+		if q := r.Request(); q.ConnAcquiredNs != 15 || q.WroteRequestNs != 21 || q.ErrorType != r.ErrorType || q.ErrorCode != r.ErrorCode {
+			t.Errorf("%s: read back %+v", tc.name, q)
+		}
+		if bytes.Contains(b, []byte(`"conn_acquired_ns":0`)) || bytes.Contains(b, []byte(`"wrote_request_ns":0`)) || recs[1].ConnAcquiredNs != 0 || recs[1].WroteRequestNs != 0 {
+			t.Errorf("%s: a time that did not happen is written:\n%s", tc.name, b)
+		}
+	}
+}
+
+// The check refuses a release attempt whose shape or ceiling is not the
+// configuration's, and connection and write times out of order with the
+// dispatch; a cell record whose shape or account group is not the
+// configuration's; and billing refusals in a cell the route did not stop.
+func TestRecordAndGroupProblems(t *testing.T) {
+	cfg := releaseCfg(t)
+	ok := Record{Index: 0, Shape: config.ShapeS, CeilingTokens: 512, DispatchNs: 10, ConnAcquiredNs: 12, WroteRequestNs: 13}
+	if p := recordProblems(cfg, []Record{ok, {Index: 1, Shape: config.ShapeS, CeilingTokens: 512}}); p != nil {
+		t.Fatalf("problems %q", p)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*Record)
+		want string
+	}{
+		{"shape", func(r *Record) { r.Shape = config.ShapeR }, `attempt 0 is shape "R" at 512`},
+		{"ceiling", func(r *Record) { r.CeilingTokens = 1024 }, `attempt 0 is shape "S" at 1024`},
+		{"connection before dispatch", func(r *Record) { r.ConnAcquiredNs = 9 }, "acquired its connection at 9 ns, before its dispatch at 10 ns"},
+		{"connection never dispatched", func(r *Record) { r.DispatchNs = 0 }, "before its dispatch at 0 ns"},
+		{"written before the connection", func(r *Record) { r.WroteRequestNs = 11 }, "was written at 11 ns, before its connection at 12 ns"},
+		{"written with no connection", func(r *Record) { r.ConnAcquiredNs = 0 }, "was written at 13 ns, before its connection at 0 ns"},
+	} {
+		r := ok
+		tc.edit(&r)
+		if p := recordProblems(cfg, []Record{r}); len(p) != 1 || !strings.Contains(p[0], tc.want) {
+			t.Errorf("%s: %q, want %q", tc.name, p, tc.want)
+		}
+	}
+	c := releaseCell(cfg)
+	if p := c.groupProblems(cfg); p != nil {
+		t.Fatalf("problems %q", p)
+	}
+	c.Shape, c.AccountGroup = "", "azure"
+	if p := c.groupProblems(cfg); len(p) != 2 || p[0] != `shape "", the configuration's "S"` || p[1] != `account_group "azure", the configuration's "groq"` {
+		t.Errorf("problems %q", p)
+	}
+	c = releaseCell(cfg)
+	c.BillingRefusals = 1
+	if err := c.checkLabel(true, nil, nil, 0); err == nil || !strings.Contains(err.Error(), "1 billing refusals in a counted cell") {
+		t.Errorf("a counted cell with a billing refusal: %v", err)
+	}
+}
