@@ -1,5 +1,5 @@
 #!/bin/sh
-# The race unit suite, which is what the CI lint job runs. The AC suite,
+# The race unit suite, which is what the CI unit job runs. The AC suite,
 # kind smoke and campaign e2e stay in CI; `make test` runs the full gate
 # locally when you want it.
 # Bypass once with `git push --no-verify`.
