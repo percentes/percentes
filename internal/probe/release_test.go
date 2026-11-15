@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1454,5 +1455,47 @@ func TestModelFault(t *testing.T) {
 	tg.ReportedModel = &config.ReportedModel{Name: "m-2026"}
 	if f := ModelFault(tg, []*ReleaseRecord{silent}); f != `target.reported_model "m-2026" is recorded and no response of the ceiling check reported a model` {
 		t.Errorf("recorded model, none reported: %s", f)
+	}
+}
+
+// A probe's reported counts are its prompt count and its output count,
+// reasoning included, each nil where unreported.
+func TestShapeReported(t *testing.T) {
+	if p, o := (*Shape)(nil).Reported(); p != nil || o != nil {
+		t.Fatalf("nil shape: %v %v", p, o)
+	}
+	s := &Shape{usage: map[string]json.RawMessage{"prompt_tokens": json.RawMessage("90"), "completion_tokens": json.RawMessage("16"), "total_tokens": json.RawMessage("150")}}
+	if p, o := s.Reported(); p == nil || o == nil || *p != 90 || *o != 60 {
+		t.Fatalf("reported %v %v", p, o)
+	}
+	s = &Shape{usage: map[string]json.RawMessage{"input_tokens": json.RawMessage("100"), "cache_read_input_tokens": json.RawMessage("28")}}
+	if p, o := s.Reported(); p == nil || *p != 128 || o != nil {
+		t.Fatalf("no output count: %v %v", p, o)
+	}
+}
+
+// A negative reported count is no count: ten requests reporting -1
+// prompt and output tokens pass neither bound check, and a cache count
+// that overflows the prompt sum reads as math.MaxInt.
+func TestNegativeUsageFailsBounds(t *testing.T) {
+	s := &Shape{usage: map[string]json.RawMessage{"prompt_tokens": []byte("-1"), "completion_tokens": []byte("-1")}}
+	p, o := s.Reported()
+	reqs := make([]CheckRequest, CeilingRequests)
+	for i := range reqs {
+		reqs[i] = CheckRequest{PromptTokens: p, OutputTokens: o}
+	}
+	if in, out := inputCheck(reqs, 128), outputCheck(reqs, 16); in.Pass || out.Pass {
+		t.Errorf("negative counts passed: input=%+v output=%+v", in, out)
+	}
+	n := -1
+	for i := range reqs {
+		reqs[i] = CheckRequest{PromptTokens: &n, OutputTokens: &n}
+	}
+	if in, out := inputCheck(reqs, 128), outputCheck(reqs, 16); in.Pass || out.Pass || in.Reported != 0 || out.Reported != 0 {
+		t.Errorf("recorded negative counts passed: input=%+v output=%+v", in, out)
+	}
+	huge := &Shape{usage: map[string]json.RawMessage{"input_tokens": []byte("9223372036854775807"), "cache_read_input_tokens": []byte("1")}}
+	if p, _ := huge.Reported(); p == nil || *p != math.MaxInt {
+		t.Errorf("overflowing prompt sum read as %v", p)
 	}
 }

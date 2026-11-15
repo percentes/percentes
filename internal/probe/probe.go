@@ -111,6 +111,11 @@ type Record struct {
 	// response shape. They never gate the start.
 	Findings []string `json:"findings,omitempty"`
 	Start    Start    `json:"start"`
+
+	// PromptTokens and OutputTokens are Shape's reported counts
+	// (Shape.Reported), absent where unreported.
+	PromptTokens *int `json:"prompt_tokens,omitempty"`
+	OutputTokens *int `json:"output_tokens,omitempty"`
 }
 
 // Start is the start gate's decision.

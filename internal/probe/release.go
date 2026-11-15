@@ -1123,6 +1123,29 @@ func verifyInBand(t *config.Target, documented bool, q CheckRequest) error {
 	return nil
 }
 
+// Reported is the stream's reported prompt token count (promptTokens) and
+// its output token count, reasoning included (outputTokens), each nil
+// where unreported or s is nil.
+func (s *Shape) Reported() (prompt, output *int) {
+	if s == nil {
+		return nil, nil
+	}
+	if n, ok := promptTokens(s); ok {
+		prompt = &n
+	}
+	var completion *int
+	for _, k := range []string{"completion_tokens", "output_tokens"} {
+		if n, ok := s.tokens(k); ok {
+			completion = &n
+			break
+		}
+	}
+	if n, ok := outputTokens(s, prompt, completion); ok {
+		output = &n
+	}
+	return prompt, output
+}
+
 // promptTokens is the stream's reported prompt token count: a
 // chat-completions prompt_tokens, or a Messages input_tokens plus its two
 // cache counts, which input_tokens excludes; a sum past math.MaxInt is
