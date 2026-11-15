@@ -285,6 +285,10 @@ var (
 	ErrLedgerCap     = errors.New("ledger cap reached")
 )
 
+// ErrLateEpoch is Run's error, with nothing sent, for an epoch after
+// Hooks.LatestEpoch.
+var ErrLateEpoch = errors.New("ladder epoch exceeds its start tolerance")
+
 // Interruption records a safety stop. Requests dispatched before it run
 // to their terminal state; the unsent ones are never sent.
 type Interruption struct {
@@ -573,6 +577,9 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 	// The measurement span is [warmup end, cooldown start], or for a
 	// release run each step's window.
 	g.epoch = time.Now()
+	if hooks != nil && !hooks.LatestEpoch.IsZero() && g.epoch.After(hooks.LatestEpoch) {
+		return nil, ErrLateEpoch
+	}
 	res.EpochWall = g.epoch
 	if hooks != nil && hooks.OnEpoch != nil {
 		hooks.OnEpoch(g.epoch)
