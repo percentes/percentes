@@ -688,8 +688,9 @@ func newLadderRecord(cfg *config.Config, l *Ladder) *LadderRecord {
 // stopped it, with the GC pause snapshots from the first step's start to
 // the last attempted step's end. At each drain's end, once every request
 // of the step (and of the warm-up, at the first step) is terminal, it
-// takes the step's verdict; a verdict that ends the ladder leaves every
-// later request unsent.
+// takes the step's verdict, the first step's over the warm-up's requests
+// as well; a verdict that ends the ladder leaves every later request
+// unsent.
 func (g *gen) runLadder(ctx context.Context, l *Ladder, requests []Request, rec *LadderRecord,
 	pace func(*Request, *sync.WaitGroup) bool, cpuMon *cpuMonitor) (bool, *gcMonitor) {
 	gcMons := make([]*gcMonitor, len(l.Steps))
@@ -730,8 +731,12 @@ func (g *gen) runLadder(ctx context.Context, l *Ladder, requests []Request, rec 
 				sr.Status429++
 			}
 		}
+		judged := measured
+		if k == 0 {
+			judged = requests[:st.End]
+		}
 		gcLoMs, gcHiMs := gcMons[k].stopAndP99Ms()
-		gates := g.gates(g.cfg, measured, cpuMon.collect(g.epoch), gcLoMs, gcHiMs, st.StartNs, st.EndNs)
+		gates := g.gates(g.cfg, judged, cpuMon.collect(g.epoch), gcLoMs, gcHiMs, st.StartNs, st.EndNs)
 		sr.Gates = &gates
 		sr.Tripwire = g.trip.fired()
 		if end := stepEnd(sr); end != "" {

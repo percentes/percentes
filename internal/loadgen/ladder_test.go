@@ -219,7 +219,7 @@ func statusByHit(t *testing.T, hits *atomic.Int64, status func(n int64) int) *ht
 }
 
 // Two steps run to the last drain's end; each step's verdict covers its
-// own window and measured requests.
+// own window and measured requests, the first step's the warm-up's too.
 func TestLadderRunsEveryStep(t *testing.T) {
 	t.Parallel()
 	var hits atomic.Int64
@@ -264,7 +264,7 @@ func TestLadderRunsEveryStep(t *testing.T) {
 			t.Fatalf("step %d: %+v, want %+v", k+1, got, want)
 		}
 	}
-	if want := []gateCall{{4, 1e9, 3e9}, {8, 4.5e9, 6.5e9}, {14, 1e9, 6.5e9}}; !slices.Equal(calls, want) {
+	if want := []gateCall{{6, 1e9, 3e9}, {8, 4.5e9, 6.5e9}, {14, 1e9, 6.5e9}}; !slices.Equal(calls, want) {
 		t.Fatalf("gate calls %+v, want %+v", calls, want)
 	}
 	if !res.Gates.Pass || res.WarmupEndNs != 1e9 || res.RunEndNs != 8e9 {
@@ -329,7 +329,15 @@ func TestClientValidityEndsLadder(t *testing.T) {
 	srv := statusByHit(t, &hits, func(int64) int { return http.StatusOK })
 	var mu sync.Mutex
 	var calls []gateCall
-	res, err := run(context.Background(), ladderRunCfg(srv.URL, 2, 4), nil, recordGates(gateCall{4, 1e9, 3e9}, &mu, &calls))
+	record := recordGates(gateCall{}, &mu, &calls)
+	failFirst := func(cfg *config.Config, requests []Request, samples []cpuSample, lo, hi float64, start, end int64) GateReport {
+		rep := record(cfg, requests, samples, lo, hi, start, end)
+		mu.Lock()
+		defer mu.Unlock()
+		rep.Pass = len(calls) > 1
+		return rep
+	}
+	res, err := run(context.Background(), ladderRunCfg(srv.URL, 2, 4), nil, failFirst)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +348,7 @@ func TestClientValidityEndsLadder(t *testing.T) {
 	if lr.End != LadderEndClientValidity || lr.EndStep != 1 || lr.Steps[0].Gates.Pass || lr.Steps[1].Attempted {
 		t.Fatalf("ladder %+v", lr)
 	}
-	if want := []gateCall{{4, 1e9, 3e9}, {6, 1e9, 3e9}}; !slices.Equal(calls, want) {
+	if want := []gateCall{{6, 1e9, 3e9}, {6, 1e9, 3e9}}; !slices.Equal(calls, want) {
 		t.Fatalf("gate calls %+v, want %+v", calls, want)
 	}
 	if res.Gates.Pass {
