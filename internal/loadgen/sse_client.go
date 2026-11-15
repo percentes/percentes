@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -88,6 +89,7 @@ func (g *gen) execute(r *Request) bool {
 		stop := time.AfterFunc(errorBodyWait, cancel)
 		defer stop.Stop()
 		r.ErrorBody = readErrorBody(resp.Body, secrets)
+		r.ErrorType, r.ErrorCode, r.ErrorStatus = errorFields(r.ErrorBody)
 		return true
 	}
 
@@ -317,7 +319,8 @@ type chunk struct {
 	// end: the stream's terminator.
 	end bool
 	// messages: usage is a Messages usage object, whose completion count
-	// is outputTokens, a message_delta's output_tokens, when outputSeen.
+	// is outputTokens, a message_delta's output_tokens, when outputSeen;
+	// a count intField refuses is not seen.
 	messages     bool
 	outputTokens int
 	outputSeen   bool
@@ -440,10 +443,11 @@ func parseMessagesEvent(payload []byte) (c chunk, ok bool) {
 			return c, false
 		}
 		if v := lookup(u, "output_tokens"); v != nil {
-			if json.Unmarshal(v, &c.outputTokens) != nil {
+			if n, ok := intField(v); ok {
+				c.outputTokens, c.outputSeen = n, true
+			} else if json.Unmarshal(v, new(int)) != nil {
 				return c, false
 			}
-			c.outputSeen = true
 		}
 	case "error":
 		if c.err = lookup(root, "error"); c.err == nil {
@@ -542,16 +546,11 @@ func usageTokens(payload []byte) (n int, ok bool) {
 	return completionTokens(c.usage)
 }
 
-// completionTokens reads completion_tokens from a usage object; ok is
-// false when the key is missing or null.
+// completionTokens reads completion_tokens from a usage object under
+// intField's rule; ok is false where usage is not an object.
 func completionTokens(usage json.RawMessage) (n int, ok bool) {
-	var u struct {
-		CompletionTokens *int `json:"completion_tokens"`
-	}
-	if json.Unmarshal(usage, &u) != nil || u.CompletionTokens == nil {
-		return 0, false
-	}
-	return *u.CompletionTokens, true
+	u, _ := object(usage)
+	return intField(u["completion_tokens"])
 }
 
 // requestBody builds the OpenAI-compatible chat-completion request.
@@ -831,4 +830,208 @@ func readErrorBody(body io.Reader, secrets []string) []byte {
 		b = b[:errorBodyLimit]
 	}
 	return b
+}
+
+// Bytes kept of each error field.
+const errorFieldLimit = 256
+
+// errorFields reads the error object of a non-200 body: the body's
+// "error" object, or the body itself where it has none, and for a JSON
+// array its first element. It returns the object's "type" string, its
+// "code", a string's value or a number's JSON text, and its "status"
+// string, each cut at errorFieldLimit bytes; a field of another type, and
+// every field of a body that does not decode, is "".
+func errorFields(body []byte) (typ, code, status string) {
+	var arr []json.RawMessage
+	if json.Unmarshal(body, &arr) == nil && len(arr) > 0 {
+		body = arr[0]
+	}
+	root, ok := object(body)
+	if !ok || root == nil {
+		return "", "", ""
+	}
+	obj := root
+	if e, ok := object(root["error"]); ok && e != nil {
+		obj = e
+	}
+	cut := func(s string) string {
+		if len(s) > errorFieldLimit {
+			return s[:errorFieldLimit]
+		}
+		return s
+	}
+	json.Unmarshal(orNull(obj["type"]), &typ)      //nolint:errcheck
+	json.Unmarshal(orNull(obj["status"]), &status) //nolint:errcheck
+	if v := obj["code"]; !stringField(v, &code) {
+		var n json.Number
+		if json.Unmarshal(v, &n) == nil {
+			code = n.String()
+		}
+	}
+	return cut(typ), cut(code), cut(status)
+}
+
+// PromptTokens is r's reported prompt token count: a chat-completions
+// prompt_tokens, or a Messages input_tokens plus its two cache counts,
+// which input_tokens excludes. ok is false when its usage reports
+// neither; a sum past math.MaxInt is math.MaxInt.
+func (r *Request) PromptTokens() (n int, ok bool) {
+	u, _ := object(r.Usage)
+	if n, ok := intField(u["prompt_tokens"]); ok {
+		return n, true
+	}
+	if n, ok = intField(u["input_tokens"]); !ok {
+		return 0, false
+	}
+	for _, k := range []string{"cache_creation_input_tokens", "cache_read_input_tokens"} {
+		if c, ok := intField(u[k]); ok {
+			if c > math.MaxInt-n {
+				n = math.MaxInt
+				continue
+			}
+			n += c
+		}
+	}
+	return n, true
+}
+
+// OutputTokens is r's reported output, reasoning included: the largest of
+// its completion count, its usage's completion_tokens, its usage's
+// total_tokens less its prompt count (math.MaxInt where total_tokens is
+// math.MaxInt) and any reasoning_tokens count at any depth of its usage.
+// ok is false without a completion count.
+func (r *Request) OutputTokens() (n int, ok bool) {
+	u, _ := object(r.Usage)
+	switch {
+	case r.UsageSeen:
+		if n = r.CompletionTokens; n < 0 {
+			return 0, false
+		}
+		if c, ok := intField(u["completion_tokens"]); ok {
+			n = max(n, c)
+		}
+	default:
+		if n, ok = intField(u["completion_tokens"]); !ok {
+			if n, ok = intField(u["output_tokens"]); !ok {
+				return 0, false
+			}
+		}
+	}
+	if total, ok := intField(u["total_tokens"]); ok && total == math.MaxInt {
+		n = math.MaxInt
+	} else if ok {
+		if p, ok := r.PromptTokens(); ok {
+			n = max(n, total-p)
+		}
+	}
+	return max(n, maxReasoningTokens(r.Usage)), true
+}
+
+// intField decodes a token count: a non-negative JSON number with an
+// integral value, in any notation, past math.MaxInt taken as
+// math.MaxInt. ok is false for a missing, null, negative, fractional or
+// non-number value.
+func intField(raw json.RawMessage) (int, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '-' && (raw[0] < '0' || raw[0] > '9') || !json.Valid(raw) {
+		return 0, false
+	}
+	return countOf(string(raw))
+}
+
+// TokenCount decodes a reported token count as intField does.
+func TokenCount(raw json.RawMessage) (int, bool) { return intField(raw) }
+
+// TokenCountText is a decoded count as published: math.MaxInt, the value
+// a count past it takes, as "at least 9223372036854775807".
+func TokenCountText(n int) string {
+	if n == math.MaxInt {
+		return "at least " + strconv.Itoa(n)
+	}
+	return strconv.Itoa(n)
+}
+
+// countOf is the value of s, a JSON number, where it is a non-negative
+// integer, saturating at math.MaxInt.
+func countOf(s string) (int, bool) {
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	mant, exp := s, int64(0)
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		mant = s[:i]
+		e, err := strconv.ParseInt(strings.TrimPrefix(s[i+1:], "+"), 10, 64)
+		switch {
+		case err == nil:
+			exp = e
+		case strings.HasPrefix(s[i+1:], "-"):
+			exp = math.MinInt64
+		default:
+			exp = math.MaxInt64
+		}
+	}
+	digits := mant
+	if i := strings.IndexByte(mant, '.'); i >= 0 {
+		digits = mant[:i] + mant[i+1:]
+		if exp < math.MinInt64+int64(len(mant)) {
+			exp = math.MinInt64
+		} else {
+			exp -= int64(len(mant) - i - 1)
+		}
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return 0, true
+	}
+	if neg {
+		return 0, false
+	}
+	for strings.HasSuffix(digits, "0") {
+		digits = digits[:len(digits)-1]
+		if exp < math.MaxInt64 {
+			exp++
+		}
+	}
+	switch {
+	case exp < 0:
+		return 0, false
+	case exp > 19 || int64(len(digits))+exp > 19:
+		return math.MaxInt, true
+	}
+	u, err := strconv.ParseUint(digits+strings.Repeat("0", int(exp)), 10, 64)
+	if err != nil || u > math.MaxInt {
+		return math.MaxInt, true
+	}
+	return int(u), true
+}
+
+// maxReasoningTokens is the largest count (intField) under a key named
+// reasoning_tokens at any depth of v, or 0.
+func maxReasoningTokens(v json.RawMessage) int {
+	var x any
+	dec := json.NewDecoder(bytes.NewReader(v))
+	dec.UseNumber()
+	if len(v) == 0 || dec.Decode(&x) != nil {
+		return 0
+	}
+	n := 0
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case map[string]any:
+			for k, e := range t {
+				if c, ok := e.(json.Number); ok && k == "reasoning_tokens" {
+					if i, ok := countOf(string(c)); ok {
+						n = max(n, i)
+					}
+				}
+				walk(e)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(x)
+	return n
 }

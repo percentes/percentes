@@ -138,6 +138,12 @@ type Request struct {
 	// ErrorBody is the first errorBodyLimit bytes of a non-200 body with
 	// credentials masked, held for the raw-frame store; never in JSON.
 	ErrorBody []byte `json:"-"`
+	// ErrorType, ErrorCode and ErrorStatus are the type, code and status
+	// string of ErrorBody's error object as received, mapped to nothing
+	// (errorFields); "" where the body carries none.
+	ErrorType   string `json:"error_type,omitempty"`
+	ErrorCode   string `json:"error_code,omitempty"`
+	ErrorStatus string `json:"error_status,omitempty"`
 	// Frames are the timed reads of a 200 body, credentials masked, kept
 	// for hosted targets only; never in JSON. FrameBytesDropped counts the
 	// body bytes read after the first frameLimit and not kept.
