@@ -20,9 +20,13 @@ type Release struct {
 	Ladder Ladder     `yaml:"ladder" json:"ladder"`
 	Shape  Shape      `yaml:"shape" json:"shape"`
 	Caps   LedgerCaps `yaml:"caps" json:"caps"`
-	// OtherHosts are the release's other routes of the target's model.
-	// The ceiling rule chooses one ceiling from a check of every host
-	// (SPEC-HOSTED HA3 point 7).
+	// AccountGroup names the provider account or deployment the route is
+	// recorded against; the routes of one group share its limits and
+	// spend limit (SPEC-HOSTED HA4).
+	AccountGroup string `yaml:"account_group" json:"account_group"`
+	// OtherHosts are the release's other routes of the target's model and
+	// request shape, its host group. The ceiling rule chooses one ceiling
+	// from a check of every host (SPEC-HOSTED HA3 point 7 and HA4).
 	OtherHosts []ModelHost `yaml:"other_hosts,omitempty" json:"other_hosts,omitempty"`
 }
 
@@ -459,6 +463,9 @@ func (c *Config) validateRelease(v *validator) {
 	}
 	pin("release.shape.deadline_s", float64(r.Shape.DeadlineS), PinnedReleaseDeadlineS)
 	validateLedgerCaps(v, "release.caps", r.Caps)
+	if !fieldKey(r.AccountGroup) {
+		v.errf("release.account_group: the provider account or deployment the route is recorded against, one or more of a-z, A-Z, 0-9, _ and -, got %q", r.AccountGroup)
+	}
 	hosts := map[string]bool{c.Target.Name: true}
 	for i, h := range r.OtherHosts {
 		field := fmt.Sprintf("release.other_hosts[%d]", i)
