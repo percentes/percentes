@@ -253,7 +253,7 @@ func runAdmittedCell(t *testing.T, gate func(*route)) *cellRecord {
 	}
 	dir := r.cellDir(run)
 	for _, name := range []string{cellFile, evidence.AttemptsFile, evidence.ManifestFile, probe.File, dispatchFile, evidence.ClockFile, evidence.StatusStartFile, evidence.StatusEndFile,
-		evidence.BalanceStartFile, evidence.BalanceEndFile, "ceiling-probe-groq-512.json"} {
+		evidence.BalanceStartFile, evidence.BalanceEndFile, "ceiling-probe-groq-512-0.json"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Error(err)
 		}
