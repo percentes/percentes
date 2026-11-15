@@ -563,13 +563,15 @@ func TestExactPlan(t *testing.T) {
 	}
 }
 
-// A cell's configuration carries the attempt's seed and the admitted
-// steps, and its schedule is a prefix of the whole ladder's.
+// A cell's configuration carries the attempt's seed, the route's binding
+// rate and the admitted steps, and its schedule is a prefix of the whole
+// ladder's.
 func TestCellConfig(t *testing.T) {
 	cfg := releaseConfig(t, "https://api.example.test/openai/v1/chat/completions")
+	cfg.Release.BindingRPS = 2.429
 	c := cellConfig(cfg, 42, 3)
-	if c.Run.Seed != 42 || !slices.Equal(c.Release.Ladder.StepsRPS, []float64{0.25, 0.5, 1}) || len(cfg.Release.Ladder.StepsRPS) != 5 {
-		t.Fatalf("cell config seed %d, steps %v; route steps %v", c.Run.Seed, c.Release.Ladder.StepsRPS, cfg.Release.Ladder.StepsRPS)
+	if c.Run.Seed != 42 || !slices.Equal(c.Release.Ladder.StepFractions, []float64{0.25, 0.5, 0.75}) || len(cfg.Release.Ladder.StepFractions) != 5 || c.Release.BindingRPS != 2.429 {
+		t.Fatalf("cell config seed %d, steps %v at %g rps; route steps %v", c.Run.Seed, c.Release.Ladder.StepFractions, c.Release.BindingRPS, cfg.Release.Ladder.StepFractions)
 	}
 	full := *cfg
 	full.Run.Seed = 42

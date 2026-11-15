@@ -366,10 +366,14 @@ func enoughOpenFiles(t *testing.T) {
 }
 
 // shortLadder scales r's ladder to a 1 s warm-up and 2 s windows with 1 s
-// drains at steps of 2, 4, 8, 16 and 32 requests a second, with a 1 s
-// CPU window, once the ceiling rule has read the pinned ladder.
+// drains at steps of 2, 4, 8, 16 and 32 requests a second, the fractions
+// of a binding rate of 1, with a 1 s CPU window, once the ceiling rule
+// has read the pinned ladder at the frozen binding rate; each cell is due
+// when the test runs it.
 func shortLadder(r *route) {
-	r.cfg.Release.Ladder = config.Ladder{StepsRPS: []float64{2, 4, 8, 16, 32}, WarmupS: 1, StepS: 2, DrainS: 1}
+	r.cfg.Release.Ladder = config.Ladder{StepFractions: []float64{2, 4, 8, 16, 32}, WarmupS: 1, StepS: 2, DrainS: 1}
+	r.cfg.Release.BindingRPS = 1
+	r.due = func(schedule.Run) time.Time { return time.Now() }
 	r.cfg.ClientValidity.CPUWindowS = 1
 }
 

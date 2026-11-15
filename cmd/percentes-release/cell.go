@@ -29,13 +29,14 @@ const priceChangedReason = "the route's price was recorded again during the cell
 const operatorErrorHeld = "the error is kept beside the cell's frames"
 
 // cellConfig is the route's configuration for one cell attempt: the
-// attempt's seed, and the ladder cut at the top admitted step. The cut
-// ladder's schedule is a prefix of the whole ladder's.
+// attempt's seed, and the ladder at the route's binding rate cut at the
+// top admitted step. The cut ladder's schedule is a prefix of the whole
+// ladder's.
 func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 	c := *cfg
 	c.Run.Seed = seed
 	rel := *cfg.Release
-	rel.Ladder.StepsRPS = slices.Clone(cfg.Release.Ladder.StepsRPS[:steps])
+	rel.Ladder.StepFractions = slices.Clone(cfg.Release.Ladder.StepFractions[:steps])
 	c.Release = &rel
 	return &c
 }
@@ -254,7 +255,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		}
 		return rec, r.retain(ctx, ev, rec, nil)
 	}
-	interval := time.Duration(float64(time.Second) / cfg.Release.Ladder.StepsRPS[0])
+	interval := time.Duration(float64(time.Second) / cfg.Release.Ladder.StepRates(cfg.Release.BindingRPS)[0])
 	if werr := waitUntil(ctx, pr.Request.DispatchUTC.Add(interval)); werr != nil {
 		finish(outcomeStopped, "stopped before the first dispatch: "+werr.Error())
 		return rec, r.retain(ctx, ev, rec, nil)

@@ -134,6 +134,9 @@ type route struct {
 
 	now  func() time.Time
 	wait func(ctx context.Context, t time.Time) error
+	// due is when runCell takes a run to be due, its scheduled start
+	// where nil; the rehearsal and tests run cells at other times.
+	due func(run schedule.Run) time.Time
 	// cell runs one cell attempt; runCell unless a test replaces it.
 	cell func(ctx context.Context, run schedule.Run) (*cellRecord, error)
 	// label labels a missed or interrupted cell; labelCell unless a test
