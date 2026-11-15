@@ -192,7 +192,8 @@ type Result struct {
 	SplitSeries     bool     `json:"split_series,omitempty"`
 
 	// Tripwires is set for a pilot or release run only. Interrupted is
-	// set when a safety stop cancelled the run's context.
+	// set when a safety stop cancelled the run's context, for a release
+	// run only where it ended before the ladder's end.
 	Tripwires   *Tripwires    `json:"tripwires,omitempty"`
 	Interrupted *Interruption `json:"interrupted,omitempty"`
 
@@ -617,7 +618,7 @@ func run(ctx context.Context, cfg *config.Config, hooks *Hooks, gates gateFunc) 
 	}
 	compareModels(cfg, g.model, res)
 	res.Tripwires = g.trip.report()
-	if aborted || ctx.Err() != nil {
+	if aborted || (ladder == nil && ctx.Err() != nil) {
 		<-stopped
 		res.Interrupted = interruption(context.Cause(ctx), g.stopNs, requests)
 		return res, fmt.Errorf("loadgen: run aborted by context: %w", ctx.Err())
