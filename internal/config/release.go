@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
 
 // Release is the release profile's ladder, request shape (SPEC-HOSTED
@@ -87,14 +88,28 @@ type Limit struct {
 	Marking string `yaml:"marking" json:"marking"`
 	// WindowS is the rolling window of a LimitSpendWindow, and absent for
 	// every other dimension.
-	WindowS     float64 `yaml:"window_s,omitempty" json:"window_s,omitempty"`
-	OperatorSet bool    `yaml:"operator_set,omitempty" json:"operator_set,omitempty"`
+	WindowS float64 `yaml:"window_s,omitempty" json:"window_s,omitempty"`
+	// EvaluationWindowsS are the windows in seconds the provider documents
+	// evaluating a rate, token or spend-window limit over, ascending and
+	// ending at the window its value is stated over (StatedWindowS).
+	// Absent, that window alone.
+	EvaluationWindowsS []float64 `yaml:"evaluation_windows_s,omitempty" json:"evaluation_windows_s,omitempty"`
+	OperatorSet        bool      `yaml:"operator_set,omitempty" json:"operator_set,omitempty"`
 	// Counting is how the provider counts a request against a
 	// tokens_per_minute or tokens_per_day limit, one of the Counting*
 	// values, and absent for every other dimension. OutputBurndown is
 	// the factor output tokens count at under CountingOutputBurndown.
 	Counting       string  `yaml:"counting,omitempty" json:"counting,omitempty"`
 	OutputBurndown float64 `yaml:"output_burndown,omitempty" json:"output_burndown,omitempty"`
+	// OutputAtGeneration marks an output-counting token rate limit or a
+	// spend window the provider may count a request against at any time
+	// until the request ends, taken as the hard timeout after its
+	// dispatch at the latest.
+	OutputAtGeneration bool `yaml:"output_at_generation,omitempty" json:"output_at_generation,omitempty"`
+	// ResetZone is the Internet Assigned Numbers Authority (IANA) time
+	// zone whose midnight resets a requests_per_day or tokens_per_day
+	// limit, and absent for every other dimension.
+	ResetZone string `yaml:"reset_zone,omitempty" json:"reset_zone,omitempty"`
 	// Source is the page's URL or the retained screenshot's file name.
 	Source string `yaml:"source" json:"source"`
 	// Retrieved is the retrieval date, YYYY-MM-DD in UTC.
@@ -105,6 +120,35 @@ type Limit struct {
 	// sum).
 	SHA256     string `yaml:"sha256,omitempty" json:"sha256,omitempty"`
 	HMACSHA256 string `yaml:"hmac_sha256,omitempty" json:"hmac_sha256,omitempty"`
+}
+
+// StatedWindowS is the window in seconds a rate, token or spend-window
+// limit's value is stated over: 60 for a per-minute limit, 1 for
+// requests_per_second, window_s for a spend window; 0 for every other
+// dimension.
+func (l *Limit) StatedWindowS() float64 {
+	switch l.Dimension {
+	case LimitRPM, LimitTPM, LimitInputTPM, LimitOutputTPM:
+		return 60
+	case LimitRPS:
+		return 1
+	case LimitSpendWindow:
+		return l.WindowS
+	}
+	return 0
+}
+
+// WindowsS are the limit's evaluation windows in seconds:
+// EvaluationWindowsS, or the stated window alone; nil for a dimension
+// with no window.
+func (l *Limit) WindowsS() []float64 {
+	switch w := l.StatedWindowS(); {
+	case w == 0:
+		return nil
+	case len(l.EvaluationWindowsS) == 0:
+		return []float64{w}
+	}
+	return slices.Clone(l.EvaluationWindowsS)
 }
 
 // Values of a limit's marking.
@@ -712,6 +756,16 @@ func validateLimit(v *validator, field string, l *Limit) {
 	case l.Dimension != LimitSpendWindow && l.WindowS != 0:
 		v.errf("%s.window_s: set for %q only", field, LimitSpendWindow)
 	}
+	if ws := l.EvaluationWindowsS; len(ws) > 0 {
+		stated := l.StatedWindowS()
+		ascending := ws[0] > 0 && slices.IsSorted(ws) && len(slices.Compact(slices.Clone(ws))) == len(ws)
+		switch {
+		case stated == 0:
+			v.errf("%s.evaluation_windows_s: set for rate, token and spend-window limits only", field)
+		case !ascending || ws[len(ws)-1] != stated:
+			v.errf("%s.evaluation_windows_s: positive seconds in ascending order, each once, ending at the %g s the value is stated over, got %v", field, stated, ws)
+		}
+	}
 	tokens := l.Dimension == LimitTPM || l.Dimension == LimitTPD
 	switch {
 	case tokens && !slices.Contains(countings, l.Counting):
@@ -719,11 +773,23 @@ func validateLimit(v *validator, field string, l *Limit) {
 	case !tokens && l.Counting != "":
 		v.errf("%s.counting: set for %q and %q only", field, LimitTPM, LimitTPD)
 	}
+	daily := l.Dimension == LimitRPD || l.Dimension == LimitTPD
+	switch {
+	case daily && l.ResetZone == "":
+		v.errf("%s.reset_zone: required for %q and %q: the IANA time zone whose midnight starts each reset day", field, LimitRPD, LimitTPD)
+	case daily && !resetZone(l.ResetZone):
+		v.errf("%s.reset_zone: %q is not an IANA time zone name", field, l.ResetZone)
+	case !daily && l.ResetZone != "":
+		v.errf("%s.reset_zone: set for %q and %q only", field, LimitRPD, LimitTPD)
+	}
 	switch {
 	case l.Counting == CountingOutputBurndown && l.OutputBurndown < 1:
 		v.errf("%s.output_burndown: must be >= 1 for counting %q, got %g", field, CountingOutputBurndown, l.OutputBurndown)
 	case l.Counting != CountingOutputBurndown && l.OutputBurndown != 0:
 		v.errf("%s.output_burndown: set for counting %q only", field, CountingOutputBurndown)
+	}
+	if l.OutputAtGeneration && l.Dimension != LimitOutputTPM && l.Dimension != LimitSpendWindow && (l.Dimension != LimitTPM || l.Counting == CountingInput) {
+		v.errf("%s.output_at_generation: set for %q, %q counting output and %q only", field, LimitOutputTPM, LimitTPM, LimitSpendWindow)
 	}
 	switch src := strings.TrimSpace(l.Source); {
 	case src == "":
@@ -744,6 +810,16 @@ func validateLimit(v *validator, field string, l *Limit) {
 	case l.Marking == MarkingConfidential && !sha256Hex(l.HMACSHA256):
 		v.errf("%s.hmac_sha256: 64 lowercase hex characters required, got %q", field, l.HMACSHA256)
 	}
+}
+
+// resetZone reports whether name is an IANA time zone name other than
+// "Local".
+func resetZone(name string) bool {
+	if name == "" || name == "Local" {
+		return false
+	}
+	_, err := time.LoadLocation(name)
+	return err == nil
 }
 
 var unpublishedDimensionRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)

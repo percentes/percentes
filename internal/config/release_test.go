@@ -153,6 +153,24 @@ func TestReleaseRefusals(t *testing.T) {
 		{"burndown without a factor", func(c *Config) { tpm(c).Counting = CountingOutputBurndown }, "target.limits[1].output_burndown: must be >= 1"},
 		{"burndown below one", func(c *Config) { tpm(c).Counting, tpm(c).OutputBurndown = CountingOutputBurndown, 0.5 }, "target.limits[1].output_burndown: must be >= 1"},
 		{"factor without burndown", func(c *Config) { tpm(c).OutputBurndown = 15 }, "target.limits[1].output_burndown: set for counting \"output_burndown\" only"},
+		{"generation on a request limit", func(c *Config) { limit(c).OutputAtGeneration = true }, "target.limits[0].output_at_generation: set for \"output_tokens_per_minute\", \"tokens_per_minute\" counting output and \"spend_per_window_usd\" only"},
+		{"generation on an input-only token limit", func(c *Config) { tpm(c).Counting, tpm(c).OutputAtGeneration = CountingInput, true }, "target.limits[1].output_at_generation: set for"},
+		{"generation on a daily token limit", func(c *Config) {
+			tpm(c).Dimension, tpm(c).ResetZone, tpm(c).OutputAtGeneration = LimitTPD, "America/Los_Angeles", true
+		}, "target.limits[1].output_at_generation: set for"},
+		{"windows off a window dimension", func(c *Config) { limit(c).Dimension, limit(c).EvaluationWindowsS = LimitConcurrency, []float64{60} }, "target.limits[0].evaluation_windows_s: set for rate, token and spend-window limits only"},
+		{"windows not ending at the stated window", func(c *Config) { limit(c).EvaluationWindowsS = []float64{1, 10} }, "target.limits[0].evaluation_windows_s: positive seconds in ascending order, each once, ending at the 60 s the value is stated over, got [1 10]"},
+		{"windows descending", func(c *Config) { limit(c).EvaluationWindowsS = []float64{10, 1, 60} }, "ending at the 60 s the value is stated over, got [10 1 60]"},
+		{"window twice", func(c *Config) { limit(c).EvaluationWindowsS = []float64{1, 1, 60} }, "got [1 1 60]"},
+		{"window zero", func(c *Config) { limit(c).EvaluationWindowsS = []float64{0, 60} }, "got [0 60]"},
+		{"spend windows past the spend window", func(c *Config) {
+			limit(c).Dimension, limit(c).WindowS, limit(c).EvaluationWindowsS = LimitSpendWindow, 600, []float64{60, 3600}
+		}, "ending at the 600 s the value is stated over, got [60 3600]"},
+		{"daily limit without a reset zone", func(c *Config) { limit(c).Dimension = LimitRPD }, "target.limits[0].reset_zone: required for \"requests_per_day\" and \"tokens_per_day\""},
+		{"daily token limit without a reset zone", func(c *Config) { tpm(c).Dimension = LimitTPD }, "target.limits[1].reset_zone: required"},
+		{"reset zone not a zone", func(c *Config) { limit(c).Dimension, limit(c).ResetZone = LimitRPD, "Pacific" }, "target.limits[0].reset_zone: \"Pacific\" is not an IANA time zone name"},
+		{"reset zone local", func(c *Config) { limit(c).Dimension, limit(c).ResetZone = LimitRPD, "Local" }, "target.limits[0].reset_zone: \"Local\" is not an IANA"},
+		{"reset zone on a minute limit", func(c *Config) { limit(c).ResetZone = "America/Los_Angeles" }, "target.limits[0].reset_zone: set for \"requests_per_day\" and \"tokens_per_day\" only"},
 		{"limit source", func(c *Config) { limit(c).Source = " " }, "target.limits[0].source: required"},
 		{"limit source scheme", func(c *Config) { limit(c).Source = "ftp://example.com/limits" }, "target.limits[0].source: \"ftp://example.com/limits\" is not an http"},
 		{"limit date", func(c *Config) { limit(c).Retrieved = "7 October 2026" }, "target.limits[0].retrieved: a date as YYYY-MM-DD"},
@@ -256,12 +274,48 @@ func TestReleaseRefusals(t *testing.T) {
 // sources, recorded permission, documented statuses, documented in-band
 // error types, with and without a status, and billing refusals, with and
 // without a body string, load.
+// A rate, token or spend-window limit is evaluated over the windows it
+// records, by default the window its value is stated over; no other
+// limit has a window.
+func TestLimitWindows(t *testing.T) {
+	for _, c := range []struct {
+		l    Limit
+		want []float64
+	}{
+		{Limit{Dimension: LimitRPM}, []float64{60}},
+		{Limit{Dimension: LimitRPM, EvaluationWindowsS: []float64{1, 10, 60}}, []float64{1, 10, 60}},
+		{Limit{Dimension: LimitRPS}, []float64{1}},
+		{Limit{Dimension: LimitTPM}, []float64{60}},
+		{Limit{Dimension: LimitInputTPM}, []float64{60}},
+		{Limit{Dimension: LimitOutputTPM}, []float64{60}},
+		{Limit{Dimension: LimitSpendWindow, WindowS: 600}, []float64{600}},
+		{Limit{Dimension: LimitRPD}, nil},
+		{Limit{Dimension: LimitConcurrency}, nil},
+		{Limit{Dimension: LimitSpendMonth}, nil},
+	} {
+		if got := c.l.WindowsS(); !slices.Equal(got, c.want) {
+			t.Errorf("%s: windows %v, want %v", c.l.Dimension, got, c.want)
+		}
+	}
+	cfg, err := LoadFile("../../configs/release.reference.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Target.Limits[0].EvaluationWindowsS = []float64{1, 10, 60}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("windows 1, 10 and 60 s on requests_per_minute: %v", err)
+	}
+}
+
 func TestReleaseLimitAndNamingForms(t *testing.T) {
 	c := loadRef(t, releaseRef)
 	c.Target.Limits = append(c.Target.Limits,
-		Limit{Dimension: LimitSpendWindow, Value: 10, WindowS: 600, Marking: MarkingPublic, Source: "https://ai.google.dev/gemini-api/docs/rate-limits", Retrieved: "2026-10-07", SHA256: strings.Repeat("ab", 32)},
+		Limit{Dimension: LimitSpendWindow, Value: 10, WindowS: 600, Marking: MarkingPublic, OutputAtGeneration: true, Source: "https://ai.google.dev/gemini-api/docs/rate-limits", Retrieved: "2026-10-07", SHA256: strings.Repeat("ab", 32)},
+		Limit{Dimension: LimitOutputTPM, Value: 1e6, Marking: MarkingPublic, OutputAtGeneration: true, Source: "https://example.test/limits", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
+		Limit{Dimension: LimitTPM, Value: 1e6, Marking: MarkingPublic, Counting: CountingOutputBurndown, OutputBurndown: 5, OutputAtGeneration: true, Source: "https://example.test/limits", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
 		Limit{Dimension: LimitSpendMonth, Value: 10, OperatorSet: true, Marking: MarkingPublic, Source: "spend-limit.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
-		Limit{Dimension: LimitTPD, Value: 7e8, Marking: MarkingPublic, Counting: CountingOutputBurndown, OutputBurndown: 15, Source: "quotas.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
+		Limit{Dimension: LimitTPD, Value: 7e8, Marking: MarkingPublic, Counting: CountingOutputBurndown, OutputBurndown: 15, ResetZone: "UTC", Source: "quotas.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
+		Limit{Dimension: LimitRPD, Value: 10000, Marking: MarkingPublic, ResetZone: "America/Los_Angeles", Source: "quotas.png", Retrieved: "2026-10-07", SHA256: strings.Repeat("0", 64)},
 		Limit{Dimension: LimitTPM, Value: 1e6, Marking: MarkingConfidential, Counting: CountingInput, Source: "limits.png", Retrieved: "2026-10-07", HMACSHA256: strings.Repeat("0", 64)},
 	)
 	c.Target.RetainedHeaders = []string{"x-ratelimit-*"}

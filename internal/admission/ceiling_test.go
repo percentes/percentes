@@ -18,6 +18,9 @@ func lim(dim string, value float64) config.Limit {
 	if dim == config.LimitTPM || dim == config.LimitTPD {
 		l.Counting = config.CountingInputOutput
 	}
+	if dim == config.LimitRPD || dim == config.LimitTPD {
+		l.ResetZone = "UTC"
+	}
 	return l
 }
 

@@ -899,7 +899,7 @@ func TestReleaseProbeSnapshots(t *testing.T) {
 		if s.Retained != nil {
 			got[i] = fmt.Sprint(*s.Retained)
 		}
-		if s.Limit != cfg.Target.Limits[i] {
+		if !reflect.DeepEqual(s.Limit, cfg.Target.Limits[i]) {
 			t.Errorf("snapshot %d carries %+v", i, s.Limit)
 		}
 	}
@@ -947,10 +947,10 @@ func TestReleaseProbeConfidentialSnapshot(t *testing.T) {
 	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, SnapshotDir: dir, Key: key})
 	want := tpm
 	want.Value = 0
-	if s := rec.Snapshots[1]; s.Limit != want || s.Retained == nil || !*s.Retained {
+	if s := rec.Snapshots[1]; !reflect.DeepEqual(s.Limit, want) || s.Retained == nil || !*s.Retained {
 		t.Fatalf("confidential snapshot %+v", s)
 	}
-	if s := rec.Snapshots[0]; s.Limit != cfg.Target.Limits[0] {
+	if s := rec.Snapshots[0]; !reflect.DeepEqual(s.Limit, cfg.Target.Limits[0]) {
 		t.Errorf("public snapshot %+v", s)
 	}
 	path, err := Write(t.TempDir(), rec)
