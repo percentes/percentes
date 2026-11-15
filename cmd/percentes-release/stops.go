@@ -30,6 +30,9 @@ var (
 	errEADDRNOTAVAIL = errors.New("a request failed with EADDRNOTAVAIL (no local port left)")
 )
 
+// billingSetting names a billing refusal's stop as the operator's own.
+const billingSetting = probe.BillingSetting
+
 // billingRefusal returns the stop for a response the target documents as
 // its spend-limit or exhausted-balance refusal, the operator's billing
 // setting, by its status and body (probe.BillingReason) or by the in-band

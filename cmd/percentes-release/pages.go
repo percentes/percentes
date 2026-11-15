@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
@@ -46,11 +47,14 @@ type routeRecords struct {
 	probes     []evidence.FileRef
 	cells      []report.CellRecords
 	mismatches []report.ModelMismatch
+	billing    []report.BillingStop
 	close      *evidence.WindowClose
 	// labelled counts the attempts with a manifest that do not count;
 	// unrecorded the missed and interrupted attempts with no manifest,
 	// which keep their run record only.
 	labelled, unrecorded int
+	outsideIncomplete    int
+	stops                []*cellRecord
 }
 
 // pagesCmd writes the release's index page and each route's page from
@@ -176,8 +180,9 @@ func buildPages(out, framesRoot, sched string, cfgs []*config.Config, key *relea
 			}
 		}
 		st.ModelMismatches = rp.recs[i].mismatches
-		rp.files[r.Page] = []byte(st.Text())
-		if rp.files[path.Join(routesDir, r.Config.Target.Name+".json")], err = marshalPage(st); err != nil {
+		page := &pagedRoute{StepTables: st, Stops: stoppedCells(rp.recs[i].stops)}
+		rp.files[r.Page] = []byte(page.text())
+		if rp.files[path.Join(routesDir, r.Config.Target.Name+".json")], err = marshalPage(page); err != nil {
 			return nil, err
 		}
 	}
@@ -276,10 +281,17 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 			lastEnd = end
 		}
 		if _, err := os.Stat(filepath.Join(dir, evidence.ManifestFile)); errors.Is(err, os.ErrNotExist) {
-			if rec.Outcome != outcomeMissed && rec.Outcome != outcomeInterrupted {
+			switch {
+			case !rec.unlabelled():
 				return nil, fmt.Errorf("pages: %s: %s with no %s", dir, rec.Outcome, evidence.ManifestFile)
+			case rec.Outcome == outcomeStopped:
+				rr.stops = append(rr.stops, &rec)
+				if rec.BillingRefusals > 0 {
+					rr.billing = append(rr.billing, billingStop(&rec, rec.BillingRefusals))
+				}
+			default:
+				rr.unrecorded++
 			}
-			rr.unrecorded++
 			continue
 		}
 		m, err := evidence.CheckRelease(evidence.Release{Dir: dir, Config: cfg.Raw, FramesRoot: framesRoot, Pair: [2]string{report.JSONFile, report.TextFile}, Key: key})
@@ -300,6 +312,9 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 		case !reflect.DeepEqual(rr.ceiling, m.Release.Ceiling) || !slices.Equal(rr.probes, m.Release.Probes):
 			return nil, fmt.Errorf("pages: %s: the ceiling choice or its probe records differ from the route's other cells'", dir)
 		}
+		if n := m.Release.BillingRefusals; n > 0 {
+			rr.billing = append(rr.billing, billingStop(&rec, n))
+		}
 		switch {
 		case rec.Outcome == outcomeCounted && !m.Counted():
 			return nil, fmt.Errorf("pages: %s: counted in the run record, %s in the manifest", dir, m.Release.Outcome)
@@ -309,12 +324,19 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 				rr.mismatches = append(rr.mismatches, report.ModelMismatch{Cell: cellLabel(rec.Run), Expected: e.ExpectedModel,
 					Reported: e.ReportedModels, Requests: e.ModelMismatches})
 			}
-			continue
+			switch {
+			case !m.Release.LadderStarted:
+				continue
+			case !m.Release.RecordsComplete:
+				rr.outsideIncomplete++
+				continue
+			}
+		default:
+			if prev, ok := counted[rec.Run.Label]; ok {
+				return nil, fmt.Errorf("pages: cell %s of route %s counted twice: %s and %s", rec.Run.Label, name, prev, dir)
+			}
+			counted[rec.Run.Label] = dir
 		}
-		if prev, ok := counted[rec.Run.Label]; ok {
-			return nil, fmt.Errorf("pages: cell %s of route %s counted twice: %s and %s", rec.Run.Label, name, prev, dir)
-		}
-		counted[rec.Run.Label] = dir
 		recs, err := readAttempts(dir, m)
 		if err != nil {
 			return nil, err
@@ -322,9 +344,10 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 		rr.cells = append(rr.cells, report.CellRecords{Cell: cellLabel(rec.Run), Outcome: m.Release.Outcome, Gaps: m.Release.Gaps, Records: recs,
 			Start: m.Release.Run.Start, Docs: report.DocsOf(m)})
 	}
-	if rr.verdict == nil && rr.unrecorded == 0 {
+	if rr.verdict == nil && rr.unrecorded == 0 && len(rr.stops) == 0 {
 		return nil, fmt.Errorf("pages: route %s has no cell with a %s under %s", name, evidence.ManifestFile, out)
 	}
+	slices.SortFunc(rr.stops, func(a, b *cellRecord) int { return a.Run.Start.Compare(b.Run.Start) })
 	if p := filepath.Join(out, name, evidence.WindowCloseFile); fileExists(p) {
 		if rr.close, err = evidence.ReadWindowClose(p); err != nil {
 			return nil, fmt.Errorf("pages: %w", err)
@@ -334,6 +357,68 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 		}
 	}
 	return rr, nil
+}
+
+// billingStop is rec's billing stop of n responses, with its reasons
+// that name the operator's billing setting.
+func billingStop(rec *cellRecord, n int) report.BillingStop {
+	bs := report.BillingStop{Cell: cellLabel(rec.Run), Responses: n, Reasons: []string{}}
+	for _, reason := range rec.Reasons {
+		if strings.Contains(reason, billingSetting) {
+			bs.Reasons = append(bs.Reasons, reason)
+		}
+	}
+	return bs
+}
+
+// stoppedCell is a stopped attempt with no manifest as a page states it.
+// Error is stoppedError; the run record keeps the execution error.
+type stoppedCell struct {
+	Cell            string   `json:"cell"`
+	Reasons         []string `json:"reasons"`
+	BillingRefusals int      `json:"billing_refusals,omitempty"`
+	Error           string   `json:"error"`
+}
+
+// stoppedError is a page's execution error of a stopped attempt with no
+// manifest.
+const stoppedError = "its evidence was not written"
+
+// stoppedCells are stops as a page states them.
+func stoppedCells(stops []*cellRecord) []stoppedCell {
+	var out []stoppedCell
+	for _, rec := range stops {
+		out = append(out, stoppedCell{Cell: cellLabel(rec.Run), Reasons: rec.Reasons, BillingRefusals: rec.BillingRefusals, Error: stoppedError})
+	}
+	return out
+}
+
+func (c stoppedCell) line() string {
+	return fmt.Sprintf("- %s stopped: %s; billing refusals: %d; execution error: %s\n", c.Cell, strings.Join(c.Reasons, "; "), c.BillingRefusals, c.Error)
+}
+
+// pagedRoute is a route page's JSON: its step tables and the stopped
+// attempts with no manifest.
+type pagedRoute struct {
+	*report.StepTables
+	Stops []stoppedCell `json:"stopped_no_manifest,omitempty"`
+}
+
+func (p *pagedRoute) text() string {
+	s := p.StepTables.Text()
+	if len(p.Stops) == 0 {
+		return s
+	}
+	var b strings.Builder
+	b.WriteString(s)
+	if !strings.HasSuffix(s, "\n\n") {
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "-- Stopped cells with no %s, from their run records --\n", evidence.ManifestFile)
+	for _, c := range p.Stops {
+		b.WriteString(c.line())
+	}
+	return b.String()
 }
 
 // cellEnd is when the cell in dir, with run record rec, last ran: its
