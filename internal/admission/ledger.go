@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"syscall"
 	"time"
@@ -467,6 +468,35 @@ func Open(path string) (*Ledger, error) {
 		return nil, err
 	}
 	return l, nil
+}
+
+// LockRoute takes an exclusive lock on route of the ledger file l's path
+// resolves to, held until the returned file is closed, or fails at once
+// when another process holds it. The lock file beside the ledger is
+// opened read-only, so one that another user created still serves; its
+// owner sets its mode to 0644 whatever the umask.
+func (l *Ledger) LockRoute(route string) (*os.File, error) {
+	if route == "" || filepath.Base(route) != route {
+		return nil, fmt.Errorf("admission: lock route: invalid route %q", route)
+	}
+	path, err := filepath.EvalSymlinks(l.path)
+	if err != nil {
+		return nil, fmt.Errorf("admission: lock route %s: %w", route, err)
+	}
+	f, err := os.OpenFile(path+"."+route+".lock", os.O_RDONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("admission: lock route %s: %w", route, err)
+	}
+	// Only the file's owner can change its mode.
+	_ = f.Chmod(0o644)
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("admission: lock route %s: another process holds it", route)
+		}
+		return nil, fmt.Errorf("admission: lock route %s: %w", route, err)
+	}
+	return f, nil
 }
 
 // Bind makes every later operation on l refuse the file at its path
