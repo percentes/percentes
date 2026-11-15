@@ -49,11 +49,13 @@
 // the files it names, and the publication page it gives against the one
 // under --pages.
 //
-// Before the freeze, rehearse runs the acceptance run: one cell of each
-// of six mock routes, served on loopback by this process in the
-// release's request forms and credential headers, concurrently at their
-// pinned offsets up the whole ladder, and writes the cells' evidence and
-// a summary that says whether the rehearsal is green.
+// Before the freeze, rehearse runs the acceptance run in five steps.
+// Step 1 runs one cell of each of five mock routes, served on loopback
+// by this process in the release's request forms and credential headers,
+// concurrently at their pinned offsets up the whole ladder; steps 2 to 4
+// run an attribution, an overload and a failure-mode cell, and step 5
+// runs ceiling checks alone. It writes the cells' evidence and a summary
+// that says whether the rehearsal is green.
 //
 //	percentes-release key create --key FILE
 //	percentes-release key sum --key FILE FILE ...
@@ -85,7 +87,8 @@
 //	    [--check-record FILE ...] --pages DIR --record FILE [--write-page]
 //	    [--release-key FILE]
 //	percentes-release rehearse --out DIR --frames DIR --clock-sync CMD
-//	    --byte-cap N [--scale N] [--master-seed SEED] [--source-diff FILE]
+//	    --byte-cap N [--anthropic-rpm N] [--scale N] [--master-seed SEED]
+//	    [--source-diff FILE]
 //	percentes-release check-cpu
 //
 // Exit codes: 0 = the route's runs are over and every cell counts, or
@@ -158,7 +161,7 @@ commands:
   pages           write the index page and each route's page
   pack            write a route's evidence pack
   publish-check   check the release publication record
-  rehearse        run six mock routes' cells up the ladder at their offsets
+  rehearse        run the five-step rehearsal against mock routes
   check-cpu       whether this build measures host CPU
 
 Run percentes-release <command> -h for the command's flags.

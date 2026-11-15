@@ -38,12 +38,33 @@ const e2eReasoning = 3
 
 func e2eKey(f *mockForm) string { return testKey + "-" + f.name }
 
+// e2eForms are the rehearsal's request forms and a fifth, chat
+// completions with max_completion_tokens, the key as a bearer token and
+// reasoning under "reasoning".
+var e2eForms = append(slices.Clone(rehearsalForms),
+	mockForm{"groq", config.AdapterChatCompletions, config.AuthBearer, "/v1/chat/completions", "max_completion_tokens", "reasoning"})
+
+// e2eRoute is form f's Shape S route in an account group of its own,
+// with a route cap of US$40, a requests_per_minute limit of 1,000 and a
+// tokens_per_minute limit of 1,000,000.
+func e2eRoute(f *mockForm) *mockRoute {
+	return &mockRoute{name: f.name, form: f.name, shape: config.ShapeS, group: f.name, routeUSD: "40", limits: func() []config.Limit {
+		return []config.Limit{
+			{Dimension: config.LimitRPM, Value: 1000},
+			{Dimension: config.LimitTPM, Value: 1_000_000, Counting: config.CountingInputOutput},
+		}
+	}}
+}
+
+// reasons reports whether form f's mock streams reasoning.
+func (f *mockForm) reasons() bool { return f.reasoningKey != "" || f.adapter == config.AdapterMessages }
+
 // startE2E serves form f's mock, which refuses the key in any header but
 // the form's.
 func startE2E(t *testing.T, f *mockForm) *mock.Server {
 	t.Helper()
 	s, err := f.startMock(1, config.LatencyDist{Distribution: "fixed", FixedMs: 20}, config.LatencyDist{Distribution: "fixed", FixedMs: 1},
-		e2eReasoning, e2eAnswer, e2eKey(f))
+		mockStream{e2eReasoning, e2eAnswer}, e2eKey(f), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +77,7 @@ func startE2E(t *testing.T, f *mockForm) *mock.Server {
 func e2eConfig(t *testing.T, f *mockForm, endpoint string) *config.Config {
 	t.Helper()
 	env := "PERCENTES_E2E_KEY_" + strings.ToUpper(f.name)
-	cfg, err := f.routeConfig(configs.ReleaseReference, endpoint, env)
+	cfg, err := routeConfig(configs.ReleaseReference, e2eRoute(f), f, 512, endpoint, env, "2026-10-07")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +232,7 @@ func TestGateReasons(t *testing.T) {
 // mockCounts is the mock's count of finished requests by outcome label.
 func mockCounts(t *testing.T, s *mock.Server) map[string]int {
 	t.Helper()
-	c, err := mockFinished(s.Addr())
+	c, err := mockFinished(http.DefaultClient, "http://"+s.Addr())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,12 +260,12 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 	writeFile(t, dir, "r.txt", []byte("record"))
 	opPath := writeFile(t, dir, "operator.json", []byte(operatorJSON))
 
-	n := len(releaseForms)
+	n := len(e2eForms)
 	mocks := make([]*mock.Server, n)
 	cfgs := make([]*config.Config, n)
 	names := make([]string, n)
-	for i := range releaseForms {
-		f := &releaseForms[i]
+	for i := range e2eForms {
+		f := &e2eForms[i]
 		mocks[i] = startE2E(t, f)
 		cfgs[i] = e2eConfig(t, f, "http://"+mocks[i].Addr()+f.path)
 		names[i] = f.name
@@ -379,10 +400,10 @@ func TestReleaseLadderSixMockRoutes(t *testing.T) {
 			t.Fatal(err)
 		}
 		reasoning, finish := 0, "stop"
-		if releaseForms[i].reasons {
+		if e2eForms[i].reasons() {
 			reasoning = e2eReasoning
 		}
-		if releaseForms[i].adapter == config.AdapterMessages {
+		if e2eForms[i].adapter == config.AdapterMessages {
 			finish = "end_turn"
 		}
 		dispatched := 0
