@@ -66,7 +66,68 @@ type IndexRow struct {
 // and step, in alphabetical order of provider, then route, then step
 // ascending. No row order depends on a measured value.
 type Index struct {
-	Rows []IndexRow `json:"rows"`
+	Rows     []IndexRow       `json:"rows"`
+	Excluded []IndexExclusion `json:"excluded,omitempty"`
+	Unrun    []IndexExclusion `json:"ran_no_cell,omitempty"`
+	Stopped  []IndexExclusion `json:"stopped_no_manifest,omitempty"`
+}
+
+// IndexExclusion is a route with no row, one the ceiling check excluded,
+// one that ran no cell or one stopped with no cell manifest: its
+// provider, route, model, request shape, reason and page.
+type IndexExclusion struct {
+	Provider string `json:"provider"`
+	Route    string `json:"route"`
+	Model    string `json:"model"`
+	Shape    string `json:"shape"`
+	Reason   string `json:"reason"`
+	Page     string `json:"page"`
+}
+
+// Exclude adds e to the index, in alphabetical order of provider, then
+// route. A field that is empty or carries an IndexForbidden string, a
+// table delimiter or a line break is refused, and so is a route the
+// index already holds.
+func (ix *Index) Exclude(e IndexExclusion) error {
+	return ix.add(&ix.Excluded, e)
+}
+
+// AddUnrun adds e, a scheduled route the ceiling check did not exclude
+// that ran no cell, to the index as Exclude adds an excluded route.
+func (ix *Index) AddUnrun(e IndexExclusion) error {
+	return ix.add(&ix.Unrun, e)
+}
+
+// AddStopped adds e, a route whose cells left no manifest and one of
+// which stopped, to the index as Exclude adds an excluded route.
+func (ix *Index) AddStopped(e IndexExclusion) error {
+	return ix.add(&ix.Stopped, e)
+}
+
+func (ix *Index) add(list *[]IndexExclusion, e IndexExclusion) error {
+	for _, f := range []struct{ name, v string }{
+		{"provider", e.Provider}, {"route", e.Route}, {"model", e.Model}, {"shape", e.Shape}, {"reason", e.Reason}, {"page", e.Page},
+	} {
+		if err := indexField(f.v); err != nil {
+			return fmt.Errorf("report: index: excluded route %q: %s: %w", e.Route, f.name, err)
+		}
+	}
+	same := func(x IndexExclusion) bool { return x.Route == e.Route }
+	if slices.ContainsFunc(ix.Rows, func(r IndexRow) bool { return r.Route == e.Route }) ||
+		slices.ContainsFunc(ix.Excluded, same) || slices.ContainsFunc(ix.Unrun, same) || slices.ContainsFunc(ix.Stopped, same) {
+		return fmt.Errorf("report: index: route %q given twice", e.Route)
+	}
+	*list = append(*list, e)
+	slices.SortFunc(*list, func(a, b IndexExclusion) int {
+		if c := strings.Compare(strings.ToLower(a.Provider), strings.ToLower(b.Provider)); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.Provider, b.Provider); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Route, b.Route)
+	})
+	return nil
 }
 
 // NewIndex builds the index from each route's per-step tables
@@ -229,6 +290,18 @@ func (ix *Index) Markdown() string {
 		}
 		row = append(row, fmt.Sprintf("[%s](%s)", r.Route, r.Page))
 		w(row)
+	}
+	for _, part := range []struct {
+		head string
+		list []IndexExclusion
+	}{{"Excluded by the ceiling check", ix.Excluded}, {"Scheduled and ran no cell", ix.Unrun}, {"Stopped with no cell manifest", ix.Stopped}} {
+		if len(part.list) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "\n%s, with no row above:\n\n", part.head)
+		for _, e := range part.list {
+			fmt.Fprintf(&b, "- %s, [%s](%s), %s, Shape %s: %s\n", e.Provider, e.Route, e.Page, e.Model, e.Shape, e.Reason)
+		}
 	}
 	return b.String()
 }
