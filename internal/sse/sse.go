@@ -48,6 +48,14 @@ func SplitLines(data []byte, atEOF bool) (int, []byte, error) {
 // the stream. A final event without a trailing blank line is still
 // delivered. payload is valid only for the duration of the call.
 func Events(r io.Reader, limit int, fn func(payload []byte) (stop bool)) (sawData bool, dropped int, err error) {
+	sawData, dropped, _, err = EventsCut(r, limit, fn)
+	return sawData, dropped, err
+}
+
+// EventsCut is Events, and reports whether the last payload delivered was
+// the pending event an error ended before its blank line. A pending event
+// a clean end of stream ends is not cut.
+func EventsCut(r io.Reader, limit int, fn func(payload []byte) (stop bool)) (sawData bool, dropped int, cut bool, err error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 4096), limit)
 	sc.Split(SplitLines)
@@ -64,7 +72,7 @@ func Events(r io.Reader, limit int, fn func(payload []byte) (stop bool)) (sawDat
 			stop := !overflow && len(payload) > 0 && fn(payload)
 			event, overflow = event[:0], false
 			if stop {
-				return sawData, dropped, nil
+				return sawData, dropped, false, nil
 			}
 			continue
 		}
@@ -84,12 +92,13 @@ func Events(r io.Reader, limit int, fn func(payload []byte) (stop bool)) (sawDat
 		}
 		event = append(append(event, v...), '\n')
 	}
+	err = sc.Err()
 	if payload := bytes.TrimSuffix(event, []byte("\n")); !overflow && len(payload) > 0 {
 		fn(payload)
+		cut = err != nil
 	}
-	err = sc.Err()
 	if errors.Is(err, bufio.ErrTooLong) {
 		dropped++
 	}
-	return sawData, dropped, err
+	return sawData, dropped, cut, err
 }

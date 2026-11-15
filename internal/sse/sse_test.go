@@ -3,6 +3,7 @@ package sse
 import (
 	"bufio"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -130,5 +131,44 @@ func TestOversizedLineEndsTheScan(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("an oversized line reached the caller: %d payloads", len(got))
+	}
+}
+
+// cutReader returns body, then err.
+type cutReader struct {
+	body string
+	err  error
+}
+
+func (c *cutReader) Read(p []byte) (int, error) {
+	if c.body == "" {
+		return 0, c.err
+	}
+	n := copy(p, c.body)
+	c.body = c.body[n:]
+	return n, nil
+}
+
+// A pending event is delivered at the stream's end, and is cut only where
+// a read error ended the stream; a whole event before the error is not.
+func TestPendingEventIsCutOnlyByReadError(t *testing.T) {
+	for _, c := range []struct {
+		name, body string
+		err        error
+		want       []string
+		cut        bool
+	}{
+		{"read error mid-event", "data: {\"a\":1}\n\ndata: {\"partial\":", errBoom, []string{`{"a":1}`, `{"partial":`}, true},
+		{"read error after a whole event", "data: {\"a\":1}\n\n", errBoom, []string{`{"a":1}`}, false},
+		{"clean end mid-event", "data: {\"a\":1}\n\ndata: [DONE]", io.EOF, []string{`{"a":1}`, "[DONE]"}, false},
+	} {
+		var got []string
+		_, _, cut, err := EventsCut(&cutReader{c.body, c.err}, 1<<20, func(p []byte) bool {
+			got = append(got, string(p))
+			return false
+		})
+		if strings.Join(got, "|") != strings.Join(c.want, "|") || cut != c.cut || (err != nil) != (c.err != io.EOF) {
+			t.Errorf("%s: payloads %q, cut %t, err %v; want %q, cut %t", c.name, got, cut, err, c.want, c.cut)
+		}
 	}
 }
