@@ -328,7 +328,9 @@ func TestOperatorCopies(t *testing.T) {
 // Refreshed refuses the records whose limits or eligibility file was
 // last modified before the refresh started, to the second, naming each
 // and dating none; otherwise it dates those two by their files'
-// modification times and leaves the other records' dates as written.
+// modification times and leaves the other records' dates as written. A
+// file time a clock tick behind a start just past a second passes; one
+// further behind is refused.
 func TestOperatorRefreshed(t *testing.T) {
 	path := writeOperator(t, operatorJSON)
 	start := time.Date(2026, 10, 17, 6, 0, 0, 500_000_000, time.UTC)
@@ -370,6 +372,16 @@ func TestOperatorRefreshed(t *testing.T) {
 		if r := op.find(kind); r.Retrieved != want {
 			t.Errorf("%s retrieved %s, want %s", kind, r.Retrieved, want)
 		}
+	}
+	start = time.Date(2026, 10, 17, 6, 0, 1, 1_000_000, time.UTC)
+	touch("limits.png", start.Add(-4*time.Millisecond))
+	touch("eligibility.md", start.Add(-4*time.Millisecond))
+	if _, err := refreshed(); err != nil {
+		t.Errorf("a tick behind a start just past a second: %v", err)
+	}
+	start = start.Add(30 * time.Millisecond)
+	if _, err := refreshed(); err == nil {
+		t.Error("a start 31 ms past the second took a file time in the second before it")
 	}
 }
 

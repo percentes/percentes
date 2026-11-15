@@ -210,11 +210,17 @@ func readRecord(path string) ([]byte, time.Time, error) {
 	return data, fi.ModTime(), err
 }
 
+// fileClockLag bounds how far a file's modification time, stamped from
+// Linux's coarse clock, reads behind the clock Refreshed's since was
+// read from.
+const fileClockLag = 20 * time.Millisecond
+
 // Refreshed checks that the file of every record of a RefreshedRecords
-// kind was modified at or after since, to the second, and sets each such
-// record's retrieved time to its file's modification time.
+// kind was modified at or after since, to the second, within fileClockLag,
+// and sets each such record's retrieved time to its file's modification
+// time.
 func (op *Operator) Refreshed(since time.Time) error {
-	from := since.Truncate(time.Second)
+	from := since.Add(-fileClockLag).Truncate(time.Second)
 	var stale []string
 	for _, r := range op.Records {
 		if slices.Contains(RefreshedRecords, r.Kind) && r.modified.Before(from) {
