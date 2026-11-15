@@ -539,7 +539,8 @@ func (l *Ledger) update(fn func(*State) (*Entry, error)) (*Entry, error) {
 	return e, ferr
 }
 
-// append writes e after prior, the file's whole content, and syncs.
+// append writes e after prior, the file's whole content, and syncs. A
+// write that fails part-way is cut back to prior.
 func (l *Ledger) append(f *os.File, prior []byte, e *Entry) error {
 	sum := sha256.Sum256(prior)
 	e.Seq = bytes.Count(prior, []byte("\n")) + 1
@@ -549,7 +550,13 @@ func (l *Ledger) append(f *os.File, prior []byte, e *Entry) error {
 	if err != nil {
 		return fmt.Errorf("admission: ledger: %w", err)
 	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
+	if n, err := f.Write(append(line, '\n')); err != nil {
+		if n > 0 {
+			if terr := f.Truncate(int64(len(prior))); terr != nil {
+				return fmt.Errorf("admission: ledger write: %w", errors.Join(err, terr))
+			}
+			err = errors.Join(err, f.Sync())
+		}
 		return fmt.Errorf("admission: ledger write: %w", err)
 	}
 	if err := f.Sync(); err != nil {
