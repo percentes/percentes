@@ -1,14 +1,101 @@
 package probe
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
 )
+
+// closedURL is a loopback chat-completions URL nothing listens on.
+func closedURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return "http://" + addr + "/v1/chat/completions"
+}
+
+// A request that reached no connection (a refused connect, a failed TLS
+// handshake) ends the check: it is stopped, sends and refuses nothing,
+// and its record names the request; an earlier refusal still refuses the
+// check, and a request that reached a connection and got no response
+// refuses it. Verify ties the record's Unreached to its last request.
+func TestUnreachedRequestEndsCheck(t *testing.T) {
+	noSpacing(t)
+	cfg := releaseConfig(t, closedURL(t))
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if rec.Outcome() != CheckStopped || rec.RefusedBy() != "" || rec.Sent() != 0 || rec.Ceiling.Sent != 0 || len(rec.Requests) != 1 ||
+		!strings.HasPrefix(rec.Unreached, "request 0 reached no connection: ") || !strings.Contains(rec.Unreached, "refused") {
+		t.Fatalf("closed port: outcome %s, refused by %q, %d sent, %d requests, unreached %q", rec.Outcome(), rec.RefusedBy(), rec.Sent(), len(rec.Requests), rec.Unreached)
+	}
+	if err := rec.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	for name, edit := range map[string]func(*ReleaseRecord){
+		"another request named": func(r *ReleaseRecord) { r.Unreached = strings.Replace(r.Unreached, "request 0 ", "request 1 ", 1) },
+		"a connected request":   func(r *ReleaseRecord) { r.Requests[0].Exchange.ConnAcquiredNs = 5 },
+		"also interrupted":      func(r *ReleaseRecord) { r.Interrupted = "the check's context ended" },
+	} {
+		r := *rec
+		r.Requests = append([]CheckRequest(nil), rec.Requests...)
+		edit(&r)
+		if err := r.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens); err == nil {
+			t.Errorf("Verify of a record with %s: nil", name)
+		}
+	}
+
+	tlsSrv := httptest.NewTLSServer(sseHandler(answerFrame, stopFrame, doneFrame))
+	defer tlsSrv.Close()
+	cfg = releaseConfig(t, tlsSrv.URL+"/v1/chat/completions")
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if rec.Outcome() != CheckStopped || rec.Sent() != 0 || len(rec.Requests) != 1 || rec.Requests[0].Exchange.TLS == nil || rec.Requests[0].Exchange.TLS.Error == "" {
+		t.Fatalf("untrusted certificate: outcome %s, %d sent, requests %+v", rec.Outcome(), rec.Sent(), rec.Requests)
+	}
+
+	var hits atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 3 {
+			w.Header().Set("Connection", "close")
+			w.WriteHeader(http.StatusTooManyRequests)
+			srv.Listener.Close()
+			return
+		}
+		sseHandler(answerFrame, stopFrame, doneFrame)(w, r)
+	}))
+	defer srv.Close()
+	cfg = releaseConfig(t, srv.URL+"/v1/chat/completions")
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if rec.Outcome() != CheckRefused || rec.RefusedBy() != "HTTP 429" || rec.Sent() != 3 || len(rec.Requests) != 4 || !strings.HasPrefix(rec.Unreached, "request 3 reached no connection: ") {
+		t.Fatalf("a 429, then the listener closed: outcome %s, refused by %q, %d sent, %d requests, unreached %q", rec.Outcome(), rec.RefusedBy(), rec.Sent(), len(rec.Requests), rec.Unreached)
+	}
+
+	hits.Store(0)
+	dropped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 2 {
+			if c, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				c.Close()
+			}
+			return
+		}
+		sseHandler(answerFrame, stopFrame, doneFrame)(w, r)
+	}))
+	defer dropped.Close()
+	cfg = releaseConfig(t, dropped.URL+"/v1/chat/completions")
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if rec.Outcome() != CheckRefused || rec.RefusedBy() != "no response" || rec.Sent() != 10 || rec.Unreached != "" {
+		t.Fatalf("a connected request dropped: outcome %s, refused by %q, %d sent, unreached %q", rec.Outcome(), rec.RefusedBy(), rec.Sent(), rec.Unreached)
+	}
+}
 
 // overloaded is the error documentation a route records for the
 // overloaded_error in-band type, HTTP 529.
