@@ -633,228 +633,105 @@ Both commands compare the manifest's configuration hash with that of `Config.Pub
 
 ## The release runner
 
-A release (SPEC-HOSTED amendment HA3) is a set of route characterizations
-published together. A route is one provider, one model identifier, one
-endpoint and one account tier. `cmd/percentes-release` runs one route as
-its own process; the routes of a release run concurrently on one client
-host, each at its own offset inside the slot, all writing under one
-`--out` directory. You need this section to run a release or to read a
-route page; it ends with one request followed from the schedule to its
-row in the index.
+`cmd/percentes-release` runs one route as one process (SPEC-HOSTED §1 to §9). A release's routes run concurrently on one client host at their own offsets, under one `--out` directory.
+
+| Subcommand | What it does | Code | Exit codes |
+|---|---|---|---|
+| `key create`, `key sum` | write the release key; print each file's HMAC-SHA256 under it | `key.go`, `keyCmd` | 0; 1 |
+| `ledger create`, `ledger price` | start the admission ledger with the routes' caps; record a route's prices for its cells and ceiling check | `ledger.go`, `ledgerCmd` | 0; 1 |
+| `ceiling-check` | send a route's ceiling check and write its record; `--recover` settles unsettled checks, `--record FILE` installs a record printed on standard error | `ceiling.go`, `ceilingCheckCmd` | 0 the check and its input and output bounds passed and `run` accepts the reported model, or `--recover` settled or installed a record. 2 the check or a bound failed, its record's outcome is `refused` or `stopped`, its start gate blocked it, or it carries a model fault. 1 the command refused to start ([its table](#before-the-first-cell)), a record could not be written, or the ledger did not settle the admission |
+| `schedule` | write the committed schedule of the given routes | `schedule.go`, `scheduleCmd` | 0; 1 |
+| `public-config` | write a route's configuration as published | `public.go`, `publicConfigCmd` | 0; 1 |
+| `run` | run one route's cells over the committed window | `route.go`, `runCmd` | 0 every cell counts; 4 a cell does not count; 3 the route stopped, or a stop is unacknowledged; 5 SIGTERM with no stop; 1 a refusal to start, or an execution error after it |
+| `dispatch` | sum every cell's dispatch series under `--out` | `dispatch.go`, `dispatchCmd` | 0; 1 |
+| `pages` | write the index page and each route's page; with `--cell-files`, each route page names each cell's archive | `pages.go`, `pagesCmd` | 0; 1 |
+| `pack` | write a route's evidence pack, its pages built at the `--cell-files` address given | `pack.go`, `packCmd` | 0; 1 |
+| `publish-check` | check the release publication record against the pages and packs it builds at the `--cell-files` address given; `--write-page` writes the publication page | `publish.go`, `publishCheckCmd` | 0 the record is complete and the publication page under `--pages` is the one it gives; 2 either is not; 1 |
+| `rehearse` | run the five-step rehearsal against mock routes | `rehearse.go`, `rehearseCmd` | 0 green; 2 not; 1 |
+| `check-cpu` | report whether this build measures host CPU | `main.go`, `checkCPUCmd` | 0 measured; 2 not |
+
+Exit codes are the constants in `cmd/percentes-release/main.go` (`exitOK` to `exitTerminated`). Any command exits 2 on a Go panic or a fatal runtime error. SIGINT and SIGHUP (the hang-up signal) cancel the context of `ceiling-check`, `run` and `rehearse` with `loadgen.ErrOperatorAbort` (`operatorContext`); SIGTERM cancels it with `errTerminated` for `run` and as an operator abort for the other two. The other commands take no context, and the three signals do not stop them: each runs to completion.
+
+Once started, `run` exits 1 on an execution error in `route.loop`. The next start does this:
+
+| Execution error | Next start |
+|---|---|
+| an error inside a cell (`runCell`) | the cell is labelled `interrupted`, except a stopped cell, which keeps its label and makes `run` exit 3 (`cellEnded`), and a cell whose evidence was written (`retain`) and whose ledger settlement alone failed, which keeps its outcome; `route.state` resumes from the cell records |
+| a failed label, wait or read of the cell records | `route.state` resumes from the cell records |
+| a refresh fault at the window close (`windowClose`) | no window-close record was written, so the window close runs again |
+| the ledger's open line changed (`readLedger`) | the cell is labelled `interrupted`; `checkLedger` refuses to start until the ledger the schedule froze is back |
+| a cell record written under another schedule file (`scheduleOf`) | `sameSchedule` refuses to start |
 
 ### The release profile
 
-A release configuration holds one route. `internal/config/release.go`
-pins the numbers and refuses a file outside them:
+`internal/config/release.go` refuses a release file outside these values:
 
-| Field | Pinned value |
-|---|---|
-| `release.ladder.steps_rps` | 0.25, 0.5, 1, 2 and 4, in that order |
-| `release.ladder.warmup_s`, `step_s`, `drain_s` | 60, 480 and 90 |
-| `release.shape` | name `S`, `input_bound_tokens` 1200, `ceiling_tokens` 512 or 1024, `deadline_s` 30 |
-| `client.http_timeout_s` | 90, the hard timeout |
-| `load` | `poisson` arrivals, `ignore_eos` false, `unique_prefixes` true, `connections` 32; no rate, input length or `max_tokens` |
-| `release.caps` | `route_usd` and `global_usd`, positive decimals, the route's within the global |
-| `release.other_hosts` | the release's other routes of the target's model, each a route name and that route's `model_name`; empty for a model with one host |
-| `target` | `hosted` true, `name`, `model_name`, `api_key_env`, the complete `endpoint_url`, `adapter` (`chat_completions` or `messages`), the literal `body`, at least one `limits` entry, a `response_headers` list matching `Retry-After`, a `naming` record and a `retention` record; optional `auth_header` (`authorization_bearer` when absent), `reported_model`, `retained_headers`, `response_shape` (chat completions only), `probe`, `unpublished_limits`, `not_applied`, `status_docs`, `error_docs`, `billing_refusals` and `balance_unavailable` |
+| Field | Value | Constant or file |
+|---|---|---|
+| `release.ladder.step_fractions` | 0.25, 0.50, 0.75, 0.90 and 1.00 of the binding rate, the rate the binding-rate rule (`admission.Solve`) solves for the route | `PinnedReleaseStepFractions` |
+| `release.ladder.warmup_s`, `step_s`, `drain_s` | 60 s, 240 s, 90 s; the drain follows each step's measured window, with nothing scheduled, while that step's requests end | `PinnedReleaseWarmupS`, `PinnedReleaseStepS`, `PinnedReleaseDrainS` |
+| `release.shape` | Shape S: input bound 1,200, ceiling 512, fallback 1,024; Shape R: input bound 128, ceiling 16, fallback 256 where `fallback` is true; `deadline_s` 30 | `PinnedReleaseShapes`, `PinnedReleaseDeadlineS` |
+| `client.http_timeout_s` | 90 s, the hard timeout | `PinnedReleaseHardTimeoutS` |
+| `load` | `arrival_process` `deterministic`, `connections` 32 | `PinnedReleaseArrivalProcess`, `PinnedReleaseConnections` |
+| `target.unpublished_limits` | each entry limits the route to 0.5 requests per second | `PinnedReleaseUnpublishedCapRPS` |
+| `release.caps` | `route_usd` within `global_usd`, both positive decimals | `release.go` |
+| `release.other_hosts`, `release.account_group` | the route's host group and account group, both defined in the [Glossary](#glossary) | `release.go` |
 
-The literal body is checked as a JSON object with `stream` true and the
-case slot once; under the release profile it must also carry the
-adapter's ceiling key (`max_completion_tokens` or `max_tokens` on a
-chat-completions target, `max_tokens` on a Messages target) equal to
-`release.shape.ceiling_tokens`, a top-level `model`, where present, equal to
-`target.model_name`, and none of `temperature`, `top_p`,
-`top_k`, `min_p`, `frequency_penalty`, `presence_penalty`,
-`repetition_penalty`, `ignore_eos` or `min_tokens`. Each `limits` entry
-records a dimension (requests or tokens per minute, input or output
-tokens per minute, requests per second, concurrent requests, requests or
-tokens per day, spend per rolling window, spend per month, the
-auto-reload threshold), its value, its marking (`public`, a value a
-public documentation page gives, which publishes in full;
-`confidential`, a value only the account console shows under terms that
-keep it confidential), whether the operator set it, how the provider
-counts tokens against it where it is a token limit, the page or
-screenshot it came from, the retrieval date and the hash of the
-retained copy: its SHA-256 (`sha256`), or for a confidential limit its
-HMAC-SHA256 under the release key (`hmac_sha256`, which `key sum`
-prints). Three optional fields record what a route cannot measure
-or publish. `unpublished_limits` is the operator's dated ruling on a
-dimension the provider documents but neither publishes a value for nor
-shows in the console: the documenting page's source, retrieval date and
-hash, the ruling's date and where the ruling is kept; each entry caps
-the route at 0.5 requests per second in the ceiling rule.
-`retained_headers` names recorded response headers whose values the
-provider's terms keep unpublished, in the form of `response_headers`; it
-may not cover `Retry-After`, whose values the tables print. On a target
-with a confidential limit it must cover every `response_headers` entry
-except two kinds written in full, with no `*`: `Retry-After` in any
-case, and a request identifier, a name that ends in `requestid` once
-case, `-` and `_` are ignored and contains no `ratelimit`
-(`config.RequestIDHeader`: `X-Request-Id`, `x-amzn-RequestId`).
-`probe.limits_retained` must also be set wherever `probe.limits_url`
-is, because a provider can echo the limit in any header or in the
-limits body (`validateConfidentialRetention`).
-`not_applied` lists the body parameters of SPEC-HOSTED HA3 point 3 that
-the target rejects (`stream_options`, `reasoning_effort` or
-`reasoning_format` on a chat-completions target; `thinking` or
-`output_config` on a Messages target), which the body then omits and the
-manifest records. Three more fields carry the operator's rulings and
-readings. `balance_unavailable` (its `kind`, the reason, the ruling's
-date and where it is kept) is the dated ruling a cell starts under when
-the balance command prints `unavailable`
-([A cell, in order](#a-cell-in-order)). Its kind is `prepaid`, which
-needs an `auto_reload_threshold_usd` limit in `target.limits`, or
-`postpaid`, which needs a `spend_per_month_usd` limit; the ceiling rule
-then tests that limit at the route's start.
-`retention` records what the provider's terms say about keeping model
-output (`provision`), the customer's deletion duties under them
-(`deletion`), the terms page by `source`, `retrieved` date and `sha256`,
-and `model_output`: `protocol_period` keeps each 200 body in the frame
-store, `none` keeps only its byte count. `probe.limits_retained` keeps
-the limits read's body out of the probe record, as a hash, where the
-terms keep it unpublished. `reported_model` records the identifier the
-route's responses carry where it differs from `model_name`, with the
-model documentation page that names both as one build (source, retrieval
-date and hash); each response's reported model is compared with it
-(`Target.ExpectedModel`), and with `model_name` where none is recorded.
-`percentes-release public-config --config FILE --out FILE` writes the
-configuration as published (`Config.Published`): each confidential
-limit's value replaced by the quoted string `"[retained]"` and every
-other byte as written. It refuses a value that is not a plain scalar
-written in `target.limits`, a comment inside that limit, and a comment
-or string anywhere in the file, a key among them, that carries the
-value as a number of its own. The identifiers the provider fixes are
-left out of that search: `target.model_name`,
-`target.reported_model.name`, `target.endpoint_url` and each
-`release.other_hosts[].model` in their own fields. In any other string
-or comment, a form that lies inside the text of one of them, or of a
-model without its provider prefix (`gpt-oss-120b` for
-`openai/gpt-oss-120b`), does not count where the identifier holds a
-letter other than `e` and `E` (`config.FixedIdentifiers`,
-`config.CarriesOutside`); a form that runs on past that text counts. A
-limit of 4 on the model `gpt-4o-mini` therefore publishes, and
-`qwen3-3225` in a note still refuses a limit of 3225 on `qwen3-32`, as
-`qwen3-32,000` does a limit of 32000. The forms looked for are
-the value as written and in decimal, the decimal also with zeros added
-after its last digit up to 17 digits in all (`9876543.2500`), each also
-with its whole part grouped in threes by a comma, a space, a no-break
-space, a thin space or a narrow no-break space (`9,876,543.25`), each
-with a fractional part also with a decimal comma, ungrouped
-(`9876543,25`) or grouped by a full stop or one of those space
-characters (`9.876.543,25`), and the value in scientific notation as
-`strconv.FormatFloat` prints it in format `e` or `E` (`9.87654325E+06`).
-An ungrouped decimal comma form with at most three digits before the
-comma and three after is left out, because it reads as a whole number
-grouped in threes (`12,500` for a value of 12.5). A form inside a longer
-number does not count (`12,000` for a value of 12), and runs of 32 or
-more hexadecimal digits, such as a SHA-256 hash or a commit identifier,
-and `YYYY-MM-DD` dates are skipped (`valueForms`, `Carries`). A file
-holding a second YAML document, or anything but whitespace after a
-document-end marker (`...` at the start of a line), is refused by
-`config.Decode` and by `Config.Published`. Both also refuse a YAML
-directive (a line starting with `%`, such as `%TAG`) and a tag other
-than the core types yaml.v3 (the Go YAML library the loader uses)
-gives an untagged node (`!!str`, `!!int`, `!!float`, `!!bool`,
-`!!null`, `!!timestamp`, `!!merge`, `!!seq` and `!!map`), such as
-`!<tag:example.com,2000:x>` or `!x`. yaml.v3 keeps
-neither a directive nor a tag in a comment or a string, where the scans
-above look. The file must be UTF-8 (8-bit Unicode Transformation
-Format), the encoding the directive check reads.
-The freeze commits that file; every command reads the file
-as loaded. `configs/release.reference.yaml` is one route with
-placeholders for the system text, the limit snapshots and the caps; its
-comments give the form of a balance ruling, which it does not carry. The
-transport's idle pool is two times
-the top step's rate times the hard timeout plus `load.connections`: 752
-at the pins.
+The literal body carries `stream` true, the case slot once and the ceiling key of the route's adapter (`target.adapter`, the streaming request form: chat completions or Messages), such as `max_tokens`, at `release.shape.ceiling_tokens`, with no sampling parameter. Each `target.limits` entry records a dimension, value, marking (`public` or `confidential`), source and hash, with `evaluation_windows_s`, `counting`, `output_at_generation` and `reset_zone` where they apply.
+
+`percentes-release public-config` writes `Config.Published`: each confidential value replaced by `"[retained]"` and the rest of the file unchanged. It refuses a file carrying a confidential value elsewhere in a form `config.ValueForms` gives, outside the identifiers the provider fixes (`config.CarriesOutside`).
 
 ### The release key
 
-The release key stops a withheld value from being recovered through its
-published hash. You need this section before the freeze, and to read an
-`hmac_sha256` field. A plain SHA-256 of a short text, such as a 429
-message that names a limit, can be matched by hashing guessed texts
-until one agrees. On a route with a confidential limit a release
-therefore publishes the hashes below as HMAC-SHA256 under the release
-key, and nobody without the key can test a guess against one of them.
-The schedule's hash of each configuration as loaded is keyed on every
-route. Every other hash a release publishes is a plain SHA-256, among
-them the manifest's references to the configuration as published, the
-attempts file, the report pair, the clock, status and balance records
-and the ledger.
+`releasekey.Create` (`key create --key FILE`) writes `Size` (32) random bytes as lowercase hexadecimal to a new file with mode 0600. `releasekey.Read` refuses a file with any group or other permission bit, and one that is not 64 lowercase hex digits and a newline. A `releasekey.Key` prints as `[release key]` and `encoding/json` writes none of its bytes.
 
-| Record | Keyed field | What it hashes |
-|---|---|---|
-| the configuration (`target.limits`), ceiling-check records (each snapshot), `report.json` (`tables.limits`), `routes/<route>.json` (`limits`) | `hmac_sha256`; `routes/<route>.txt` prints `hmac-sha256` | a confidential limit's retained copy |
-| `probe.json`, ceiling-check records | `hmac_sha256` of a body stand-in | each non-200 body, and the limits body where it is withheld |
-| `probe.json`, ceiling-check records | `error_hmac_sha256` | the response shape's in-band error object |
-| `attempts.jsonl` | `stream_error_hmac_sha256` | each request's in-band error object |
-| `manifest.json` | `operator.hmac_sha256`, `frames.hmac_sha256`, `records[].hmac_sha256`, and `source.diff.hmac_sha256` where the build was modified | the frame store, the operator file and each operator record, named with no `bytes` |
-| `window-close.json` | `operator.hmac_sha256`, `records[].hmac_sha256` | the operator file and each operator record read after the route's last cell |
-| `routes/<route>.json` (`drift_changes`, `drift_parts`, `window_close`) | `hmac_sha256`; `routes/<route>.txt` prints `hmac-sha256` | each limits and eligibility record the drift rule compares |
-| `schedule.json`, every route | `config_hmac_sha256` | the configuration as loaded |
+The schedule's `config_hmac_sha256` is keyed on every route; the other fields below are keyed only on a route with a confidential limit. Every other published hash is a plain SHA-256.
 
-`percentes-release key create --key FILE` writes the key
-(`releasekey.Create`): 32 random bytes from `crypto/rand`, as 64
-lowercase hexadecimal digits and a newline, to a new file with mode
-0600. It refuses an existing file. `key sum --key FILE FILE ...` prints
-each named file's HMAC-SHA256 under the key, the value a confidential
-limit records in `hmac_sha256` for its retained copy. `releasekey.Read`
-refuses a key file other users can read, or one in any other form, and
-its errors carry none of the file. A `releasekey.Key` prints as
-`[release key]` under every format verb, and `encoding/json` writes
-none of its bytes. The key file belongs beside the API key files,
-outside the source tree and the frame store.
+| Record | Keyed field |
+|---|---|
+| the schedule file (`--schedule`), every route | `config_hmac_sha256`, the configuration as loaded |
+| configuration, ceiling-check records, `report.json`, route pages | `hmac_sha256` of a confidential limit's retained copy |
+| `probe.json`, ceiling-check records | `hmac_sha256` of a withheld body; `error_hmac_sha256` |
+| `attempts.jsonl` | `stream_error_hmac_sha256` |
+| `manifest.json`, `window-close.json` | `hmac_sha256` of the frame store, operator file and each record, with no `bytes` |
 
-| Command | `--release-key` | What the key hashes |
-|---|---|---|
-| `schedule` | required | each configuration as loaded (`config_hmac_sha256`) |
-| `run` | required, read before the route starts | the configuration as loaded, for `checkFrozen`; on a route with a confidential limit, the texts the probe and the attempts file withhold, and the frame store, the operator file and its records each manifest and the window-close record name |
-| `ceiling-check` | required on a route with a confidential limit | the texts the record withholds, and each confidential limit's retained copy for its check |
-| `rehearse` | none | what `schedule`, `ceiling-check` and `run` hash, under a key made in memory and never written |
-| `pages`, `pack`, `publish-check`, `percentes --check-release` | required where a route has a confidential limit | nothing new: the completeness check compares the frame store, the operator file and its records with the keyed hashes each manifest records |
+`schedule` and `run` require `--release-key`; `ceiling-check`, `pages`, `pack`, `publish-check` and `percentes --check-release` require it where any route has a confidential limit; `rehearse` makes one in memory.
 
 ### The schedule
 
-`internal/schedule` derives a release's frame from one master seed
-(SPEC-HOSTED §4 as HA3 point 9 amends it): twelve cells per route, one
-per UTC slot (00:00, 04:00, 08:00, 12:00, 16:00 and 20:00) on a weekday
-and on a weekend day, over a committed window of at most 14 days. A
-cell's attempt 1 date is drawn from its day type's dates in the window by
-the SHA-256 of the seed and the cell label, reduced modulo their count;
-its attempt 2 is the next date of that day type, absent when there is
-none. Where the six weekend dates miss a Saturday or a Sunday, a counter
-is appended to the seed and the whole schedule re-derived. Each route's
-offset inside the slot is drawn from the seed as a permutation of 0, 10,
-20 ... minutes over the routes in name order. A run starts at its slot
-plus its offset, with a 15-minute tolerance, and a route takes at most
-two re-runs in the window. One cell with all five steps admitted runs
-48 minutes 30 seconds: the warm-up, then five steps of 480 s each followed
-by a 90 s drain. The committed file is the schedule's JSON, and `Load`
-refuses any byte that differs from what the file's own input derives.
-`percentes-release schedule --master-seed SEED --first DATE --last DATE
---config FILE ... --ledger FILE --release-key FILE --schedule FILE`
-writes it for the routes whose configurations are given, prints the
-counter, the ledger's hash and each route's offset and first cell, and
-never replaces an existing file.
-The file also freezes the run's inputs: per route (`configs`), the
-SHA-256 of the configuration as published (`frozenConfig`, through
-`Config.Published`), the HMAC-SHA256 of the configuration as loaded
-under the release key (`config_hmac_sha256`) and the route's host
-group; the SHA-256 of the ledger's open line, its first
-(`ledger_sha256`); and the ledger's position as `schedule` read it, its
-line count (`ledger_lines`) and the SHA-256 of its bytes through that
-line (`ledger_head_sha256`). For a route with no confidential limit the
-file as published is the file as loaded.
-`schedule` refuses routes whose host groups disagree and a ledger that
-does not cap every route as its configuration does (`State.CheckRelease`).
-At the route's start, `run` refuses a route whose configuration as
-published, configuration as loaded, host group or ledger differs from
-the frozen one (`checkFrozen`, `checkLedger`). A configuration that
-differs from the frozen one only in a confidential limit's value has
-the same file as published and another keyed hash, so `checkFrozen`
-refuses it, as it refuses another release key and a schedule with no
-`config_hmac_sha256`.
+`schedule.New` derives the sampling frame from one master seed (SPEC-HOSTED §4); `schedule.Load` refuses a file whose bytes differ from what its own input derives.
+
+| Rule | Value | Constant or function |
+|---|---|---|
+| Cells per route | 12: slots 00, 04, 08, 12, 16, 20 UTC for each day type, weekday and weekend; each cell's attempt 1 date is drawn from its day type's dates but the last, and the weekend cells' dates include a Saturday and a Sunday | `SlotHoursUTC`, `derive` |
+| Window | at most 14 days | `MaxWindowDays` |
+| Attempts per cell, re-runs per route | 2, 2 | `MaxAttempts`, `MaxReruns` |
+| Offsets | a permutation of 0, 40, 80 ... minutes over the routes in name order, drawn from the seed | `OffsetStep` |
+| Account-group separation | two routes sharing an account group have offsets no closer than 80 minutes, in either direction round the slot | `GroupSeparation` |
+| Start tolerance | 15 minutes; a start or ladder epoch later than this labels the cell missed | `StartTolerance` |
+| Cell length | 60 + 5 × (240 + 90) s, 28.5 minutes | `CellLength` |
+
+`scheduleCmd` freezes per route (`configs`): `config_sha256` of the file as published (`frozenConfig`), `config_hmac_sha256`, `host_group`, `account_group`, and `binding_rps`, `binding_limit` and `binding_window_s` from `admission.Solve` (`freezeBinding`, `bindingSolution`); and for the ledger, `ledger_sha256` of its open line, `ledger_lines` and `ledger_head_sha256`. It reads each route's ceiling choice from `--ceiling-probe` records (`scheduleChoices`).
+
+`schedule` exits 1 on each refusal below. Rows are in the order the checks run.
+
+| `schedule` refuses when | Checked by |
+|---|---|
+| a flag does not parse; `--ledger` or `--schedule` is missing; no `--config` is given, or one does not load or is not under the `release` profile | `scheduleCmd`, `loadReleases` |
+| `--release-key` is missing, or names a file `releasekey.Read` refuses | `readReleaseKey`, `releasekey.Read` |
+| the ledger does not open, or its chain does not check | `admission.Open` |
+| the ledger's global cap or a route's cap differs from that route's configuration | `State.CheckRelease` |
+| a configuration has no published form | `frozenConfig`, `Config.Published` |
+| the master seed, the window's dates or the route list derive no schedule | `schedule.New` |
+| the ledger's open line, or its lines through the position first read, change before the command reads them again | `readLedger`, `frozenEntries` |
+| a ceiling-check record does not read, is not the record `ceiling-check` writes, or was admitted in another ledger | `scheduleChecks`, `readCheckRecord` |
+| a record names a ledger line that admits no ceiling check of its route up to the frozen line, or a line another record names; a ceiling-check admission there has no record | `checkAdmitted` |
+| the ledger holds no price line for a route up to the frozen line, or a route's binding rate puts its lowest step at 0 requests per second | `bindingSolution`, `routePrice`, `freezeBinding` |
+| a route's other host has no configuration given, sends another model, shape or ceilings, or names other hosts | `checkHostGroups` |
+| the routes of one account group record different `spend_per_month_usd` limits, or their route caps sum above the least of those limits | `checkAccountGroups` |
+| a route has no record of its host group; its records fail a record check `run` also makes, or pick a ceiling that differs from `release.shape.ceiling_tokens` and do not exclude the route | `scheduleChoices`, `ceilingChoiceFor` |
+| `--excluded` does not name exactly the routes the records exclude | `checkExcluded` |
+| the `--schedule` file already exists, or does not write | `scheduleCmd` |
 
 ### Before the first cell
 
