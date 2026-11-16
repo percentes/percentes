@@ -15,11 +15,14 @@ the evidence a reader needs to recompute it. It serves two measurements:
 - **A provider's hosted application programming interface (API) under
   load.** [SPEC-HOSTED.md](SPEC-HOSTED.md) measures a managed endpoint
   from one client host through one ordinary paid account: how many
-  scheduled requests complete in time, how many fail and how, at up to
-  five offered-load steps, each admitted only where its nominal demand
-  (the step's request rate, and its tokens and spend at the worst case
-  per request) stays within half of every rate, token, concurrency,
-  daily and rolling spend limit recorded for the account
+  scheduled requests complete in time, how many fail and how, at five
+  offered-load steps, each sending its requests at equal intervals and
+  each a fraction up to 1.0 of the route's binding rate: the highest
+  rate at which the nominal demand (the requests, and their tokens and
+  spend at the worst case per request) stays within every rate, token,
+  concurrency and rolling spend limit in each evaluation window the
+  provider documents, and every daily limit over each of the provider's
+  reset days, and every cap recorded for the account
   ([Measuring a hosted endpoint](#measuring-a-hosted-endpoint)).
 
 You need the first if you run an inference service and want to know
@@ -38,14 +41,15 @@ Three rules shape every measurement:
 - **Three-state outcomes.** Every dispatched request ends in exactly one
   of completed, errored or censored (observed to the client timeout with
   no terminal event: the pinned 30 s, or the hosted release's 90 s hard
-  timeout). A scheduled request a stop left unsent is reported on its own
+  timeout). A scheduled request left unsent, by a stop or, under the
+  release profile, for being more than 50 ms late, is reported on its own
   line. Only completions enter latency histograms. Failure rates are
   reported as figures in their own right. The completion curve gives,
   for each time t after the intended send, the share of all scheduled
   requests completed by t, estimated with the Aalen-Johansen cumulative
   incidence estimator. Errors are competing terminal events on the curve.
   A timeout is censored at the moment it timed out, and under the release
-  profile a scheduled request a stop left unsent is censored at the
+  profile a scheduled request left unsent is censored at the
   curve's horizon, the end of the observed time (SPEC §3, SPEC-HOSTED
   §5).
   - A latency quantile the completion curve never reaches inside the
@@ -143,7 +147,7 @@ cmd/percentes            single-run harness command-line interface (CLI) for a s
 cmd/percentes-campaign   N-run campaign runner for a self-hosted target (SPEC §5 repetition, §10 gates)
 cmd/percentes-calibrate  SPEC §10 capacity ramp and §5 single-replica reference
 cmd/percentes-pilot      the SPEC-HOSTED hosted amendment 2 (HA2) pilot: ledger, probe, dev, session, check-cpu
-cmd/percentes-release    a SPEC-HOSTED hosted amendment 3 (HA3) release: key, schedule, ledger, ceiling-check, public-config, run, dispatch, pages, pack, publish-check, rehearse, check-cpu
+cmd/percentes-release    a SPEC-HOSTED HA3 and HA4 (hosted amendments 3 and 4) release: key, schedule, ledger, ceiling-check, public-config, run, dispatch, pages, pack, publish-check, rehearse, check-cpu
 cmd/mockserver           fault-injectable mock inference server
 cmd/naivesweep           standalone reconnaissance probe, outside the instrument
 internal/                loadgen, collect, detect, orchestrator, validity, ...
@@ -166,8 +170,8 @@ below.
 A hosted target (`target.hosted: true`) is a provider's managed endpoint.
 SPEC-HOSTED.md pins what a hosted run sends and records. Two
 configuration profiles carry those pins. `release` carries the adopted
-protocol (hosted amendments 1 and 3, HA1 and HA3, written into its
-body) and is the path to published hosted figures. `pilot` carries the
+protocol (hosted amendments 1, 3 and 4, HA1, HA3 and HA4, written into
+its body) and is the path to published hosted figures. `pilot` carries the
 numbers of a drafted amendment, HA2, that is not adopted, and reports
 privately. Each profile refuses a value outside its pins. Hosted runs
 go through `percentes-pilot` or `percentes-release`, which reserve every
@@ -230,27 +234,29 @@ go doc ./cmd/percentes-pilot
 ### A release
 
 `percentes-release` runs a public descriptive release under SPEC-HOSTED
-amendment HA3. A route is one provider, one model, one endpoint and one
-account tier; each route has one configuration file, which carries the
-complete request uniform resource locator (URL), the whole request body
-as literal JavaScript Object Notation (JSON) frozen by hash, the header
-the key travels in, and every limit recorded for the account with its
-source and a marking: `public` where a public documentation page gives
-the value, which then publishes in full, or `confidential` where only
-the account console shows it under terms that keep it confidential.
+amendments HA3 and HA4. A route is one provider, one model, one
+endpoint, one account tier and one request shape; each route has one
+configuration file, which carries the complete request uniform
+resource locator (URL), the whole request body as literal JavaScript
+Object Notation (JSON) frozen by hash, the header the key travels in,
+and every limit recorded for the account with its source and a marking:
+`public` where a public documentation page gives the value, which then
+publishes in full, or `confidential` where only the account console
+shows it under terms that keep it confidential.
 A confidential limit's value is absent from the configuration as
-published, the ceiling rule's verdict, the refresh records and the
-ceiling-check snapshots. The configuration and the verdict name such a
-limit by its source and the keyed hash of its retained copy. A keyed
-hash here is an HMAC-SHA256 (a hash-based message authentication code
-built on SHA-256, the 256-bit Secure Hash Algorithm) under the release
-key: 32 random bytes that `percentes-release key create` writes once,
-at the freeze, to a file only its owner can read. Nobody without the
-key can check a guess against a keyed hash. Keep the key file
-private, as the API keys are: copy it to the client host, and leave it
-out of the repository. Never write a confidential limit's value, in any
-format, into a configuration comment, the operator file, a note, a URL
-or a file name.
+published, the verdict of the ceiling rule (the tests of the route's
+rates against its recorded limits, in the Binding rate row below), the
+refresh records and the ceiling-check snapshots. The configuration and
+the verdict name such a limit by its source and the keyed hash of its
+retained copy. A keyed hash here is an HMAC-SHA256 (a hash-based
+message authentication code built on SHA-256, the 256-bit Secure Hash
+Algorithm) under the release key: 32 random bytes that
+`percentes-release key create` writes once, at the freeze, to a file
+only its owner can read. Nobody without the key can check a guess
+against a keyed hash. Keep the key file private, as the API keys are:
+copy it to the client host, and leave it out of the repository. Never
+write a confidential limit's value, in any format, into a configuration
+comment, the operator file, a note, a URL or a file name.
 A provider can echo a limit in its rate-limit headers or in the body of
 its limits page, so a route with a confidential limit must withhold
 both: `target.retained_headers` must cover every recorded response
@@ -266,17 +272,21 @@ the route's window-close record names the operator file and its records
 the same way; the
 manifest names its other files by SHA-256 hash and size. The routes of
 a release run as separate processes on one client host, each at its own
-offset inside the slot.
+offset inside the slot: 0, 40, 80 minutes and so on, one per route,
+with the routes of one account group (the routes recorded against one
+provider account or deployment) at least 80 minutes apart both ways
+round the 240-minute slot.
 
 | Setting | Value |
 |---|---|
-| Ladder | five steps at 0.25, 0.5, 1, 2 and 4 requests per second, Poisson arrivals (random and independent), 480 s each, with a 90 s drain after every step in which nothing is sent, after a 60 s warm-up |
-| Cell | one run of the ladder: 48 minutes 30 seconds with all five steps admitted |
-| Frame | twelve cells per route: six UTC start slots (00:00, 04:00, 08:00, 12:00, 16:00 and 20:00), each run once on a weekday and once on a weekend day, inside a committed window of at most 14 days |
+| Ladder | five steps at 0.25, 0.5, 0.75, 0.9 and 1.0 of the route's binding rate, paced arrivals (requests at equal intervals), 240 s each, with a 90 s drain after every step in which nothing is sent, after a 60 s warm-up; a segment of T seconds at rate r sends floor(r·T) requests, r × T rounded down |
+| Cell | one run of the ladder: 28 minutes 30 seconds; a cell that starts more than 15 minutes after its slot plus the route's offset, or whose ladder would start more than 15 minutes after that time, is missed |
+| Frame | twelve cells per route: six UTC start slots (00:00, 04:00, 08:00, 12:00, 16:00 and 20:00), each run once on a weekday and once on a weekend day, inside a committed window of at most 14 days; a cell's first attempt is never on the last date of its day type in the window |
 | Deadline and hard timeout | 30 s from intended dispatch splits completions into in time and late; 90 s from actual dispatch censors a request with no terminal event |
-| Request shape | Shape S: one frozen body per route with a synthetic support ticket per request, under a 1,200-token input bound and a 512- or 1,024-token output ceiling |
-| Admission | a step runs only where its nominal demand is at most half of every recorded rate, token, concurrency, daily and spend-window limit, and only where the account's monthly cap and the route's liability cap cover twelve cells, two re-runs and 100 probe requests |
-| Before each cell | the route's refresh command rewrites the recorded limits and model documentation and prints the limit values it read, and its balance command reads the account's balance; a cell is blocked before any request where its records were not rewritten, its balance is below the cell's reservation, the balance command fails, or the balance is unavailable and the route records no `balance_unavailable` ruling, and a route whose limits as read, at its newest recorded price, no longer admit one of its steps stops |
+| Writes | a request more than 50 ms past its intended send time is not sent and counts as unsent, failing G2 at its step; in each evaluation window of W seconds of the route's limits, at most the lesser of the top step's rate times (W + 0.1) seconds, rounded up, and the requests the limits admit in W, at their recorded values and as read at the cell's start, are written, and for a limit marked `output_at_generation`, in each window of W + 90 seconds, at most the lesser of the top step's rate times (W + 90.1) seconds, rounded up, and that limit's allowance for W; the test is made as each request's first byte goes to the socket, a request counts in a window until the window's length plus 50 ms after its last byte, and a request the windows do not admit waits up to 50 ms from that first attempt; a request still not admitted is refused: it is not written, its record carries `write_denied`, the ledger does not settle it as sent, and it fails G2 at its step. A warm-up request left unsent or refused fails G2 at the first step. A request's write time is when the socket accepted its last byte |
+| Request shape | Shape S: one frozen body per route with a synthetic support ticket per request, under a 1,200-token input bound and a 512- or 1,024-token output ceiling; Shape R, a probe of request-count limits: a frozen one-line instruction per request, under a 128-token input bound and a 16-token output ceiling, with a 256-token fallback where the route declares one |
+| Binding rate | the highest rate, rounded down to 0.001 requests per second, at which nominal demand is at most every recorded rate, token, concurrency and spend-window limit in each evaluation window the provider documents, a limit marked `output_at_generation` (one the provider may count a request against until the request ends) over the window plus 0.1 s plus the 90 s hard timeout, on the assumption that the provider stops counting a request when the client gives up on it, and every daily limit over each of the provider's reset days (the period between two of its daily-quota resets), as a reservation of every attempt that can touch the day; the account's monthly cap and the route's liability cap must cover twelve cells, two re-runs and 100 probe requests, the auto-reload threshold the costliest cell, and the routes of one account group carry liability caps whose sum is at most the group's recorded spend limit; the limit or cap that sets it is the route's binding limit; a confidential limit never sets it, and a route whose confidential limit fails at the binding rate is excluded |
+| Before each cell | the route's refresh command rewrites the limits and model documentation records with the lines it reads from the provider's pages for the route's tier and model (SPEC-HOSTED §2) and prints the limit values it read, each page's whole text staying beside the records, and its balance command reads the account's balance; a cell is blocked before any request where the clock-sync command gives no offset reading, its records were not rewritten, its balance is below the cell's reservation, the balance command fails, or the balance is unavailable and the route records no `balance_unavailable` ruling, and a route whose limits as read, at its newest recorded price, no longer admit one of its step rates, under the ceiling rule, stops; a limit the command could not read keeps its recorded value |
 | After the last cell | the refresh command runs once more; its record is the route's window-close record, compared with the last counted cell and printed on the route's page |
 | Model identifier | each response's reported model is compared with the expected one (the requested identifier, or the one `target.reported_model` records from the model documentation); a cell with any other is labelled `model_mismatch`, kept out of the frame and re-run, and the route's page lists it with the expected identifier, every identifier reported and how many requests reported another |
 | Retries | none; `Retry-After` is never honoured, and a release configuration must record it under `target.response_headers` |
@@ -315,31 +325,39 @@ The steps below follow one request of a release from the schedule to its
 line in the published tables.
 
 1. **Schedule.** The committed schedule gives the route a cell (a date
-   and a UTC slot) and the route's offset inside the slot. The cell's
-   seed fixes the request's step and its intended send time.
+   and a UTC slot) and the route's offset inside the slot. The ladder's
+   step rates fix the request's step and its intended send time, and the
+   cell's seed enters its user text.
 2. **Admission.** At the cell's start, after the clock and status
    records, the refresh command rewrites the recorded limits and model
    documentation and the balance command reads the account's balance;
-   a cell is blocked here where its records were not rewritten, its
-   balance is below its reservation, the balance command fails, or the
-   balance is unavailable and the route records no
-   `balance_unavailable` ruling, and a route whose limits as read,
-   at its newest recorded price, no longer admit one of its steps stops
-   here. The ledger then reserves one probe request plus every scheduled
-   request of the cell against the route's and the release's liability
-   caps; a refusal stops the route before any request is sent. Where a
-   price was recorded for the route after the limits and the balance
-   were checked, the ledger reserves nothing and the cell repeats both
-   checks at the new price; a second such price blocks the cell. The
-   request's step was admitted by the ceiling rule when the route
-   started.
+   a cell is blocked here where the clock record holds no offset
+   reading, its records were not rewritten, its balance is below its
+   reservation, the balance command fails, or the balance is
+   unavailable and the route records no `balance_unavailable` ruling,
+   and a route whose limits as read, at
+   its newest recorded price, no longer admit one of its step rates
+   under the ceiling rule stops here. The ledger then reserves one probe
+   request plus every scheduled request of the cell against the route's
+   and the release's liability caps; a refusal stops the route before
+   any request is sent. Where a price was recorded for the route after
+   the limits and the balance were checked, the ledger reserves nothing
+   and the cell repeats both checks at the new price; a second such
+   price blocks the cell. The
+   request's step rate is the step's fraction of the route's binding
+   rate, which the schedule froze before the window.
 3. **Body.** The request's user text is the prefix `cs-<seed>-<index>`
-   (six-digit index), a space and a synthetic support ticket. It replaces
-   the one slot in the route's frozen body; every other byte is sent as
-   configured, and the key travels in the one header the configuration
-   names.
-4. **Send.** The client sends at the intended time and records the send.
-   The 90 s hard timeout runs from the send.
+   (six-digit index), a space and a synthetic support ticket, or for
+   Shape R a frozen one-line instruction. It replaces the one slot in
+   the route's frozen body; every other byte is sent as configured, and
+   the key travels in the one header the configuration names.
+4. **Send.** The client sends at the intended time and records the send,
+   the time its connection was acquired and the time the socket accepted
+   its request's last byte, its write time. A request whose worker reaches
+   it more than 50 ms late is not sent, and a write beyond the route's
+   write limit for an evaluation window waits up to 50 ms for the
+   window to admit it and is otherwise refused; either fails G2 at the
+   step. The 90 s hard timeout runs from the send.
 5. **Stream.** The first content event stamps the time to first token.
    `data: [DONE]` ends a chat-completions stream and `message_stop` a
    Messages stream. A whole answer arriving more than 30 s after the
@@ -353,7 +371,7 @@ line in the published tables.
    requests with a 95 percent binomial (Wilson score) interval; if it
    completed, it also raises the step's completion curve at its
    completion time and counts toward the step's throughput, the
-   completions per second over the step's 480 s window.
+   completions per second over the step's 240 s window.
 8. **Pages.** The route's page pools that line over the cells that
    attempted the step. The index row for the route and step prints one
    column per outcome line, each the line's pooled count over the pooled
