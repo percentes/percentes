@@ -208,77 +208,34 @@ Before each timing-coupled acceptance test, `hostqual.Qualified` measures timer 
 
 ## Server-side sampling and the receive path
 
-The client samples the server's metrics endpoints every second and
-checks its own receive path twice per window. You need this section
-for the `server_side` and `receive_path` fields. A hosted target exposes
-no metrics endpoint to the instrument, so only the loopback canary
-applies to it.
+| Setting | Use | Code |
+|---|---|---|
+| `target.metrics_urls` | one Prometheus endpoint per replica, keyed r0, r1 in order, sampled every `PinnedQueueSampleIntervalS` (1 s) from the epoch | `serverstats.ForRun` |
+| `target.queue_gauge` | the waiting-queue gauge G7 reads (`vllm:num_requests_waiting` on vLLM, `percentes_mock_requests_waiting` on the mock) | `serverstats.BaselineMeans` |
+| `target.metrics_families` | families kept on every sample and reduced per window and replica into `server_side` | `serverstats.ReduceWindow` |
+| `target.ttft_histogram` | the server TTFT histogram the receive-path check compares with | `collect.ReceivePathFor` |
 
-### The sampler
-
-`target.metrics_urls` names one Prometheus endpoint per replica (keyed r0,
-r1 in order), each sampled every 1 s from the run epoch.
-`target.queue_gauge` (`vllm:num_requests_waiting` on vLLM,
-`percentes_mock_requests_waiting` on the mock) feeds G7: the per-replica
-mean over the baseline window, with coverage of at least 90 % of the
-expected samples. The kind campaign sets no `metrics_urls`, since each
-pod's endpoint needs its own address behind the one NodePort Service.
-
-`target.metrics_families` names the families kept on every sample. The
-top-level `server_side` map reduces them per window and replica:
-
-| Family type | Per-window value |
+| Family type | Per-window value in `server_side` |
 |---|---|
-| gauge, untyped | the mean over the samples inside the window |
-| counter | the increase, measured per label set from its last sample before the window (or its first inside) to its last inside, summed over label sets |
-| histogram | the increase in count, sum and buckets by the same rule, the +Inf bucket left out |
+| gauge, untyped | mean over the samples inside the window |
+| counter | increase per label set from its last sample before the window to its last inside, summed |
+| histogram | increase in count, sum and buckets by the same rule, the +Inf bucket left out |
 
-A label set missing from a sample adds nothing there, and one first seen
-inside the window adds its whole value. A label set that falls, or a
-histogram whose bucket layout changes, is marked as a reset and
-contributes its later value; after a layout change no buckets are
-reported. A non-finite value, or a sum over label sets that overflows, is
-an error counted in `family_errors`. The run report keeps the sample series
-under `server_samples`.
+A value that falls for a label set, or a changed bucket layout, is a reset; a non-finite value or an overflowing sum counts in `family_errors`. The sample series is under `server_samples`.
 
-### The receive-path checks
+The §2 receive-path checks are reported per window in `receive_path` and fail no run: the client TTFT mean against the server histogram's mean, and the loopback canary (`loadgen.StartCanary`), a stream that a mock inside the client process serves at fixed times and the load's own reader parses. A hosted target exposes no metrics endpoint, so only the canary applies.
 
-The two §2 checks are reported per window in the top-level `receive_path`
-map, and neither fails a run:
+A release cell carries one canary summary per attempted step in its cell record, checked on replay (`stepCanary`), and a canary that does not start makes the cell `client_invalid`.
 
-- the client-side TTFT mean over completed requests, against the mean of
-  the server's TTFT histogram (`target.ttft_histogram`) over the same
-  window, pooled across replicas; the difference also holds the network
-  round trip and any difference in where the server starts its clock;
-- the loopback canary, one stream against an in-process mock with fixed
-  timing through the same read path: its event lag p99 and max bound the
-  host's read-loop lag, with the first-token and per-gap deviations beside
-  them.
-
-A window restricted to one replica carries no receive-path report.
-`percentes-calibrate` takes the same settings as `--families` and
-`--ttft-histogram`.
-
-### Token counts and the ITL label
-
-A self-hosted or mock request asks for the usage object
-(`stream_options.include_usage`); the hosted body the client generates
-does not, and a literal body carries whatever it says. The client
-records the completion token count from a usage object at the path
-`target.response_shape.usage` names (`usage` by default) that carries a
-completion count, beside its own content-event count; a count the stream
-does not carry is absent, and an explicit 0 is a count. Each window
-reports both counts as distributions (`content_events`,
-`completion_tokens`) and the §10 check over the completed requests that
-carried a completion count (`token_check`: sampled and matched).
-
-| Case | Pooled ITL label in `report.txt` |
+| Case | Pooled gap label begins (`itlLabel`, after `ITL pooled (per-window),` in `report.txt`) |
 |---|---|
-| hosted target | inter-chunk, with the counts when the stream carried usage |
-| usage sampled, every request matched | inter-token, with the counts |
-| usage sampled, a mismatch | inter-chunk, with the counts |
-| mock, no usage in the stream | one token per content event by construction |
-| any other target with no usage | inter-chunk |
+| hosted target | `inter-chunk (§3` |
+| usage sampled, every completion's count equals its content-event count | `inter-token (§10 check:` |
+| usage sampled, a mismatch | `inter-chunk (§3; §10 check:` |
+| mock, no usage in the stream | `one token per content event by construction` |
+| any other target with no usage | `inter-chunk (§3, no usage in the stream)` |
+
+Each window reports `content_events`, `completion_tokens` and the §10 check over completions that carried a count (`token_check`).
 
 ## Fault modes
 
