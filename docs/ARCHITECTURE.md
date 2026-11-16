@@ -524,52 +524,30 @@ carried a completion count (`token_check`: sampled and matched).
 
 ## Fault modes
 
-The mock injects five scheduled faults and a slow reload, and the
-process-kill variant kills a real container. You need this section to
-read a Phase 0 run or a process-kill campaign.
-
-The mock's modes stand in for the §1 variants in Phase 0: `stream_abort`
-reproduces the resets of a clean delete, and `silent_hang` the silent drops
-of a black-hole partition.
-
-| SPEC §2 name | Configuration | Mock behaviour | What the instrument must show |
+| §2 name | Configuration | Mock behaviour | Expected signature |
 |---|---|---|---|
-| stall | `stall` | server-wide emission freeze, staggered flush on expiry | completions delayed; the excess lands in p99.9 and max (AC2); lambda × D samples attributable to a stall of length D (AC2b) |
-| error | `error` | 5xx on new requests; in-flight streams untouched | an error-rate step in the fault window; the goodput dip yields a detector TTR |
-| throttle | `throttle` | 429 on new requests; in-flight streams untouched | `status_429` in the fault window's error classes, absent from the baseline |
-| stream-abort | `stream_abort` | a TCP reset (RST) of in-flight streams at fire, sent by closing with `SO_LINGER=0`; admitted streams reset after N tokens | in-flight requests classified errored as `reset`, absent from the histograms (AC4) |
-| silent-hang | `silent_hang` | no bytes, no clean close (FIN) and no RST, ever, on hijacked connections; captured requests stay hung past expiry | censored at exactly 30 s and entered on the incidence curve as censored observations (AC4b) |
-| slow-reload-on-reschedule | `mock.slow_reload`, a startup setting | 503 for a set duration after process start | the replica-ready probe boundary in the decomposition |
+| stall | `stall` | server-wide emission freeze, staggered flush on expiry | completions delayed into p99.9 and max (AC2, AC2b) |
+| error | `error` | 500 on new requests; in-flight streams untouched | an error-rate step and a detector TTR |
+| throttle | `throttle` | 429 on new requests | `status_429` in the fault window only |
+| stream-abort | `stream_abort` | a TCP (Transmission Control Protocol) reset (RST) of in-flight streams, closing with `SO_LINGER=0` | in-flight requests errored as `reset` (AC4) |
+| silent-hang | `silent_hang` | sends nothing more on hijacked connections and holds them open | censored at the timeout, on the curve (AC4b) |
+| slow reload | `mock.slow_reload` | 503 for a set time after start | the `replica_ready` boundary |
 
-The first five are scheduled in the configuration or armed through the
-mock's `/admin/faults`; slow reload is set when the mock starts.
+The first five are scheduled in `mock.fault_schedule` or armed through `/admin/faults` (`internal/mock/faults.go`, `internal/mock/server.go`); slow reload is a start-up setting.
 
-**Process kill.** The process-kill variant runs against a container on a
-Docker host: vLLM in Phase 1, the mock in its end-to-end test. Before each
-run `percentes-campaign` waits until the container is running, `/health`
-returns 200 and one streamed inference succeeds, then reads the
-container's process ID (PID), start time and restart count from
-`docker inspect` and measures the host clock's offset from the client
-clock. `orchestrator.ProcessKillInjector` sends SIGKILL to that PID at
-T_inject after checking that the PID still belongs to the container; the
-kill script stamps the host clock before and after the kill, and the
-recorded fire is the midpoint of that bracket converted by the offset.
-Docker's `on-failure` restart policy starts the same container again.
-After the run the campaign reads the restart count, which must have
-advanced by exactly one and must not have moved between runs, the
-container's `die` and `start` events, the server log, from which
-`internal/vllmlog` fills the decomposition's log rows, and the
-fingerprints. A restart policy or container name other than the §6 pins
-invalidates the run. `collect.SplitAtFire` separates the in-flight
-requests ending just after the fire, which are indeterminate, from the
-rest, and the requests scheduled from the fire to replica-ready are
-collected as the `outage` window. The commands run over SSH on the host
-`--ssh-target` names, or locally when it is empty. `deploy/process-kill-e2e.sh`
-(`make process-kill-e2e`, in `make test` and in the `kind` job of
-continuous integration) runs the mock in a Docker container under the
-same restart policy, kills it once with `--dry-kill` and again in two
-campaign runs, and checks the dry-kill record and the run files; on macOS it reaches the container's process through a privileged
-helper container (`--kill-via docker-helper`).
+**Process kill** (`cmd/percentes-campaign/processkill.go`, `internal/orchestrator/processkill.go`):
+
+1. Before each run:
+   1. wait until the container runs, `/health` returns 200 and one streamed inference succeeds;
+   2. read the container's process ID (PID), start time, restart policy and restart count with `docker inspect`;
+   3. check the restart policy and container name against `pins.container` (`pinReasons`), and that the container did not restart since the last run;
+   4. write the before fingerprint;
+   5. measure the host clock's offset (`SSHContainerOps.ClockOffset`).
+2. At T_inject, `ProcessKillInjector` checks the PID still belongs to the container and sends SIGKILL through `SSHContainerOps.KillInit`; the recorded fire is the midpoint of the host-clock bracket around the kill, converted by the offset (`observedFire`).
+3. Docker's restart policy (`PinnedContainerRestartPolicy`, `on-failure`) starts the same container.
+4. After the run, check the restart count advanced by exactly one, read the `die` and `start` events, the server log (`vllmlog.Parse`, `vllmlog.Apply`) and the after fingerprint; `collect.SplitAtFire` separates requests indeterminate at the fire, and the `outage` window is collected. Any failed check or read makes the run invalid.
+
+Commands run over SSH on `--ssh-target`, or locally when it is empty; a local kill runs through `sudo` or, with `--kill-via docker-helper`, a privileged helper container (Docker on macOS). `deploy/process-kill-e2e.sh` (`make process-kill-e2e`) kills the mock container once with `--dry-kill` and again in a two-run campaign.
 
 ## Hosted runs and the evidence files
 
