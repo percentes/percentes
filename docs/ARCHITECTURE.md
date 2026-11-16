@@ -15,7 +15,7 @@ Phase 0 runs against the mock and needs no GPU (graphics processing unit); Phase
 - [Fault modes](#fault-modes)
 - [Hosted runs and the evidence files](#hosted-runs-and-the-evidence-files)
 - [The release runner](#the-release-runner)
-- [Tracing a published number](#tracing-a-published-number)
+- [Tracing a published number back to raw records](#tracing-a-published-number-back-to-raw-records)
 - [Changing things safely](#changing-things-safely)
 - [Glossary](#glossary)
 
@@ -1099,316 +1099,155 @@ The manifest names the source diff of a modified build by hash in `source.diff`,
 
 ### The end-to-end test
 
-`TestReleaseLadderSixMockRoutes` (`cmd/percentes-release/e2e_test.go`)
-runs six routes in one process against six in-process shaped mocks, two
-of them Messages shapes, each holding its own key in one of the three
-credential headers, over a ladder scaled to seconds with every step
-admitted, and checks each cell's outcome, records, ledger settlement,
-manifest, concurrent-run list and dispatch series, that each
-manifest's aggregate dispatch series equals every route's sends per
-second over the cell, and that each attempted step's G2 in the cell
-report agrees with the ladder's verdict. The six request forms are the
-list `rehearse` uses (`releaseForms`). When a cell does not count only
-because the client-validity gate failed under test load, the test logs
-the gates and skips.
+`TestReleaseLadderFiveMockRoutes` (`cmd/percentes-release/e2e_test.go`) runs five Shape S routes in one process against in-process shaped mocks over plain HTTP, one per form of `e2eForms`, with the ladder scaled to seconds and the host gates widened (`hostGatesWide`). It checks outcomes, records, settlement, manifests, the aggregate dispatch series, and per-step G2 and G6. Where the in-process client-validity gate is the only failure, it checks the attempted steps and skips, naming the gate parts that failed.
 
 ### The rehearsal
 
-`percentes-release rehearse` is the acceptance run: the client host
-carries six routes' ladders at once, against mocks, before any provider
-request is sent. You need this section to produce the acceptance run's
-evidence file or to read one.
+`percentes-release rehearse` serves shaped mocks on `127.0.0.1` over TLS under one `mock.SelfSignedCert`, the only root the client trusts (`Hooks.RootCAs`). The routes come from `rehearsalRoutes` and the forms from `rehearsalForms`; `--anthropic-rpm` sets the `anthropic` route's requests-per-minute (RPM) limit from `rehearsalRPMs`.
 
-The command serves six shaped mocks on loopback in its own process, one
-per request form the instrument supports (`releaseForms`); the route
-names are labels, and each real route's form is fixed by its frozen
-configuration. Each mock accepts a fresh random key in its form's
-credential header only; the key is set in the process's environment for
-the run and unset after it.
+| Route | Form | Shape | Key header | Ceiling |
+|---|---|---|---|---|
+| `anthropic` | Messages, `max_tokens` | R | `x-api-key` | 16 |
+| `azure` | chat completions, `max_completion_tokens`, reasoning | S | `api-key` | 512 |
+| `azure-R` | the `azure` mock, same account group | R | `api-key` | 256, its fallback |
+| `baseten` | chat completions, `max_tokens`, reasoning | S | bearer | 512 |
+| `gemini` | chat completions, `max_tokens` | S | bearer | 512 |
 
-| Route | Form | Key header | Reasoning in the stream |
-|---|---|---|---|
-| `anthropic` | Messages at `/v1/messages` | `x-api-key` | yes |
-| `azure` | chat completions, `max_completion_tokens` | `api-key` | no |
-| `baseten` | chat completions, `max_tokens` | `Authorization: Bearer` | yes, as `reasoning_content` |
-| `bedrock` | Messages at `/anthropic/v1/messages` | `Authorization: Bearer` | no |
-| `google` | chat completions, `max_tokens` | `Authorization: Bearer` | no |
-| `groq` | chat completions, `max_completion_tokens` | `Authorization: Bearer` | yes, as `reasoning` |
+1. Each route's ceiling check runs against its mock through `sendCeiling`, then the schedule freezes each route. Every route runs its first cell through `runCell` concurrently at its offset.
+2. Attribution: one `azure-R` cell against `Server.SetRateLimit`, after `groupQuiet`; its `status_429` records must label at or below the limit's share (`labels`).
+3. Overload: one `anthropic` step at 1.5 times its binding rate (`overload`, `route.overLimits`).
+4. Failure mode: one `anthropic` ladder with the throttle and silent-hang faults armed (`failureMode`).
+5. Check only: the `anthropic` and `gemini` ceiling checks against new mocks, with their ledger and records under `checks/` (`checkOnly`); `anthropic` is excluded and `gemini` takes 1,024.
 
-At full length a mock's stream starts after 0.3 to 1.5 s and sends
-events 10 to 40 ms apart: 200 reasoning tokens on a form that reasons,
-then a 504-character answer in 4-character content events. First, each
-route's ten-request ceiling check is sent to its mock at the route's
-configured ceiling, the six at once, through the code `ceiling-check`
-uses (`sendCeiling`), admitted and settled in the rehearsal's ledger.
-Each route then runs through `newRoute`, which reads that record, with
-the same input checks as `run`: `true` as its status command, a balance
-command that prints the route's cap as its amount, and a refresh
-script, `inputs/refresh-<route>`, that touches the note file every mock
-record names and prints the route's recorded limits, so `--out` may
-hold no white space; the ceiling rule must admit the whole ladder.
-Every route then runs the schedule's first cell through `runCell`, all
-concurrently, each starting at its pinned offset after one
-common start, so a cell carries its probe, canary, ladder, ledger
-admission and settlement, and retained evidence as under `run`.
+The rehearsal is green when no step records a problem (`rehearse` sets `green` where its reasons are empty). `rehearsal.json` (`schema_version` 2) records the result with each reason.
 
-The command refuses to start, and writes nothing, on any of these:
+`rehearse` refuses with exit 1, and writes nothing under `--out`, when:
 
-| Input | Refused when |
+- a flag does not parse, or `--out`, `--frames` or `--clock-sync` is missing (`rehearseCmd`);
+- `--scale` is below 1, or makes a step shorter than G2's 5 s CPU window (`PinnedCPUWindowS`);
+- `--anthropic-rpm` is not a value of `rehearsalRPMs` (5,000 or 10,000);
+- `--byte-cap` is missing, or `--master-seed` is empty;
+- `--frames` is inside the source tree, or `evidence.ParseClockCommand` refuses `--clock-sync`;
+- `--out` holds white space, or exists and is not empty (`newDir`);
+- the open-file soft limit is below `minOpenFiles` (`checkOpenFiles`);
+- the binary carries no version-control revision, or was built from a modified tree and `--source-diff` is missing.
+
+| Step | Each must hold | Function |
+|---|---|---|
+| before step 1 | each route's ceiling check is not blocked and does not exclude the route; the host-group and account-group checks pass (`checkHostGroups`, `checkAccountGroups`); `run`'s start checks pass for each route (`newRoute`); the ceiling rule admits every ladder step at the frozen binding rate. A failure here exits 1 with no `rehearsal.json` | `setUp`, `checkRoute`, `newRoute` |
+| 1 to 4, every cell | a cell record with outcome `counted`; no ladder end (`client_validity`, `tripwire` or `backoff`); every ladder step its configuration sets attempted, with G2 (client validity) passing at each; a tripwire record with none fired. The completeness check passing (`evidence.CheckRelease`); `manifest.json` hashed; a replay of the report pair from `inputs/<route>.yaml` identical byte for byte | `rehearsed`, `replayCell` |
+| 1 | each route's cell started at its offset with no execution error; its ceiling choice is the table's ceiling; its binding rate, binding limit and window are the release route's where `rehearsalRoutes` sets them (every route but `gemini`) | `full` |
+| 1 | each mock answered status 200, and nothing else, to every ceiling-check and cell request its routes sent | `rehearse`, `maps1` |
+| 1 | the host's aggregate dispatch series read from the cells' `dispatch.json` files | `aggregate` |
+| 2 to 4 | no execution error; the cell's `attempts.jsonl` read | `stepCell` |
+| 2 | a counted cell records at least one `status_429`; the mock answered 200 and 429 alone, their sum the requests sent and the 429 count the cell's `status_429` count | `attribution` |
+| 2 | the route page labels every `status_429` of the cell, each at or below the limit's share; exactly one of the route's sends in its account group's history carries the first refusal's write time, and with that send's write time removed, the refusal is labelled `comparison unresolved` | `labels` |
+| 3 | the mock answered 200 to every request; the resource bounds below held | `overload`, `rehearsalResources.problems` |
+| 4 | both faults armed and recorded; where the cell attempted its top step, each fault fired and expired, the mock answered at least one 429 and one hung request, and the cell recorded a censored request; where it did not, the mock answered 200 to every request | `failureMode` |
+| 4 | the mock answered 200, 429 and hung alone, their sum the requests sent and the 429 count the cell's `status_429` count; the resource bounds below held | `failureMode`, `rehearsalResources.problems` |
+| 5 | `anthropic` excluded with a reason; `gemini` at Shape S's fallback ceiling; each new mock answered 200 to every check request it was sent | `checkOnly` |
+| after step 5 | every route has a rehearsal cell to project; one window's projected disk below the free disk, the two stores' sum below it where `--out` and `--frames` share one filesystem and each store below its own otherwise; the free disk read | `rehearsalRun.windowDisk`, `windowDisk.problems` |
+
+`windowDisk` projects one window from each route's largest rehearsal cell, taken `rehearsalAttemptsPerWindow` (14) times: its bytes under `--out` at `diskMargin` (2) times, and its frames at `diskMargin` times the route's largest ceiling over the events its mock streamed per request, or `diskMargin` where that ratio is below 1.
+
+During steps 3 and 4 `hostSampler` (`cmd/percentes-release/rehearse_host.go`) reads, once a second, the process's open descriptors (`openFiles`) and the TCP sockets to each destination from `/proc/net/tcp` and `/proc/net/tcp6` (`socketsPerDestination`). Listening sockets are left out. Sockets in TIME_WAIT (the kernel's hold on a closed socket) are counted. The tables list every socket in the host's network namespace, so the count includes other processes' sockets.
+
+At the cell's end `finish` reads the process's peak resident set size (RSS, `peakRSS`), the host's memory, the local port range (`localPortRange`) and the `tcp_tw_reuse` setting. `rehearsalResources.problems` holds each of the two cells to these bounds:
+
+| Reading | Bound | A missing or failed reading |
+|---|---|---|
+| peak RSS | at most half the host's memory | breaks the bound on every host |
+| open descriptors | below `minOpenFiles` (65,536) | breaks the bound on every host |
+| sockets to one destination | below the size of the local port range | breaks the bound on Linux; leaves it unchecked on any other host |
+
+A broken bound is a problem of its step's cell, and the rehearsal is not green. `--scale k` divides the ladder's durations, the offsets, the mocks' stream times and the ceiling checks' spacing by the whole number k, and the summary of a run with k above 1 carries `full_length` false.
+
+### One release request, end to end
+
+1. The schedule file gives the cell its date, slot and offset; `loadgen.BuildLadder` fixes the request's step and t_i; the attempt seed is the `<seed>` of its prefix `cs-<seed>-<index>`.
+2. `runCell` admits the cell after its start checks; `gen.requestBody` puts the prefix and shape text in the frozen body's case slot.
+3. `gen.execute` sends at t_i unless 50 ms late; the first byte takes a write permit; `liveSeries` counts the send.
+4. The outcome (`in_time`, `late`, censored at 90 s, or an error class) is recorded in `attempts.jsonl` without the answer.
+5. The cell report counts it on its step's line and towards Hosted-G6; `pages` pools the line into `routes/<route>.txt`, and the index prints the pooled count.
+
+## Tracing a published number back to raw records
+
+1. Find the line on `routes/<route>.txt` or in `routes/<route>.json`, or the row in `index.json`; each names its route, step and line.
+2. Read the cells that contributed: the route's `<route>/<label>-a<attempt>/manifest.json` files whose `release` record has the outcome `counted`. The route's evidence pack holds these manifests under `out/` and its page files under `pages/`. The pack holds no `attempts.jsonl`, report pair or configuration, so steps 3 to 5 read the cell's archive, `<route>-<cell>.tar.gz`, which holds the files the cell's directory under `--out` holds, and the route's configuration.
+3. Re-render one cell's report pair with `percentes --replay DIR --config FILE --out OUT`; it exits 1 unless the pair matches the manifest byte for byte. Where the route has a confidential limit, the configuration as published does not load, and only the retained `config.yaml` beside the cell's frames replays the cell.
+4. Check the cell's files with `percentes --check-release DIR --config FILE --frames ROOT`, which confirms the recorded hash of each file [its list](#replay-and-the-completeness-check) names. It reads the retained frame store, so only the operator can run it; a route with a confidential limit also needs `--release-key`.
+5. In that cell's `attempts.jsonl`, leave out records with `warmup` true and take the step's records. The cell has a figure for the step only where it attempted the step, that is where the step or a later one dispatched a request. Each record falls on one line (`lineOf`):
+   - `outcome` empty (`""`): `unsent`;
+   - `outcome` `censored`: `censored`;
+   - `outcome` `errored`: `billing_refusal` where `billing_refusal` is true, else the line its `err_class` names;
+   - `outcome` `completed`: `completed_in_time` where `in_time` is true, `completed_late` where `late` is true.
+
+   The line's count over the step's records is the cell's figure.
+6. For the route page's pooled figure, sum the step's line counts and its scheduled counts over the counted cells of the sampling frame that attempted the step with requests scheduled, or over one part where a drift split divides it (`pool`, `drift`).
+7. For a record's timings, read its frames in the frame store (`frames.jsonl` under `--frames`, named in the manifest's `frames`), each read with its time from the run epoch; the frame store is retained, so this step is the operator's.
+8. For a self-hosted run, find the field in the tables below; each row names the function that computes the field. A `*` in a field path stands for any key or index.
+
+`report.json` (one run; `report.Report` embeds `run.Artifacts`):
+
+| Field | Computed in |
 |---|---|
-| `--scale` | below 1, or so large that a step is shorter than the 5 s CPU window (above 96) |
-| `--out`, `--frames`, `--clock-sync` | missing |
-| `--byte-cap` | missing, or not above 0 |
-| `--master-seed` | empty (the default is `percentes-rehearsal`) |
-| `--frames` | inside the source tree |
-| `--clock-sync` | not `sntp` with a server, and not `chronyc` ending in `tracking` without `-c` |
-| open-file limit | below 65,536 |
-| the binary | no version-control revision, or built from a modified tree without `--source-diff` |
-| `--out` | an existing directory that is not empty |
+| `windows.*`: `ttft_conditional_on_completion`, `e2e_conditional_on_completion`, `error_rate`, `goodput_frac`, `goodput_rps`, `goodput_sweep` | `collect.Collect` |
+| `windows.*.completion_incidence` | `collect.EstimateIncidence` |
+| `windows.*.ttft_tail_ci`, `e2e_tail_ci` (tail confidence intervals) | `collect.tailCIs`, called by `collect.Collect` |
+| `threshold_analysis` | `collect.AnalyzeThresholds`, from the `baseline` and `fault` windows |
+| `in_flight_at_fire` | `collect.AccountInFlight`, at `actual_fire_ns` |
+| `share_gate` | `run.shareGate` |
+| `detector` | `detect.RunWith` |
+| `decomposition` | `detect.NewDecomposition`, with probe times recorded in `run.Execute` |
+| `orchestration`, `actual_fire_ns` | `orchestrator.Execute`; `run.Execute` |
+| `schedule_fired` | `run.scheduleFires`, which reads the mock's `/admin/faults` back |
+| `loadgen.gates` | `loadgen.evaluateGates` |
+| `validity_gates` | `validity.Evaluate` |
+| `run_valid`, `invalid_reasons` | `run.validity`; `cmd/percentes` adds the reasons `validity.Report.FailReasons` gives for every gate except G1 and G2 |
+| `conditional_headline` | `report.headline`; a hosted report has no such field |
 
-| Path under `--out` | Contents |
+`campaign.json` (`report.CampaignReport`, with the campaign under `campaign`):
+
+| Field | Computed in |
 |---|---|
-| `inputs/` | the operator file, whose required records all name one note file; the source diff, when given; the ledger with the six routes' caps and a mock price at both bounds; the schedule over the current UTC date and the nine days after it, from `--master-seed`, freezing each mock route's configuration and the ledger; each route's ceiling-check record, `ceiling-<route>.json`, from the ten requests sent to its mock; each mock route is the only host of its model |
-| `<route>/<cell>-a1/` | the cell's files, as under `run` |
-| `rehearsal.json` | the summary: whether the rehearsal is green, with the reasons where it is not; whether it ran at full length, the scale, and the ladder and mock settings as run; the master seed, the cell label, the build's revision and whether its tree was modified, the host's name, operating system, architecture, CPU count and open-file limit, the clock-sync command, and the start and end; per route, the form, the offset, the ceiling check's result, the cell directory, the outcome, each step's rate, scheduled count and G2 report, the tripwires, the requests sent, the mock's answers by status, the completeness check's result and the manifest's SHA-256; and the host's aggregate dispatch series over every cell |
+| `campaign.per_run[*]` | `campaign.extractScalars`, one row per run |
+| `campaign.endpoints[*]`, `campaign.invalid_runs` | `campaign.summarize`, each summary from `stats.Summarize` |
+| `campaign.noise_floor_cov` (coefficient of variation of the primary endpoint, `clean_delete` campaigns only) | `campaign.RunWith`, from the `ttr_equilibrium_s` summary |
+| `campaign.halted`, `halted_after_run`, `failed`, `failed_run`, `failed_reason` | `campaign.RunWith` |
+| `instrument_commit`, `config_sha256`, `overrides` | `report.GenerateCampaignWith`, from the `report.CampaignMeta` that `cmd/percentes-campaign` passes |
+| `validity_gates[*]` | `validity.Evaluate`, once per run in `cmd/percentes-campaign` |
 
-The rehearsal is green when, for every route, the cell counted, ran all
-five steps with G2 passing at each and no ladder end or tripwire, and
-passed the completeness check, and the route's mock answered every
-request the ceiling check and the cell sent with status 200. `rehearse`
-exits 0 when green, 2
-when not, and 1 on an execution error or a refusal. An interrupt
-(SIGINT, from Ctrl-C) or a termination signal (SIGTERM) stops the cells,
-each retained and labelled, and the summary is still written.
+`calibration.json` (`calibrate.Output`, with the result under `calibration`):
 
-`--scale k` divides the warm-up, step and drain lengths, the length of
-an offset minute and the mocks' stream times by k, for a shortened run;
-its summary carries `"full_length": false` and is not the evidence file. A
-cell's report pair is rendered from its configuration file, which keeps
-the pinned 480 s step window, so a shortened run's throughput figures
-read k times below the rate that ran.
-
-### Following one release request
-
-This is the worked example: one request of a release, from the
-committed schedule to its row in the index.
-
-1. **Schedule.** The committed schedule (`schedule.json` as
-   `percentes-release schedule` wrote it) gives the route a cell, a date
-   and a UTC slot, and the route's offset inside the slot. The cell's
-   attempt seed becomes `run.seed`, and `loadgen.BuildLadder` fixes the
-   request's step k and its intended time t_i from it; the record will
-   carry `step` and `warmup`.
-2. **Admission.** When the route's process started, the ceiling rule
-   admitted step k at the schedule's exact counts, or the request would
-   never be scheduled. At the cell's start, after the clock and status
-   records, the refresh command rewrites the recorded limits and model
-   documentation and the balance command reads the account's balance;
-   a cell is blocked here with no request sent where its records were
-   not rewritten, its balance is below its reservation, the balance
-   command fails, or the balance is unavailable and the route records
-   no `balance_unavailable` ruling, and a route
-   whose limits as read, at its newest recorded price, no longer admit
-   one of its steps stops here. The ledger then reserves one probe
-   request plus every scheduled request of the cell against the route's
-   and the release's liability caps; a refusal stops the route and the
-   cell is retained with that label.
-3. **Body.** The user text is `cs-<seed>-<i>` with a six-digit index, a
-   space, and a Shape S ticket; it replaces the case slot of the frozen
-   body, whose hash the probe record carries, and the key goes in the
-   one header `target.auth_header` names.
-4. **Dispatch.** The worker sends at t_i and the live dispatch series
-   counts the send in its UTC second; the hard timeout of 90 s runs from
-   the send; the step's tripwires count the send and the request in
-   flight.
-5. **Stream.** The status, the allowed headers, the peer address and
-   the protocol are recorded as they arrive. The first content event
-   stamps `first_token_ns`; a retained header's values go to the frame
-   store and `[retained]` to the record; `message_stop` ends a Messages
-   stream as `[DONE]` ends a chat-completions stream.
-6. **Outcome.** A completion whose whole answer arrived within 30 s of
-   t_i is `in_time`, and later than that `late`; no terminal event by 90 s
-   from the send is `censored`. A failure takes its class from the stage
-   at which it occurs ([From dispatch to outcome](#from-dispatch-to-outcome));
-   the first in-band error object ends the request at its arrival as
-   `malformed_stream`, and nothing after it is read. A completion with
-   the adapter's length finish reason is also counted as stopped at the
-   ceiling.
-7. **Record.** The request is one line of `attempts.jsonl` with `step`,
-   `in_time` or `late`, `reasoning_tokens` where the usage carried one,
-   and no answer. Its gaps between content events enter the step's
-   histogram in the manifest's `inter_chunk_gaps`, and its send enters
-   the manifest's `dispatch_aggregate`.
-8. **Cell report.** The request is one count on its step's
-   `completed_in_time` or `completed_late` line, or on an error or
-   censored line, of the cell's `report.json`, over the step's scheduled
-   requests with its Wilson interval; if it completed, one rise of the
-   step's completion-incidence curve at its completion time, one value
-   in the step's TTFT and whole-answer distributions and one completion
-   in the step's throughput; and one count toward the step's hosted-G6
-   in the manifest's `gates`.
-9. **Pages.** `percentes-release pages` reads the cell with the route's
-   other counted cells, pools that line per step over the frame's cells
-   that attempted the step with the DEFF-adjusted interval, and writes it
-   to `routes/<route>.txt`. The index row for the route and step prints
-   the line's pooled count over the pooled scheduled count in that line's
-   column, in a table ordered by provider, route and step and never by a
-   measured value.
-
-## Tracing a published number
-
-The tables below map each published field to the code that computes it,
-in this order: a single run's `report.json`, a campaign's
-`campaign.json`, a calibration's `calibration.json`, a hosted run's
-evidence files, and last a release cell with its per-step tables, its
-route page and the index.
-
-`report.json`, the JavaScript Object Notation (JSON) report of one run:
-
-| Field | Computed in | SPEC |
-|---|---|---|
-| `windows.*.ttft_conditional_on_completion`, `e2e_conditional_on_completion` | `collect.Collect`, `histo.H.Summarize` | §3 |
-| `windows.*.error_rate`, `censored_rate`, `err_classes` | `collect.Collect` | §3 |
-| `windows.*.completion_incidence` (points, censored count, final survival, horizon) | `collect.EstimateIncidence` | §3 |
-| incidence quantiles and their refusals, in `report.txt` only | `report.incidenceText` through `IncidenceCurve.Quantile` and `Ceiling` | §3 |
-| `windows.*.itl_pooled` | `collect.Collect` | §3 |
-| `windows.*.content_events`, `completion_tokens`, `token_check` | `collect.Collect` | §6, §10 |
-| `windows.*.goodput_frac`, `goodput_rps`, `goodput_sweep` | `collect.Collect` | §3, §4 |
-| `windows.*.ttft_tail_ci`, `e2e_tail_ci` | `collect.tailCIs`: 95 % order-statistic intervals, ranks by the normal approximation to the binomial, refused where a rank falls outside the sample | §7 |
-| `windows.fault_survivor` | `collect.Collect` over the replica `run.survivorOf` names | §3 |
-| `windows.outage` (process kill) | `collect.Collect` from the fire to replica-ready, in `percentes-campaign` | §1 |
-| `threshold_analysis` | `collect.AnalyzeThresholds` | §4 |
-| `in_flight_at_fire`, with `on_victim_*` | `collect.AccountInFlight` against the recorded fire; under process kill, `determinate` and `indeterminate_at_fire` from `collect.SplitAtFire` | §1, §3 |
-| `detector.to_pre_fault`, `to_equilibrium`, `sensitivity`, `components` | `detect.RunWith`, one `detect.detect` per detection | §5 |
-| `detector.equilibrium_*`, `backlog_drain_*` | `detect.RunWith` | §5 |
-| `detector.partition_heal_recovery`, `heal_anchor_ns`, `integrated_goodput_deficit_to_partition_heal` | `detect.RunWith`, black-hole variant only | §5 |
-| `decomposition.segments` | `detect.NewDecomposition`, probe times in `run.Execute`; under process kill, container and log times from `percentes-campaign` through `vllmlog.Apply` | §5 |
-| `container` (process kill) | `percentes-campaign`: container state before and after, clock offsets, the kill record, fire uncertainty, `die` and `start` events, log boundaries | §5, §6 |
-| `loadgen.gates` | `loadgen.evaluateGates` | §2 |
-| `share_gate` | `run.shareGate` | §1 |
-| `victim_replica` | the `--victim` flag, through `run.Options.VictimReplica` | §1 |
-| `orchestration`, `actual_fire_ns` | `orchestrator.Execute` and the injector's records; `run.Execute` | §2, AC3 |
-| `schedule_fired` | the mock's `/admin/faults` read back (`run.scheduleFires`) | §2 |
-| `run_valid`, `invalid_reasons` | `run.validity`; `cmd/percentes` adds `validity.Report.FailReasons` | §10 |
-| `validity_gates` | `validity.Evaluate` | §10 |
-| `receive_path`, `server_side`, `server_samples`, `family_errors` | `run.Artifacts.AttachObservations`, in the binary | §2 |
-| `conditional_headline` | `report.headline` | Appendix |
-
-`campaign.json`:
-
-| Field | Computed in | SPEC |
-|---|---|---|
-| `campaign.per_run[*]`, each with its `receive_path`, `server_side` and `family_errors` | `campaign.extractScalars` | §5, §7 |
-| `campaign.endpoints[*]` (summary, `contributing_n`, `dropped_runs`, `dropped_reason`) | `stats.Summarize`, `campaign.summarize` | §7 |
-| `campaign.halted`, `failed`, `failed_run`, `failed_reason` | `campaign.RunWith` | §7 |
-| `instrument_commit`, `config_sha256`, `overrides` | `report.GenerateCampaignWith` | §6 |
-| `campaign.noise_floor_cov`, clean delete only | `campaign.Run`, from the coefficient of variation `stats.Summarize` gives for the primary endpoint | §7 |
-| `validity_gates[*]` | `validity.Evaluate`, per run | §10 |
-
-`calibration.json`:
-
-| Field | Computed in | SPEC |
-|---|---|---|
-| `calibration.ramps[*].steps[*]` (rate, goodput, queue mean and coverage, gates, pass and reasons, `receive_path`, `server_window`) | `calibrate.RunRamp` | §10 |
-| `calibration.lambda_max`, `lambda_r`, `load_rate_rps`, `decision`, `valid`, `reason` | `calibrate.Calibrate` | §10 |
-| `calibration.reference` | `calibrate.Reference` | §5 |
-
-The evidence files of a hosted run ([Hosted runs](#hosted-runs-and-the-evidence-files)):
-
-| File or field | Computed in | SPEC |
-|---|---|---|
-| `attempts.jsonl`: the times, outcome, class, status, allowed headers, `retry_after`, `peer_addr`, `conn_reused`, `content_events`, `completion_tokens`, `usage`, `finish_reason`, `reported_model`, `model_mismatch`, `system_fingerprint`, `stream_error`, `stream_error_hmac_sha256`, `unknown_events`, `reasoning`, `refusal` and `refusal_bytes` of each record | `loadgen.execute` and `recordChunk`, the usage through `mergeUsage`, copied by `evidence.Records`, which on a target with a confidential limit writes `config.RetainedError`'s stand-in to `stream_error` with the text's HMAC-SHA256 under the release key (`releasekey.Key.Sum`) | SPEC-HOSTED §9 |
-| `attempts.jsonl`: `score` | `score.Scorer.Score`, through `evidence.Records` | SPEC-HOSTED HA2 §5 |
-| `attempts.jsonl`: `run_failures` | the command's invalid reasons, repeated on every record | SPEC-HOSTED §7 |
-| `frames.jsonl` | `evidence.FrameRecords`, from the timed reads `loadgen.execute` kept | SPEC-HOSTED §9 |
-| `probe.json` | `probe.Run` | SPEC-HOSTED §2, §5 |
-| `clock.json`, `status-start.json`, `status-end.json` | `evidence.ReadClock`, `evidence.ReadStatus` | SPEC-HOSTED §9 |
-| `manifest.json` | `evidence.NewManifest` | SPEC-HOSTED §9 |
-
-A release cell ([The release runner](#the-release-runner)):
-
-| File or field | Computed in | SPEC |
-|---|---|---|
-| `cell.json` | `cmd/percentes-release` (`runCell`, `cellOutcome`, `labelCell`); `auth_statuses` by `countAuth` | SPEC-HOSTED HA3 point 16 |
-| `manifest.json`: `release` | `evidence.Cell`, filled by `cellEvidence` and `retain`; `schedule_sha256` from the `--schedule` file's bytes in `newRoute`; `admission` by `admission.CeilingRule`; `ceiling_choice`, with `left_out`, by `probe.ChooseCeiling`; `dispatch_aggregate` by `hostDispatch`; `inter_chunk_gaps` by `evidence.StepGaps`; `canary` by `loadgen.SummarizeCanary` over each attempted step's window in `runCell` | HA3 points 6, 7, 9 and 15; §2 |
-| `manifest.json`: `gates` (per step) | `evidence.releaseGates`: `validity.G2` per attempted step and over the ladder, `validity.ReleaseG6` per step | HA3 points 5 and 13 |
-| `manifest.json`: `balance_start`, `balance_end` | `evidence.ReadBalance`, named by `evidence.NewManifest` | SPEC-HOSTED §9 |
-| `balance-start.json`: `check` | `evidence.CheckBalance`, against `State.ReservationUSD` | SPEC-HOSTED §3 |
-| `refresh.json`, and the records' `retrieved` dates in the manifest | `evidence.ReadStatus`, `ReadRefreshedLimits`, `PublishedRefresh`, `Operator.Refreshed` | SPEC-HOSTED §4 |
-| `window-close.json`; `routes/<route>.json`: `window_close` | `windowClose`, `evidence.NewWindowClose`; `report.CompareWindowClose` | SPEC-HOSTED §4 |
-| `manifest.json`: `endpoint.expected_model`; the `model_mismatch` label | `Target.ExpectedModel`; `cellOutcome`, checked by `evidence.CheckRelease` | SPEC-HOSTED §2 |
-| a ceiling-check record's `expected_model` | `probe.RunRelease`, from `Target.ExpectedModel`; read by `ReleaseRecord.Expected` | SPEC-HOSTED §2 |
-| a ceiling-check record's `ledger_sha256` | `sendCeiling`, from `Ledger.Bound`; compared with the schedule's `ledger_sha256` by `readCeilingProbes` | HA3 point 9 |
-| a ceiling-check record's `ceiling_check` and `input_bound_check` results | `probe.RunRelease`; re-derived from the record's requests by `ReleaseRecord.Verify` when `run` reads it | HA3 point 7 |
-| `schedule.json`: `input.configs` (`config_sha256`, `config_hmac_sha256`, `host_group`), `input.ledger_sha256`, `input.ledger_lines`, `input.ledger_head_sha256` | `scheduleCmd` through `frozenConfig` (the configuration as published, from `Config.Published`, and the configuration as loaded under `releasekey.Key.Sum`) and the ledger's `State.OpenSHA256`, `State.Lines` and `State.HeadSHA256`; checked at route start by `checkFrozen`, `checkLedger` and `frozenEntries` | HA3 point 9 |
-| `routes/<route>.json`: `model_mismatch_cells` | `readRouteCells`, from each `model_mismatch` manifest's endpoint record; the text line by `StepTables.Text` | SPEC-HOSTED §2 |
-| the configuration as published, and the manifest's configuration hash | `Config.Published`, through `publicConfigCmd` and `evidence.NewManifest` | HA3 point 15 |
-| `probe-retained.json` | `probe.Withheld`, `probe.WriteRetained` | HA3 point 15 |
-| `manifest.json`: `frames`, `records` (`sha256` and `bytes`, or `hmac_sha256`) | `evidence.NewManifest` through `refOf`, `keyedRefOf` and `Operator.published`; checked by `readRef` in `evidence.CheckRelease` | SPEC-HOSTED §9; HA3 point 15 |
-| the publication record's check | `evidence.LoadPublication`, `Publication.Check`, through `publishCheckCmd` | HA3 point 14 |
-| `publication.md`, `publication.json` | `Publication.Page`, `PublicationPage.Markdown`, through `publishCheckCmd` | SPEC-HOSTED §9; HA3 point 14 |
-| `report.json`: `tables.cells[*].steps[*].signals.content_events_errored`, `content_events_censored`, `prompt_tokens` | `report.signals`, `promptTokens` | SPEC-HOSTED §8 |
-| `routes/<route>.json`: `naming` | `report.NewStepTables`, from `target.naming.lines` | HA3 point 14 |
-| `report.json`: `tables.limits` | `admission.CeilingRule`, with the `unpublished:` cover tests; a confidential limit's source and `hmac_sha256` in place of its value, checked by `admission.CheckPublished` | HA3 points 6 and 15 |
-| `report.json`: `tables.cells[*].steps[*].lines`, `hosted_g6` | `report.stepTables`, `newRate` (Wilson); the finish-reason sub-lines by `finishLabel` | HA3 points 8 and 13 |
-| `report.json`: `tables.cells[*].steps[*].g2` | `report.stepG2`, from the manifest's per-step `gates`; the text line by `g2Text` | HA3 point 5 |
-| `report.json`: `tables.cells[*].steps[*].canary` | `report.stepCanary`, from the manifest's `release.canary`; the text line by `canaryText` | §2; SPEC-HOSTED §6 |
-| `report.json`: `tables.cells[*].steps[*].throughput`, `tables.step_s` | `report.throughput` over `release.ladder.step_s` | SPEC-HOSTED §8 |
-| `report.json`: `tables.cells[*].steps[*].completion_incidence`, `incidence_quantiles` | `report.curve`, `report.incidence` through `collect.EstimateIncidence` | HA3 point 13; §3 |
-| `report.json`: `tables.cells[*].steps[*].signals` (`failure_timing`, `ttft`, `whole_answer`, `latency_by_connection`, `content_events`, `completion_tokens`, `reasoning_tokens`, `inter_chunk_gaps`, `retry_after`) | `report.signals`, `distribution` with `collect.OrderStatRanks`, `counts`, `gapsOf` | HA3 point 8; SPEC-HOSTED §5, §8; §7 |
-| `tables.pooled` (a complete frame) | `report.pool`, `newPooled`, `designEffect`; `throughput` by `pooledThroughput` | HA3 point 13; SPEC-HOSTED §8 |
-| `tables.drift_changes`, `tables.drift_parts` | `report.DocsOf`, `report.drift` | SPEC-HOSTED §4; HA3 point 9 |
-| the index table, `index.md` and `index.json` | `report.NewIndex`, `Index.Markdown`, written by `pagesCmd` | HA3 point 12 |
-| `routes/<route>.txt`, `routes/<route>.json` | `StepTables.Text` and the tables' JSON encoding, written by `pagesCmd` | HA3 point 13 |
-| `dispatch.json`, `dispatch-aggregate.json` | `newDispatchSeries` and `liveSeries`, `aggregate` | HA3 point 9 |
-| `rehearsal.json` | `rehearse`; each route's entry by `route.rehearsed`; `dispatch` by `aggregate` | SPEC-HOSTED §9 |
+| Field | Computed in |
+|---|---|
+| `calibration.ramps[*].steps[*]`: `goodput`, `queue_mean`, `gates`, `server_window`, `receive_path` | `calibrate.LoadRunner.RunStep`, through `collect.Collect` and `collect.ReceivePathFor` |
+| `calibration.ramps[*].steps[*]`: `pass`, `reasons` | `calibrate.Judge` |
+| `calibration.ramps[*].lambda_max`, `valid`, `reason` | `calibrate.RunRamp` |
+| `calibration.lambda_max`, `lambda_r`, `load_rate_rps`, `decision`, `valid`, `reason` | `calibrate.Calibrate` |
+| `calibration.reference` | `calibrate.Reference` |
 
 ## Changing things safely
 
-Each kind of change lives in one place and moves with the items listed
-under it. You need this section before editing a pin, a metric, a fault
-mode or a diagram.
+| Change | Where | Covered by |
+|---|---|---|
+| A configuration pin | one constant in `internal/config/config.go`, checked by `Config.Validate`; every file under `configs/` that sets the field | `TestPinnedValueEnforcement`; the reference configurations load in the Go suite; `make kind-smoke` and `make reproduce` for `configs/kind-e2e.yaml`; `make campaign-e2e` for `configs/kind-campaign.yaml`; `make process-kill-e2e` for `configs/process-kill-mock.yaml`; `percentes-calibrate --check` for `configs/phase1.yaml` |
+| A metric | computed in `collect` or `detect`, carried in `run.Artifacts`, rendered in `report` | the §8 acceptance suite (`make test-ac`), whose AC6 asserts report completeness |
+| A fault mode | `internal/mock/faults.go`, the configuration's fault enum, `/admin/faults` in `internal/mock/server.go`, `internal/mock/sse.go` | a behaviour test per mode in `internal/mock` |
+| A release rule | `internal/admission`, `internal/probe`, `internal/evidence`, `internal/report`, `cmd/percentes-release` | `make test-unit`; `percentes-release rehearse` |
+| A published field | the encoder and `report.FromRun` | `percentes --replay`; `evidence.CheckRelease` |
 
-- **A configuration pin** lives in one constant in
-  `internal/config/config.go` (the pilot and release pins among them, as
-  `PinnedPilot*` and `PinnedRelease*`), which `Config.Validate` checks. Every
-  configuration under `configs/` that sets the field carries the new value:
-  the Go suite loads the four reference configurations, the kind stages load
-  the kind configurations, and `configs/phase1.yaml` is checked with
-  `percentes-calibrate --check`. The mutation case in
-  `TestPinnedValueEnforcement` moves with the pin, and the SPEC text and a
-  dated CHANGELOG.md entry change with it. A few fixed statistical
-  constants (the 95 % t multipliers by degrees of freedom, the 95 % z value, the
-  5 % conditional-caveat threshold) sit in `internal/stats` and
-  `internal/collect` beside the code that uses them.
-- **A metric** is computed in `collect` or `detect` from the request
-  records, carried in `run.Artifacts` and rendered in `report`; AC6 asserts
-  report completeness, so its field list grows with it.
-- **A fault mode** needs the engine in `internal/mock/faults.go`, the mode
-  in the configuration enum and its validation, the mode in the
-  `/admin/faults` check in `internal/mock/server.go`, its handling in
-  `internal/mock/sse.go`, and a behaviour test that asserts its
-  transport-level signature, as the raw TCP silent-hang test does.
-- **Real vLLM** reuses the request path in `loadgen` and the window and
-  detector arithmetic in `collect` and `detect`, and the configuration
-  carries the Phase 1 pins. Still to build:
-  - replica attribution from the §1 layer-7 proxy's header and access log.
-    `loadgen` records the serving replica only from the mock's header, so
-    on any other target the survivor cohort, the on-victim outcome split
-    and G3 have no attribution, and G1 fails every run;
-  - the node-partition injector for the black-hole variant, which
-    `percentes-campaign` refuses;
-  - producers for the packet capture, endpoint staleness (G4) and GPU
-    fingerprint (G5) observations: `validity.Observations` has fields for
-    them, and both binaries fill only the queue samples;
-  - a backlog-drain measurement in `detect`;
-  - the Kubernetes API and log boundaries of the decomposition.
-- **A diagram** is a draw.io file under `docs/diagrams/`: a Scalable
-  Vector Graphics (SVG) image that carries its draw.io source, so draw.io
-  opens it for editing.
-- **Reproducing** anything: `make test` is the whole gate (`test-unit`,
-  `test-ac`, `kind-smoke`, `reproduce`, `campaign-e2e`, `process-kill-e2e`),
-  and each stage runs alone. `make hooks` installs the git hooks.
+`make test` runs `test-unit`, `test-ac`, `kind-smoke`, `reproduce`, `campaign-e2e` and `process-kill-e2e`; continuous integration (`.github/workflows/ci.yml`) runs the same stages in its `unit`, `ac` and `kind` jobs and lint in `lint`, each job's `actions/setup-go` step pinning Go 1.21.6 (`go-version`), the toolchain the `Makefile` selects through `GOTOOLCHAIN`. `make hooks` sets `core.hooksPath` to `hooks`: `pre-commit` runs gofmt (the Go source formatter), build and lint, `commit-msg` checks the subject line, and `pre-push` runs the race unit suite.
+
+Not implemented for real vLLM:
+
+- replica attribution from the §1 layer-7 proxy (a proxy that routes each HTTP request to a replica); `loadgen` reads the serving replica only from the mock's `X-Percentes-Replica` header;
+- the node-partition injector;
+- producers for the G4 and G5 observations (`validity.Observations`);
+- a backlog-drain measurement;
+- the Kubernetes API and log boundaries of the decomposition.
+
+No report or campaign applies the §7 Holm step-down to secondary comparisons; `stats.holm` is unexported and called only from its tests.
 
 ## Glossary
 
