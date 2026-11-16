@@ -674,3 +674,41 @@ func TestModelFaultRouteExcluded(t *testing.T) {
 		t.Fatalf("schedule: %v, %v", reasons, err)
 	}
 }
+
+// schedule refuses a route whose host group's records choose a ceiling
+// other than its configuration's, give no deciding record, or are
+// missing, and takes records that exclude the group.
+func TestScheduleCeilingChoices(t *testing.T) {
+	groq, _ := quickSolo(t, "groq", "https://api.example.test/openai/v1/chat/completions")
+	cfgs, err := loadReleases([]string{groq})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(ceiling int, pass bool, edit func(*probe.ReleaseRecord)) string {
+		r := hostCeiling(cfgs[0], 2000, "groq", ceiling, pass, "open")
+		if edit != nil {
+			edit(&r)
+		}
+		return writeCeiling(t, r)
+	}
+	stopped := func(r *probe.ReleaseRecord) {
+		r.Requests[len(r.Requests)-1].Exchange.Error = "cancelled"
+		r.Interrupted = "the check's context ended after 10 of 10 requests: operator abort"
+	}
+	for _, c := range []struct {
+		name  string
+		paths []string
+		want  string
+	}{
+		{"runs at its ceiling", []string{at(512, true, nil)}, ""},
+		{"chooses another ceiling", []string{at(512, false, nil), at(1024, true, nil)}, "schedule: route groq: the ceiling check chose 1024 (groq failed at 512; every host passed at 1,024); the configuration runs at 512"},
+		{"excludes the group", []string{at(512, false, nil), at(1024, false, nil)}, ""},
+		{"only stopped", []string{at(512, true, stopped)}, "schedule: route groq: probe: route groq has no check at 512 that was not stopped (1 stopped)"},
+		{"no record", nil, "schedule: route groq: no --ceiling-probe record of its host group (groq)"},
+	} {
+		_, err := scheduleChoices(cfgs, c.paths, nil, "open")
+		if c.want == "" && err != nil || c.want != "" && (err == nil || err.Error() != c.want) {
+			t.Errorf("%s: %v, want %q", c.name, err, c.want)
+		}
+	}
+}
