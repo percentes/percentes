@@ -24,14 +24,15 @@ func ProbeSent(rec *probe.Record) int {
 
 // RunSent counts a run's dispatched requests, split at the end of
 // warm-up by intended dispatch time. Every dispatch counts, whatever its
-// outcome. A nil result sent nothing.
+// outcome, except one the write limit refused before its first byte. A
+// nil result sent nothing.
 func RunSent(res *loadgen.Result) (warmup, after int) {
 	if res == nil {
 		return 0, 0
 	}
 	for i := range res.Requests {
 		r := &res.Requests[i]
-		if r.DispatchNs == 0 {
+		if r.DispatchNs == 0 || r.WriteDenied {
 			continue
 		}
 		if r.IntendedNs < res.WarmupEndNs {

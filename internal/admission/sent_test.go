@@ -153,3 +153,16 @@ func TestSentCounts(t *testing.T) {
 		t.Errorf("RunSent(nil) = %d, %d", w, m)
 	}
 }
+
+// A dispatch the write limit refused sent no byte and settles as unsent.
+func TestRunSentSkipsRefusedWrites(t *testing.T) {
+	res := &loadgen.Result{WarmupEndNs: 60e9, Requests: []loadgen.Request{
+		{IntendedNs: 0, DispatchNs: 1, Outcome: loadgen.OutcomeCompleted},
+		{IntendedNs: 1e9, DispatchNs: 1e9 + 1, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrConnect, WriteDenied: true},
+		{IntendedNs: 60e9, DispatchNs: 60e9 + 1, Outcome: loadgen.OutcomeCompleted},
+		{IntendedNs: 61e9, DispatchNs: 61e9 + 1, Outcome: loadgen.OutcomeErrored, ErrClass: loadgen.ErrConnect, WriteDenied: true},
+	}}
+	if w, m := RunSent(res); w != 1 || m != 1 {
+		t.Errorf("RunSent = %d, %d, want 1, 1", w, m)
+	}
+}
