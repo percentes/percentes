@@ -575,3 +575,16 @@ func TestCampaignReportPrintsDecompositionRows(t *testing.T) {
 		t.Fatalf("per-run table lacks the outage column:\n%s", humanText)
 	}
 }
+
+// The run report's client-validity line counts refused writes.
+func TestReportWritesDenied(t *testing.T) {
+	art := minimalArtifacts()
+	art.Loadgen.Gates.WritesDenied = 5
+	_, humanText, err := Generate(art, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(humanText, "undispatched=0; writes_denied=5; cpu ") {
+		t.Fatalf("no writes_denied in the client-validity line:\n%s", humanText)
+	}
+}

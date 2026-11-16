@@ -361,8 +361,8 @@ func human(r *Report) string {
 	if !g.CPUMeasured {
 		cpuCell = "UNMEASURED on this platform build (gate cannot pass uncertified)"
 	}
-	w("client-validity gate: pass=%v (skew p99=%dus max=%dus; undispatched=%d; cpu %s; %s)",
-		g.Pass, g.SendSkewP99Us, g.SendSkewMaxUs, g.Undispatched, cpuCell, g.GCPauseText())
+	w("client-validity gate: pass=%v (skew p99=%dus max=%dus; undispatched=%d; writes_denied=%d; cpu %s; %s)",
+		g.Pass, g.SendSkewP99Us, g.SendSkewMaxUs, g.Undispatched, g.WritesDenied, cpuCell, g.GCPauseText())
 	w("share gate: applicable=%v pass=%v shares=%v", art.ShareGate.Applicable, art.ShareGate.Pass, art.ShareGate.Shares)
 	if art.FamilyErrors > 0 {
 		w("kept-family reads that failed: %d", art.FamilyErrors)
