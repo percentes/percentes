@@ -551,254 +551,85 @@ Commands run over SSH on `--ssh-target`, or locally when it is empty; a local ki
 
 ## Hosted runs and the evidence files
 
-A hosted target (`target.hosted`) is a managed provider endpoint the
-project does not operate. SPEC-HOSTED.md is the pre-registered protocol
-for measuring one, and the code below runs it. You need this section to
-run or read a pilot window, and to know what each evidence file holds; a
-release adds to it in [The release runner](#the-release-runner). Two
-commands drive hosted targets, and both reserve every request in the
-admission ledger before it is sent: `cmd/percentes-pilot` runs the
-descriptive pilot of SPEC-HOSTED amendment HA2 (two endpoints, one task,
-six paired sessions), and `cmd/percentes-release` runs one route of a
-release under amendment HA3 ([The release runner](#the-release-runner)).
-`cmd/percentes` and `cmd/percentes-campaign` refuse a hosted target
-before any setup or request.
-`run.CheckConfig` makes `cmd/percentes` and `cmd/percentes-campaign`
-refuse a pilot configuration, and any target that carries a literal body,
-before any setup.
+A hosted target (`target.hosted`) is a managed provider endpoint, driven by `cmd/percentes-pilot` and `cmd/percentes-release`; each request is admitted in the admission ledger before its send. The key is read from the file `--env` names (`NAME=value` lines, owner-readable only), as the variable `target.api_key_env` names, and is masked out of every recorded header, body and error string.
 
-### What a hosted run reads first
+| File | Writer | Content | Published or retained |
+|---|---|---|---|
+| `attempts.jsonl` | `evidence.WriteRun` through `evidence.Records` | one record per scheduled request in index order: times, outcome, class, status, allowed headers, usage, `finish_reason`, `reported_model`, `stream_error`, and `err_text` in the form `redact.ErrorText` gives (table below). Under the release profile `shape`, `ceiling_tokens`, `step`, `warmup`, `in_time`, `late`, `wrote_request_ns`, `write_denied`, `billing_refusal`, `reasoning_tokens` and no answer text | published |
+| `frames.jsonl` | `evidence.WriteRunFrames` | every read of a 200 body with its time, up to `frameLimit` (8 MiB) per request, and the first `errorBodyLimit` (4,096) bytes of a non-200 body. Retained header values. Only byte counts (`dropped_bytes`) where `target.retention.model_output` is `none`. The in-band error text and the error body's code and status that `attempts.jsonl` withholds where the route has a confidential limit | retained under `--frames` |
+| `clock.json` | `evidence.ReadClock`, `evidence.WriteClock` | the clock-sync command (`sntp` or `chronyc tracking`), its output, the parsed offset and its flag | published |
+| `status-start.json`, `status-end.json` | `evidence.ReadStatus`, `evidence.WriteStatus` | the operator's endpoint-status command, output verbatim | published |
+| `refresh.json` | `evidence.PublishedRefresh`; as run, `evidence.WriteRetainedRefresh` | release cells: the run of the refresh command (`deploy/release/`) and the limits it printed, each confidential limit without its value. Where the route has a confidential limit (`config.Target.Confidential`), `[retained]` in place of standard output, standard error and each limit's `unavailable` reason | published; where the route has a confidential limit, the record as run is retained beside the cell's frames |
+| `balance-start.json`, `balance-end.json` | `evidence.ReadBalance`, `evidence.CheckBalance`, `evidence.WriteStatus` | release cells: the balance command; the start record's `check` (`sufficient`, `insufficient`, `unavailable`, `check_failed`) | published |
+| `probe.json` | `probe.Write` (pilot window); `probe.Encode` and `replaceFile` (release cell) | the probe exchange, response shape, findings, start decision and reported prompt and output counts | published |
+| `probe-retained.json` | `probe.WriteRetained` | what a probe or ceiling-check record withholds: retained header values, a withheld limits body, and each non-200 body and in-band error where the route has a confidential limit | retained |
+| `manifest.json` | `evidence.NewManifest` | build revision, configuration hash, endpoint as configured and observed, operator records, ledger hash, every artifact by `sha256` and `bytes` or by `hmac_sha256`, validity, gates, and the release cell record | published |
+| `operator.json`, `records/` | `Operator.WriteCopies` | the operator file and records as read | retained beside the frames |
+| `config.yaml` | `evidence.WriteConfigCopy` | release, route with a confidential limit: the configuration as loaded | retained, owner-readable |
+| `operator-error.txt` | `evidence.WriteOperatorError` | route with a confidential limit: an operator or refresh error that can quote retained text | retained |
+| `window-close.json` | `windowClose`, `evidence.NewWindowClose` | per release route after its last cell: the refresh record as published, the tier, and the operator file and records read after it | published; copies under `--frames` in `window-close/<route>/<UTC time>/`, where `<UTC time>` is the record's time in UTC (Coordinated Universal Time), written as the date YYYYMMDD, the letter T, the time HHMMSS to nine decimal places of a second, and the letter Z |
 
-- **The operator file** (`--operator`, `internal/evidence`) names the
-  provider, the account tier and the client host, the pilot roles where
-  the run is a pilot, and one record of each required kind: limits,
-  prices, quota, terms, status mapping, eligibility, dedicated account and
-  affiliation. A record is a file beside the operator file, with the URL
-  it was taken from and the retrieval date. `LoadOperator` reads and
-  hashes every record before the run, and the manifest carries the
-  hashes; a release route reads the file and its records again at each
-  cell's start, after its refresh command rewrote the limits and
-  eligibility records ([A cell, in order](#a-cell-in-order)). A binary
-  that carries no version-control revision refuses to run, and one built
-  from a modified tree needs a `source_diff` record (`CheckSource`). On a
-  release route with a confidential limit, `Operator.CheckConfidential`
-  refuses the file where the limit's value is a number of its own
-  (outside a longer number, a run of 32 or more hexadecimal digits and a
-  date, `config.Carries`) in the file's own path, the provider, client
-  host, cell, a role, or a record's path, URL or note. The account tier,
-  which the provider fixes, is not searched, so a tier named `Tier 4`
-  passes with a limit of 4. The value inside the text of an identifier
-  the provider fixes, with or without its provider prefix, is not
-  counted, as in `public-config` (`config.FixedIdentifiers`), so a
-  record URL ending `/openai/gpt-oss-120b` passes with a limit of 120.
-  It searches for the value as loaded and for each value the route's
-  refresh command read (`Operator.Withhold`), in each form
-  `public-config` searches (`config.ValueForms`): in decimal, also with
-  trailing zeros and with its whole part grouped in threes by a comma or
-  a space character, each with a fractional part also with a decimal
-  comma (`250.013,5`), and in scientific notation with a lowercase or
-  uppercase exponent mark, as `strconv.FormatFloat` prints it in format
-  `e` or `E` (`%g` and `%G` print that or the decimal). The route keeps
-  the values read in memory; a process that starts after
-  earlier cells takes them from the refresh records as run beside those
-  cells' frames (`retainedReads`, `evidence.ReadRetainedRefresh`). The
-  refusal names the field and the limit's dimension, and neither the
-  value nor the file's name. `run` refuses to start on such a file; read
-  at a cell's start, it blocks the cell, whose manifest carries the
-  records read when the route started; read after the route's last cell,
-  it stops the window-close record being written. `NewManifest` and
-  `NewWindowClose` refuse it too.
-- **The admission ledger** (`--ledger`, `internal/admission`) is one
-  append-only JSON Lines (JSONL, one JavaScript Object Notation (JSON)
-  object per line) file holding every inference request sent to a route,
-  the per-request prices the operator entered at each pair of input and
-  output token bounds the route sends requests at, the hosting costs,
-  and, on its first line, the caps it enforces. Each line carries its
-  sequence number and the SHA-256 (256-bit Secure Hash Algorithm) digest
-  of every byte before it; a ledger whose chain does not check admits
-  nothing. An admission names its requests' token bounds and is refused
-  where the route holds no price at exactly those bounds; it reserves
-  its requests before any is sent and is settled with the count actually
-  sent, so a run cut short still holds its reservation, and each request
-  is charged at the highest price recorded for the route at its own
-  bounds. The pilot's caps are code constants (`PilotCaps`): 1,024
-  requests per route, 2,048 in all, and a projected liability of US$40
-  at the highest per-request price recorded for each route at the
-  pilot's bounds, 2,000 input and 4,096 output tokens.
-- **The key.** `target.api_key_env` names an environment variable. The
-  pilot and release commands read it from a file given with `--env`
-  (`NAME=value` lines, readable by its owner only) and never from the
-  inherited environment. The key travels
-  in the one header `target.auth_header` selects and is masked out of
-  every recorded header, body and error string.
+`redact.ErrorText` gives the text of a transport or stream error, in `attempts.jsonl` (`err_text`) and in the probe and ceiling-check records. The first row that matches applies, so a dial or read timeout carried by a `*net.OpError` prints that error's text.
 
-### One hosted run, in order
+| Error | Text |
+|---|---|
+| a network error (`*net.OpError`) | its text, without its own source address or that of a wrapped network error that names both ends |
+| a certificate that does not verify | its text |
+| a deadline or a network timeout | `timed out after <timeout>`, with `<timeout>` the timeout its caller gives |
+| a cancellation | `cancelled` (`redact.Cancelled`) |
+| an end of input | `connection closed` |
+| any other error | its Go type and `, text withheld` |
 
-1. **Status and clock.** `--status-cmd` runs the operator's
-   endpoint-status command and keeps its output verbatim
-   (`status-start.json`). `--clock-sync` runs the host's clock-sync tool,
-   `sntp` or `chronyc tracking`, and parses the offset it reports
-   (`clock.json`). No reading, or an offset above 60 s, flags the run,
-   and a flagged run does not count.
-2. **The pre-run probe** (`internal/probe`, SPEC-HOSTED §5). From the
-   client host: Domain Name System (DNS) resolution, the Transport Layer
-   Security (TLS) handshake and one request at the run's settings, with
-   the response shape recorded: which keys carried
-   content or reasoning, the finish reasons, where usage objects and
-   refusal fields appeared, and the reported model. A 400, 401, 403 or
-   404, or a status the target lists in `probe.account_limit_statuses`,
-   blocks the start. Any other outcome is recorded and the run starts. A
-   pilot probe can add a wrong-model request and read a limits URL;
-   neither gates the start.
-3. **The load**, through `loadgen.Run`, with the loopback canary beside
-   it. A configuration with a pilot body, or a target with a literal
-   body, supplies one case text per scheduled request (`Hooks.Cases`);
-   the client sends the body with the case text in its one slot,
-   `"{{case}}"`, and every other byte unchanged. A pilot window carries
-   two tripwires that record and never block a dispatch: a send beyond
-   the schedule, and a fifth request in flight (the pinned limit is 4).
-   Either firing makes the window client-invalid.
-4. **After the last terminal event:** the end status; the frame store
-   under `--frames`, a directory outside the source tree, with the
-   operator file and its records copied beside it; `attempts.jsonl`; and
-   `manifest.json`. A pilot window writes no report pair; a release cell
-   renders its pair from the manifest, the attempts file and the
-   configuration alone (`report.WriteHostedPair`) and names both files in
-   the manifest ([A cell, in order](#a-cell-in-order)).
+**The operator file** (`--operator`, `evidence.LoadOperator`) names the provider, the account tier, the client host and one record of each required kind; `LoadOperator` hashes every record before the run. `evidence.CheckSource` refuses a build with no version-control revision, and a modified tree without a `source_diff` record.
 
-### The evidence files
+On a release route with a confidential limit, `Operator.CheckConfidential` refuses an operator file whose path or text fields carry the value of a confidential limit, the configured one or the one the refresh command read (`Operator.Withhold`). The fields searched are the provider, client host, cell and roles, and each record's path, note and URL (Uniform Resource Locator). It searches each form `config.ValueForms` gives, skipping a form that lies within an identifier the provider fixes (`config.CarriesOutside` over `config.FixedIdentifiers`).
 
-| File | Contents | Written by |
-|---|---|---|
-| `attempts.jsonl` | one JSON object per scheduled request, in index order: the times from the run epoch (intended, dispatch, first content event, terminal event), the outcome and error class, the protocol and HTTP status, the response headers `target.response_headers` allows and the first `Retry-After` among them (a header `target.retained_headers` names carries the stand-in `[retained]` here and its values in the frame store), the redacted error text, the peer address and whether the connection was reused, the content-event count, the usage object (the stream's usage objects merged, each later non-null field laid over the earlier ones) and completion token count where the stream carried them, the finish reason, the reported model and any mismatch, the system fingerprint, the first in-band error object (on a target with a confidential limit, the stand-in `config.RetainedError` gives: the object with its `type` string alone, `{}` for an object without one, or `[retained]` for text that is not an object; the object's HMAC-SHA256 under the release key is in `stream_error_hmac_sha256`), the unknown-event count, whether reasoning arrived, whether a refusal field carried text and its length where the shape names one, the scorer's verdict where the request had a label, and the run's invalid reasons repeated on every record. Outside the release profile a hosted record also carries the visible answer. | `evidence.WriteRun` |
-| `frames.jsonl` | per request, every read of a 200 body with its return time, up to 8 MiB per request, or the first 4,096 bytes of a non-200 body, read for at most 1 s after the status; the values of the retained headers; on a target with a confidential limit, each request's in-band error object (`stream_error`); credentials masked; under a release route whose `target.retention.model_output` is `none`, no read of a 200 body, its byte count added to `dropped_bytes` | `evidence.WriteRunFrames`, into a directory named by the run epoch under `--frames` |
-| `clock.json`, `status-start.json`, `status-end.json` | the command, its output verbatim, exit code and timing; for the clock, the parsed offset and its flag | `evidence.WriteClock`, `evidence.WriteStatus` |
-| `refresh.json` | release cells only: the operator-records refresh command's run at the cell's start, with its output verbatim, exit code and timing, and the limits it printed; for a route with a confidential limit the output and every limit's `unavailable` reason are `[retained]` and that limit carries no value, and the record as run is kept beside the cell's frames | `evidence.ReadStatus`, `evidence.PublishedRefresh`, `evidence.WriteStatus`, `evidence.WriteRetainedRefresh` |
-| `balance-start.json`, `balance-end.json` | release cells only: the operator's account balance or quota command, run like the status command, with its output verbatim, exit code and timing at the cell's start and at its end; the start record adds `check`, the printed amount against the cell's reservation (`sufficient`, `insufficient`, `unavailable` or `check_failed`) | `evidence.ReadBalance`, `evidence.CheckBalance`, `evidence.WriteStatus` |
-| `probe.json` | the probe record: the exchange (DNS, connects, TLS, peer, protocol, status, allowed headers, a non-200 body), the response shape, the findings against the configured shape and the start decision; a header `target.retained_headers` names carries `[retained]`; where `target.probe.limits_retained` is set the limits body is a stand-in marked `retained` with its SHA-256 (`sha256`), or its HMAC-SHA256 under the release key (`hmac_sha256`) on a target with a confidential limit; on such a target each non-200 body is the same kind of stand-in with its `hmac_sha256`, and the response shape's in-band error is the `config.RetainedError` stand-in with `error_hmac_sha256` | `probe.Write` |
-| `probe-retained.json` | what a probe or ceiling-check record withholds: the retained headers' values in each request and the limits read, the limits body, and on a target with a confidential limit each non-200 body and in-band error object (`stream_error`); beside a cell's frames, or under `ceiling-check --frames` | `probe.WriteRetained` |
-| `manifest.json` | the build revision and whether the tree was modified; the capture limits; the configuration file by hash, the file as published under the release profile; the endpoint as configured and as observed (requested, expected and reported models, mismatches, protocols, the parameters recorded as not applied); the client host; the clock and status records, and under the release profile the balance records; the operator file and its records by hash; the ledger's hash and line count; every artifact and the frame store by hash; each hash a SHA-256 with the size in bytes (`sha256`, `bytes`), except that on a target with a confidential limit the frame store, the operator file and its records carry only their HMAC-SHA256 under the release key (`hmac_sha256`); validity and its reasons; the G2 and G6 gates, per ladder step under the release profile; the release cell record ([The cell's files and report](#the-cells-files-and-report)); and the replay record the report pair needs, absent for a release cell, whose pair reads its cell record | `evidence.NewManifest` |
-| `operator.json`, `records/` | copies of the operator file and its records as read at the cell's start, beside the frame store | `Operator.WriteCopies` |
-| `operator-error.txt` | release cells of a route with a confidential limit whose operator records or refreshed limits failed at the cell's start, or whose operator records failed when the cell was labelled: the error, beside the cell's frames, readable by its owner only; for such a route whose operator records or refreshed limits failed at window close, the error in the attempt's `window-close/<route>/<UTC time>/` directory under `--frames` | `evidence.WriteOperatorError` |
-| `config.yaml` | release cells of a route with a confidential limit: the configuration as loaded, beside the cell's frames, readable by its owner only | `evidence.WriteConfigCopy` |
-| `window-close.json` | per release route, in `<route>/` under `--out`, after its last cell: the refresh record as it publishes, the account tier, and the operator file and its records as read after it, keyed as in the manifest; their copies under `--frames` in `window-close/<route>/<UTC time>/` | `windowClose`, `evidence.NewWindowClose` |
+**The admission ledger** (`--ledger`, `internal/admission/ledger.go`) is one append-only JSON Lines (JSONL, one JavaScript Object Notation object per line) file. Each line carries its sequence number and the SHA-256 of every byte before it; `admission.Parse` checks the chain on every read and append, and a chain that does not check admits nothing. An admission reserves its requests at the route's highest recorded price for their token bounds, and is settled with the count sent.
+
+The pilot's caps are `PilotCaps`: `PilotRouteRequestCap` (1,024), `PilotTotalRequestCap` (2,048) and `PilotLiabilityCapUSD` (US$40).
+
+### A hosted run, in order
+
+1. **Admission, status and clock.** A pilot window is admitted in the ledger, then `--status-cmd` and `--clock-sync` run; an offset above `PinnedClockOffsetMaxS` (60 s), or no reading, makes the window client-invalid. A release cell runs its clock, status, refresh and balance commands before its admission; there the offset stops the route and a missing reading blocks the cell ([A cell, in order](#a-cell-in-order)).
+2. **Probe** (`probe.Run`, SPEC-HOSTED §5): DNS (Domain Name System) resolution, the TLS handshake and one request; a 400, 401, 403 or 404, or a status in `target.probe.account_limit_statuses`, blocks the start (`probe.Gate`).
+3. **Load** through `loadgen.Run` with the canary; one case text per request through `Hooks.Cases`. A pilot window's tripwires (`newTripwire`) record a send beyond the schedule and a fifth request in flight (`PinnedPilotInFlightTripwire`, 4); a fired tripwire makes the window client-invalid without stopping it.
+4. **After the last terminal event:** the end status, the frame store, `attempts.jsonl` and `manifest.json`. A release cell writes its report pair through `report.WriteHostedPair` before the manifest that names it.
 
 ### The pilot
 
-`cmd/percentes-pilot` runs the pilot profile: two hosted endpoints, one
-literal body (`pilot.body`, a system text and the case slot) to which
-each target's `model` and `params` are added, deterministic arrivals of
-one request every 10 s, a 60 s warm-up and a 1,200 s measured window, a
-4,096-token completion ceiling and the pinned 30 s timeout. Every number
-is a pin the pilot profile checks at load (`internal/config/pilot.go`).
+`cmd/percentes-pilot` runs the pilot profile, whose constants are in `internal/config/config.go` and enforced in `internal/config/pilot.go`: two targets (`PinnedPilotTargets`), one request every 10 s (`PinnedPilotRateRPS`), a 60 s warm-up, a 1,200 s window, a 4,096-token ceiling and the 30 s timeout.
 
-- **The cases** come from `internal/pilot`: synthetic support tickets
-  from a deterministic generator, 120 measured (30 per label) and 24
-  development (6 per label), each at most 600 bytes, labelled by the
-  route a reader would send the ticket to: `billing`, `technical`,
-  `account` or `escalation`. The generator's output is pinned by hash in
-  its tests.
-- **The scorer** (`internal/score`) applies the output contract, exactly
-  one JSON object whose one key is `route` and whose value is one of the
-  labels, and classes each attempt into one of ten task outcomes
-  (success, late correct, wrong label, schema failure, refusal, length
-  limit, partial answer, no answer, unknown termination,
-  instrument-incompatible) against the 10 s scoring cutoff from intended
-  dispatch. The verdict is written beside the transport outcome in the
-  attempts record.
-- **`probe`** probes each target and writes `probe.json`; **`dev`** sends
-  the 24 development cases through each target at the session rate and
-  applies the development gate (at least 22 correct, complete answers,
-  and at least 5 of the 6 per label); the first attempt is `dev-1`, and
-  one recorded revision, `dev-2`, may change only the body and the
-  targets' `params` and `not_applied`.
-- **`session`** runs one dated session from a schedule file that
-  `pilot.NewSchedule` derives from a master seed: six sessions, three on
-  weekdays and three on weekend days, one slot at 20:00 Coordinated
-  Universal Time (UTC), a reserve
-  date per day type, the endpoint order and a case permutation per
-  session. The command re-derives the schedule from the file's input and
-  refuses a file that differs; it refuses a session directory that
-  exists, and a start more than 15 minutes after the slot. Both windows
-  run in the session's order, the second starting as the first drains;
-  `session.json` records the gap and whether it exceeded five minutes. A
-  reserve replaces at most one session per output root, for a session
-  that never ran or whose window was client-invalid or did not start.
-- **Client-invalid** is a window with a failed G2 gate, a fired tripwire,
-  an interrupted run, a response over a protocol other than HTTP/1.1, or
-  a flagged clock. A 401 or 403 inside a window is counted and does not
-  invalidate it.
+| Part | Code |
+|---|---|
+| Cases: 120 measured and 24 development synthetic tickets, labelled `billing`, `technical`, `account` or `escalation` | `pilot.Generate` (`internal/pilot/tickets.go`) |
+| Scorer: one JSON object whose one key is `route`; ten task outcomes | `score.NewScorer`, `Scorer.Score` |
+| `probe`, `dev` (the development gate), `session` | `cmd/percentes-pilot/probe.go`, `dev.go`, `session.go` |
+| Session schedule from a master seed, re-derived and compared | `pilot.NewSchedule` |
+| Paired pilot report | `report.GeneratePilot`; no command calls it |
 
 ### Replay and the completeness check
 
-`percentes --replay DIR --config FILE --out OUT` renders a release
-cell's report pair again from `manifest.json`, `attempts.jsonl` and the
-configuration file (`report.FromRun`): it checks the configuration and
-attempts hashes and the protocol counts against the manifest, the
-invalid reasons on every record against the manifest's, the manifest's
-hosted G6 results against the records, the steps its G2 results cover
-(`report.stepG2`), the canary summaries against those steps
-(`report.stepCanary`) and the ceiling rule's verdict against the
-configuration's limits (`admission.CheckPublished`), writes the pair
-to OUT and exits 1 unless both files match
-the manifest's references byte for byte.
+In the commands below, DIR is a cell's directory, FILE after `--config` the configuration as loaded, OUT an output directory other than DIR, whose report pair is overwritten, ROOT the `--frames` root and KEY the release key file.
 
-`percentes --check-release DIR --config FILE --frames ROOT
-[--release-key FILE]` runs `evidence.CheckRelease`: the commit record,
-the configuration, the attempts file, the report pair, the manifest, the
-scorer output on every measured attempt of a pilot run, and the frame
-store with one line per attempt must all exist with the hashes and sizes
-the manifest records, and the operator copies beside the frame store
-with them. On a target with a confidential limit the manifest names the
-frame store and the operator copies by HMAC-SHA256 under the release
-key, with no size, so the command needs `--release-key`; it refuses such
-a manifest where either is named by SHA-256, and any other target's
-where either is keyed (`readRef`). For a release cell it also checks the cell's label against its gates, the dispatches
-its own part of the aggregate dispatch series counts against the
-attempts file, its gap histograms against the completions, its canary
-summaries, where it has them, against its per-step G2 results and the
-canary's fixed timing, the balance records, and that the attempts
-file carries no answer text; the ceiling
-rule's verdict against the configuration's limits
-(`admission.CheckPublished`), with no confidential value in it; and the
-manifest's expected model, mismatch count and reported models against
-the configuration and the attempts file. A labelled cell passes as a
-record outside the frame, and the command prints its label.
+| Command | Calls | Checks |
+|---|---|---|
+| `percentes --replay DIR --config FILE --out OUT` | `report.FromRun` | renders the pair from `manifest.json`, `attempts.jsonl` and the configuration, checks hashes, invalid reasons, G6, per-step G2 (`stepG2`), canary summaries (`stepCanary`) and the ceiling-rule verdict (`admission.CheckPublished`); exits 1 unless both files match the manifest byte for byte |
+| `percentes --check-release DIR --config FILE --frames ROOT [--release-key KEY]` | `evidence.CheckRelease` | the cell's files and records against its manifest (list below), naming every problem it finds |
 
-Both commands serve the cells of `cmd/percentes-release`, whose report
-pair is the cell report. Both take
-a release configuration as loaded and compare the manifest's
-configuration hash with the file as published that `Config.Published`
-derives from it. For a route with a confidential limit the published
-file carries the quoted string `"[retained]"` in place of the value and
-does not load, so both commands need the retained file, and
-`--check-release` also requires `config.yaml` beside the cell's frames
-to equal the file given. A pilot window's manifest names no report pair,
-and its configuration file is the two-endpoint pilot file, whose
-top-level target `run.Replay` does not accept, so neither command
-applies to a pilot window as the tree stands. The paired pilot report
-has a renderer, `report.GeneratePilot`, and no command.
+`evidence.CheckRelease` checks these:
+
+- a build revision in the manifest, and a source diff named where the build's tree was modified;
+- the recorded hash and size, or keyed hash (`readRef`), of each file the manifest names in DIR: `artifacts` and the clock, status and balance records, though not the ceiling-check record copies that the manifest's `release` record names in `probes`;
+- for a release cell, the label against its gates, the ceiling-rule verdict (`admission.CheckPublished`), and each attempt's shape and ceiling, with its connection and write times in order after its dispatch (`recordProblems`);
+- for a release cell, the dispatch series, gap histograms, canary, balance records, no answer text, and the expected and reported models;
+- the same hashes of the files in the cell's frame directory under ROOT: the frame store, the operator file copy, the record copies and the source diff;
+- where the configuration given differs from its published form, the retained `config.yaml` beside the frames, which must hold the configuration given byte for byte.
+
+Both commands compare the manifest's configuration hash with that of `Config.Published` for the configuration given. Neither applies to a pilot window, whose manifest names no report pair.
 
 ### The mock's shaped form
 
-`mock.NewShaped` builds a mock that answers in a hosted provider's stream
-form, for the tests of the hosted code; `cmd/mockserver` builds the Phase 0
-form only, because a shape has no configuration file form. A `Shape`
-sets: a reasoning key and the number of reasoning chunks sent before the
-answer; the answer per request, chosen by the last message's content, in
-four-rune content chunks; the finish reason, or no finish chunk; when the
-usage chunk is sent (on request, always, never); an in-band error object
-sent after a set number of content chunks in place of the finish and
-usage chunks; an unknown key added to every chunk; a body cut before its
-terminator; and a key that must arrive in the one credential header the
-shape names and in no other, or the request is refused with 401. The
-request's `max_completion_tokens` (or `max_tokens` when absent) caps
-reasoning and content chunks together, and a capped stream ends with
-finish reason `length`. A shape with `Messages` set serves the Anthropic
-Messages stream instead, at `/v1/messages` and `/anthropic/v1/messages`:
-`message_start`, a thinking block, a text block, `message_delta` and
-`message_stop`; it refuses a request without `anthropic-version:
-2023-06-01`, and answers every non-200 status in the Messages error form.
+`mock.NewShaped` serves a hosted provider's stream form for the hosted tests and the rehearsal; `cmd/mockserver` builds the Phase 0 form only. A `Shape` (`internal/mock/shape.go`) sets reasoning chunks, the answer in four-rune content chunks, the finish reason, the usage chunk, an in-band error, an unknown key, a cut body and the one credential header the key must arrive in. With `Messages` set it serves the Messages stream (`internal/mock/messages.go`).
 
 ## The release runner
 
