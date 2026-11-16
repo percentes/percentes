@@ -322,3 +322,64 @@ func TestCancelWithoutCauseWritesNoMarker(t *testing.T) {
 		t.Fatalf("loop: %d, %v, markers %+v", code, err, markers(t, r))
 	}
 }
+
+// An operator abort during a cell that ends with an execution error
+// stops the route; a marker the signal failed to write is written once
+// more as the cell ends.
+func TestAbortMarkerRewrittenAtCellEnd(t *testing.T) {
+	for _, unblock := range []bool{true, false} {
+		r, _ := billingStopRoute(t)
+		r.ackDir = t.TempDir()
+		r.wait = noWait
+		run := r.runs[0]
+		ctx, cancel := context.WithCancelCause(context.Background())
+		r.cell = func(_ context.Context, run schedule.Run) (*cellRecord, error) {
+			rec := r.newRecord(run)
+			rec.Outcome = outcomeInterrupted
+			if err := r.writeNew(run, rec); err != nil {
+				return nil, err
+			}
+			if err := os.Chmod(r.dir, 0o555); err != nil {
+				return nil, err
+			}
+			cancel(loadgen.ErrOperatorAbort)
+			time.Sleep(100 * time.Millisecond)
+			if unblock {
+				if err := os.Chmod(r.dir, 0o755); err != nil {
+					return nil, err
+				}
+			}
+			return rec, errors.New("disk write failed")
+		}
+		code, err := r.loop(ctx)
+		os.Chmod(r.dir, 0o755) //nolint:errcheck
+		if err != nil || code != exitStopped {
+			t.Fatalf("unblocked %t: exit %d, %v", unblock, code, err)
+		}
+		m := markers(t, r)
+		if unblock && (len(m) != 1 || m[0].Run != run || !m[0].During) || !unblock && len(m) != 0 {
+			t.Fatalf("unblocked %t: markers %+v", unblock, m)
+		}
+	}
+}
+
+// An abort after a cell returns, before the loop names the next run,
+// names no run: the cell that ended writes no marker.
+func TestAbortAfterCellNamesNoRun(t *testing.T) {
+	r, _ := billingStopRoute(t)
+	run := r.runs[0]
+	hold := &abortHold{r: r}
+	hold.at(&run, true)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	stop := hold.watch(ctx)
+	rec := r.newRecord(run)
+	rec.Outcome = outcomeCounted
+	if code, done, err := r.cellEnded(ctx, hold, run, rec, nil); done || err != nil {
+		t.Fatalf("cell ended: exit %d, done %t, %v", code, done, err)
+	}
+	cancel(loadgen.ErrOperatorAbort)
+	stop()
+	if m := markers(t, r); len(m) != 0 {
+		t.Fatalf("markers %+v", m)
+	}
+}
