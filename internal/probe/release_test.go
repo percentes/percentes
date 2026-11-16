@@ -291,6 +291,126 @@ func TestReleaseProbeNullUsageCounts(t *testing.T) {
 	}
 }
 
+// shapeRConfig is the release reference as a Shape R route at 16 that
+// declares the 256 fallback, pointed at url.
+func shapeRConfig(t *testing.T, url string) *config.Config {
+	t.Helper()
+	c := releaseConfig(t, url)
+	atCeiling(t, c, 16)
+	yes := true
+	c.Release.Shape.Name, c.Release.Shape.InputBoundTokens, c.Release.Shape.Fallback = config.ShapeR, 128, &yes
+	return c
+}
+
+// Shape R passes a request stopped at its 16-token ceiling, which fails
+// Shape S, and still fails one with no finish reason; its prompts count
+// against the 128-token bound.
+func TestReleaseProbeShapeR(t *testing.T) {
+	noSpacing(t)
+	cfg := shapeRConfig(t, "http://"+startShaped(t, mock.Shape{Answer: strings.Repeat("ready ", 20)})+"/v1/chat/completions")
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+	if rec.Shape != config.ShapeR || rec.Ceiling != (CeilingCheck{Ceiling: 16, LengthValue: "length", Sent: 10, Passed: 10, Pass: true}) ||
+		rec.OutputBound != (OutputCheck{CeilingTokens: 16, Reported: 10, MaxOutputTokens: 16, Pass: true}) || !rec.InputBound.Pass || rec.InputBound.BoundTokens != 128 {
+		t.Fatalf("shape %q, check %+v, output %+v, input %+v", rec.Shape, rec.Ceiling, rec.OutputBound, rec.InputBound)
+	}
+	for i, r := range rec.Requests {
+		if r.FinishReason != "length" || !r.Pass || r.Fail != "" {
+			t.Fatalf("request %d: %+v", i, r)
+		}
+	}
+	if err := rec.Verify(&cfg.Target, LengthChatCompletions, 128); err != nil {
+		t.Errorf("verify: %v", err)
+	}
+	for _, c := range []struct{ shape, finish, want string }{
+		{config.ShapeS, "length", `finish reason "length": stopped at the ceiling`},
+		{config.ShapeS, "stop", ""},
+		{config.ShapeR, "length", ""},
+		{config.ShapeR, "stop", ""},
+		{config.ShapeR, "", "no finish reason"},
+	} {
+		if got := ceilingFail(http.StatusOK, rec.Requests[0].Shape, c.finish, stopValue(c.shape, LengthChatCompletions)); got != c.want {
+			t.Errorf("Shape %s, finish %q: %q, want %q", c.shape, c.finish, got, c.want)
+		}
+	}
+
+	unfinished := shapeRConfig(t, "http://"+startShaped(t, mock.Shape{Answer: "ready", OmitFinish: true})+"/v1/chat/completions")
+	if rec := releaseProbe(t, ReleaseInput{Config: unfinished, Texts: texts(0)}); rec.Ceiling.Pass || rec.Requests[0].Fail != "no finish reason" {
+		t.Errorf("no finish reason: %+v, first request %+v", rec.Ceiling, rec.Requests[0])
+	}
+	if rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(129)}); rec.InputBound != (InputCheck{BoundTokens: 128, Reported: 10, MaxPromptTokens: 129, Exceeded: 10}) || !rec.Ceiling.Pass {
+		t.Errorf("over 128 prompt tokens: input %+v, ceiling %+v", rec.InputBound, rec.Ceiling)
+	}
+}
+
+// The output bound counts reasoning: each request's output is the largest
+// of its completion count, total_tokens less prompt_tokens and a
+// reasoning_tokens count; one that reports no completion count leaves the
+// bound unmet. The bound leaves each request's ceiling-check pass alone.
+func TestReleaseProbeOutputBound(t *testing.T) {
+	noSpacing(t)
+	for _, c := range []struct {
+		name, usage, out string
+		want             OutputCheck
+	}{
+		{"completion including reasoning", `{"prompt_tokens":9,"completion_tokens":10,"total_tokens":19,"completion_tokens_details":{"reasoning_tokens":8}}`, "10",
+			OutputCheck{CeilingTokens: 16, Reported: 10, MaxOutputTokens: 10, Pass: true}},
+		{"at the ceiling", `{"prompt_tokens":9,"completion_tokens":16}`, "16", OutputCheck{CeilingTokens: 16, Reported: 10, MaxOutputTokens: 16, Pass: true}},
+		{"total beyond the completion count", `{"prompt_tokens":9,"completion_tokens":10,"total_tokens":30}`, "21",
+			OutputCheck{CeilingTokens: 16, Reported: 10, MaxOutputTokens: 21, Exceeded: 10}},
+		{"reasoning beyond the completion count", `{"prompt_tokens":9,"completion_tokens":4,"output_tokens_details":{"reasoning_tokens":20}}`, "20",
+			OutputCheck{CeilingTokens: 16, Reported: 10, MaxOutputTokens: 20, Exceeded: 10}},
+		{"no completion count", `{"prompt_tokens":9,"total_tokens":30}`, "absent", OutputCheck{CeilingTokens: 16}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			usage := `data: {"model":"openai/gpt-oss-120b","choices":[],"usage":` + c.usage + "}\n\n"
+			srv := httptest.NewServer(sseHandler(answerFrame, stopFrame, usage, doneFrame))
+			defer srv.Close()
+			cfg := shapeRConfig(t, srv.URL+"/v1/chat/completions")
+			rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0)})
+			out := "absent"
+			if p := rec.Requests[0].OutputTokens; p != nil {
+				out = fmt.Sprint(*p)
+			}
+			if out != c.out || rec.OutputBound != c.want || !rec.Ceiling.Pass {
+				t.Errorf("output %s, bound %+v, ceiling %+v; want %s, %+v", out, rec.OutputBound, rec.Ceiling, c.out, c.want)
+			}
+			if err := rec.Verify(&cfg.Target, LengthChatCompletions, 128); err != nil {
+				t.Errorf("verify: %v", err)
+			}
+		})
+	}
+}
+
+// Each check request records when its connection was acquired and when
+// it was written, after dispatch and before the first response byte; a
+// request whose connection failed records neither.
+func TestReleaseProbeWriteTimes(t *testing.T) {
+	noSpacing(t)
+	cfg := releaseConfig(t, "http://"+startShaped(t, mock.Shape{Answer: "Billed twice."})+"/v1/chat/completions")
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	for i, r := range rec.Requests {
+		if ex := r.Exchange; ex.ConnAcquiredNs <= 0 || ex.WroteRequestNs < ex.ConnAcquiredNs || ex.FirstByteNs < ex.WroteRequestNs {
+			t.Errorf("request %d: connection %d ns, written %d ns, first byte %d ns", i, ex.ConnAcquiredNs, ex.WroteRequestNs, ex.FirstByteNs)
+		}
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	cfg.Target.EndpointURL = "http://" + addr + "/v1/chat/completions"
+	rec = releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	ex := rec.Requests[0].Exchange
+	b, err := json.Marshal(ex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Error == "" || ex.ConnAcquiredNs != 0 || ex.WroteRequestNs != 0 || bytes.Contains(b, []byte("conn_acquired_ns")) || bytes.Contains(b, []byte("wrote_request_ns")) {
+		t.Errorf("refused connection: %s", b)
+	}
+}
+
 // The Messages adapter: the key travels in x-api-key with the
 // anthropic-version header, the shape is read from the event types, and
 // the ceiling check reads stop_reason.
