@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/percentes/percentes/internal/admission"
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/mock"
 	"github.com/percentes/percentes/internal/probe"
 )
@@ -302,6 +303,50 @@ func TestCeilingCheckAccountGroup(t *testing.T) {
 	}
 	if err := l.Settle(a, admission.Counts{Probe: 10}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// run refuses a ceiling check admitted on its account group after the
+// line the schedule froze, and so does lateChecks for a check that names
+// the group; a check on another group, or before the line, passes.
+func TestLateChecks(t *testing.T) {
+	cfg, err := config.LoadFile(routeConfigFile(t, "groq", "https://api.example.test/openai/v1/chat/completions", "10"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, cfg, "+0.005032")
+	l, err := admission.Open(f.ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := l.AdmitCheck("groq", "groq", probe.CeilingRequests, admission.ReleaseProbeTokens(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Settle(a, admission.Counts{Probe: 10}); err != nil {
+		t.Fatal(err)
+	}
+	enoughOpenFiles(t)
+	if _, err := newRoute(f.in); err == nil || !strings.Contains(err.Error(), "admits a ceiling check of route groq on account group groq after line") {
+		t.Fatalf("run: %v", err)
+	}
+	entries := []admission.Entry{{Seq: 1}, {Seq: 2, Kind: admission.KindAdmit, Purpose: admission.PurposeProbe, Route: "azure", AccountGroup: "azure"},
+		{Seq: 3, Kind: admission.KindAdmit, Purpose: admission.PurposeProbe, Route: "gemini", AccountGroup: "gemini"}}
+	for _, c := range []struct {
+		frozen int
+		group  string
+		routes []string
+		fails  bool
+	}{
+		{1, "azure", []string{"azure-R"}, true},
+		{1, "azure", nil, true},
+		{2, "azure", []string{"azure", "azure-R"}, false},
+		{1, "baseten", []string{"baseten"}, false},
+		{3, "gemini", []string{"gemini"}, false},
+	} {
+		if err := lateChecks(entries, c.frozen, c.group, c.routes); (err != nil) != c.fails {
+			t.Errorf("frozen at %d, group %s: %v", c.frozen, c.group, err)
+		}
 	}
 }
 
