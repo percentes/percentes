@@ -64,11 +64,22 @@ func cellConfig(cfg *config.Config, seed int64, steps int) *config.Config {
 // start ends the cell before the ladder, unless it is a 401 or 403 the
 // route's previous probed cell also saw, which stops the route; a
 // documented billing refusal on the probe or inside the ladder stops the
-// route; an EMFILE error ends the ladder and the cell is client-invalid;
-// a response whose reported model differs from the expected one labels
-// the cell model_mismatch. Every finished cell keeps its evidence with a
-// labelled manifest and a report pair (retain). An error is an execution
-// error.
+// route, on the probe also where its probe record fails to write, and
+// inside the ladder writes the running record with the first stop as its
+// decided label at each one, counting the refusals answered so far; a
+// probe's status enters the record once its probe record is written; a
+// ladder whose epoch would fall more than the start tolerance after the
+// run is due (route.dueAt) is not started and the cell is missed, its
+// probe sent where it reached a connection; an EMFILE or EADDRNOTAVAIL
+// error ends the ladder and the cell is client-invalid; a request of the
+// cell that reported more tokens than the shape's bounds stops the route
+// after the ladder (pricingBreach); a response whose reported model
+// differs from the expected one labels the cell model_mismatch. Every
+// finished cell keeps its evidence with a labelled manifest and a report
+// pair (retain). An error is an execution error; it leaves a stopped cell
+// stopped, with a stop marker (route.writeStopHold) where its record
+// fails to write, and a retained cell whose ledger settlement failed
+// keeps its outcome.
 func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord, err error) {
 	dir := r.cellDir(run)
 	rec = r.newRecord(run)
@@ -350,6 +361,9 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 	rec.EpochUTC = &epoch
 	rec.Ladder, rec.Tripwires, rec.Interrupted = res.Ladder, res.Tripwires, res.Interrupted
 	rec.AuthStatuses = countAuth(res.Requests)
+	billed, billing := billingRefusals(t, res.Requests)
+	rec.BillingRefusals += billed
+	breach := pricingBreach(&cfg.Release.Shape, res.Requests, probePrompt, probeOutput)
 	if res.Ladder != nil {
 		for _, st := range res.Ladder.Steps {
 			if st.Attempted {
@@ -358,7 +372,7 @@ func (r *route) runCell(ctx context.Context, run schedule.Run) (rec *cellRecord,
 		}
 	}
 
-	outcome, reasons := cellOutcome(res, runErr, context.Cause(cellCtx), ev.clock, canaryErr)
+	outcome, reasons := cellOutcome(res, runErr, context.Cause(cellCtx), ev.clock, canaryErr, billing, breach)
 	finish(outcome, reasons...)
 	if outcome == outcomeInterrupted {
 		// The next start labels the cell (labelCell).
@@ -728,18 +742,24 @@ func probeSentNote(pr *probe.Record) string {
 }
 
 // cellOutcome classifies a run that reached the ladder. cause is the
-// cell context's cause, nil when it was never cancelled. A route stop or
-// any other cancellation stops the route; otherwise a response whose
+// cell context's cause, nil when it was never cancelled; stops are the
+// route stops judged after the ladder, nil where none applies. A route
+// stop, or any cancellation other than SIGTERM's, EMFILE's or
+// EADDRNOTAVAIL's, labels the cell stopped, except an operator abort that
+// cut no ladder, which leaves the cell its own label (cellEnded holds the
+// route after any operator abort); otherwise SIGTERM that cut the ladder
+// interrupts the cell; otherwise a response whose
 // reported model differs from the expected one labels the cell
-// model_mismatch (SPEC-HOSTED §2); otherwise an EMFILE error, a failed
-// client-validity gate, a tripwire, a protocol other than HTTP/1.1, a
-// flagged clock or a canary that did not start makes the cell
+// model_mismatch (SPEC-HOSTED §2); otherwise an EMFILE or EADDRNOTAVAIL
+// error, a failed client-validity gate, a tripwire, a protocol other than
+// HTTP/1.1, a flagged clock or a canary that did not start makes the cell
 // client-invalid; otherwise the cell counts, with the reason the backoff
 // rule ended its ladder, if it did.
-func cellOutcome(res *loadgen.Result, runErr, cause error, clock *evidence.ClockRecord, canaryErr error) (string, []string) {
+func cellOutcome(res *loadgen.Result, runErr, cause error, clock *evidence.ClockRecord, canaryErr error, stops ...*routeStop) (string, []string) {
 	var (
 		stopped []string
 		invalid []string
+		term    bool
 	)
 	var rs *routeStop
 	switch {
@@ -749,17 +769,28 @@ func cellOutcome(res *loadgen.Result, runErr, cause error, clock *evidence.Clock
 		}
 	case errors.As(cause, &rs):
 		stopped = append(stopped, rs.Error())
-	case errors.Is(cause, errEMFILE):
-		invalid = append(invalid, errEMFILE.Error())
+	case errors.Is(cause, errEMFILE), errors.Is(cause, errEADDRNOTAVAIL):
+		invalid = append(invalid, cause.Error())
+	case errors.Is(cause, errTerminated):
+		term = res.Interrupted != nil
+		if !term && runErr != nil {
+			invalid = append(invalid, runErr.Error())
+		}
+	case errors.Is(cause, loadgen.ErrOperatorAbort) && res.Interrupted == nil:
+		if runErr != nil {
+			invalid = append(invalid, runErr.Error())
+		}
 	default:
 		stopped = append(stopped, "stopped: "+cause.Error())
 	}
-	if !slices.Contains(invalid, errEMFILE.Error()) {
-		for i := range res.Requests {
-			if isEMFILE(&res.Requests[i]) {
-				invalid = append(invalid, errEMFILE.Error())
-				break
-			}
+	for _, s := range stops {
+		if s != nil && !slices.Contains(stopped, s.Error()) {
+			stopped = append(stopped, s.Error())
+		}
+	}
+	for i := range res.Requests {
+		if e := clientExhausted(&res.Requests[i]); e != nil && !slices.Contains(invalid, e.Error()) {
+			invalid = append(invalid, e.Error())
 		}
 	}
 	// A stopped run leaves requests unsent, which fails the whole run's
@@ -804,6 +835,8 @@ func cellOutcome(res *loadgen.Result, runErr, cause error, clock *evidence.Clock
 	switch {
 	case len(stopped) > 0:
 		return outcomeStopped, append(append(stopped, invalid...), ended...)
+	case term:
+		return outcomeInterrupted, []string{terminatedReason}
 	case res.ModelMismatches > 0:
 		return outcomeMismatch, append(invalid, ended...)
 	case len(invalid) > 0:

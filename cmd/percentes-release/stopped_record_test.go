@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,44 @@ func pinRecordTimes(t *testing.T, dir string, at time.Time) {
 		if err := replaceJSON(p, m); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// A billing refusal inside the ladder writes the cell's running record
+// with the stop as its decided label at once, while other requests hang.
+func TestBillingRefusalWritesDecidedRecordAtOnce(t *testing.T) {
+	refused := make(chan time.Time, 1)
+	srv, _ := hangingEndpoint(t, func(n int64) int {
+		if n == 2 {
+			refused <- time.Now()
+			return http.StatusPaymentRequired
+		}
+		return 0
+	})
+	cfg := releaseConfig(t, srv.URL+"/openai/v1/chat/completions")
+	cfg.Target.BillingRefusals = []config.BillingRefusal{{Status: 402, Meaning: "balance exhausted", Source: "errors.png", Retrieved: "2026-10-07"}}
+	r, _ := newTestRoute(t, cfg, "+0.005")
+	shortLadder(r)
+	r.cfg.Client.HTTPTimeoutS = 3
+	run := r.runs[0]
+	path := filepath.Join(r.cellDir(run), cellFile)
+	seen := make(chan time.Duration, 1)
+	go func() {
+		at := <-refused
+		for deadline := at.Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			if b, err := os.ReadFile(path); err == nil && bytes.Contains(b, []byte(`"decided"`)) {
+				seen <- time.Since(at)
+				return
+			}
+		}
+		seen <- -1
+	}()
+	rec, err := r.runCell(context.Background(), run)
+	if err != nil || rec.Outcome != outcomeStopped || rec.BillingRefusals != 1 {
+		t.Fatalf("cell %+v: %v", rec, err)
+	}
+	if d := <-seen; d < 0 || d > time.Second {
+		t.Fatalf("decided label on disk %s after the refusal", d)
 	}
 }
 

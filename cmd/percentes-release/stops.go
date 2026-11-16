@@ -47,6 +47,21 @@ func billingRefusal(t *config.Target, status int, body []byte, streamErr string)
 	return nil
 }
 
+// billingRefusals counts the responses among reqs that billingRefusal
+// stops on, and returns the first one's stop.
+func billingRefusals(t *config.Target, reqs []loadgen.Request) (int, *routeStop) {
+	n := 0
+	var first *routeStop
+	for i := range reqs {
+		if s := billingRefusal(t, reqs[i].Status, reqs[i].ErrorBody, reqs[i].StreamError); s != nil {
+			if n++; first == nil {
+				first = s
+			}
+		}
+	}
+	return n, first
+}
+
 // authStatuses are the statuses that, returned again by the route's next
 // probe, stop the route as a credential or account fault.
 var authStatuses = []int{http.StatusUnauthorized, http.StatusForbidden}

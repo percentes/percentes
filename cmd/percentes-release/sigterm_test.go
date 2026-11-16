@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
@@ -29,6 +31,49 @@ func terminatedAfter(d time.Duration) context.Context {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	time.AfterFunc(d, func() { cancel(errTerminated) })
 	return ctx
+}
+
+// copyTree copies the files under src, other than temporary files and
+// files gone before they are read, to dst; it may run off the test's
+// goroutine.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if strings.HasSuffix(p, ".tmp") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		return os.WriteFile(target, b, 0o600)
+	})
+}
+
+// restoreTree leaves r's route directory as the copy under snap, as a
+// process killed when the copy was taken would.
+func restoreTree(t *testing.T, r *route, snap string) {
+	t.Helper()
+	if err := os.RemoveAll(r.dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyTree(snap, r.dir); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // run takes SIGTERM as errTerminated; every other command, ceiling-check
@@ -70,6 +115,30 @@ func TestSigtermSignals(t *testing.T) {
 			t.Fatalf("%v with %v: cause %v", tc.sig, tc.term, context.Cause(ctx))
 		}
 		stop()
+	}
+}
+
+// A ladder cut by SIGTERM is interrupted, never counted or stopped; a
+// stop found with it still stops the route. SIGTERM after a ladder that
+// ran to its end leaves the cell's own label.
+func TestSigtermCellOutcome(t *testing.T) {
+	res := &loadgen.Result{Gates: loadgen.GateReport{Pass: true, CPUMeasured: true}, Interrupted: &loadgen.Interruption{Cause: "SIGTERM"}}
+	clock := &evidence.ClockRecord{}
+	if o, r := cellOutcome(res, errors.New("loadgen: run aborted by context"), errTerminated, clock, nil); o != outcomeInterrupted || !slices.Equal(r, []string{terminatedReason}) {
+		t.Fatalf("SIGTERM: %s %q", o, r)
+	}
+	if o, _ := cellOutcome(res, nil, errTerminated, clock, nil, &routeStop{"route stop: billing"}); o != outcomeStopped {
+		t.Fatalf("SIGTERM with a billing stop: %s", o)
+	}
+	if o, r := cellOutcome(res, nil, loadgen.ErrOperatorAbort, clock, nil); o != outcomeStopped || r[0] != "stopped: operator abort" {
+		t.Fatalf("operator abort: %s %q", o, r)
+	}
+	ended := &loadgen.Result{Gates: loadgen.GateReport{Pass: true, CPUMeasured: true}}
+	if o, r := cellOutcome(ended, nil, errTerminated, clock, nil); o != outcomeCounted || len(r) != 0 {
+		t.Fatalf("SIGTERM after the ladder's end: %s %q", o, r)
+	}
+	if o, r := cellOutcome(ended, errors.New("loadgen: a response arrived over HTTP/2.0"), errTerminated, clock, nil); o != outcomeInvalid || len(r) != 1 {
+		t.Fatalf("SIGTERM after a ladder with a run error: %s %q", o, r)
 	}
 }
 
@@ -131,6 +200,98 @@ func TestSigtermBeforeFirstDispatch(t *testing.T) {
 	var own dispatchSeries
 	if b, err := os.ReadFile(filepath.Join(r.cellDir(r.runs[0]), dispatchFile)); err != nil || json.Unmarshal(b, &own) != nil || own.Final {
 		t.Fatalf("dispatch series %+v: %v", own, err)
+	}
+}
+
+// The whole cycle: SIGTERM mid-ladder ends the loop with exitTerminated,
+// no marker and no hold, the cell interrupted with its admission settled
+// at what the endpoint received; the next start, with no acknowledgement
+// file, labels the cell with its ladder's final dispatch series, takes
+// its re-run and sends a fresh cell's requests, and pages reads the
+// interrupted attempt once.
+func TestSigtermMidLadderCycle(t *testing.T) {
+	fastDispatch(t)
+	e := newEndpoint(t, always200)
+	r, _ := newTestRoute(t, releaseConfig(t, e.url()), "+0.005")
+	shortLadder(r)
+	r.steps = 1
+	r.ackDir = t.TempDir()
+	run := r.runs[0]
+	if !r.hasAttempt2(run.Label) {
+		t.Fatalf("%s has no attempt 2", run.Label)
+	}
+	shiftClock(r, run.Start)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	r.onEpoch = func(time.Time) { time.AfterFunc(1500*time.Millisecond, func() { cancel(errTerminated) }) }
+	if code, err := r.loop(ctx); err != nil || code != exitTerminated {
+		t.Fatalf("loop: exit %d, %v", code, err)
+	}
+	rec := readCell(t, r, run)
+	if rec.Outcome != outcomeInterrupted || !slices.Equal(rec.Reasons, []string{terminatedReason}) || rec.Interrupted == nil || rec.Decided != nil {
+		t.Fatalf("record %s %q, interrupted %+v", rec.Outcome, rec.Reasons, rec.Interrupted)
+	}
+	sent1 := e.hits.Load()
+	u := ledgerState(t, r.ledgerPath).Routes[r.cfg.Target.Name]
+	if u.Reserved != 0 || int64(u.Probe+u.Warmup+u.Measured) != sent1 || int64(rec.Sent.Probe+rec.Sent.Warmup+rec.Sent.Measured) != sent1 {
+		t.Fatalf("ledger %+v, record %+v, endpoint %d", u, rec.Sent, sent1)
+	}
+	if len(markers(t, r)) != 0 || fileExists(filepath.Join(r.cellDir(run), evidence.ManifestFile)) {
+		t.Fatalf("markers %v, or a manifest written", markers(t, r))
+	}
+	st, err := r.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holds, err := r.holds(st); err != nil || len(holds) != 0 {
+		t.Fatalf("holds %q: %v", holds, err)
+	}
+	var rerun *schedule.Run
+	for i := range st.runs {
+		if st.runs[i].Label == run.Label && st.runs[i].Attempt == 2 {
+			rerun = &st.runs[i]
+		}
+	}
+	if rerun == nil {
+		t.Fatalf("no re-run of %s in %v", run.Label, st.runs)
+	}
+
+	// The next start, at the re-run's start: every attempt 1 between is
+	// missed, the interrupted cell is labelled, and the re-run is sent.
+	shiftClock(r, rerun.Start)
+	ctx2, cancel2 := context.WithCancelCause(context.Background())
+	r.onEpoch = nil
+	var sent2 int64
+	r.cell = func(ctx context.Context, next schedule.Run) (*cellRecord, error) {
+		if next != *rerun {
+			t.Fatalf("ran %s attempt %d, want the re-run", next.Label, next.Attempt)
+		}
+		routeRecs, err := readRouteCells(r.out, r.framesRoot, r.cfg, r.key)
+		if err != nil || len(routeRecs.stops) != 0 || routeRecs.unrecorded != 0 || routeRecs.labelled != 4 {
+			t.Fatalf("pages: %+v, %v", routeRecs, err)
+		}
+		before := e.hits.Load()
+		rec, err := r.runCell(ctx, next)
+		sent2 = e.hits.Load() - before
+		cancel2(errTerminated)
+		return rec, err
+	}
+	if code, err := r.loop(ctx2); err != nil || code != exitTerminated {
+		t.Fatalf("next start: exit %d, %v", code, err)
+	}
+	m, _ := checkRetained(t, r, run)
+	if m.Release.Outcome != evidence.CellInterrupted || !m.Release.LadderStarted || m.Release.RecordsComplete {
+		t.Fatalf("label %+v", m.Release)
+	}
+	if src := m.Release.Dispatch.Sources[0]; !src.Final || src.Dispatches != rec.Sent.Warmup+rec.Sent.Measured {
+		t.Fatalf("own dispatch source %+v, record %+v", src, rec.Sent)
+	}
+	rr := readCell(t, r, *rerun)
+	fresh := freshSends(len(loadgen.BuildSchedule(cellConfig(r.cfg, rerun.Seed, r.steps))), rr)
+	if sent2 != fresh || int64(rr.Sent.Probe+rr.Sent.Warmup+rr.Sent.Measured) != fresh {
+		t.Fatalf("the re-run sent %d (record %+v), a fresh cell %d", sent2, rr.Sent, fresh)
+	}
+	if u := ledgerState(t, r.ledgerPath).Routes[r.cfg.Target.Name]; u.Reserved != 0 || int64(u.Probe+u.Warmup+u.Measured) != sent1+fresh {
+		t.Fatalf("ledger %+v, sent %d", u, sent1+fresh)
 	}
 }
 
@@ -243,6 +404,114 @@ func TestSigtermPages(t *testing.T) {
 	if _, err := buildPages(r.out, r.framesRoot, r.sched, r.scheduleSHA256, r.ledgerPath, f.in.probeFiles, cfgs, r.key, ""); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A process killed at the stop timeout after SIGTERM, its cell still
+// running, restarts as a crash does: the cell is interrupted and holds
+// nothing, the next start, with no acknowledgement file, labels it and
+// goes on to its wait with nothing sent, and pages reads it.
+func TestSigtermKilledAtStopTimeout(t *testing.T) {
+	srv, hits := hangingEndpoint(t, func(int64) int { return 0 })
+	r, f := newTestRoute(t, releaseConfig(t, srv.URL+"/openai/v1/chat/completions"), "+0.005")
+	ladder, binding, cpu := r.cfg.Release.Ladder, r.cfg.Release.BindingRPS, r.cfg.ClientValidity.CPUWindowS
+	shortLadder(r)
+	r.cfg.Client.HTTPTimeoutS = 2
+	r.ackDir = t.TempDir()
+	run := r.runs[0]
+	r.now = func() time.Time { return run.Start }
+	r.wait = noWait
+	ctx, cancel := context.WithCancelCause(context.Background())
+	snap := t.TempDir()
+	snapped := make(chan error, 1)
+	r.onEpoch = func(time.Time) {
+		go func() {
+			time.Sleep(time.Second)
+			cancel(errTerminated)
+			time.Sleep(500 * time.Millisecond)
+			snapped <- copyTree(r.dir, snap)
+		}()
+	}
+	if code, err := r.loop(ctx); err != nil || code != exitTerminated {
+		t.Fatalf("loop: exit %d, %v", code, err)
+	}
+	if err := <-snapped; err != nil {
+		t.Fatal(err)
+	}
+	restoreTree(t, r, snap)
+	if got := readCell(t, r, run); got.Outcome != outcomeRunning {
+		t.Fatalf("record at the kill %s", got.Outcome)
+	}
+	st, err := r.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holds, err := r.holds(st); err != nil || len(holds) != 0 || len(st.unlabelled) != 1 || st.unlabelled[0].Outcome != outcomeInterrupted {
+		t.Fatalf("holds %q, unlabelled %+v: %v", holds, st.unlabelled, err)
+	}
+
+	r.cfg.Release.Ladder, r.cfg.Release.BindingRPS, r.cfg.ClientValidity.CPUWindowS = ladder, binding, cpu
+	r.onEpoch = nil
+	ctx2, cancel2 := context.WithCancelCause(context.Background())
+	r.wait = func(context.Context, time.Time) error {
+		cancel2(errTerminated)
+		return errTerminated
+	}
+	sent := hits.Load()
+	var code int
+	stdout := stdoutOf(t, func() { code, err = r.loop(ctx2) })
+	if err != nil || code != exitTerminated || hits.Load() != sent || len(markers(t, r)) != 0 || strings.Contains(stdout, "held") ||
+		!strings.Contains(stdout, run.Label+" attempt 1: interrupted, labelled") {
+		t.Fatalf("next start: exit %d, %v; %d requests:\n%s", code, err, hits.Load()-sent, stdout)
+	}
+	if m, err := evidence.ReadManifest(filepath.Join(r.cellDir(run), evidence.ManifestFile)); err != nil || m.Release.Outcome != evidence.CellInterrupted || !m.Release.LadderStarted || m.Release.RecordsComplete {
+		t.Fatalf("label %+v: %v", m, err)
+	}
+	cfgs := append(slices.Clone(f.in.hostCfgs), r.cfg)
+	if _, err := buildPages(r.out, r.framesRoot, r.sched, r.scheduleSHA256, r.ledgerPath, f.in.probeFiles, cfgs, r.key, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A documented billing refusal answered after SIGTERM still stops the
+// cell and holds the route, with no abort marker, and its end status and
+// balance commands run.
+func TestSigtermBillingAfterSignal(t *testing.T) {
+	termed := make(chan struct{})
+	srv := newEndpoint(t, func(n int64) (int, string) {
+		if n == 1 {
+			return http.StatusOK, ""
+		}
+		<-termed
+		return 402, "no credit"
+	})
+	cfg := releaseConfig(t, srv.url())
+	cfg.Target.BillingRefusals = []config.BillingRefusal{{Status: 402, Meaning: "balance exhausted", Source: "errors.png", Retrieved: "2026-10-07"}}
+	r, _ := newTestRoute(t, cfg, "+0.005")
+	shortLadder(r)
+	r.ackDir = t.TempDir()
+	run := r.runs[0]
+	r.now = func() time.Time { return run.Start }
+	r.wait = noWait
+	ctx, cancel := context.WithCancelCause(context.Background())
+	r.onEpoch = func(time.Time) {
+		time.AfterFunc(500*time.Millisecond, func() {
+			cancel(errTerminated)
+			close(termed)
+		})
+	}
+	if code, err := r.loop(ctx); err != nil || code != exitStopped {
+		t.Fatalf("loop: exit %d, %v", code, err)
+	}
+	rec := readCell(t, r, run)
+	st, err := r.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holds, err := r.holds(st); err != nil || rec.Outcome != outcomeStopped || rec.BillingRefusals == 0 || len(holds) != 1 || len(markers(t, r)) != 0 {
+		t.Fatalf("record %s %q, holds %q, markers %v: %v", rec.Outcome, rec.Reasons, holds, markers(t, r), err)
+	}
+	m, _ := checkRetained(t, r, run)
+	endRecordsRan(t, r, run, m)
 }
 
 // ceiling-check takes a real SIGTERM as an operator abort: it stops

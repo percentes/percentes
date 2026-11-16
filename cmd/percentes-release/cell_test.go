@@ -451,12 +451,96 @@ func TestBillingRefusalStopsRoute(t *testing.T) {
 	if c := m.Release; m.Counted() || c.Outcome != outcomeStopped || !c.LadderStarted || !slices.Equal(c.Reasons, rec.Reasons) {
 		t.Fatalf("cell label %+v", c)
 	}
+	if c := m.Release; rec.BillingRefusals < 1 || c.BillingRefusals != rec.BillingRefusals || !c.RecordsComplete || c.Shape != config.ShapeS || c.AccountGroup != cfg.Release.AccountGroup {
+		t.Fatalf("%d billing refusals; cell record %d, complete %t, shape %q, group %q", rec.BillingRefusals, c.BillingRefusals, c.RecordsComplete, c.Shape, c.AccountGroup)
+	}
+	b, err := os.ReadFile(filepath.Join(r.cellDir(run), evidence.AttemptsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, err := evidence.ReadRecords(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := 0
+	for _, q := range recs {
+		if q.Status == http.StatusBadRequest {
+			if refused++; q.ErrorCode != "blocked_api_access" || q.WroteRequestNs < q.ConnAcquiredNs || q.ConnAcquiredNs < q.DispatchNs || q.ConnAcquiredNs == 0 {
+				t.Fatalf("refused attempt %+v", q)
+			}
+		}
+	}
+	if refused != rec.BillingRefusals {
+		t.Fatalf("%d refused attempts, %d billing refusals counted", refused, rec.BillingRefusals)
+	}
 	st, err := r.state()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(st.runs) != len(r.runs)+1 || st.next == nil || st.next.Attempt != 1 {
 		t.Fatalf("after the stop: %d runs, next %+v; the stopped cell takes a re-run", len(st.runs), st.next)
+	}
+}
+
+// A request that reports more output tokens than the ceiling stops the
+// route after the ladder, labelled a pricing-bound breach; the cell keeps
+// its evidence and takes a re-run.
+func TestPricingBreachStopsRoute(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body) //nolint:errcheck
+		completion := 2
+		if hits.Add(1) == 4 {
+			completion = 513
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, strings.TrimSuffix(chatStream, "data: [DONE]\n\n")) //nolint:errcheck
+		fmt.Fprintf(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":300,\"completion_tokens\":%d,\"total_tokens\":%d}}\n\ndata: [DONE]\n\n", completion, 300+completion)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := releaseConfig(t, srv.URL+"/openai/v1/chat/completions")
+	r, _ := newTestRoute(t, cfg, "+0.005032")
+	shortLadder(r)
+	// No dispatch is early, so a 0 ms bound fails G2 at step 1 on any host.
+	r.cfg.ClientValidity.SendSkewMaxMs = 0
+	run := r.runs[0]
+	r.now, r.wait = func() time.Time { return run.Start }, noWait
+	code, err := r.loop(context.Background())
+	if err != nil || code != exitStopped {
+		t.Fatalf("loop: code %d, %v", code, err)
+	}
+	rec := readCell(t, r, run)
+	want := "route stop: pricing-bound breach: 1 of the cell's requests reported more than the 1200-token input bound or the 512-token ceiling, reasoning included, that the ledger prices each request at; the largest reported were 300 prompt and 513 output tokens"
+	if rec.Outcome != outcomeStopped || rec.Interrupted != nil || len(rec.Reasons) != 3 || rec.Reasons[0] != want || !gateReasons(rec.Reasons[1:]) ||
+		rec.Reasons[2] != "ladder ended at step 1: "+loadgen.LadderEndClientValidity {
+		t.Fatalf("outcome %s, reasons %q, interrupted %+v", rec.Outcome, rec.Reasons, rec.Interrupted)
+	}
+	if m, _ := checkRetained(t, r, run); m.Counted() || !m.Release.RecordsComplete {
+		t.Fatalf("manifest counted %t, records complete %t", m.Counted(), m.Release.RecordsComplete)
+	}
+}
+
+// A probe that reports more prompt tokens than the input bound on a cell
+// that starts too late for its ladder stops the route as a pricing-bound
+// breach, beside the missed reason.
+func TestLateProbeBreachStopsRoute(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		io.Copy(io.Discard, req.Body) //nolint:errcheck
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, strings.TrimSuffix(chatStream, "data: [DONE]\n\n"))                                                                            //nolint:errcheck
+		io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1201,\"completion_tokens\":2,\"total_tokens\":1203}}\n\ndata: [DONE]\n\n") //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	r, _ := newTestRoute(t, releaseConfig(t, srv.URL+"/openai/v1/chat/completions"), "+0.005032")
+	shortLadder(r)
+	r.due = func(schedule.Run) time.Time { return time.Now().Add(-schedule.StartTolerance - time.Minute) }
+	rec, err := r.runCell(context.Background(), r.runs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Outcome != outcomeStopped || len(rec.Reasons) != 2 || !strings.HasPrefix(rec.Reasons[0], "route stop: pricing-bound breach: 1 of the cell's requests") ||
+		!strings.HasPrefix(rec.Reasons[1], "ladder not started") {
+		t.Fatalf("probe sent=%d outcome=%s reasons=%q", rec.Sent.Probe, rec.Outcome, rec.Reasons)
 	}
 }
 

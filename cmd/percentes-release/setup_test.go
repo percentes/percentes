@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -622,12 +623,22 @@ func TestCellOutcome(t *testing.T) {
 			r.Ladder.Steps = []loadgen.StepRecord{{Gates: &loadgen.GateReport{Pass: true, CPUMeasured: true}}}
 			return r
 		}, errors.New("aborted"), stop, clean, nil, outcomeStopped, []string{stop.Error()}},
-		{"operator abort", ok, errors.New("aborted"), loadgen.ErrOperatorAbort, clean, nil, outcomeStopped, []string{"stopped: operator abort"}},
+		{"operator abort", func() *loadgen.Result {
+			r := ok()
+			r.Interrupted = &loadgen.Interruption{}
+			return r
+		}, errors.New("aborted"), loadgen.ErrOperatorAbort, clean, nil, outcomeStopped, []string{"stopped: operator abort"}},
+		{"operator abort after the ladder's end", ok, nil, loadgen.ErrOperatorAbort, clean, nil, outcomeCounted, nil},
 		{"emfile", func() *loadgen.Result {
 			r := ok()
 			r.Requests = []loadgen.Request{{ErrText: "dial tcp 192.0.2.1:443: socket: too many open files"}}
 			return r
 		}, nil, nil, clean, nil, outcomeInvalid, []string{errEMFILE.Error()}},
+		{"eaddrnotavail", func() *loadgen.Result {
+			r := ok()
+			r.Requests = []loadgen.Request{{ErrText: "dial tcp 192.0.2.1:443: connect: " + syscall.EADDRNOTAVAIL.Error()}, {ErrText: "dial tcp 192.0.2.1:443: connect: " + syscall.EADDRNOTAVAIL.Error()}}
+			return r
+		}, errors.New("aborted"), errEADDRNOTAVAIL, clean, nil, outcomeInvalid, []string{errEADDRNOTAVAIL.Error()}},
 		{"gate", func() *loadgen.Result {
 			r := ok()
 			r.Gates.Pass = false
@@ -656,12 +667,35 @@ func TestCellOutcome(t *testing.T) {
 		{"model mismatch on a stopped route", func() *loadgen.Result {
 			r := ok()
 			r.ExpectedModel, r.ReportedModels, r.ModelMismatches = "m", []string{"m", "m-v2"}, 2
+			r.Interrupted = &loadgen.Interruption{}
 			return r
 		}, errors.New("aborted"), loadgen.ErrOperatorAbort, clean, nil, outcomeStopped, []string{"stopped: operator abort", mismatch}},
 	} {
-		got, reasons := cellOutcome(tc.res(), tc.runErr, tc.cause, tc.clock, tc.canary)
+		got, reasons := cellOutcome(tc.res(), tc.runErr, tc.cause, tc.clock, tc.canary, nil, nil)
 		if got != tc.outcome || !slices.Equal(reasons, tc.reasons) {
 			t.Errorf("%s: %s %q, want %s %q", tc.name, got, reasons, tc.outcome, tc.reasons)
+		}
+	}
+
+	// A stop judged after the ladder stops the route whatever the cause,
+	// and a stop that was also the cause is listed once.
+	breach := &routeStop{"pricing-bound breach"}
+	exhausted := ok()
+	exhausted.Requests = []loadgen.Request{{ErrText: "socket: too many open files"}}
+	for _, tc := range []struct {
+		name    string
+		res     *loadgen.Result
+		cause   error
+		stops   []*routeStop
+		reasons []string
+	}{
+		{"breach", ok(), nil, []*routeStop{nil, breach}, []string{breach.Error()}},
+		{"billing and breach", ok(), stop, []*routeStop{stop, breach}, []string{stop.Error(), breach.Error()}},
+		{"billing after an exhausted client", exhausted, errEMFILE, []*routeStop{stop, nil}, []string{stop.Error(), errEMFILE.Error()}},
+	} {
+		got, reasons := cellOutcome(tc.res, nil, tc.cause, clean, nil, tc.stops...)
+		if got != outcomeStopped || !slices.Equal(reasons, tc.reasons) {
+			t.Errorf("%s: %s %q, want %s %q", tc.name, got, reasons, outcomeStopped, tc.reasons)
 		}
 	}
 }
