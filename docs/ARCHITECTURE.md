@@ -5,12 +5,11 @@ Percentes drives open-loop load (each request sent at its scheduled time whether
 Phase 0 runs against the mock and needs no GPU (graphics processing unit); Phase 1 runs against vLLM, the open-source inference server whose version §6 pins, and SPEC.md's status line records which Phase 1 runs are done. Under SPEC-HOSTED, a route is one provider, model identifier, endpoint, account tier and request shape, and a cell is one run of the route's ladder, the stepped series of request rates of SPEC-HOSTED §3.
 
 - [Binaries](#binaries)
-- [A run on the clock](#a-run-on-the-clock)
-- [One request](#one-request)
-- [Anatomy of a run](#anatomy-of-a-run)
-- [Recovery detection](#recovery-detection)
 - [Package map](#package-map)
-- [Gates and where each bites](#gates-and-where-each-bites)
+- [A run, in order](#a-run-in-order)
+- [One request, from schedule to outcome](#one-request-from-schedule-to-outcome)
+- [Recovery detection](#recovery-detection)
+- [Gates](#gates)
 - [Server-side sampling and the receive path](#server-side-sampling-and-the-receive-path)
 - [Fault modes](#fault-modes)
 - [Hosted runs and the evidence files](#hosted-runs-and-the-evidence-files)
@@ -33,420 +32,179 @@ Packages are each binary's `internal/` imports from `go list`, less `internal/co
 | `cmd/mockserver` | The Phase 0 mock inference server from a run configuration's `mock` section; `--addr-file` writes the bound address | `mock` | 0 stopped by SIGINT or SIGTERM (the interrupt and termination signals); 1 error |
 | `cmd/naivesweep` | A closed-loop sweep (each of a fixed number of workers sends its next request once its last one has answered) of an OpenAI-compatible endpoint, configured by `SWEEP_ENDPOINT`, `SWEEP_API_KEY` and `SWEEP_MODEL`; outside the instrument, with no client-validity gate and no ledger admission | `sse`, `redact` | 0 every request has a verdict; 1 configuration missing or invalid |
 
-## A run on the clock
-
-A self-hosted run has four phases, and every report window is cut from
-them by intended dispatch time. You need this section to read any
-`windows.*` field of a run report. A release cell replaces these phases
-with the ladder's steps ([The ladder](#the-ladder)).
-
-A run has four phases, whose ends `internal/loadgen/loadgen.go` sets from
-the pinned durations: warm-up 60 s (discarded), baseline 300 s, the fault
-phase, which is §1's degradation-and-recovery window with its 600 s
-timeout, and cooldown 60 s. The load is identical throughout.
-
-- **T_inject** is the configured fault instant, measured from the run
-  epoch: the end of warm-up plus `fault.t_inject_offset_s`. The experiment
-  profile sets the offset to 300 s, the end of the baseline phase, so
-  T_inject is 360 s from the run epoch.
-- **The fire anchor** is the earlier of T_inject and the recorded actual
-  fire time (`collect.FireAnchorNs`). AC3 lets the fault fire up to 500 ms
-  either side of T_inject. Times to recovery are measured from the fire
-  anchor.
-
-`run.Execute` builds the report windows. Every request belongs to the
-window of its intended dispatch time, and each window is half-open,
-[start, end).
-
-| Window (report key) | Bounds | SPEC term |
-|---|---|---|
-| `baseline` | [warm-up end, fire anchor − 30 s) | baseline window (pre-fault) |
-| `guard` | [fire anchor − 30 s, T_inject) | guard window |
-| `fault` | [T_inject, end of the fault phase), which is T_inject + 600 s on the experiment profile | fault window |
-| `fault_degraded` | [T_inject, recovery point), when the detector's recovery point falls inside the fault window | no separate term |
-| `fault_recovered` | [recovery point, end of the fault phase), under the same condition | no separate term |
-| `fault_survivor` | the fault window, restricted to requests served by the survivor replica, when baseline attribution names exactly one replica besides the victim | survivor cohort (§3) |
-
-The recovery point is the pre-fault recovery, or partition-heal recovery
-under the black-hole variant. No window covers the cooldown; the
-detector's 1 s buckets still run to the end of the run. The guard window
-exists because a request intended in the 30 s before the fire can still be
-in flight when the fault fires, and counting it in the baseline would
-charge a fault loss to the baseline.
-
-The diagram's detector row is explained in [Recovery
-detection](#recovery-detection).
-
-![One run to scale: phases, report windows, the fault-window splits and the detector's plateau, with the guard window magnified for an on-time and an early fire](diagrams/run-timeline.drawio.svg)
-
-## One request
-
-Every request's send time is fixed before the run, a pacer and a worker
-keep the send on time, and its ending is classed by the stage at which
-it fails. You need this section to read any latency or outcome figure.
-
-`loadgen.BuildSchedule` fixes every t_i before the run. The pacer spawns a
-worker 10 ms before t_i, and the worker dispatches at t_i. The
-server-sent events (SSE) client (`internal/loadgen/sse_client.go`, with the
-framing in `internal/sse`) posts to the target's complete `endpoint_url`,
-or to `base_url` plus `/v1/chat/completions` when no `endpoint_url` is
-set, and reads the stream. The client timeout, the pinned 30 s or the
-release profile's 90 s hard timeout, runs from the actual dispatch.
-
-### Pacer timing
-
-If one loop did the precise wait and the dispatch itself, a hiccup while
-handling request i (a garbage-collection pause, a scheduler delay) would
-delay request i and push every later request back with it. The generator
-splits the work in two (`internal/loadgen/loadgen.go`):
-
-1. **The pacer**, a loop in one goroutine (Go's lightweight thread), sleeps
-   until t_i − 10 ms (`spawnLeadNs`), spawns the worker for request i, and
-   moves straight on to request i + 1. It never does the precise wait.
-2. **The worker** sleeps on its own timer (`gen.sleep`) until
-   t_i − 1.5 ms (`spinNs`), then spins on the clock until it reaches t_i and
-   dispatches. The timer keeps the spin short; the spin covers timer
-   wake-up latency.
-
-Each worker aims at its own absolute t_i, so pacer jitter inside the 10 ms
-lead does not delay the send, and one late wake-up does not accumulate
-across later requests. A worker spawned after t_i − 1.5 ms skips the timer,
-and one spawned after t_i dispatches at once, its lateness recorded as send
-skew, which the §2 client-validity gate bounds.
-
-![The pacer and worker timing for one request, including a late pacer wake-up that still dispatches at t_i](diagrams/pacer-timing.drawio.svg)
-
-### From dispatch to outcome
-
-The client stamps four moments:
-
-- **dispatch:** send skew is dispatch time minus t_i;
-- **the first content event:** time to first token (TTFT) is its time
-  minus t_i;
-- **each later content event:** the gap from the previous one;
-- **the terminal event:** end-to-end (e2e) latency is the completion time
-  minus t_i.
-
-A content event is an SSE event whose decoded delta carries non-empty
-content at the key `target.response_shape.content` names (`content` by
-default). Keys the shape lists as reasoning are recorded apart and never
-count as content. A target whose `adapter` is `messages` is read by the
-Messages adapter instead of the response shape: `text_delta` text is
-content, `thinking_delta` text is reasoning, `message_start` carries the
-model and the first usage object, `message_delta` the stop reason and the
-cumulative usage, an `error` event the in-band error object, and
-`message_stop` ends the stream. Gaps between content events are inter-chunk latencies. On a
-self-hosted or mock target the report calls them inter-token latency (ITL)
-where the §10 check passes. A hosted target's gaps stay inter-chunk, and a
-mock run without usage is labelled one token per content event by
-construction ([token counts](#token-counts-and-the-itl-label)). A chunk carrying a usage object
-supplies the completion token count.
-
-The client classifies how each request ends into one of the three §3
-states and, for an error, one of six classes, by the stage at which the
-failure occurs. A stream is also classed `malformed_stream` when an event
-or a line exceeds the 1 MiB bound the client reads with.
-
-![How one scheduled request ends: the three failure stages with their tests, the six error classes, censoring, completion, the precedence rule, and what each state feeds](diagrams/outcomes.drawio.svg)
-
-`collect.Collect` then, per window:
-
-- assigns each request to the window of its intended time;
-- records completed TTFT and e2e latencies into the pinned HdrHistogram
-  (high-dynamic-range histogram) configuration through `RecordValue` only;
-- adds every scheduled request to the window's incidence curve;
-- counts error classes, error and censored rates, throughput, and goodput,
-  the fraction of scheduled requests that complete within the §4
-  service-level objective (SLO);
-- runs the §4 threshold sweep and computes the content-event and
-  usage-count distributions and the §7 tail confidence intervals (CIs).
-
-`detect.BuildSeries` buckets the same records at 1 s for the detector.
-Every latency, rate and detector figure is computed from these records.
-
-## Anatomy of a run
-
-`cmd/percentes` runs one experiment from setup to report in the order
-below, and campaigns and calibration repeat that run. You need this
-section to find where a step of a run happens.
-
-The diagram follows one run of `cmd/percentes` from its setup to its report;
-the sections below expand each part.
-
-![One run of cmd/percentes: the setup before the load, the client host and the target cluster during the run, and the analysis pipeline after the last terminal event, with percentes-campaign repeating the run](diagrams/system-flow.drawio.svg)
-
-`run.Execute`, in code order:
-
-1. `loadgen.Run` anchors the run epoch on the monotonic clock and fires the
-   `OnEpoch` hook before it starts the pacer.
-2. The hook releases the orchestrator, which pre-arms the injector to fire
-   at epoch + T_inject with automatic expiry and records the armed, fire and
-   expiry times. §1 requires pre-arming because a black-hole partition
-   makes the victim unreachable the moment it fires. Each §5 recovery probe
-   runs when `cmd/percentes` is given its uniform resource locator (URL):
-   `--probe-direct` for replica-ready, `--probe-service` for
-   traffic-restored. A probe starts at the planned fire and polls every
-   500 ms until its first counted success or the end of the fault phase; a
-   success counts only after the fault was visible on that path.
-   `percentes-campaign` takes `--probe-direct`, required under the
-   process-kill variant, and passes it to every run; it passes no service
-   probe URL, so traffic-restored and routing propagation are N/A in its
-   runs.
-3. The load runs open loop through warm-up, baseline, the fault phase and
-   cooldown. Monitors sample client central processing unit (CPU) use at
-   1 Hz and the Go garbage-collection (GC) pause histogram for the §2 gate.
-4. After the last terminal event:
-   1. the phase windows are collected (baseline, guard, fault);
-   2. the detector runs (`detect.RunWith`): two baselines, hysteresis, the
-      27-row sensitivity sweep, integrated deficits, per-component recovery;
-   3. the split windows are collected: `fault_survivor`, and
-      `fault_degraded` and `fault_recovered` at the recovery point;
-   4. in-flight-at-fire requests are classified by outcome and replica
-      (`collect.AccountInFlight`), the share gate is computed from
-      per-request replica attribution (`run.shareGate`), and the §4
-      threshold analysis runs;
-   5. the probe times fill the decomposition, and for a mock fault the
-      scheduled fires are read back from `/admin/faults`;
-   6. `run.validity` decides validity from the fault source, the
-      client-validity gate (G2), the share gate (G1) and the injection
-      timing.
-5. `run.Execute` returns. The binary attaches the server samples and the
-   canary streams (`AttachObservations` fills the top-level `server_side`
-   and `receive_path` maps, keyed by window), evaluates G1 to G7
-   (`validity.Evaluate`), renders the report pair (`report.Generate`), and
-   exits 0, 2 or 1.
-
-**Campaigns.** `percentes-campaign` runs N repetitions of one variant with
-seed base + i. For a clean delete it resolves each run's victim and arms a
-fresh injector that deletes the pod through kubectl on a named context:
-with `--victim` it waits for that pod to be Ready, and with
-`--victim-selector` for every replica to be Ready before it picks one. It
-evaluates G1 to G7 per run and aggregates the per-run scalars under §7
-(`campaign.Run`, `stats.Summarize`): all values, median, mean and a
-t-interval whose degrees of freedom follow the contributing runs, with
-heavy-tailed scalars led by the median and range. Each endpoint reports
-how many runs were dropped and why. The black-hole variant is refused until
-the node-partition injector is wired. The process-kill runner is described
-under [Fault modes](#fault-modes).
-
-**Calibration.** `percentes-calibrate` runs the §10 procedure against one
-replica addressed directly: coarse and fine ramps, the two-ramp agreement
-rule, lambda_r frozen at 0.65 lambda_max, and the §5 reference run at
-2 × lambda_r. Every step is a §3 collection over its measured window, with
-the queue-gauge series, the kept families' reductions and the §2
-receive-path report; the trace is rewritten after every step. The binary
-writes `calibration.json` and `calibration.txt`, and the values are then
-entered in the configuration's `calibration` block.
-
-![The §10 calibration procedure as a flowchart](diagrams/calibration.drawio.svg)
-
-## Recovery detection
-
-The detector turns the goodput series into a time to recovery through
-an entry threshold, a hold and an exit threshold. You need this section
-to read the `detector` and `decomposition` fields of a self-hosted
-report; hosted runs carry neither.
-
-The detector (`internal/detect`) works on goodput over R = 10 s windows of
-1 s buckets, keyed by intended dispatch time. The window at time t covers
-[t, t + R), a leading window, so an entry time is the start of the good
-service it describes, and the curve starts to fall R before the fire.
-
-- **Entry and hold.** A candidate entry is a window at or above 90 % of the
-  applicable baseline. It becomes recovery only if every window starting in
-  the following H = 30 s also stays at or above 90 %; any window below 90 %
-  cancels it (`canceled_entries`). The time to recovery (TTR) is the held
-  entry's start minus the fire anchor.
-- **Exit.** After recovery, a window below 85 % starts a re-degradation
-  episode, which ends when a window is back at 90 % (`re_degradations`);
-  the TTR stands.
-- **Two baselines.** The pre-fault level is the baseline window's goodput
-  from the collector. The single-replica equilibrium level is the
-  ratio-of-sums goodput over the plateau, from fire anchor + R to the
-  earlier of the pre-fault entry or the 600 s timeout, estimable only when
-  that span is at least R and its goodput is above zero. Each baseline has
-  its own TTR.
-- **Unobserved.** A candidate whose hold runs past the end of the series is
-  reported unobserved (`hold_unobserved`), which differs from not
-  recovered, where no held entry starts before the timeout. A cut entry
-  window counts as unobserved only when its missing seconds, each at the
-  observed mean load and all of it good, could still lift it to 90 %.
-- **Partition heal.** Under the black-hole variant the labelled recovery is
-  the first held entry at or after the heal anchor: the observed partition
-  expiry, else fire anchor + 120 s. The raw threshold crossing is reported
-  beside it.
-- **Sweep and deficit.** The sensitivity sweep runs entry 85, 90 and 95 %,
-  R 5, 10 and 20 s, and H 15, 30 and 60 s, with exit fixed at 85 %: 27 rows.
-  The integrated goodput deficit sums each second's shortfall below the
-  baseline level, from the fire anchor to recovery, or to the timeout when
-  there is none.
-- **Components.** `ttft_slo`, `e2e_slo` and `error_rate` each get their own
-  detection against their own pre-fault level. Backlog drain is reported
-  unmeasured in every run; no code path measures it yet.
-
-![The recovery detector on a schematic goodput curve](diagrams/recovery-detector.drawio.svg)
-
-The decomposition (`detect.NewDecomposition`, filled in
-`run.Execute`) reports each §5 boundary with its source. The probes supply
-replica-ready and traffic-restored when they run, and the detector
-supplies goodput restored. When `--victim` names the victim replica, the
-traffic-restored probe counts only a success whose `X-Percentes-Replica`
-header names that replica, a header only the mock sends; without
-`--victim` it counts any success. Routing propagation is traffic-restored
-minus replica-ready. No code path measures the Kubernetes API and log
-boundaries yet (reschedule, container start, weight load, and the graph
-capture of CUDA, NVIDIA's Compute Unified Device Architecture), so the
-clean-delete and black-hole variants report them N/A. Under the
-process-kill variant, container start comes from the container's
-`StartedAt` in `docker inspect`, the vLLM startup boundaries and the
-figures vLLM prints come from the server log (`internal/vllmlog`, patterns
-pinned to vLLM 0.29.0), and reschedule, traffic-restored and routing
-propagation are N/A. The code measures the probe segments from the fire in every variant; §5
-measures the black-hole ones from the partition expiry, which lands with
-the node-partition injector.
-
-The figure shows the §5 boundaries of the two Kubernetes variants. Of
-those, the code measures the probe and detector ones.
-
-![Recovery decomposition: the boundaries §5 defines, and the source of each](diagrams/recovery-decomposition.drawio.svg)
-
 ## Package map
 
-Each Go package serves named SPEC clauses through the entry points the
-table lists. You need this section to find the code behind a figure.
+| Package | Responsibility | Key files, types and entry points | § |
+|---|---|---|---|
+| `internal/config` | The configuration schema; strict YAML (YAML Ain't Markup Language) decode; the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the configuration as published, confidential values withheld | `config.go` (`Config`, `Target`, `Pinned*` constants), `load.go` (`LoadFile`, `Decode`), `validate.go` (`Config.Validate`), `release.go` (`ReleaseBodyAt`, `Target.ExpectedModel`), `published.go` (`Config.Published`, `ValueForms`, `Carries`, `CarriesOutside`, `FixedIdentifiers`, `RetainedError`), `request.go` (`LiteralBody`) | §6, §8, §10; SPEC-HOSTED §3, §9 |
+| `internal/loadgen` | Schedule, pacer, server-sent events (SSE) client, outcomes, client-validity gate, canary, release ladder, tripwires (checks on a send beyond the schedule or too many requests in flight, which end a release ladder and invalidate a pilot window), write limit | `schedule.go` (`BuildSchedule`, `BuildLadder`), `loadgen.go` (`Run`, `Hooks`, `Request`, `NewTransport`), `sse_client.go` (`gen.execute`, `recordChunk`), `gates.go` (`evaluateGates`, `CPUMeasured`), `canary.go` (`StartCanary`, `SummarizeCanary`), `write_permits.go` (`newWriteWindows`), `write_time.go` (`watchRelease`, `WatchWrite`, `instrumentWrites`) | §2, §3; SPEC-HOSTED §3, §5, §7 |
+| `internal/sse` | SSE framing with an event-size limit the caller sets, for the client, the probes and `cmd/naivesweep` | `sse.go` (`SplitLines`, `Events`, `EventsCut`) | §3 |
+| `internal/histo` | The pinned HdrHistogram (high-dynamic-range histogram) configuration; values enter only through `H.Record`, which calls the library's plain `RecordValue` | `histo.go` (`New`, `H.Record`, `H.Summarize`) | §3 |
+| `internal/mock` | OpenAI-compatible SSE mock with five scheduled fault modes and a slow reload; the shaped hosted-provider form; TLS (Transport Layer Security) serving; a 429 rate limit | `server.go` (`New`, `Server.Start`, `Server.StartTLS`), `faults.go`, `sse.go`, `shape.go` (`NewShaped`, `Shape`), `messages.go`, `limit.go` (`Server.SetRateLimit`), `tls.go` (`SelfSignedCert`) | §2; SPEC-HOSTED §9 |
+| `internal/orchestrator` | Pre-armed fault execution with armed, fire and expiry records; mock-admin, clean-delete and process-kill injectors; container commands over SSH (Secure Shell) | `orchestrator.go` (`Execute`, `NewMockInjector`), `injectors.go` (`NewCleanDeleteInjector`), `processkill.go` (`NewProcessKillInjector`), `ssh.go` (`SSHContainerOps`) | §1, §2; §8 acceptance criterion (AC) 3 |
+| `internal/serverstats` | Prometheus sampling, per-window reductions, the baseline waiting-queue means the G7 gate (the §10 queue-stability gate) reads | `serverstats.go` (`ForRun`, `Sampler.Start`, `Preflight`, `BaselineMeans`, `ReduceWindow`) | §2, §10 |
+| `internal/collect` | Windows, completion-incidence curves, in-flight accounting, threshold analysis, tail confidence intervals (CIs), receive-path report | `collect.go` (`Collect`, `AccountInFlight`, `SplitAtFire`, `AnalyzeThresholds`, `FireAnchorNs`, `GuardStartNs`), `incidence.go` (`EstimateIncidence`), `receivepath.go` | §3, §4, §7 |
+| `internal/detect` | Recovery detector, decomposition, recovery probes, `/health` calibration | `detect.go` (`BuildSeries`, `RunWith`, `Run`, `NewDecomposition`), `probe.go` (`ProbeRecovery`), `calibration.go` (`CalibrateHealth`) | §5 |
+| `internal/vllmlog` | vLLM start-log boundaries for the process-kill decomposition | `patterns.go` (`VLLM0290`), `vllmlog.go` (`Parse`), `apply.go` (`Apply`) | §5 |
+| `internal/validity` | The G1 to G7 run-validity gates of §10; Hosted-G6 (completion within the deadline) per release step | `validity.go` (`Evaluate`, `G2`, `ReleaseG6`) | §10; SPEC-HOSTED §7 |
+| `internal/stats` | §7 statistics: values, median, mean, t-interval, coefficient of variation; Holm step-down (unused) | `stats.go` (`Summarize`), `holm.go` | §7 |
+| `internal/run` | One run's artifacts from load to validity; the configurations the single-run path refuses | `run.go` (`Execute`, `analyze`, `CheckConfig`, `Artifacts`), `replay.go` (`Replay`), `container.go` | §1 to §5 |
+| `internal/campaign` | N runs, per-run scalars, endpoint summaries with drop counts, halt after an invalid run | `campaign.go` (`Run`, `RunWith`) | §5, §7 |
+| `internal/calibrate` | The §10 ramps and the §5 reference step | `calibrate.go` (`RunRamp`, `Calibrate`, `Reference`), `runner.go` (`LoadRunner`), `output.go` | §5, §10 |
+| `internal/report` | Report pairs for runs, campaigns, hosted runs and release cells; the pilot report; per-step tables, `status_429` attribution, null reading, drift split, index | `report.go` (`Generate`), `campaign_report.go` (`GenerateCampaign`), `replay.go` (`FromRun`, `WriteHostedPair`), `pilot.go` (`GeneratePilot`), `cell.go` (`CellReport`), `steps.go` (`NewStepTables`), `attribution.go` (`StepTables.Attribute`, `RecordSends`, `ExchangeSend`), `null.go`, `drift.go` (`DocsOf`, `CompareWindowClose`), `index.go` (`NewIndex`) | §2 to §5, §7; SPEC-HOSTED §4, §5, §8 |
+| `internal/redact` | Credentials and response bytes kept out of printed and written errors; a network error's text written with this host's source address removed as [the error text](#hosted-runs-and-the-evidence-files) gives it | `redact.go` (`URL`, `ErrorText`, `Wrap`) | §6 |
+| `internal/probe` | The hosted pre-run probe and start gate; the release ceiling check, its record and the ceiling choice; withheld values | `probe.go` (`Run`, `Gate`, `Write`, `Encode`, `WriteRetained`), `release.go` (`RunRelease`, `ReleaseRecord.Verify`, `ChooseCeiling`, `ChooseCeilingAt`, `Decisive`, `Spent`, `ModelFault`, `RepeatQuiet`, `Exposed`, `ExposedByMarking`), `shape.go` | SPEC-HOSTED §2, §5, §9 |
+| `internal/admission` | The hash-chained ledger of requests and their worst-case cost (liability); the release ceiling rule with its binding-rate rule | `ledger.go` (`Create`, `Open`, `Parse`, `Ledger.Bind`, `Ledger.AdmitAt`, `Ledger.Settle`, `PilotCaps`, `ReleaseCaps`), `ceiling.go` (`Solve`, `CeilingRule`, `CheckRPS`, `WindowAllowances`, `CheckPublished`, `ExpectedPlan`), `sent.go` (`ProbeSent`) | SPEC-HOSTED §3, §9 |
+| `internal/evidence` | Per-attempt records, frame store (the retained reads of each response body), run records, operator file, manifest, completeness check, evidence pack, publication record and page | `attempts.go` (`Records`, `WriteRun`), `frames.go` (`WriteRunFrames`, `CheckFramesRoot`), `clock.go` (`ReadClock`), `status.go` (`ReadStatus`, `ReadBalance`), `balance.go` (`CheckBalance`), `refresh.go` (`ReadRefreshedLimits`, `NewWindowClose`), `operator.go` (`LoadOperator`), `manifest.go` (`NewManifest`, `ReleaseG6`), `cell.go` (`Cell`), `gaps.go` (`StepGaps`), `release.go` (`CheckRelease`), `pack.go` (`BuildPack`), `publication.go` (`LoadPublication`, `Publication.Check`), `publication_page.go` (`Publication.Page`) | SPEC-HOSTED §4, §9 |
+| `internal/pilot` | Synthetic ticket text: the pilot fixture and schedule, Shape S tickets (the release's support-ticket request shape, input bound 1,200 tokens), the Shape R text (its short fixed instruction, input bound 128 tokens), the shape factory | `tickets.go` (`Generate`), `schedule.go` (`NewSchedule`), `shape.go` (`GenerateShapeS`), `release_shape.go` (`GenerateShapeR`, `NewShape`) | SPEC-HOSTED §3; HA2 |
+| `internal/score` | The pilot's output contract and its ten task outcomes | `route.go` (`NewContract`), `outcome.go` (`NewScorer`, `Scorer.Score`) | HA2 |
+| `internal/schedule` | Each route's sampling frame (its twelve cells, SPEC-HOSTED §4) from one master seed: dates, attempt seeds, offsets, re-runs, the frozen inputs | `schedule.go` (`New`, `Load`, `Schedule.Runs`) | SPEC-HOSTED §4 |
+| `internal/releasekey` | The release key and HMAC-SHA256 (a hash-based message authentication code over SHA-256, the 256-bit Secure Hash Algorithm) under it | `releasekey.go` (`Create`, `Read`, `Key.Sum`) | SPEC-HOSTED §9 |
+| `internal/hostqual` | The host probe the timing-coupled acceptance tests run first | `hostqual.go` (`Measure`, `Allocation`, `Qualified`) | §2, §8 |
+| `internal/ac` | The §8 acceptance suite, with the mock in a separate process | test files only | §8 |
 
-![Package dependencies, from go list](diagrams/package-layers.drawio.svg)
-
-The diagram predates the hosted packages, which the table lists.
-
-| Group | Package | Role | SPEC | Entry points | Tests |
-|---|---|---|---|---|---|
-| Configuration | `internal/config` | schema in YAML (YAML Ain't Markup Language), strict decode of a file holding one YAML document and only whitespace after its end marker, with no directive and no tag beyond the core types, the pins of each profile (`experiment`, `ac`, `pilot`, `release`) checked at load; the literal request body and its case slot; the release target's limits, unpublished-limit rulings, retained headers, not-applied parameters, naming record, documented statuses, errors and billing refusals, balance ruling and retention of model output, the other hosts of its model and the identifier its responses carry; each limit's marking, the retained headers and limits body a confidential limit requires, and the configuration as published with each confidential value withheld, and the forms of a value searched for in a text; the stand-in for a withheld in-band error object; the request-identifier header names a confidential route may publish; the body with its ceiling key set to another ceiling | §1 to §6, §8, §10; SPEC-HOSTED HA2 and HA3 | `LoadFile`, `Parse`, `Decode`, `Config.Validate`, `Config.Published`, `ValueForms`, `Carries`, `RetainedError`, `RequestIDHeader`, `Target.ExpectedModel`, `ReleaseBodyAt`, `CheckBaseURL`, `CheckLiteralBody`, `LiteralBody` | a mutation case per pin; refusal rows per profile |
-| Load | `internal/loadgen` | schedule, pacer, SSE client with the Hypertext Transfer Protocol (HTTP) version 1.1 pin, outcome classification, per-request status, header, peer and protocol records, the credential header and literal body per target, the Messages stream adapter, retained header values kept apart from the record, the pilot and release tripwires, the release ladder with its drains and per-step verdicts, the dispatch and completion hooks, client gate, loopback canary | §2, §3; SPEC-HOSTED §3, §5, §9; HA3 points 2, 5, 15 and 16 | `BuildSchedule`, `BuildLadder`, `Run`, `NewTransport`, `StartCanary`, `SummarizeCanary`, `CPUMeasured` | request-body, stream-hardening, capture, ladder, hook and gate units; canary oracle; AC1 to AC2d |
-| | `internal/sse` | SSE framing for the client, the recovery probes and naivesweep | §3 | `SplitLines`, `Events` | a unit per grammar case |
-| | `internal/histo` | the pinned HdrHistogram wrapper; `RecordValue` only, and a test fails the suite if a correction API appears | §3 | `New`, `H.Record`, `H.Summarize` | the correction-API ban; AC1 oracles |
-| | `internal/mock`, `cmd/mockserver` | OpenAI-compatible SSE mock: five scriptable fault modes and a slow-reload startup setting; the shaped hosted-provider form ([the mock's shaped form](#the-mocks-shaped-form)) | §2; SPEC-HOSTED §2, §5 | `New`, `NewShaped`, `Server.Start`, `/admin/faults` | a behaviour test per mode, including a raw Transmission Control Protocol (TCP) silent-hang test; a test per shape mode |
-| Fault | `internal/orchestrator` | pre-armed fault execution with armed, fire and expiry records; mock-admin, clean-delete and process-kill injectors; container commands over SSH (Secure Shell) | §1, §2, AC3 | `Execute`, `NewMockInjector`, `NewCleanDeleteInjector`, `NewProcessKillInjector`, `SSHContainerOps` | AC3; fake-ops tests; a fake `ssh` on PATH |
-| Server side | `internal/serverstats` | Prometheus sampler, per-window reductions, G7 baseline means | §2, §6, §10 | `ForRun`, `Sampler.Start`, `Sampler.Stop`, `Preflight`, `BaselineMeans`, `ReduceWindow` | test servers; window, reset and per-label-set oracles |
-| Analysis | `internal/collect` | windows, incidence curves, in-flight accounting, threshold analysis, tail CIs, receive-path report | §3, §4, §7 | `Collect`, `EstimateIncidence`, `AccountInFlight`, `SplitAtFire`, `AnalyzeThresholds` | hand-computed incidence oracles; AC4, AC4b |
-| | `internal/detect` | recovery detector, decomposition, recovery probes, /health calibration | §5 | `BuildSeries`, `RunWith`, `ProbeRecovery`, `CalibrateHealth`, `NewDecomposition` | synthetic-series units; AC5 |
-| | `internal/vllmlog` | vLLM startup-log boundaries and printed figures, patterns pinned to vLLM 0.29.0, applied to the process-kill decomposition | §5 | `Parse`, `Apply`, `VLLM0290`, `Mock` | the 16 September 2026 vLLM start log as a byte-exact fixture |
-| | `internal/validity` | the G1 to G7 run-validity gates | §10 | `Evaluate` | a unit per gate |
-| | `internal/stats` | §7 statistics: values, median, mean, t-interval, coefficient of variation | §7 | `Summarize` | hand-computed oracles |
-| Composition | `internal/run` | one run's artifacts; the profiles the single-run path refuses; a hosted run re-analysed from its records | §2; SPEC-HOSTED §9 | `Execute`, `CheckConfig`, `Replay` | the whole pipeline in process under the race detector |
-| | `internal/campaign` | N runs, per-run scalars, endpoint summaries with drop counts, halt after an invalid run | §5, §7, §10 | `Run`, `RunWith` | fake-runner units |
-| | `internal/calibrate` | the §10 ramps and the §5 reference | §10, §5 | `RunRamp`, `Calibrate`, `Reference`, `LoadRunner` | a capacity-model fake runner; one step against the mock |
-| Output | `internal/report` | the report pairs for a run and a campaign; the hosted report without SLO fields; a hosted run's pair from its manifest and attempts file; the paired pilot report; the release cell report with G2 per step; the per-step tables with their intervals, finish-reason sub-lines, throughput, curves and quantile refusals, latency and token distributions, gap histograms and signals, the drift split of a frame, the window-close comparison, a route page's `model_mismatch` lines, and the index table | §2 to §5, §7; SPEC-HOSTED §4, §7 to §9, HA2 §8, HA3 points 8, 12, 13 and 16 | `Generate`, `GenerateCampaign`, `FromRun`, `WriteHostedPair`, `GeneratePilot`, `NewStepTables`, `NewIndex`, `DocsOf`, `CompareWindowClose` | renderer units; AC6 field assertions; byte-for-byte replay; hand-computed interval oracles; the forbidden-string test |
-| | `internal/redact` | endpoint and error redaction for every published artifact and error string | §6 | `URL`, `ErrorText`, `Wrap` | leak tests across the packages that print |
-| Hosted | `internal/probe` | the pre-run probe: Domain Name System (DNS) resolution, the Transport Layer Security (TLS) handshake, one request, the response shape, the start gate; the release ceiling check, a record's results re-derived from its requests, the ceiling choice across a model's hosts with a host left out on its records' reported-model fault, the values a probe record withholds, and the reported-model fault of a route's own records | SPEC-HOSTED §2, §5; HA3 points 7 and 15 | `Run`, `RunRelease`, `ReleaseRecord.Verify`, `ChooseCeiling`, `ModelFault`, `ReleaseRecord.Expected`, `LengthValue`, `Gate`, `Write`, `Retains`, `Exposed`, `ExposedByMarking`, `WriteRetained` | an httptest server per shape and failure |
-| | `internal/admission` | the request and liability ledger, hash-chained, priced per token bound, bound to one open line once `Bind` is called; the release ceiling rule, and the check of a published verdict against the configuration's limits | SPEC-HOSTED HA2 §3; HA3 points 6 and 15 | `Create`, `Open`, `Ledger.Bind`, `Ledger.Admit`, `Ledger.AdmitAt`, `Ledger.Settle`, `CeilingRule`, `CheckPublished`, `State.Covers`, `State.ReservationUSD`, `State.PriceRevision` | chain, cap and settlement units |
-| | `internal/evidence` | per-attempt records, the frame store, the clock, status, refresh and balance records with the balance check, the limits a refresh prints and the refresh record as published and as run, the window-close record, the operator file read again at each release cell's start, the manifest with the release cell record (the label, the aggregate dispatch series, the gap histograms, the per-step gates), the completeness check, the evidence pack, the release publication record and the publication page built from it | SPEC-HOSTED §4, §9; HA3 points 9, 13, 14, 15 and 16 | `Records`, `WriteRun`, `WriteRunFrames`, `ReadClock`, `ReadStatus`, `ReadBalance`, `CheckBalance`, `ReadRefreshedLimits`, `PublishedRefresh`, `ReadRetainedRefresh`, `ReadWindowClose`, `WindowClose.Verify`, `LoadOperator`, `Operator.Withhold`, `Operator.CheckConfidential`, `Operator.Refreshed`, `NewManifest`, `StepGaps`, `ReleaseG6`, `CheckRelease`, `BuildPack`, `ReadPack`, `PackCarries`, `LoadPublication`, `Publication.Check`, `Publication.Page` | round-trip, hash and refusal units |
-| | `internal/pilot` | the synthetic ticket fixture, the pilot schedule, the Shape S tickets | SPEC-HOSTED HA2; HA3 point 7 | `Generate`, `NewSchedule`, `GenerateShapeS` | pinned hashes; determinism |
-| | `internal/score` | the task scorer: the route contract and the ten outcome classes | SPEC-HOSTED HA2 §5 | `NewContract`, `NewScorer`, `Scorer.Score` | boundary, wrong-label and duplicate-key cases |
-| | `internal/schedule` | a release's frame from one master seed: twelve cells per route, dates, attempt seeds, per-route offsets, the re-run bound, the committed file with each route's frozen configuration hashes (as published, and keyed as loaded) and host group, the ledger's open-line hash and its position (line count and the hash of its bytes) | SPEC-HOSTED §4; HA3 point 9 | `New`, `Load`, `Schedule.Runs`, `Schedule.Rerun`, `Schedule.Config` | a pinned derivation; window and refusal cases |
-| | `internal/releasekey` | the release key ([The release key](#the-release-key)): 32 random bytes written once as lowercase hexadecimal to a new file readable by its owner only; the HMAC-SHA256 (a hash-based message authentication code built on SHA-256, the 256-bit Secure Hash Algorithm) under it of each configuration as loaded and, on a route with a confidential limit, of the withheld texts, the limit copies, the frame store, the operator file and its records; a key that prints as `[release key]` under every format verb and that `encoding/json` cannot write | SPEC-HOSTED §9; HA3 points 9 and 15 | `New`, `Create`, `Read`, `Key.Sum` | create and read refusals; formatting and JavaScript Object Notation (JSON) encoding expose no key bytes |
-| Test support | `internal/hostqual` | the host qualification probe the timing-coupled tests run first | §2, §8 | `Measure`, `Observation.Qualify`, `Qualified`, `Allocation` | per-limit units |
-| | `internal/ac` | the §8 acceptance suite; the mock runs as a separate process, so it never shares the generator's Go scheduler | §8 | | |
-
-`detect.Run` wraps `RunWith` for a bare bucket series; the acceptance
-suite calls it. `internal/stats` also implements the Holm step-down
-correction for multiple comparisons, with tests; no campaign path calls it
-yet.
+![Package dependencies from go list: the seven commands with their internal imports, and the internal packages grouped by role](diagrams/package-layers.drawio.svg)
 
 | Path | Contents |
 |---|---|
-| `deploy/kind/` | the cluster configuration (one node, image pinned by digest, host port 18000 mapped to NodePort 30800); `smoke.sh`; `reproduce.sh`, the AC7 one-command run; `campaign-e2e.sh` |
-| `deploy/mock/` | the two-replica mock Deployment and its NodePort Service; a readiness probe on `/health` and no liveness probe, so silent_hang can hold `/health` silent |
-| `deploy/process-kill-e2e.sh` | the process-kill end-to-end: the mock in a Docker container under `--restart on-failure`, one dry kill and a two-run campaign that kill and restart it, and a check of the dry-kill record and the run files |
-| `deploy/phase1/` | the vLLM topology manifest, which does not deploy until its PIN-AT-PHASE1 placeholders are filled; capture scripts for the host fingerprint, the GPU sample series and the server log |
-| `configs/` | every runnable configuration; one file drives both the cluster ConfigMap and the host runner; `pilot.reference.yaml` and `release.reference.yaml` are the pilot and release profiles' reference files; `embed.go` builds `release.reference.yaml` into `percentes-release` for `rehearse` |
+| `configs/` | Every runnable configuration; `experiment.reference.yaml`, `ac.reference.yaml`, `pilot.reference.yaml` and `release.reference.yaml` are the profiles' reference files; `embed.go` builds `release.reference.yaml` into `percentes-release` for `rehearse` |
+| `deploy/kind/` | The kind (Kubernetes in Docker) cluster configuration, `smoke.sh`, `reproduce.sh` (AC7) and `campaign-e2e.sh` |
+| `deploy/mock/` | The two-replica mock Deployment and its NodePort Service (a Service reachable on one fixed port of every cluster node) |
+| `deploy/phase1/` | The vLLM topology manifest and the Phase 1 capture scripts |
+| `deploy/release/` | The release's refresh command, which a release's freeze commit adds to the tree: `pct-refresh.py` and one `refresh-<route>` wrapper per provider it reads rows for, where `<route>` is the `target.name` of that provider's route; a second route of the provider, such as `azure-R`, names the first's record files in its operator file and runs its wrapper. A wrapper runs `pct-refresh.py` for its route and is the command `--refresh-cmd` names. The script rewrites the route's limits and eligibility records with the rows of its tier and model from the provider's pages, keeps each page's text beside them, and prints `{"limits": [...]}`. For a route whose rows it does not read, it prints every limit as unavailable |
+| `docs/diagrams/` | draw.io diagrams as SVG (Scalable Vector Graphics) files that carry their draw.io source |
 
-## Gates and where each bites
+## A run, in order
 
-Every check that can refuse a configuration, end a run or label a cell
-carries a pinned number and one enforcing function. You need this
-section when a run exits 2 or a cell does not count.
+![One run of cmd/percentes: the setup before the load, the client host and the target cluster during the run, and the analysis pipeline after the last terminal event, with percentes-campaign repeating the run](diagrams/system-flow.drawio.svg)
 
-| Check | Pinned numbers | When | Consequence | Enforced in |
+`cmd/percentes/main.go`, then `run.Execute` (`internal/run/run.go`):
+
+1. `config.LoadFile` decodes and validates the file; `run.CheckConfig` and the `target.hosted` check refuse what this binary does not run.
+2. `serverstats.Preflight` checks the queue gauge, the kept families and the time-to-first-token (TTFT) histogram on each `target.metrics_urls` endpoint; a failure exits 1 before any dispatch.
+3. `loadgen.Run` builds the schedule, anchors the run epoch on the monotonic clock and calls `Hooks.OnEpoch`. `run.Execute`'s hook releases the orchestrator and the probes, then calls `Options.OnEpoch`, through which `cmd/percentes` starts the Prometheus sampler (`Sampler.Start`) and the loopback canary (`loadgen.StartCanary`).
+4. Where the run has an injector, `orchestrator.Execute` pre-arms it to fire at T_inject, the configured fault instant (the warm-up plus `fault.t_inject_offset_s` after the epoch), and records armed, fire and expiry times. `percentes-campaign` passes its clean-delete or process-kill injector, and `--admin-url` arms the mock-admin one (`orchestrator.NewMockInjector`). A mock with a `mock.fault_schedule` arms its own faults at start-up.
+5. Where `--probe-direct` or `--probe-service` is given, `detect.ProbeRecovery` polls from T_inject every 500 ms until its first counted success or the end of the fault phase.
+6. The load runs through the configured `run.phases`: warm-up, baseline, the fault phase and cooldown. The experiment profile pins them at 60, 300, 600 and 60 s (`PinnedWarmupS`, `PinnedBaselineS`, `PinnedFaultWindowTimeoutS`, `PinnedCooldownS`). Monitors sample client CPU at 1 Hz and the Go runtime's garbage-collection (GC) pause histogram.
+7. After the last terminal event, `run.Execute` reads a mock's scheduled fires back from `/admin/faults` (`scheduleFires`) and calls `analyze`, which:
+   1. collects the `baseline`, `guard` and `fault` windows with `collect.Collect`;
+   2. runs the detector, `detect.RunWith`, over `detect.BuildSeries`;
+   3. collects `fault_survivor`, and `fault_degraded` and `fault_recovered` when recovery falls inside the fault window;
+   4. computes `collect.AccountInFlight`, the share gate (`shareGate`) and `collect.AnalyzeThresholds`;
+   5. fills the decomposition (`detect.NewDecomposition`) from the probe times;
+   6. decides validity in `validity` from the fault source, G2 (client validity), G1 (replica share) and the injection timing.
+8. The binary stops the sampler and canary, calls `Artifacts.AttachObservations` (top-level `server_side` and `receive_path`), evaluates G1 to G7 (`validity.Evaluate`), writes `attempts.jsonl` (`evidence.WriteRun`) and the report pair (`report.Generate`), and exits 0, 2 or 1.
+
+The fire anchor is whichever comes first of T_inject and the recorded fire (`collect.FireAnchorNs`). `configs/experiment.reference.yaml` sets `fault.t_inject_offset_s` to 300 s, equal to the baseline phase, so T_inject is 360 s from the epoch.
+
+| Window (report key) | Bounds, by intended dispatch time, half-open | Built in |
+|---|---|---|
+| `baseline` | [warm-up end, fire anchor − `client.http_timeout_s`) | `collect.GuardStartNs` |
+| `guard` | [fire anchor − `client.http_timeout_s`, T_inject) | `collect.GuardStartNs` |
+| `fault` | [T_inject, end of the fault phase) | `loadgen.Run` sets the phase ends |
+| `fault_degraded`, `fault_recovered` | split at the detector's recovery point | `analyze` |
+| `fault_survivor` | the fault window, requests served by the one replica besides the victim, the replica the fault targets (`survivorOf`) | `analyze` |
+| `outage` | process kill only: from the fire to `replica_ready` | `cmd/percentes-campaign` |
+
+![One run to scale: phases, report windows, the fault-window splits and the detector's plateau, with the guard window magnified for an on-time and an early fire](diagrams/run-timeline.drawio.svg)
+
+**Campaigns.** `campaign.RunWith` runs N repetitions (`PinnedRepetitions`, 5, on the experiment profile); each repetition's seed is `run.seed` plus its index from 0. Per-run scalars aggregate through `stats.Summarize`.
+
+§1 has three fault variants. A clean delete removes the victim's pod with no grace period; it arms `orchestrator.NewCleanDeleteInjector` per run against the pod `--victim` names or one `--victim-selector` picks. A black hole cuts the victim's whole node off the network for a fixed time; `percentes-campaign` refuses it, since no node-partition injector exists. A process kill sends SIGKILL (signal 9) to a single replica's serving process, and its container restarts in place.
+
+**Calibration.** `calibrate.Calibrate` runs two `calibrate.RunRamp` ramps against one replica, a third where they disagree by more than `PinnedCalibrationAgreementFrac`, freezes lambda_r, the per-replica arrival rate, at `PinnedLambdaRFrac` (0.65) of lambda_max, and `calibrate.Reference` runs the §5 step at 2 × lambda_r.
+
+![The §10 calibration procedure as a flowchart](diagrams/calibration.drawio.svg)
+
+## One request, from schedule to outcome
+
+1. **Schedule.** `loadgen.BuildSchedule` (self-hosted) or `loadgen.BuildLadder` (release) fixes every intended dispatch time t_i before the run (`internal/loadgen/schedule.go`).
+2. **Pacer.** One goroutine (a Go lightweight thread) sleeps until t_i − 10 ms (`spawnLeadNs`), spawns request i's worker and moves to request i + 1 (`internal/loadgen/loadgen.go`).
+3. **Worker.** The worker sleeps on its own timer (`gen.sleep`) until t_i − 1.5 ms (`spinNs`), spins on the clock to t_i and calls `gen.execute`. A worker spawned late skips the timer; one spawned after t_i dispatches at once, and its lateness is send skew.
+4. **Dispatch.** `gen.execute` (`internal/loadgen/sse_client.go`) stamps `dispatch_ns`. Under the release profile a request more than `PinnedSendSkewMaxMs` (50 ms) past t_i is not sent and stays undispatched. The per-request timeout (`clientTimeout`) runs from dispatch: `PinnedClientTimeoutS` (30 s), or `client.http_timeout_s` (90 s) under the release profile.
+5. **Body and header.** `gen.requestBody` builds the generated body, the literal `target.body` with its case slot `"{{case}}"` replaced (`config.LiteralBody`), or a pilot configuration's body (`Pilot.RequestBody`). `gen.newRequest` posts to `target.endpoint_url`, else `target.base_url` plus `/v1/chat/completions`, with the key in the header `Target.KeyHeader` gives.
+6. **Stream.** The `httptrace` `GotConn` hook records `peer_addr`, `conn_reused` and `conn_acquired_ns`; `watchRelease` records `wrote_request_ns`. `parseChunk` reads chat-completions chunks at the paths `target.response_shape` names, and `parseMessagesEvent` reads a Messages stream. The `sse.Events` callback in `gen.execute` stamps `first_token_ns` at the first content event and records each later gap as an inter-token latency (ITL). `recordChunk` merges usage objects (`mergeUsage`) and keeps the finish reason, the reported model, the system fingerprint and the first in-band error object.
+7. **Outcome.** The request ends in one of the three §3 states (`OutcomeCompleted`, `OutcomeErrored`, `OutcomeCensored`); an errored request carries one of six error classes. Under the release profile a completion after `release.shape.deadline_s` (30 s from t_i) is marked `late` (`releaseDeadline`).
+8. **Collection.** `collect.Collect` assigns the request to the window of its t_i, records completed TTFT and end-to-end (e2e) latency, both measured from t_i, through `histo` and adds every scheduled request to the window's incidence curve. `detect.BuildSeries` buckets the same records at 1 s for the detector.
+
+![The pacer and worker timing for one request, including a late pacer wake-up that still dispatches at t_i](diagrams/pacer-timing.drawio.svg)
+
+| Error class | Set where | Condition |
+|---|---|---|
+| `connect` | `classifyTransportErr`, `gen.execute` | any transport failure other than a deadline or a reset, a refused write among them, or a request that could not be built |
+| `reset` | `classifyTransportErr`, `classifyStreamErr` | `ECONNRESET` (the peer reset the connection) |
+| `status_429` | `gen.execute` | a final status of 429 |
+| `status_other` | `gen.execute` | any other non-200 status (the client follows no redirect) |
+| `malformed_stream` | `classifyStreamErr`, `gen.execute` | an end before the terminator (`[DONE]`, or `message_stop` on a Messages target), a read error other than a reset or a deadline, an undecodable event, an event over `eventLimit` (1 MiB), or, on a hosted target (`target.hosted`), the first in-band error object |
+| `empty_stream` | `gen.execute` | the terminator with no content event |
+
+An in-band error object is an error object carried inside a stream answered 200. On a self-hosted target `recordChunk` keeps the first one in `stream_error` and the stream is read on to its terminator, so the request can still complete or end as `empty_stream`.
+
+A request with no terminal event by its timeout is censored (`context.DeadlineExceeded`). The diagram shows the chat-completions stream and the 30 s timeout.
+
+![The outcome paths of the request traced above: its failure stages and their tests, the error class each failure takes, the censored and completed states, the order of precedence among them, and the outputs each state reaches](diagrams/outcomes.drawio.svg)
+
+## Recovery detection
+
+`internal/detect/detect.go` computes the `detector` and `decomposition` fields of a self-hosted report. A hosted report carries neither.
+
+| Input or rule | Value | Source |
+|---|---|---|
+| Series | goodput (the fraction of scheduled requests meeting the §4 objective, TTFT ≤ `PinnedSLOTTFTMs` and e2e ≤ `PinnedSLOE2EMs`) per 1 s bucket of intended time | `BuildSeries` |
+| Window R | 10 s, leading: the window at t covers [t, t + R) | `PinnedDetectorWindowS` |
+| Entry | a window at or above 90 percent of the applicable baseline | `PinnedDetectorEntryPct` |
+| Hold H | 30 s; any window below entry in the hold cancels the candidate (`canceled_entries`) | `PinnedDetectorHoldS` |
+| Exit | a window below 85 percent after recovery starts a re-degradation (`re_degradations`) | `PinnedDetectorExitPct` |
+| Pre-fault baseline | the `baseline` window's goodput | `collect.Collect` |
+| Equilibrium baseline | ratio-of-sums goodput from fire anchor + R to the pre-fault entry or the timeout | `RunWith` |
+| Sweep | entry 85, 90, 95 percent; R 5, 10, 20 s; H 15, 30, 60 s; 27 rows (`sensitivity`) | `PinnedSensitivityEntryPct`, `PinnedSensitivityWindowS`, `PinnedSensitivityHoldS` |
+| Partition heal | black hole only: the first held entry starting no earlier than the heal anchor, which is the observed expiry or fire anchor + `PinnedPartitionDurationS` (`partition_heal_recovery`, `heal_anchor_ns`) | `RunWith` |
+
+| Output | Meaning |
+|---|---|
+| `to_pre_fault`, `to_equilibrium` | time to recovery (TTR) per baseline: the held entry's start minus the fire anchor |
+| `hold_unobserved` | a candidate entry window or hold that runs past the end of the series |
+| `components` | separate detections for `ttft_slo`, `e2e_slo` and `error_rate` |
+| `backlog_drain_*` | always reported unmeasured |
+| `decomposition.segments` | each §5 boundary with its source and a note where unmeasured (`NewDecomposition`) |
+
+`NewDecomposition` reports the Kubernetes API (application programming interface) and log boundaries N/A (not applicable) for the clean-delete, black-hole and mock variants. Under process kill, `cmd/percentes-campaign` fills container start from `docker inspect` and the log rows through `vllmlog.Apply`. The probes supply `replica_ready`, and `traffic_restored` where a Service exists, each measured from the fire.
+
+![Detector entry, hold and exit on a sketched goodput series](diagrams/recovery-detector.drawio.svg)
+
+## Gates
+
+| Gate | Checks | Computed in | On failure | § |
 |---|---|---|---|---|
-| Configuration pins | SPEC numbers from §1 to §5, §8 and §10 as equalities or bounds; §6 environment values as required fields | configuration load | the configuration does not load | `config.Validate` |
-| Metric preflight | the queue gauge, every kept family and the TTFT histogram's type, read on each endpoint | before the load | the binary exits before any dispatch | `serverstats.Preflight` |
-| G2: send skew | 99th percentile (p99) ≤ 5 ms and max ≤ 50 ms, compared in nanoseconds | judged after the run | run invalid | `loadgen.evaluateGates`, `run.validity` |
-| G2: undispatched | zero scheduled requests never dispatched | judged after the run | run invalid | same |
-| G2: client CPU | ≤ 70 % over any 5 s window | judged after the run | run invalid; unmeasured counts as failed | same |
-| G2: GC pause | p99 < 1 ms, on the upper edge of the runtime histogram bucket that holds it | judged after the run | run invalid; a p99 in the runtime's open last bucket fails | same |
-| Fault source | an armed injector, or the mock's scheduled fires read back | after the run | run invalid | `run.validity` |
-| Injection timing (AC3) | fire within 500 ms of T_inject | after the run | run invalid | `run.validity` |
-| G1: share (§1) | 45 to 55 % per replica over the baseline window | after the run | run invalid under a per-request (layer-7) dataplane, descriptive under per-connection routing; a replica count other than the declared one, or no attributed baseline request, fails in either regime; not applicable to a one-replica target | `run.shareGate`, `config.BalancesPerRequest` |
-| G3, G4 (black-hole only) | zero errored victim in-flight requests; staleness window ≥ 20 s with victim-bound traffic | per-run evaluation | a failed or unobserved gate strips the node-loss-representative label, and the run stays valid | `validity.Evaluate` |
-| G5 | GPU clock and power fingerprints equal across replicas and runs | per-run evaluation | not applicable until the capture output is wired | `validity.Evaluate` |
-| G6 | baseline goodput ≥ 0.99 | per-run evaluation | run invalid | `validity.Evaluate` |
-| G7 | per-replica waiting-queue mean ≤ 1.0 over the baseline window, with ≥ 90 % of the expected samples | per-run evaluation | run invalid; not applicable without `target.metrics_urls` | `validity.Evaluate` |
+| Configuration pins | each SPEC number as an equality or bound | `internal/config/validate.go`, `Config.Validate` | the file does not load | §6; SPEC-HOSTED §3 |
+| Metric preflight | queue gauge, kept families, TTFT histogram type | `internal/serverstats/serverstats.go`, `Preflight` | exit 1 before dispatch | §2 |
+| G1 share | 45 to 55 percent per replica over the baseline (`PinnedShareMinPct`, `PinnedShareMaxPct`), and the declared replica count seen | `internal/run/run.go`, `shareGate`; `internal/validity/validity.go`, `gateG1` | run invalid; the band is descriptive under per-connection routing (`config.BalancesPerRequest`); not applicable to one replica or a hosted target | §1, §10 |
+| G2 client validity | over the measured span (warm-up end to fault-phase end, or a release step's measured window): send skew 99th percentile (p99) ≤ 5 ms and maximum ≤ 50 ms, client CPU ≤ 70 percent over every 5 s window (an unmeasured CPU fails) and GC pause p99 < 1 ms. Over every request judged (the whole run; in a release step, its requests, with the warm-up's on step 1; over a ladder, every request through its last attempted step): no refused write and no undispatched request | `internal/loadgen/gates.go`, `evaluateGates` | run invalid; in a release step, the ladder ends and the cell is `client_invalid` | §2, §10; SPEC-HOSTED §7 |
+| Fault source | an armed injector, or the mock's scheduled fires read back | `internal/run/run.go`, `validity` | run invalid | §2 |
+| Injection timing | fire within `PinnedInjectionToleranceMs` (500 ms) of T_inject | `internal/run/run.go`, `validity` | run invalid | §8 (AC3) |
+| G3 | no errored victim-attributed in-flight request (black hole only) | `internal/validity/validity.go`, `gateG3` | strips the node-loss-representative label (`node_loss_representative`, the §1 label marking a black-hole run as standing for node loss) | §1, §10 |
+| G4 | staleness window ≥ `PinnedEndpointStalenessMinS` (20 s) with victim-bound traffic observed inside it | `gateG4` | strips the label; no producer fills the G4 observation | §10 |
+| G5 | GPU fingerprints equal | `gateG5` | not applicable: the fingerprints `percentes-campaign` writes under process kill are not fed into the gate | §10 |
+| G6 | baseline goodput ≥ `PinnedBaselineGoodputMin` (0.99) | `gateG6` | run invalid | §10 |
+| Hosted-G6 | completion within 30 s over the `baseline`, `guard` and `fault` windows; per release step, completion within the deadline | `gateG6Hosted`; `validity.ReleaseG6` through `evidence.ReleaseG6` | reported only | §6; SPEC-HOSTED §7 |
+| G7 | per-replica waiting-queue mean ≤ `PinnedQueueGaugeMax` (1.0) with ≥ `PinnedQueueCoverageMin` (90 percent) of samples | `gateG7` | run invalid; not applicable without `target.metrics_urls` | §10 |
+| Release send skew | a worker more than `PinnedSendSkewMaxMs` (50 ms) past t_i | `gen.execute` | request unsent; its step's G2 fails | SPEC-HOSTED §3 |
+| Release write limit | per evaluation window W, at most the lesser of ceil(the top step's rate × (W + 0.1 s)) writes and the window's allowance (`admission.WindowAllowances`); a write that some window does not admit waits for a permit, for at most `writePermitWaitNs` (50 ms) from its first attempt | `internal/loadgen/write_permits.go`, `newWriteWindows`, `tryReserve` | the write is refused with no byte sent where no permit comes within that wait, the next permit would come after it, or the write wakes from its wait after it. The request is errored as `connect` with `write_denied` true, and G2 fails | SPEC-HOSTED §3 |
+| Release step verdict | G2 over the step, a tripwire, a `status_429` fraction above 0.5 | `internal/loadgen/loadgen.go`, `stepEnd` | the ladder ends (`client_validity`, `tripwire`, `backoff`) | SPEC-HOSTED §3, §5 |
+| Tripwires | sends beyond a step's schedule; in flight above 2 × the step's rate × `client.http_timeout_s` (the hard timeout, 90 s) (`inFlightLimit`) | `internal/loadgen/loadgen.go`, `newLadderTripwire` | the ladder ends; the cell is `client_invalid` | SPEC-HOSTED §5 |
+| Client exhaustion | `EMFILE` (no file descriptor left) or `EADDRNOTAVAIL` (no local port left) | `cmd/percentes-release/stops.go`, `clientExhausted` | the ladder ends; the cell is `client_invalid` | SPEC-HOSTED §2, §5 |
 
-`percentes` and `percentes-campaign` fold run-invalidating gate failures
-into exit code 2; `run.Execute` has already recorded G1 and G2. An
-applicable gate that goes unobserved fails. `make bins`, `reproduce.sh` and
-`campaign-e2e.sh` build with `CGO_ENABLED=0` (cgo, Go's C interoperability,
-disabled), and on macOS that leaves the client CPU gate unmeasured, so such
-a run exits 2; Linux measures CPU from `/proc`. The fault-source and
-injection-timing checks sit outside SPEC's G1 to G7 list and invalidate a
-run in the code.
+`validity.Evaluate` evaluates only G2 and Hosted-G6 for a hosted target and reports the rest not applicable.
 
-**Hosted targets.** Only G2 and G6 are evaluated. Hosted G6 is completion
-within the 30 s timeout, computed over the baseline, guard and fault
-windows and reported without invalidating the run; §10 defines G6 over the
-baseline window. Under the release profile, hosted G6 is completion
-within the 30 s deadline over each ladder step's scheduled requests, and
-the cell's manifest carries it per attempted step beside G2 per step,
-and G2 over the whole ladder where no stop interrupted it
-(`evidence.ReleaseG6`, `validity.ReleaseG6`).
-The cell's text report prints a G2 line and the hosted G6 lines per
-attempted step, and a G2 failure is also named by the cell's label. The
-request body the client generates omits `ignore_eos`
-and asks for no usage object; a target with a literal `body` sends that
-body instead ([Hosted runs](#hosted-runs-and-the-evidence-files)). The key
-is read at run start from a file given with `--env`, as the value of the
-variable `target.api_key_env` names, and sent in the one header
-`target.auth_header` selects: `authorization_bearer` (the default) sends
-`Authorization: Bearer` and the key, and `x-api-key` or `api-key` sends
-the key alone in the `X-Api-Key` or `Api-Key` header. The key is
-never recorded, and every recorded header, body and error string is
-masked for it.
+| Build | Binaries | Host CPU |
+|---|---|---|
+| `make bins` | `percentes`, `percentes-campaign`, `mockserver`, `percentes-calibrate`, with `CGO_ENABLED=0` | unmeasured on macOS: a run of `percentes`, `percentes-campaign` or `percentes-calibrate` there fails G2 |
+| `make percentes-pilot`, `make percentes-release` | the pilot command and the release runner, built on macOS with cgo (Go's interface for calling C code), through which they read host CPU | measured |
+| `make percentes-release-linux` | the release runner for the Linux client host, static, with `CGO_ENABLED=0` | measured from `/proc` |
 
-**Release cells.** A release route carries these checks beside G2 and
-hosted-G6 ([The release runner](#the-release-runner)):
+`percentes-release check-cpu` reports whether a build measures host CPU.
 
-| Check | Pinned numbers | When | Consequence | Enforced in |
-|---|---|---|---|---|
-| Ceiling rule | each step's nominal demand at most half of every recorded rate, token, concurrency, daily and spend-window limit; the monthly cap and the route's ledger cap cover the twelve cells, re-runs and probes; the auto-reload threshold covers the costliest cell | route start | a step is excluded with its binding limit named; a route with no admitted step refuses to start | `admission.CeilingRule`, `newRoute` |
-| Open-file limit | soft limit at least 65,536 | route start | refusal to start | `checkOpenFiles` |
-| Balance command | one is given and parses | route start | refusal to start; a release manifest without its start balance record is refused | `ParseBalanceCommand`, `evidence.NewManifest` |
-| Frozen inputs | the schedule froze this route's configuration as published and this ledger by their SHA-256 (256-bit Secure Hash Algorithm) hashes, the configuration as loaded by its HMAC-SHA256 under the release key `--release-key` names, the route's host group and the ledger's position; at route start the ledger still holds the frozen lines up to that position, and at each cell it still has the frozen open line, its first | route start; each cell's ledger reads | refusal to start; at a cell, the cell is labelled interrupted and `run` exits 1 | `checkFrozen`, `checkLedger`, `frozenEntries`, `Ledger.Bind`, `ledgerEntries` |
-| Ceiling records | one record per host of the route's model at 512, and at 1,024 when any host failed at 512, each bound to the request it checked and naming in `ledger_sha256` the ledger the schedule froze, with its results re-derived from its requests; another host's records are also judged against that host's configuration as the schedule froze it (`--host-config`); another host whose records carry a reported-model fault is left out of the choice, and its records are then neither required at a ceiling nor checked for the start gate or the input bound | route start | refusal to start | `hostTargets`, `readCeilingProbes`, `ReleaseRecord.Verify`, `probe.ChooseCeiling` |
-| Reported model at the check | the route's own ceiling-check records expect the configuration's expected identifier and report no other, and some response reported a recorded `target.reported_model` | the ceiling check; route start | `ceiling-check` prints a `REFUSED` line and exits 2 where its record reports an identifier with such a fault; `run` refuses to start | `modelRefusal`, `readCeilingProbes`, `probe.ModelFault` |
-| Ledger prices | the ledger's highest price at the cell bounds and at the ceiling-check bounds covers the ceiling rule's verdict | route start | refusal to start | `State.Covers` |
-| Clock offset | at most 60 s | cell start | the route stops; the cell is retained and labelled | `runCell` |
-| Refresh | the refresh command exits 0 within 30 s, the operator file loads, holds no confidential limit's value and covers the build, and every limits and eligibility record's file was rewritten after the command started | cell start | the cell is blocked before admission: no ledger line, no request | `cellOperator`, `Operator.CheckConfidential`, `Operator.Refreshed` |
-| Limits read | the refresh command prints one entry per recorded limit, its value or why it is unavailable; the ceiling rule with those values, at the route's newest recorded price, still admits every step the route runs | cell start | output that does not parse blocks the cell as a refresh fault does; limits that no longer admit a step stop the route before admission | `evidence.ReadRefreshedLimits`, `limitsStop` |
-| Balance check | the balance command prints `{"amount_usd": "<decimal>"}` at or above the cell's reservation, or `{"unavailable": "<reason>"}` under a `target.balance_unavailable` ruling | cell start | the cell is blocked before admission | `evidence.CheckBalance`, `BalanceCheck.Blocks` |
-| Ledger admission | the route and global liability caps of the configuration, at the route's price revision in the cell's ledger read | cell start | a cap refusal stops the route; a later price line for the route repeats the limits and balance checks once, and a second blocks the cell | `Ledger.AdmitAt` |
-| Probe gate | a 400, 401, 403 or 404, or an operator-set limit status | cell start | the cell is blocked before its ladder | `probe.Gate` |
-| Credential or account fault | a probe 401 or 403 that the route's previous cell to send a probe also saw, on its probe or inside its ladder | cell start | the route stops; the cell is retained and labelled | `authFault` |
-| Documented billing refusal | the status and body string `target.billing_refusals` records; at the probe of a route with a confidential limit, the string is looked for in the withheld body | the probe, or any request | the route stops | `billingRefusal`, `Hooks.OnDone` |
-| G2 per step | the §2 numbers over the step's measured window | each drain's end | the ladder ends; the cell is client-invalid | `loadgen.runLadder`, `stepEnd` |
-| Tripwires | a send beyond the step's scheduled count; requests in flight above 2 × the step's rate × the 90 s hard timeout | each drain's end | the ladder ends; the cell is client-invalid | same |
-| Backoff rule | a status_429 fraction above 0.5 of the step's scheduled requests | each drain's end | the ladder ends; the cell counts | same |
-| EMFILE | any request failing for want of a file descriptor | during the ladder | the ladder ends; the cell is client-invalid | `isEMFILE` |
-| Reported model per response | every response that names a model names the expected one | the ladder | the cell is labelled `model_mismatch`, kept out of the frame, listed on the route's page and re-run | `cellOutcome` |
-
-**Timing-coupled tests.** Before each timing-coupled acceptance test,
-`internal/hostqual` probes the host against limits set in
-`hostqual.Allocation` from the §2 budget: timer wake lateness p99 ≤ 1 ms,
-plus 1 ms on Linux, where Go's poller waits in whole milliseconds, and
-max ≤ 10 ms, and a GC pause p99 bucket edge of at most 1 ms. A test
-skips only on a host that fails the probe, and re-probes after a failed
-timing assertion before it fails. `make test-ac` fails on any skip unless
-`PERCENTES_AC_ALLOW_SKIPS=1`.
+Before each timing-coupled acceptance test, `hostqual.Qualified` measures timer wake lateness and GC pauses (`hostqual.Measure`) and checks them against `hostqual.Allocation`. A test skips on a host that fails. After a failed timing assertion the host is measured again: a host that lost qualification skips the criterion, and one that kept it fails. `make test-ac` fails on any skip unless `PERCENTES_AC_ALLOW_SKIPS=1`.
 
 ## Server-side sampling and the receive path
 
