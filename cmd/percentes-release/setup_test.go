@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/percentes/percentes/internal/evidence"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/redact"
 	"github.com/percentes/percentes/internal/releasekey"
 	"github.com/percentes/percentes/internal/schedule"
 )
@@ -714,6 +716,46 @@ func TestStopSignals(t *testing.T) {
 	}
 	if isEMFILE(&loadgen.Request{ErrText: "dial tcp: connection refused"}) || !isEMFILE(&loadgen.Request{ErrText: "socket: too many open files"}) {
 		t.Fatal("EMFILE misread")
+	}
+	port := &loadgen.Request{ErrText: "dial tcp 192.0.2.1:443: connect: " + syscall.EADDRNOTAVAIL.Error()}
+	if isEADDRNOTAVAIL(&loadgen.Request{ErrText: "dial tcp: connection refused"}) || !isEADDRNOTAVAIL(port) || clientExhausted(port) != errEADDRNOTAVAIL || clientExhausted(&loadgen.Request{}) != nil {
+		t.Fatal("EADDRNOTAVAIL misread")
+	}
+	netErr := func(errno syscall.Errno) *loadgen.Request {
+		return &loadgen.Request{ErrText: redact.ErrorText(&net.OpError{Op: "dial", Net: "tcp", Source: &net.TCPAddr{IP: net.IPv4(203, 0, 113, 7)}, Addr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443}, Err: os.NewSyscallError("connect", errno)}, 0)}
+	}
+	if clientExhausted(netErr(syscall.EMFILE)) != errEMFILE || clientExhausted(netErr(syscall.EADDRNOTAVAIL)) != errEADDRNOTAVAIL {
+		t.Fatal("redacted network error misread")
+	}
+	reqs := []loadgen.Request{
+		{Status: 429, ErrorBody: []byte(`{"error":{"type":"enforced_spend_limit_reached"}}`)},
+		{Status: 429, ErrorBody: []byte(`{"error":{"type":"rate_limit_error"}}`)},
+		{Status: 429, ErrorBody: []byte(`{"error":{"type":"enforced_spend_limit_reached"}}`)},
+	}
+	if n, s := billingRefusals(tg, reqs); n != 2 || s == nil || !strings.Contains(s.Error(), "the operator's billing setting") {
+		t.Fatalf("%d billing refusals, stop %v", n, s)
+	}
+}
+
+// A request, the probe's included, that reports more prompt tokens than
+// the input bound or more output tokens, reasoning included, than the
+// ceiling is a pricing-bound breach; a request at its bounds, or that
+// reports nothing, is not.
+func TestPricingBreach(t *testing.T) {
+	sh := &config.Shape{Name: config.ShapeR, InputBoundTokens: 128, CeilingTokens: 16}
+	usage := func(u string) loadgen.Request { return loadgen.Request{Usage: json.RawMessage(u)} }
+	at := []loadgen.Request{usage(`{"prompt_tokens":128,"completion_tokens":16,"total_tokens":144}`), {}, usage(`{"prompt_tokens":7}`)}
+	if s := pricingBreach(sh, at, nil, nil); s != nil {
+		t.Fatalf("requests at their bounds: %v", s)
+	}
+	over := append(slices.Clone(at), usage(`{"prompt_tokens":129,"completion_tokens":3}`), usage(`{"prompt_tokens":20,"completion_tokens":16,"total_tokens":60}`))
+	want := "route stop: pricing-bound breach: 2 of the cell's requests reported more than the 128-token input bound or the 16-token ceiling, reasoning included, that the ledger prices each request at; the largest reported were 129 prompt and 40 output tokens"
+	if s := pricingBreach(sh, over, nil, nil); s == nil || s.Error() != want {
+		t.Fatalf("stop %v, want %q", s, want)
+	}
+	p, o := 9, 17
+	if s := pricingBreach(sh, at, &p, &o); s == nil || !strings.Contains(s.Error(), ": 1 of the cell's requests") {
+		t.Fatalf("probe over the ceiling: %v", s)
 	}
 }
 

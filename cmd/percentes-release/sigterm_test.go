@@ -514,6 +514,41 @@ func TestSigtermBillingAfterSignal(t *testing.T) {
 	endRecordsRan(t, r, run, m)
 }
 
+// pages reads a cell SIGTERM interrupted mid-ladder, labelled at the next
+// start, with the route's pinned ladder restored for the label.
+func TestSigtermLadderPages(t *testing.T) {
+	fastDispatch(t)
+	e := newEndpoint(t, always200)
+	r, f := newTestRoute(t, releaseConfig(t, e.url()), "+0.005")
+	ladder, binding, cpu := r.cfg.Release.Ladder, r.cfg.Release.BindingRPS, r.cfg.ClientValidity.CPUWindowS
+	shortLadder(r)
+	r.ackDir = t.TempDir()
+	run := r.runs[0]
+	shiftClock(r, run.Start)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	r.onEpoch = func(time.Time) { time.AfterFunc(1500*time.Millisecond, func() { cancel(errTerminated) }) }
+	if code, err := r.loop(ctx); err != nil || code != exitTerminated {
+		t.Fatalf("loop: exit %d, %v", code, err)
+	}
+	r.cfg.Release.Ladder, r.cfg.Release.BindingRPS, r.cfg.ClientValidity.CPUWindowS = ladder, binding, cpu
+	r.onEpoch = nil
+	ctx2, cancel2 := context.WithCancelCause(context.Background())
+	r.wait = func(context.Context, time.Time) error {
+		cancel2(errTerminated)
+		return errTerminated
+	}
+	if code, err := r.loop(ctx2); err != nil || code != exitTerminated {
+		t.Fatalf("next start: exit %d, %v", code, err)
+	}
+	if m, _ := checkRetained(t, r, run); m.Release.Outcome != evidence.CellInterrupted || !m.Release.LadderStarted || m.Release.RecordsComplete {
+		t.Fatalf("label %+v", m.Release)
+	}
+	cfgs := append(slices.Clone(f.in.hostCfgs), r.cfg)
+	if _, err := buildPages(r.out, r.framesRoot, r.sched, r.scheduleSHA256, r.ledgerPath, f.in.probeFiles, cfgs, r.key, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // ceiling-check takes a real SIGTERM as an operator abort: it stops
 // sending, writes its record with its admission settled and exits 2; the
 // next check is sent, and every admission of the route has its record.
@@ -658,6 +693,12 @@ func hostGatesWide(r *route) {
 	r.cfg.ClientValidity.SendSkewP99Ms, r.cfg.ClientValidity.SendSkewMaxMs = 1000, 1000
 }
 
+// gateShut fails the client-validity gate on its send-skew bounds.
+func gateShut(r *route) {
+	hostGatesWide(r)
+	r.cfg.ClientValidity.SendSkewP99Ms, r.cfg.ClientValidity.SendSkewMaxMs = 0, 0
+}
+
 // ladderSignalRun runs the first cell of a route cut to its first steps
 // ladder steps through run's operatorContext and r.loop, with a real
 // signal sig sent sigAt after the epoch unless the loop has returned. The
@@ -794,6 +835,74 @@ func endRecordsRan(t *testing.T, r *route, run schedule.Run, m *evidence.Manifes
 	if m.StatusEnd == nil || m.BalanceEnd == nil {
 		t.Fatalf("manifest end records: status %v, balance %v", m.StatusEnd, m.BalanceEnd)
 	}
+}
+
+// SIGTERM after the ladder's end, its last request still answered past
+// the drain, leaves the cell its own label: counted with its evidence
+// retained and its end commands run, its admission settled, exit 5 and
+// no re-run, hold or marker. A ladder its verdict ended at step 1 keeps
+// that verdict's label. A cell the client-validity gate failed keeps
+// client_invalid and takes its re-run. SIGTERM inside the last drain
+// interrupts the cell and takes its re-run.
+func TestSigtermAfterLadderEnd(t *testing.T) {
+	t.Run("ladder ran to its end", func(t *testing.T) {
+		r, run, code, out := ladderSignalRun(t, syscall.SIGTERM, 1, 0, http.StatusOK, 700*time.Millisecond, func(d []time.Duration) time.Duration { return d[0] + 300*time.Millisecond }, hostGatesWide)
+		rec := readCell(t, r, run)
+		if code != exitTerminated || rec.Interrupted != nil || rec.Outcome != outcomeCounted && !hostGateFailed(rec) {
+			t.Fatalf("exit %d, %s %q, interrupted %+v\n%s", code, rec.Outcome, rec.Reasons, rec.Interrupted, out)
+		}
+		skipOnHostGate(t, rec)
+		if !strings.Contains(out, "ended on SIGTERM after "+run.Label) {
+			t.Fatalf("no end line\n%s", out)
+		}
+		m, _ := checkRetained(t, r, run)
+		if m.Release.Outcome != evidence.CellCounted {
+			t.Fatalf("label %+v", m.Release)
+		}
+		endRecordsRan(t, r, run, m)
+		if u := ledgerState(t, r.ledgerPath).Routes[r.cfg.Target.Name]; u.Reserved != 0 || u.Probe+u.Warmup+u.Measured != rec.Sent.Probe+rec.Sent.Warmup+rec.Sent.Measured {
+			t.Fatalf("ledger %+v, record %+v", u, rec.Sent)
+		}
+		if rerunOf(t, r, run) {
+			t.Fatalf("%s re-run scheduled", run.Label)
+		}
+	})
+	t.Run("ladder its verdict ended", func(t *testing.T) {
+		r, run, code, out := ladderSignalRun(t, syscall.SIGTERM, 2, 0, http.StatusTooManyRequests, 700*time.Millisecond, func(d []time.Duration) time.Duration { return d[0] + 300*time.Millisecond }, nil)
+		rec := readCell(t, r, run)
+		if code != exitTerminated || rec.Outcome == outcomeInterrupted || rec.Interrupted != nil || rec.Ladder == nil || rec.Ladder.EndStep != 1 {
+			t.Fatalf("exit %d, %s %q, ladder %+v\n%s", code, rec.Outcome, rec.Reasons, rec.Ladder, out)
+		}
+		checkRetained(t, r, run)
+	})
+	t.Run("failed gate", func(t *testing.T) {
+		r, run, code, out := ladderSignalRun(t, syscall.SIGTERM, 1, 0, http.StatusOK, 700*time.Millisecond, func(d []time.Duration) time.Duration { return d[0] + 300*time.Millisecond }, gateShut)
+		rec := readCell(t, r, run)
+		if code != exitTerminated || rec.Interrupted != nil || !clientGateOnly(rec) {
+			t.Fatalf("exit %d, %s %q, interrupted %+v\n%s", code, rec.Outcome, rec.Reasons, rec.Interrupted, out)
+		}
+		m, _ := checkRetained(t, r, run)
+		if m.Release.Outcome != evidence.CellInvalid {
+			t.Fatalf("label %+v", m.Release)
+		}
+		endRecordsRan(t, r, run, m)
+		if !strings.Contains(out, "ended on SIGTERM after "+run.Label) {
+			t.Fatalf("no end line\n%s", out)
+		}
+		if !rerunOf(t, r, run) {
+			t.Fatalf("no re-run of %s", run.Label)
+		}
+	})
+	t.Run("signal inside the last drain", func(t *testing.T) {
+		r, run, code, out := ladderSignalRun(t, syscall.SIGTERM, 1, 0, http.StatusOK, 0, func(d []time.Duration) time.Duration { return d[0] - 500*time.Millisecond }, nil)
+		rec := readCell(t, r, run)
+		if code != exitTerminated || rec.Outcome != outcomeInterrupted || rec.Interrupted == nil || fileExists(filepath.Join(r.cellDir(run), evidence.ManifestFile)) {
+			t.Fatalf("exit %d, %s %q, interrupted %+v\n%s", code, rec.Outcome, rec.Reasons, rec.Interrupted, out)
+		}
+		if !rerunOf(t, r, run) {
+			t.Fatalf("no re-run of %s", run.Label)
+		}
+	})
 }
 
 // A loop that returns before ladderSignalRun's signal is due sends no
