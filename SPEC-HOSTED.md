@@ -373,7 +373,7 @@ Per step and per cell, over the step's measured window:
 
 ## 9. Required artifacts and the publication rule
 
-A cell publishes only with every per-cell artifact below, and a release publishes only after the publication steps are recorded and checked. The table summarises the artifacts; the numbered list below is the rule.
+A cell publishes only with every per-cell artifact below, and a release publishes only after the publication steps are recorded and checked. The table summarises the artifacts; the numbered list below is the rule. A cell's published files are one compressed archive, `<route>-<cell>.tar.gz` (for example `gemini-weekday-20-a1.tar.gz`, the first attempt of a weekday 20:00 UTC cell), attached to a GitHub release of this repository, and the route's page names the archive's address.
 
 | Artifact | Contents | Published |
 |---|---|---|
@@ -437,7 +437,7 @@ A cell publishes only with every per-cell artifact below, and a release publishe
 - the full-length acceptance run on the client host as an evidence file: `rehearsal.json`, written by `percentes-release rehearse` and committed at the freeze;
 - for the pilot: the report pair of a window and the paired report; a window's manifest names no pair, so the completeness check and the replay do not apply to it.
 
-**Publication rule.** A cell publishes only with every per-cell artifact the table above marks as published and, where the route keeps model output, the retained frame store. A characterization publishes only with 12 counted cells inside one collection window; an incomplete frame's cells publish labelled incomplete, with no pooled figures. A release publishes only when the publication record's check passes.
+**Publication rule.** A cell publishes only with every per-cell artifact the table above marks as published and, where the route keeps model output, the retained frame store. A characterization publishes only with 12 counted cells inside one collection window; an incomplete frame's cells publish labelled incomplete, with no pooled figures. A release publishes only when the publication record's check passes. A release whose routes are all excluded has no cell manifest, and its pages publish once the publication record's check passes.
 
 ## Appendix A. Amendment text as adopted
 
