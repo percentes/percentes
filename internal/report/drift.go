@@ -93,13 +93,14 @@ type DriftChange struct {
 
 // DriftPart is one side of a drift split: its cells in start order, the
 // scheduled starts of the first and last, the documentation state they
-// share, and their pooled figures per step.
+// share, their pooled figures per step and their null reading.
 type DriftPart struct {
 	Cells         []string     `json:"cells"`
 	FirstStartUTC time.Time    `json:"first_start_utc"`
 	LastStartUTC  time.Time    `json:"last_start_utc"`
 	Docs          []DocRecord  `json:"documentation"`
 	Pooled        []PooledStep `json:"pooled"`
+	Null          *NullReading `json:"null_reading,omitempty"`
 }
 
 // part is one side of a split while the tables are built: indexes into

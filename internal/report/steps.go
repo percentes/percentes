@@ -207,19 +207,25 @@ type CellTable struct {
 // one event, and a 95 percent Wilson interval on the effective sample
 // size Scheduled / DEFF, DEFF being the design effect (designEffect).
 // AssumesIndependence marks a DEFF of 1 that could not be estimated.
+// With no event, CellHi holds each cell's 95 percent Wilson upper bound,
+// which assumes independent requests within the cell, and CellsHi the
+// Wilson upper bound for no event in Cells cells, which assumes
+// independent cells.
 type Pooled struct {
-	Count               int     `json:"count"`
-	Scheduled           int     `json:"scheduled"`
-	Rate                float64 `json:"rate"`
-	Cells               int     `json:"cells"`
-	CellMin             float64 `json:"cell_rate_min"`
-	CellMax             float64 `json:"cell_rate_max"`
-	CellsWithEvents     int     `json:"cells_with_events"`
-	DEFF                float64 `json:"deff"`
-	EffectiveN          float64 `json:"effective_n"`
-	Lo                  float64 `json:"wilson_lo"`
-	Hi                  float64 `json:"wilson_hi"`
-	AssumesIndependence bool    `json:"assumes_independent_requests,omitempty"`
+	Count               int       `json:"count"`
+	Scheduled           int       `json:"scheduled"`
+	Rate                float64   `json:"rate"`
+	Cells               int       `json:"cells"`
+	CellMin             float64   `json:"cell_rate_min"`
+	CellMax             float64   `json:"cell_rate_max"`
+	CellsWithEvents     int       `json:"cells_with_events"`
+	DEFF                float64   `json:"deff"`
+	EffectiveN          float64   `json:"effective_n"`
+	Lo                  float64   `json:"wilson_lo"`
+	Hi                  float64   `json:"wilson_hi"`
+	AssumesIndependence bool      `json:"assumes_independent_requests,omitempty"`
+	CellHi              []float64 `json:"cell_wilson_hi,omitempty"`
+	CellsHi             float64   `json:"cells_wilson_hi,omitempty"`
 }
 
 func newPooled(k, n []int) Pooled {
@@ -242,6 +248,13 @@ func newPooled(k, n []int) Pooled {
 	p.DEFF, p.AssumesIndependence = designEffect(k, n)
 	p.EffectiveN = float64(p.Scheduled) / p.DEFF
 	p.Lo, p.Hi = wilson(p.Rate, p.EffectiveN)
+	if p.Count == 0 {
+		for i := range n {
+			_, hi := wilson(0, float64(n[i]))
+			p.CellHi = append(p.CellHi, hi)
+		}
+		_, p.CellsHi = wilson(0, float64(p.Cells))
+	}
 	return p
 }
 
@@ -594,10 +607,11 @@ func stepTables(cfg *config.Config, v *admission.Verdict, cells []CellRecords) (
 	if len(t.Cells) == admission.ReleaseCells {
 		if len(parts) == 1 {
 			t.Pooled = t.pool(parts[0].cells)
+			t.Null = t.null(parts[0].cells, sorted)
 		} else {
 			for _, p := range parts {
 				dp := DriftPart{FirstStartUTC: sorted[p.cells[0]].Start.UTC(), LastStartUTC: sorted[p.cells[len(p.cells)-1]].Start.UTC(),
-					Docs: p.docs, Pooled: t.pool(p.cells)}
+					Docs: p.docs, Pooled: t.pool(p.cells), Null: t.null(p.cells, sorted)}
 				for _, i := range p.cells {
 					dp.Cells = append(dp.Cells, t.Cells[i].Cell)
 				}
@@ -1081,8 +1095,17 @@ func (t *StepTables) text(frame bool) string {
 		if p.AssumesIndependence {
 			dep += ", assumes independent requests"
 		}
-		return fmt.Sprintf("%d/%d %s; cell rates %s to %s; %d of %d cells with events; %s; effective n %.1f; 95%% Wilson [%s, %s]",
+		s := fmt.Sprintf("%d/%d %s; cell rates %s to %s; %d of %d cells with events; %s; effective n %.1f; 95%% Wilson [%s, %s]",
 			p.Count, p.Scheduled, pct(p.Rate), pct(p.CellMin), pct(p.CellMax), p.CellsWithEvents, p.Cells, dep, p.EffectiveN, pct(p.Lo), pct(p.Hi))
+		if p.Count == 0 && len(p.CellHi) > 0 {
+			his := make([]string, len(p.CellHi))
+			for i, hi := range p.CellHi {
+				his[i] = fmt.Sprintf("%.4f%%", 100*hi)
+			}
+			s += fmt.Sprintf("; no event: cell upper bounds %s, each assuming independent requests within its cell; over %d cells upper bound %s, assuming independent cells",
+				strings.Join(his, ", "), p.Cells, pct(p.CellsHi))
+		}
+		return s
 	}
 	steps := func(pooledSteps []PooledStep, cells int) {
 		for _, s := range pooledSteps {
@@ -1117,6 +1140,8 @@ func (t *StepTables) text(frame bool) string {
 	if t.DriftParts == nil {
 		w("-- Pooled per step over the frame's %d cells: each step pools the cells that attempted it --", t.FrameCells)
 		steps(t.Pooled, t.FrameCells)
+		w("")
+		nullText(w, t.Null, t.BindingRPS, t.bindingText())
 		return b.String()
 	}
 	for i, p := range t.DriftParts {
@@ -1124,6 +1149,8 @@ func (t *StepTables) text(frame bool) string {
 			i+1, len(t.DriftParts), len(p.Cells), p.FirstStartUTC.Format(time.DateOnly), p.LastStartUTC.Format(time.DateOnly))
 		w("cells %s", strings.Join(p.Cells, ", "))
 		steps(p.Pooled, len(p.Cells))
+		w("")
+		nullText(w, p.Null, t.BindingRPS, t.bindingText())
 	}
 	return b.String()
 }
