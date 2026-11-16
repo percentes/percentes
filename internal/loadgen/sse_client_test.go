@@ -2,6 +2,7 @@ package loadgen
 
 import (
 	"encoding/json"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -308,5 +309,117 @@ func TestUsageWithoutCompletionCount(t *testing.T) {
 				t.Fatalf("usage seen %v tokens %d raw %s, want %v %d %s", r.UsageSeen, r.CompletionTokens, r.Usage, c.seen, c.n, c.raw)
 			}
 		})
+	}
+}
+
+// A request records when its connection was acquired and its request
+// written, in that order after its dispatch; a dial that fails records
+// neither.
+func TestConnectionAndWriteTimes(t *testing.T) {
+	srv := sseServer(t, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")
+	defer srv.Close()
+	g := captureGen(srv)
+	defer g.client.CloseIdleConnections()
+	r := new(Request)
+	g.execute(r)
+	if r.Outcome != OutcomeCompleted || r.ConnAcquiredNs < r.DispatchNs || r.WroteRequestNs < r.ConnAcquiredNs || r.ConnAcquiredNs == 0 || r.DoneNs < r.WroteRequestNs {
+		t.Fatalf("dispatch %d, connection %d, written %d, done %d", r.DispatchNs, r.ConnAcquiredNs, r.WroteRequestNs, r.DoneNs)
+	}
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	if r := executeAgainst(closed); r.ErrClass != ErrConnect || r.ConnAcquiredNs != 0 || r.WroteRequestNs != 0 {
+		t.Fatalf("failed dial: %q, connection %d, written %d", r.ErrClass, r.ConnAcquiredNs, r.WroteRequestNs)
+	}
+}
+
+// A non-200 body's error object gives its type, code and status string as
+// received, a numeric code as its JSON text; the raw body is kept.
+func TestErrorFields(t *testing.T) {
+	for _, c := range []struct {
+		name, body        string
+		typ, code, status string
+	}{
+		{"messages", `{"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit"}}`, "rate_limit_error", "", ""},
+		{"chat completions", `{"error":{"message":"Requests have exceeded the rate limit.","type":"requests","param":null,"code":"429"}}`, "requests", "429", ""},
+		{"array of one", `[{"error":{"code":429,"message":"Resource has been exhausted.","status":"RESOURCE_EXHAUSTED"}}]`, "", "429", "RESOURCE_EXHAUSTED"},
+		{"no error object", `{"code":"rate_limit_exceeded","status":"RESOURCE_EXHAUSTED"}`, "", "rate_limit_exceeded", "RESOURCE_EXHAUSTED"},
+		{"fields of other types", `{"error":{"type":7,"code":{"n":1},"status":["x"]}}`, "", "", ""},
+		{"not JSON", `upstream connect error`, "", "", ""},
+		{"cut short", `{"error":{"type":"rate_limit_error","mes`, "", "", ""},
+	} {
+		typ, code, status := errorFields([]byte(c.body))
+		if typ != c.typ || code != c.code || status != c.status {
+			t.Errorf("%s: %q %q %q, want %q %q %q", c.name, typ, code, status, c.typ, c.code, c.status)
+		}
+	}
+	if typ, _, _ := errorFields([]byte(`{"error":{"type":"` + strings.Repeat("x", 300) + `"}}`)); len(typ) != errorFieldLimit {
+		t.Errorf("a long type kept %d bytes, want %d", len(typ), errorFieldLimit)
+	}
+	const body = `{"error":{"code":"insufficient_quota","status":"PAYMENT_REQUIRED"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	r := executeAgainst(srv)
+	if r.ErrClass != ErrStatus429 || string(r.ErrorBody) != body || r.ErrorCode != "insufficient_quota" || r.ErrorStatus != "PAYMENT_REQUIRED" || r.ErrorType != "" {
+		t.Fatalf("%q body %q, fields %q %q %q", r.ErrClass, r.ErrorBody, r.ErrorType, r.ErrorCode, r.ErrorStatus)
+	}
+}
+
+// A stream a server resets leaves err_text naming the peer and no address of
+// this client.
+func TestCutStreamErrTextOmitsClientAddress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		c, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		c.(*net.TCPConn).SetLinger(0) //nolint:errcheck
+		c.Close()
+	}))
+	defer srv.Close()
+	r := executeAgainst(srv)
+	if r.ErrClass != ErrReset || !strings.Contains(r.ErrText, "connection reset by peer") {
+		t.Fatalf("%q, text %q", r.ErrClass, r.ErrText)
+	}
+	if strings.Contains(r.ErrText, "->") {
+		t.Errorf("err_text holds a source address: %q", r.ErrText)
+	}
+}
+
+// A request's reported prompt count is a chat-completions prompt_tokens or
+// a Messages input_tokens with its cache counts, and its output count,
+// reasoning included, is the largest of the completion count, the total
+// less the prompt count and any reasoning count; nothing reported is no
+// count, never zero, and neither is a negative count. A prompt count or
+// sum past math.MaxInt is math.MaxInt.
+func TestReportedTokens(t *testing.T) {
+	for _, c := range []struct {
+		name           string
+		r              Request
+		prompt, output int
+		hasP, hasO     bool
+	}{
+		{"chat", Request{Usage: json.RawMessage(`{"prompt_tokens":120,"completion_tokens":16,"total_tokens":136}`), CompletionTokens: 16, UsageSeen: true}, 120, 16, true, true},
+		{"reasoning outside the completion count", Request{Usage: json.RawMessage(`{"prompt_tokens":120,"completion_tokens":16,"total_tokens":400}`), CompletionTokens: 16, UsageSeen: true}, 120, 280, true, true},
+		{"reasoning count", Request{Usage: json.RawMessage(`{"prompt_tokens":9,"completion_tokens":16,"completion_tokens_details":{"reasoning_tokens":30}}`), CompletionTokens: 16, UsageSeen: true}, 9, 30, true, true},
+		{"messages", Request{Usage: json.RawMessage(`{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":8,"output_tokens":16}`), CompletionTokens: 16, UsageSeen: true}, 128, 16, true, true},
+		{"completion count in usage only", Request{Usage: json.RawMessage(`{"prompt_tokens":5,"completion_tokens":12}`)}, 5, 12, true, true},
+		{"prompt only", Request{Usage: json.RawMessage(`{"prompt_tokens":5}`)}, 5, 0, true, false},
+		{"no usage", Request{}, 0, 0, false, false},
+		{"negative prompt", Request{Usage: json.RawMessage(`{"prompt_tokens":-10000,"completion_tokens":-1}`)}, 0, 0, false, false},
+		{"negative messages output", Request{Usage: json.RawMessage(`{"input_tokens":-1,"output_tokens":-5}`), CompletionTokens: -5, UsageSeen: true}, 0, 0, false, false},
+		{"cache sum overflows", Request{Usage: json.RawMessage(`{"input_tokens":9223372036854775807,"cache_read_input_tokens":1}`)}, math.MaxInt, 0, true, false},
+		{"prompt past int64", Request{Usage: json.RawMessage(`{"prompt_tokens":99999999999999999999}`)}, math.MaxInt, 0, true, false},
+	} {
+		p, okP := c.r.PromptTokens()
+		o, okO := c.r.OutputTokens()
+		if p != c.prompt || o != c.output || okP != c.hasP || okO != c.hasO {
+			t.Errorf("%s: prompt %d %t, output %d %t; want %d %t, %d %t", c.name, p, okP, o, okO, c.prompt, c.hasP, c.output, c.hasO)
+		}
 	}
 }
