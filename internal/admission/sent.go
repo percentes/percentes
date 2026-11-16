@@ -5,18 +5,19 @@ import (
 	"github.com/percentes/percentes/internal/probe"
 )
 
-// ProbeSent counts the inference requests a probe dispatched: the probe
-// request and the wrong-model request. The limits read goes to another
-// URL and is not counted. A nil record sent nothing.
+// ProbeSent counts the inference requests a probe dispatched that reached
+// a connection (probe.LeftClient): the probe request and the wrong-model
+// request. The limits read goes to another URL and is not counted. A nil
+// record sent nothing.
 func ProbeSent(rec *probe.Record) int {
 	if rec == nil {
 		return 0
 	}
 	n := 0
-	if !rec.Request.DispatchUTC.IsZero() {
+	if probe.LeftClient(&rec.Request) {
 		n++
 	}
-	if rec.WrongModel != nil && !rec.WrongModel.DispatchUTC.IsZero() {
+	if rec.WrongModel != nil && probe.LeftClient(rec.WrongModel) {
 		n++
 	}
 	return n

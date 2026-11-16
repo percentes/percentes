@@ -12,6 +12,7 @@ import (
 	"github.com/percentes/percentes/internal/config"
 	"github.com/percentes/percentes/internal/loadgen"
 	"github.com/percentes/percentes/internal/probe"
+	"github.com/percentes/percentes/internal/redact"
 )
 
 const (
@@ -120,8 +121,9 @@ func TestSettlementIsEveryRequestSent(t *testing.T) {
 	}
 }
 
-// A request that never left the client is not counted; one that did is,
-// whatever came back.
+// A request that never left the client, or that reached no connection,
+// whether its dial failed or the cancellation ended it, is not counted;
+// one that reached a connection is, whatever came back.
 func TestSentCounts(t *testing.T) {
 	sentAt := time.Date(2026, 10, 6, 20, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
@@ -130,7 +132,11 @@ func TestSentCounts(t *testing.T) {
 	}{
 		{nil, 0},
 		{&probe.Record{}, 0},
-		{&probe.Record{Request: probe.Exchange{DispatchUTC: sentAt, Error: "dial tcp: connection refused"}}, 1},
+		{&probe.Record{Request: probe.Exchange{DispatchUTC: sentAt, Error: "dial tcp: connection refused"}}, 0},
+		{&probe.Record{Request: probe.Exchange{DispatchUTC: sentAt, Status: 200}, WrongModel: &probe.Exchange{DispatchUTC: sentAt, Error: "dial tcp: connection refused"}}, 1},
+		{&probe.Record{Request: probe.Exchange{DispatchUTC: sentAt, Error: redact.Cancelled}}, 0},
+		{&probe.Record{Request: probe.Exchange{DispatchUTC: sentAt, ConnAcquiredNs: 5, Error: redact.Cancelled}}, 1},
+		{&probe.Record{Request: probe.Exchange{DispatchUTC: sentAt, Status: 200}, WrongModel: &probe.Exchange{DispatchUTC: sentAt, Error: redact.Cancelled}}, 1},
 		{&probe.Record{Request: probe.Exchange{DispatchUTC: sentAt, Status: 401}, WrongModel: &probe.Exchange{Error: "not sent: context canceled"}}, 1},
 		{&probe.Record{Request: probe.Exchange{DispatchUTC: sentAt, Status: 200}, WrongModel: &probe.Exchange{DispatchUTC: sentAt, Status: 404},
 			Limits: &probe.Exchange{DispatchUTC: sentAt, Status: 200}}, 2},
