@@ -16,7 +16,7 @@ The commitments that shape the rest of the specification:
 ### Versions
 
 - **v0.1** (2026-07-28): first public version. Early commits label this version "v0.1.1" and use "v0.2" for the deferred cross-stack study (§11).
-- **v0.2** (2026-08-15, this version; revised through 2026-10-19). Every change to a measurement or reporting rule since first publication is listed, dated, in CHANGELOG.md; the git log carries the text. Changes are adopted before any data they could affect is collected, and the body sections below carry the normative text.
+- **v0.2** (2026-08-15, this version; revised through 2026-11-16). Every change to a measurement or reporting rule since first publication is listed, dated, in CHANGELOG.md; the git log carries the text. Changes are adopted before any data they could affect is collected, and the body sections below carry the normative text.
 
 Framing note: the first publication is a resilience characterization of vLLM, an open-source inference server for large language models (LLMs), under replica loss, published under the Percentes benchmark project. The benchmark label refers to the deferred cross-stack comparison (§11).
 
@@ -86,7 +86,7 @@ This study measures the cost of losing one serving replica under sustained load.
 
 Every scheduled request is a sample and ends in exactly one state:
 - **Completed:** latency = completion_time minus t_i. Enters the latency histograms.
-- **Errored:** explicit failure at failure_time. A timeout with no terminal event is censored, below; any other explicit failure carries exactly one of six classes by stage, set out in the table after this list. Failure time is the arrival of the status or the failing read; an error body is not read, and the connection is closed. A delivered final status is terminal regardless of any deadline that fires afterwards. Where a single error satisfies more than one test, precedence is deadline (censored), then reset, then the stage's residual class. The pinned per-request deadline is the client's only timeout. Counted in the error rate for its window. NEVER enters latency histograms.
+- **Errored:** explicit failure at failure_time. A timeout with no terminal event is censored, below; any other explicit failure carries exactly one of six classes by stage, set out in the table after this list. Failure time is the arrival of the status or the failing read; an error body is then read for at most 1 s and its first 4,096 bytes are kept, and the connection is closed unless the whole body arrived within that read, in which case the client may reuse it. A delivered final status is terminal regardless of any deadline that fires afterwards. Where a single error satisfies more than one test, precedence is deadline (censored), then reset, then the stage's residual class. The pinned per-request deadline is the client's only timeout. Counted in the error rate for its window. NEVER enters latency histograms.
 - **Censored:** no terminal event by the pinned client timeout (30 s) or run end; the generator drains dispatched requests to their own deadline, so run end censors only an aborted run. A timeout after content events is still censored, and partial content never enters the latency histograms. Counted in the censored rate with its observation time. NEVER enters latency histograms.
 
 The six error classes, by the stage at which the failure occurs:
