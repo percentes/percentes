@@ -82,12 +82,15 @@ func countAuth(reqs []loadgen.Request) map[int]int {
 }
 
 // authFault returns the stop for a probe that returned a 401 or 403 when
-// the route's previous cell to send its probe saw the same status, on its
-// probe or inside its ladder: the next probe failing the same way is the
-// independent evidence of a credential or account fault (SPEC-HOSTED HA3
-// point 16). Otherwise it returns nil and the probe blocks the start. An
-// interrupted cell that records no probe ends the search, since what its
-// probe returned is unknown.
+// the route's previous probed cell, the newest earlier cell whose probe
+// request was dispatched, whether or not it reached a connection, saw the
+// same status, on its probe or inside its ladder: the next probe failing
+// the same way is the independent evidence of a credential or account
+// fault (SPEC-HOSTED HA3 point 16). Otherwise it returns nil and the probe
+// blocks the start. A cell with no dispatched probe and no ladder is
+// passed over, except that a running one, or an interrupted one other than
+// a cell SIGTERM ended before admission (endedBeforeAdmission), ends the
+// search, since what its probe returned is unknown.
 func (r *route) authFault(rec *cellRecord, status int) (*routeStop, error) {
 	if !slices.Contains(authStatuses, status) {
 		return nil, nil
@@ -96,7 +99,11 @@ func (r *route) authFault(rec *cellRecord, status int) (*routeStop, error) {
 	if err != nil {
 		return nil, err
 	}
-	var earlier []*cellRecord
+	type cellAt struct {
+		*cellRecord
+		dir string
+	}
+	var earlier []cellAt
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -107,13 +114,13 @@ func (r *route) authFault(rec *cellRecord, status int) (*routeStop, error) {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
 		if c.StartUTC.Before(rec.StartUTC) {
-			earlier = append(earlier, &c)
+			earlier = append(earlier, cellAt{&c, filepath.Dir(p)})
 		}
 	}
-	slices.SortFunc(earlier, func(a, b *cellRecord) int { return b.StartUTC.Compare(a.StartUTC) })
+	slices.SortFunc(earlier, func(a, b cellAt) int { return b.StartUTC.Compare(a.StartUTC) })
 	for _, c := range earlier {
-		if c.Sent.Probe == 0 {
-			if c.Outcome == outcomeInterrupted || c.Outcome == outcomeRunning {
+		if c.Sent.Probe == 0 && c.EpochUTC == nil && !probeDispatched(c.dir) {
+			if c.Outcome == outcomeRunning || c.Outcome == outcomeInterrupted && !endedBeforeAdmission(c.cellRecord) {
 				return nil, nil
 			}
 			continue
@@ -131,6 +138,24 @@ func (r *route) authFault(rec *cellRecord, status int) (*routeStop, error) {
 			status, seen, c.Run.Label, c.Run.Attempt)}, nil
 	}
 	return nil, nil
+}
+
+// endedBeforeAdmission reports whether c, a cell with no dispatched
+// probe and no ladder, ended on SIGTERM with no execution error; a
+// restart's label appends to its reasons.
+func endedBeforeAdmission(c *cellRecord) bool {
+	return c.Error == "" && len(c.Reasons) > 0 && c.Reasons[0] == terminatedReason
+}
+
+// probeDispatched reports whether dir holds a probe record whose request
+// was dispatched, whether or not it reached a connection.
+func probeDispatched(dir string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, probe.File))
+	if err != nil {
+		return false
+	}
+	var pr probe.Record
+	return json.Unmarshal(b, &pr) == nil && !pr.Request.DispatchUTC.IsZero()
 }
 
 // isEMFILE reports whether a request failed for want of a file

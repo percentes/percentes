@@ -623,9 +623,10 @@ func TestAuthFaultStopsRoute(t *testing.T) {
 }
 
 // A probe's 401 or 403 stops the route only when the route's previous
-// cell to send its probe saw the same status: cells that sent nothing are
-// passed over, and an interrupted cell with no probe recorded ends the
-// search.
+// probed cell, the newest earlier cell whose probe request was
+// dispatched, saw the same status: cells with no probe record and no
+// ladder are passed over, and an interrupted one ends the search unless
+// SIGTERM ended it before admission.
 func TestAuthFaultEvidence(t *testing.T) {
 	base := time.Date(2026, 10, 17, 9, 0, 0, 0, time.UTC)
 	cell := func(i int, outcome string, probeStatus int, auth map[int]int) *cellRecord {
@@ -637,6 +638,8 @@ func TestAuthFaultEvidence(t *testing.T) {
 		return c
 	}
 	cur := cell(10, outcomeRunning, 0, nil)
+	terminated := cell(2, outcomeInterrupted, 0, nil)
+	terminated.Reasons = []string{terminatedReason}
 	for _, tc := range []struct {
 		name    string
 		status  int
@@ -654,6 +657,8 @@ func TestAuthFaultEvidence(t *testing.T) {
 		{"cells that sent nothing between", 401, []*cellRecord{cell(1, outcomeCounted, 200, map[int]int{401: 3}), cell(2, outcomeMissed, 0, nil), cell(3, outcomeStopped, 0, nil)},
 			"probe request returned 401, as did 3 requests inside its ladder at weekday-01 attempt 1"},
 		{"an interrupted cell between", 401, []*cellRecord{cell(1, outcomeBlocked, 401, nil), cell(2, outcomeInterrupted, 0, nil)}, ""},
+		{"a cell SIGTERM ended before admission between", 401, []*cellRecord{cell(1, outcomeBlocked, 401, nil), terminated},
+			"probe request returned 401, as did its probe at weekday-01 attempt 1"},
 		{"a later cell only", 401, []*cellRecord{cell(11, outcomeBlocked, 401, nil)}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
