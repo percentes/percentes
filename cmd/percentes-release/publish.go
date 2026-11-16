@@ -37,10 +37,13 @@ var publishNow = time.Now
 // window-close record was taken. No text the publication page prints
 // from the record may hold a notice's account or recipient, or the value
 // of a route's confidential limit as its configuration records it or as
-// a refresh command read it. When the record is complete it builds
-// the publication page from it, which must be under --pages byte for
-// byte, or which --write-page writes there, and prints the providers told
-// of the measurement before the notices. pages runs without a record.
+// a refresh command read it. Each ceiling-check record pages copies for
+// a route with no cell, or with stopped cells and no manifest, must be
+// under --out where pages copies it (copiedChecks). When the record is
+// complete it builds the publication page from it, which must be under
+// --pages byte for byte, or which --write-page writes there, and prints
+// the providers told of the measurement before the notices. pages runs
+// without a record.
 func publishCheckCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("publish-check", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -111,6 +114,10 @@ func publishCheckCmd(args []string) (int, error) {
 		fmt.Printf("NOT READY to publish: %v\n", err)
 		return exitAdverse, nil
 	}
+	if bad := copiedChecks(*out, rp.out); bad != "" {
+		fmt.Printf("NOT READY to publish: %s\n", bad)
+		return exitAdverse, nil
+	}
 	pg, err := pub.Page()
 	if err != nil {
 		return exitError, err
@@ -152,14 +159,33 @@ func publishCheckCmd(args []string) (int, error) {
 	return exitOK, nil
 }
 
+// sortedNames are m's keys in order.
+func sortedNames(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// copiedChecks is the refusal for the first of copies, the ceiling-check
+// record copies pages writes under out by slash path <route>/<file>, that
+// is missing there or has other bytes, or "" where every one matches.
+func copiedChecks(out string, copies map[string][]byte) string {
+	for _, name := range sortedNames(copies) {
+		if b, err := os.ReadFile(filepath.Join(out, filepath.FromSlash(name))); err != nil || !bytes.Equal(b, copies[name]) {
+			route, _, _ := strings.Cut(name, "/")
+			return fmt.Sprintf("%s under %s is not the copy pages writes under route %s of a ceiling-check record", name, out, route)
+		}
+	}
+	return ""
+}
+
 // releaseManifests reads every cell manifest under out, by its slash
 // path under out.
 func releaseManifests(out string) (map[string][]byte, error) {
-	m, err := releaseFiles(out, "*", evidence.ManifestFile)
-	if err == nil && len(m) == 0 {
-		return nil, errors.New("publish-check: no cell manifest under " + out)
-	}
-	return m, err
+	return releaseFiles(out, "*", evidence.ManifestFile)
 }
 
 // releaseFiles reads every file at out/<route>/elem..., whose elements
