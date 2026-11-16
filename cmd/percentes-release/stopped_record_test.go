@@ -16,6 +16,39 @@ import (
 	"github.com/percentes/percentes/internal/evidence"
 )
 
+// stopPublishedFromRecord writes the acknowledgement that releases r's
+// hold id on its first run's stopped cell, requires the next start to go
+// on to its wait with nothing sent and no label written, and requires
+// pages to read the stop and its billing refusal from the run record.
+func stopPublishedFromRecord(t *testing.T, r *route, hits func() int64, id string) {
+	t.Helper()
+	run := r.runs[0]
+	dir := r.cellDir(run)
+	acknowledge(t, r, id)
+	waits := countWaits(r)
+	sent := hits()
+	var (
+		code int
+		err  error
+	)
+	stdout := stdoutOf(t, func() { code, err = r.loop(context.Background()) })
+	if err != nil || code != exitStopped || *waits != 1 || hits() != sent || strings.Contains(stdout, "labelled") {
+		t.Fatalf("acknowledged start: exit %d, %v; %d waits, %d requests:\n%s", code, err, *waits, hits()-sent, stdout)
+	}
+	for _, name := range []string{evidence.AttemptsFile, evidence.ManifestFile} {
+		if fileExists(filepath.Join(dir, name)) {
+			t.Fatalf("%s written for the stopped cell", name)
+		}
+	}
+	if got := readCell(t, r, run); got.Outcome != outcomeStopped || got.Error == "" || got.BillingRefusals < 1 || got.EndUTC == nil {
+		t.Fatalf("record %+v", got)
+	}
+	rr, err := readRouteCells(r.out, r.framesRoot, r.cfg, r.key)
+	if err != nil || len(rr.stops) != 1 || len(rr.billing) != 1 || rr.labelled != 0 || rr.unrecorded != 0 {
+		t.Fatalf("pages: %+v, %v", rr, err)
+	}
+}
+
 // pinRecordTimes sets start_utc and end_utc to at in each clock, status,
 // balance and refresh record in dir.
 func pinRecordTimes(t *testing.T, dir string, at time.Time) {
@@ -43,6 +76,18 @@ func pinRecordTimes(t *testing.T, dir string, at time.Time) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// blockFromEndStatus makes r's status command, from its second call, the
+// cell's end status, turn each of blocks into a directory, and returns
+// the command as it was.
+func blockFromEndStatus(t *testing.T, r *route, blocks ...string) []string {
+	t.Helper()
+	counter := filepath.Join(t.TempDir(), "calls")
+	script := `n=$(cat "$0" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$0"; if [ $n -ge 2 ]; then for b in $1; do mkdir -p "$b"; done; fi; shift; exec "$@"`
+	orig := r.status
+	r.status = append([]string{"/bin/sh", "-c", script, counter, strings.Join(blocks, " ")}, orig...)
+	return orig
 }
 
 // A billing refusal inside the ladder writes the cell's running record
