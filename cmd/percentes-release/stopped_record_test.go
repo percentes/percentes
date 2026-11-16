@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +80,99 @@ func pinRecordTimes(t *testing.T, dir string, at time.Time) {
 		}
 		if err := replaceJSON(p, m); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// inBandBillingRoute is a route whose every request is answered 200 with
+// an in-band error the route documents as its billing refusal, with its
+// clock at the first run's start, and the server's request count.
+func inBandBillingRoute(t *testing.T) (*route, func() int64) {
+	t.Helper()
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		io.Copy(io.Discard, req.Body) //nolint:errcheck
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"error\":"+spendCapInBand+"}\n\ndata: [DONE]\n\n") //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	cfg := releaseConfig(t, srv.URL+"/openai/v1/chat/completions")
+	spendCapDocs(cfg)
+	r, _ := newTestRoute(t, cfg, "+0.005032")
+	run := r.runs[0]
+	r.now = func() time.Time { return run.Start }
+	return r, hits.Load
+}
+
+// A billing refusal on the probe stops the route also where the probe
+// record fails to write: the cell is stopped with the refusal counted and
+// held before the next start sends, and once acknowledged the route goes
+// on and pages reads the stop from the run record. Where the run record
+// fails to write too, the stop marker holds the route.
+func TestProbeBillingStopsRouteWhenProbeRecordUnwritten(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		inBand bool
+		record bool
+	}{
+		{"status 402", false, false},
+		{"in-band", true, false},
+		{"status 402, record unwritten", false, true},
+	} {
+		var (
+			r    *route
+			hits func() int64
+		)
+		if tc.inBand {
+			r, hits = inBandBillingRoute(t)
+		} else {
+			var e *endpoint
+			r, e = billingStopRoute(t)
+			hits = e.hits.Load
+		}
+		run := r.runs[0]
+		dir := r.cellDir(run)
+		blocks := []string{filepath.Join(dir, probe.File+".tmp")}
+		if tc.record {
+			blocks = append(blocks, filepath.Join(dir, cellFile+".tmp"))
+		}
+		// From the cell's refresh command on, each of blocks is a
+		// directory.
+		r.refresh = append([]string{"/bin/sh", "-c", `mkdir -p "$0" "$1" && shift && exec "$@"`, blocks[0], blocks[len(blocks)-1]}, r.refresh...)
+		r.wait = noWait
+		code, err := r.loop(context.Background())
+		if err != nil || code != exitStopped || hits() != 1 {
+			t.Fatalf("%s: first start: exit %d, %v; %d requests", tc.name, code, err, hits())
+		}
+		r.refresh = r.refresh[5:]
+		for _, b := range blocks {
+			if err := os.RemoveAll(b); err != nil {
+				t.Fatal(err)
+			}
+		}
+		id := cellLabel(run)
+		if tc.record {
+			id = stopPrefix + cellLabel(run)
+			if !fileExists(r.stopMarkerPath(run)) || readCell(t, r, run).Outcome != outcomeRunning {
+				t.Fatalf("%s: no stop marker", tc.name)
+			}
+		} else if got := readCell(t, r, run); got.Outcome != outcomeStopped || got.BillingRefusals != 1 || got.Error == "" ||
+			len(got.Reasons) != 1 || !strings.Contains(got.Reasons[0], "billing refusal") {
+			t.Fatalf("%s: record %+v", tc.name, got)
+		}
+		waits := countWaits(r)
+		stdout := stdoutOf(t, func() { code, err = r.loop(context.Background()) })
+		if err != nil || code != exitStopped || *waits != 0 || hits() != 1 || !strings.Contains(stdout, "held until "+r.ackFile(id)+" exists") {
+			t.Fatalf("%s: restart: exit %d, %v; %d waits, %d requests:\n%s", tc.name, code, err, *waits, hits(), stdout)
+		}
+		if fileExists(filepath.Join(dir, probe.File)) {
+			t.Fatalf("%s: probe record written", tc.name)
+		}
+		stopPublishedFromRecord(t, r, hits, id)
+		u := ledgerState(t, r.ledgerPath).Routes[r.cfg.Target.Name]
+		if got := readCell(t, r, run); got.Sent.Probe != 1 || got.Sent.Warmup+got.Sent.Measured != 0 || u.Probe != 1 || u.Reserved != 0 || got.ProbeStatus != 0 {
+			t.Fatalf("%s: record sent %+v, probe status %d; ledger %+v", tc.name, got.Sent, got.ProbeStatus, u)
 		}
 	}
 }
