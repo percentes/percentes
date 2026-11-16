@@ -1,14 +1,102 @@
 package probe
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
 )
+
+// A configured billing refusal stops the ceiling check at the first
+// response it matches, by status alone (Gemini's 402) or by status and
+// body (Anthropic's spend-limit 429 and its 400), with the billing
+// rule's reason; the record is stopped and verifies.
+func TestCeilingCheckBillingStop(t *testing.T) {
+	noSpacing(t)
+	for _, tc := range []struct {
+		status      int
+		match, body string
+	}{
+		{402, "", "{}"},
+		{429, "enforced_spend_limit_reached", `{"error":{"details":{"error_code":"enforced_spend_limit_reached"}}}`},
+		{400, "You have reached your specified", `{"error":{"message":"You have reached your specified workspace API usage limits"}}`},
+	} {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			var hits atomic.Int64
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body) //nolint:errcheck
+			}))
+			t.Cleanup(s.Close)
+			cfg := releaseConfig(t, s.URL)
+			cfg.Target.BillingRefusals = []config.BillingRefusal{{Status: tc.status, BodyContains: tc.match, Meaning: "spend limit reached",
+				Source: "https://example.test/errors", Retrieved: "2026-11-02"}}
+			r := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+			if hits.Load() != 1 || !r.Start.Blocked || !strings.Contains(r.Start.Reason, BillingSetting) || r.Outcome() != CheckStopped {
+				t.Fatalf("HTTP %d: server requests=%d, start %+v, outcome %s", tc.status, hits.Load(), r.Start, r.Outcome())
+			}
+			if err := r.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+				t.Fatal(err)
+			}
+			r.Start = Start{}
+			if err := r.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens); err == nil {
+				t.Fatal("a record not blocked after a billing refusal verifies")
+			}
+		})
+	}
+}
+
+// On a route with a confidential limit the record withholds the
+// refusal's body, so Verify of the record as written accepts the billing
+// stop where the recorded reason is the rule's at the response's status,
+// and refuses another reason.
+func TestCeilingCheckBillingStopWithheld(t *testing.T) {
+	noSpacing(t)
+	var hits atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":{"details":{"error_code":"enforced_spend_limit_reached"}}}`) //nolint:errcheck
+	}))
+	t.Cleanup(s.Close)
+	cfg := releaseConfig(t, s.URL)
+	l := &cfg.Target.Limits[1]
+	l.Marking, l.SHA256, l.HMACSHA256 = config.MarkingConfidential, "", l.SHA256
+	cfg.Target.BillingRefusals = []config.BillingRefusal{{Status: 429, BodyContains: "enforced_spend_limit_reached", Meaning: "spend limit reached",
+		Source: "https://example.test/errors", Retrieved: "2026-11-02"}}
+	r := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, Key: newKey(t)})
+	if hits.Load() != 1 || !r.Start.Blocked || r.Requests[0].Exchange.Body == nil || !r.Requests[0].Exchange.Body.Retained {
+		t.Fatalf("server requests=%d, start %+v, body %+v", hits.Load(), r.Start, r.Requests[0].Exchange.Body)
+	}
+	b, err := Encode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "enforced_spend_limit_reached") {
+		t.Fatal("the record carries the withheld body")
+	}
+	r = &ReleaseRecord{}
+	if err := json.Unmarshal(b, r); err != nil {
+		t.Fatal(err)
+	}
+	length, bound := LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens
+	if err := r.Verify(&cfg.Target, length, bound); err != nil {
+		t.Fatal(err)
+	}
+	r.Start.Reason = "probe request returned 429"
+	if err := r.Verify(&cfg.Target, length, bound); err == nil {
+		t.Fatal("a withheld 429 verifies as blocked under a reason that is not the billing rule's")
+	}
+}
 
 // refused is route's Shape R record at ceiling admitted at ledger line
 // seq whose fifth request was answered an ordinary 429.
