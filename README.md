@@ -42,16 +42,17 @@ Three rules shape every measurement:
   of completed, errored or censored (observed to the client timeout with
   no terminal event: the pinned 30 s, or the hosted release's 90 s hard
   timeout). A scheduled request left unsent, by a stop or, under the
-  release profile, for being more than 50 ms late, is reported on its own
-  line. Only completions enter latency histograms. Failure rates are
-  reported as figures in their own right. The completion curve gives,
-  for each time t after the intended send, the share of all scheduled
-  requests completed by t, estimated with the Aalen-Johansen cumulative
-  incidence estimator. Errors are competing terminal events on the curve.
-  A timeout is censored at the moment it timed out, and under the release
-  profile a scheduled request left unsent is censored at the
-  curve's horizon, the end of the observed time (SPEC §3, SPEC-HOSTED
-  §5).
+  release profile, for being more than 50 ms late, is reported on its
+  own line. Only completions enter latency histograms. Failure rates are
+  reported as figures in their own right.
+
+  The completion curve gives, for each time t after the intended send,
+  the share of all scheduled requests completed by t, estimated with the
+  Aalen-Johansen cumulative incidence estimator. Errors are competing
+  terminal events on the curve. A timeout is censored at the moment it
+  timed out, and under the release profile a scheduled request left
+  unsent is censored at the curve's horizon, the end of the observed
+  time (SPEC §3, SPEC-HOSTED §5).
   - A latency quantile the completion curve never reaches inside the
     horizon is refused and is never extrapolated. Add the share of
     scheduled requests completed when the curve ends to the share still
@@ -119,25 +120,30 @@ body.
 
 The full gate's last four stages build a Docker image. Three of them
 drive a kind cluster; the process-kill stage runs the mock in a local
-Docker container on host port 18100, which `PK_PORT` overrides, and kills
-the container's init process. The AC suite measures this machine as well
-as the code: before its timing-coupled tests it qualifies the host with
-a probe (timer wake lateness and garbage-collection pauses,
-`internal/hostqual`). On a host that fails the probe those tests skip and
-`make test-ac` fails; `PERCENTES_AC_ALLOW_SKIPS=1` accepts the skips. When
-a timing-coupled assertion fails, the host is probed again: a host that
+Docker container on host port 18100, which `PK_PORT` overrides, and
+kills the container's init process. The AC suite measures this machine
+as well as the code: before its timing-coupled tests it qualifies the
+host with a probe (timer wake lateness and garbage-collection pauses,
+`internal/hostqual`).
+
+On a host that fails the probe those tests skip and `make test-ac`
+fails; `PERCENTES_AC_ALLOW_SKIPS=1` accepts the skips. When a
+timing-coupled assertion fails, the host is probed again: a host that
 lost qualification during the run skips the test, and one that kept it
 fails.
+
 The cluster stages bind host ports 18080 to 18082, which `SVC_PORT`,
 `POD_PORT` and `ADMIN_PORT` override, and host port 18000, the kind
 mapping to the mock Service's NodePort 30800, which is fixed in
 `deploy/kind/kind-config.yaml`. On macOS the stages that run the harness
 build it with `CGO_ENABLED=0`, which disables cgo (the Go mechanism for
-calling C code), and a macOS build without cgo reads no host CPU samples,
-so the host CPU gate reports unmeasured. Every run in those stages is
-then invalid, and the command that ran it exits 2 while the stage itself
-passes; `percentes` prints `RUN INVALID (run-failing gate)` and
-`percentes-campaign` prints `CAMPAIGN NOTE: at least one run is invalid`. Reports are written to
+calling C code), and a macOS build without cgo reads no host CPU
+samples, so the host CPU gate reports unmeasured.
+
+Every run in those stages is then invalid, and the command that ran it
+exits 2 while the stage itself passes; `percentes` prints
+`RUN INVALID (run-failing gate)` and `percentes-campaign` prints
+`CAMPAIGN NOTE: at least one run is invalid`. Reports are written to
 `results/`.
 
 ## Layout
@@ -168,19 +174,21 @@ below.
 
 ### What every hosted run writes
 
-A hosted target (`target.hosted: true`) is a provider's managed endpoint.
-SPEC-HOSTED.md pins what a hosted run sends and records. Two
+A hosted target (`target.hosted: true`) is a provider's managed
+endpoint. SPEC-HOSTED.md pins what a hosted run sends and records. Two
 configuration profiles carry those pins. `release` carries the adopted
 protocol (hosted amendments 1, 3 and 4, HA1, HA3 and HA4, written into
-its body) and is the path to published hosted figures. `pilot` carries the
-numbers of a drafted amendment, HA2, that is not adopted, and reports
-privately. Each profile refuses a value outside its pins. Hosted runs
-go through `percentes-pilot` or `percentes-release`, which reserve every
-request in the admission ledger before it is sent; `percentes` and
-`percentes-campaign` refuse a hosted target. A run's report pair is `report.json`, the
-machine-readable report, and `report.txt`, its human-readable rendering,
-from one configuration. Every hosted run writes the evidence
-SPEC-HOSTED §9 requires:
+its body) and is the path to published hosted figures. `pilot` carries
+the numbers of a drafted amendment, HA2, that is not adopted, and
+reports privately.
+
+Each profile refuses a value outside its pins. Hosted runs go through
+`percentes-pilot` or `percentes-release`, which reserve every request in
+the admission ledger before it is sent; `percentes` and
+`percentes-campaign` refuse a hosted target. A run's report pair is
+`report.json`, the machine-readable report, and `report.txt`, its
+human-readable rendering, from one configuration. Every hosted run
+writes the evidence SPEC-HOSTED §9 requires:
 
 - `attempts.jsonl`, one record per scheduled request;
 - the raw response frames, in a store outside the source tree;
@@ -194,37 +202,43 @@ cell-start run of the command that re-reads the account's limits and
 model documentation pages), the balance records of its start and end,
 the ceiling-check records of every route of the same host group (the
 routes of a release that serve one model with one request shape) and,
-for Shape S, each other route's record given to `run` that spent a
-byte cap, and its dispatch series (dispatches per second of Coordinated
-Universal Time,
-UTC, a write the write limit refused counted as a dispatch with no byte
-sent). Once no cell is left, the route's process writes the route's
+for Shape S, each other route's record given to `run` that spent a byte
+cap, and its dispatch series (dispatches per second of Coordinated
+Universal Time, UTC, a write the write limit refused counted as a
+dispatch with no byte sent).
+
+Once no cell is left, the route's process writes the route's
 window-close record, `window-close.json`: the limits and model
 documentation read once more and compared with the last counted cell; a
 stopped route's process writes it when it next runs. The report pair is
-rendered from those files alone. Each cell's published files are one compressed archive,
-`<route>-<cell>.tar.gz` (for example `azure-weekend-08-a2.tar.gz`, the second
-attempt at a weekend 08:00 UTC cell), on a GitHub release of this repository; given
-the release's download address with `--cell-files`,
+rendered from those files alone. Each cell's published files are one
+compressed archive, `<route>-<cell>.tar.gz` (for example
+`azure-weekend-08-a2.tar.gz`, the second attempt at a weekend 08:00 UTC
+cell), on a GitHub release of this repository; given the release's
+download address with `--cell-files`,
 `percentes-release pages` writes each archive's address into its cell's
-section of the route page. Anyone holding a cell's published files
-can run `percentes --replay DIR --config FILE
---out OUT` (OUT a directory other than DIR): it renders the report pair
-again from `manifest.json`, `attempts.jsonl` and the configuration file,
-and exits 1 unless both files match the hashes the manifest records,
-byte for byte. A route with a confidential limit (a value only the
-account console shows, under terms that keep it confidential) publishes
-its configuration with the quoted string `"[retained]"` in place of that
-value, and that file does not load, so its cells replay only from the
-retained file as loaded. `percentes --check-release DIR --config FILE
---frames ROOT` and the `percentes-release` commands `pages`, `pack` and
-`publish-check` also read the frame store, which holds the model's
-answers where the route's terms permit keeping them and stays
-unpublished, and the last three read the schedule and the admission
-ledger, so only the operator can run them. A reader checks an evidence
-pack by comparing each file's `sha256sum` with the hash its `inventory.json` records. A pooled
-count on a route page is the sum, over the cells that attempted the
-step, of the cell's non-warm-up records in its published
+section of the route page.
+
+Anyone holding a cell's published files can run
+`percentes --replay DIR --config FILE --out OUT` (OUT a directory other
+than DIR): it renders the report pair again from `manifest.json`,
+`attempts.jsonl` and the configuration file, and exits 1 unless both
+files match the hashes the manifest records, byte for byte. A route with
+a confidential limit (a value only the account console shows, under
+terms that keep it confidential) publishes its configuration with the
+quoted string `"[retained]"` in place of that value, and that file does
+not load, so its cells replay only from the retained file as loaded.
+
+`percentes --check-release DIR --config FILE --frames ROOT` and the
+`percentes-release` commands `pages`, `pack` and `publish-check` also
+read the frame store, which holds the model's answers where the route's
+terms permit keeping them and stays unpublished, and the last three read
+the schedule and the admission ledger, so only the operator can run
+them. A reader checks an evidence pack by comparing each file's
+`sha256sum` with the hash its `inventory.json` records.
+
+A pooled count on a route page is the sum, over the cells that attempted
+the step, of the cell's non-warm-up records in its published
 `attempts.jsonl` with that `step` and outcome; its interval follows from
 those counts by the formula in SPEC-HOSTED §8.
 
@@ -249,46 +263,53 @@ go doc ./cmd/percentes-pilot
 `percentes-release` runs a public descriptive release under SPEC-HOSTED
 amendments HA3 and HA4. A route is one provider, one model, one
 endpoint, one account tier and one request shape; each route has one
-configuration file, which carries the complete request uniform
-resource locator (URL), the whole request body as literal JavaScript
-Object Notation (JSON) frozen by hash, the header the key travels in,
-and every limit recorded for the account with its source and a marking:
-`public` where a public documentation page gives the value, which then
-publishes in full, or `confidential` where only the account console
-shows it under terms that keep it confidential.
+configuration file, which carries the complete request uniform resource
+locator (URL), the whole request body as literal JavaScript Object
+Notation (JSON) frozen by hash, the header the key travels in, and every
+limit recorded for the account with its source and a marking: `public`
+where a public documentation page gives the value, which then publishes
+in full, or `confidential` where only the account console shows it under
+terms that keep it confidential.
+
 A confidential limit's value is absent from the configuration as
 published, the verdict of the ceiling rule (the tests of the route's
 rates against its recorded limits, in the Binding rate row below), the
 refresh records and the ceiling-check snapshots. The configuration and
 the verdict name such a limit by its source and the keyed hash of its
-retained copy. A keyed hash here is an HMAC-SHA256 (a hash-based
-message authentication code built on SHA-256, the 256-bit Secure Hash
-Algorithm) under the release key: 32 random bytes that
-`percentes-release key create` writes once, at the freeze, to a file
-only its owner can read. Nobody without the key can check a guess
-against a keyed hash. Keep the key file private, as the API keys are:
-copy it to the client host, and leave it out of the repository. Never
-write a confidential limit's value, in any format, into a configuration
-comment, the operator file, a note, a URL or a file name.
+retained copy.
+
+A keyed hash here is an HMAC-SHA256 (a hash-based message authentication
+code built on SHA-256, the 256-bit Secure Hash Algorithm) under the
+release key: 32 random bytes that `percentes-release key create` writes
+once, at the freeze, to a file only its owner can read. Nobody without
+the key can check a guess against a keyed hash. Keep the key file
+private, as the API keys are: copy it to the client host, and leave it
+out of the repository.
+
+Never write a confidential limit's value, in any format, into a
+configuration comment, the operator file, a note, a URL or a file name.
 A provider can echo a limit in its rate-limit headers or in the body of
 its limits page, so a route with a confidential limit must withhold
 both: `target.retained_headers` must cover every recorded response
 header other than `Retry-After` and a request identifier such as
-`X-Request-Id`, and `target.probe.limits_retained` must be set where
-the route reads a limits URL. On such a route the probe and
-ceiling-check records also carry each non-200 response body as its
-keyed hash, and those records and the attempts file carry each in-band
-error object as a stand-in with its keyed hash. The texts stay in the
-retained store. Each cell's manifest names the frame store, the
-operator file and its records by keyed hash, with no byte count, and
-the route's window-close record names the operator file and its records
-the same way; the
-manifest names its other files by SHA-256 hash and size. The routes of
-a release run as separate processes on one client host, each at its own
-offset inside the slot: 0, 40, 80 minutes and so on, one per route,
-with the routes of one account group (the routes recorded against one
-provider account or deployment) at least 80 minutes apart both ways
-round the 240-minute slot.
+`X-Request-Id`, and `target.probe.limits_retained` must be set where the
+route reads a limits URL.
+
+On such a route the probe and ceiling-check records also carry each
+non-200 response body as its keyed hash, and those records and the
+attempts file carry each in-band error object as a stand-in with its
+keyed hash. The texts stay in the retained store.
+
+Each cell's manifest names the frame store, the operator file and its
+records by keyed hash, with no byte count, and the route's window-close
+record names the operator file and its records the same way; the
+manifest names its other files by SHA-256 hash and size.
+
+The routes of a release run as separate processes on one client host,
+each at its own offset inside the slot: 0, 40, 80 minutes and so on, one
+per route, with the routes of one account group (the routes recorded
+against one provider account or deployment) at least 80 minutes apart
+both ways round the 240-minute slot.
 
 | Setting | Value |
 |---|---|
@@ -344,21 +365,22 @@ line in the published tables.
    cell's seed enters its user text.
 2. **Admission.** At the cell's start, after the clock and status
    records, the refresh command rewrites the recorded limits and model
-   documentation and the balance command reads the account's balance;
-   a cell is blocked here where the clock record holds no offset
-   reading, its records were not rewritten, its balance is below its
-   reservation, the balance command fails, or the balance is
-   unavailable and the route records no `balance_unavailable` ruling,
-   and a route whose limits as read, at
-   its newest recorded price, no longer admit one of its step rates
-   under the ceiling rule stops here. The ledger then reserves one probe
-   request plus every scheduled request of the cell against the route's
-   and the release's liability caps; a refusal stops the route before
-   any request is sent. Where a price was recorded for the route after
-   the limits and the balance were checked, the ledger reserves nothing
-   and the cell repeats both checks at the new price; a second such
-   price blocks the cell. The
-   request's step rate is the step's fraction of the route's binding
+   documentation and the balance command reads the account's balance; a
+   cell is blocked here where the clock record holds no offset reading,
+   its records were not rewritten, its balance is below its reservation,
+   the balance command fails, or the balance is unavailable and the
+   route records no `balance_unavailable` ruling, and a route whose
+   limits as read, at its newest recorded price, no longer admit one of
+   its step rates under the ceiling rule stops here.
+
+   The ledger then reserves one probe request plus every scheduled
+   request of the cell against the route's and the release's liability
+   caps; a refusal stops the route before any request is sent. Where a
+   price was recorded for the route after the limits and the balance
+   were checked, the ledger reserves nothing and the cell repeats both
+   checks at the new price; a second such price blocks the cell.
+
+   The request's step rate is the step's fraction of the route's binding
    rate, which the schedule froze before the window.
 3. **Body.** The request's user text is the prefix `cs-<seed>-<index>`
    (six-digit index), a space and a synthetic support ticket, or for
