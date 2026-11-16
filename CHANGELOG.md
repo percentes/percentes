@@ -5,6 +5,7 @@ Every change to a measurement or reporting rule since first publication, newest 
 ## 2026-11-16
 
 - §3: on a delivered non-200 status the error body is read for at most 1 s after the status and its first 4,096 bytes are kept; the connection is closed unless the whole body arrived within that read, in which case the client may reuse it.
+- §6: for a release under SPEC-HOSTED.md hosted amendments 3 and 4 (HA3 and HA4), the hand-off to that document's §3 covers the arrival process as well as the rate, output ceiling, input length, timeout and body, and a request write that document's write limit refused fails the client-validity gate.
 
 ## 2026-10-19
 
