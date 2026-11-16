@@ -145,6 +145,19 @@ func faultMock(t *testing.T, fault func(n int32, w http.ResponseWriter) bool, pr
 	return srv.URL + u.Path, &hits
 }
 
+// answer429 and answer529 answer a request as a rate limit and as an
+// overload; drop closes its connection with no response.
+func answer429(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusTooManyRequests)
+	io.WriteString(w, `{"error":{"type":"rate_limit_exceeded"}}`) //nolint:errcheck
+}
+
+func drop(w http.ResponseWriter) {
+	if c, _, err := w.(http.Hijacker).Hijack(); err == nil {
+		c.Close()
+	}
+}
+
 // checker sends ceiling checks of the configurations it is given on
 // ledger, writing under out, and returns the exit code, output and error.
 type checker struct {

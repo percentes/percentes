@@ -42,6 +42,21 @@ func readRecord(t *testing.T, path string) *probe.ReleaseRecord {
 	return &rec
 }
 
+// rewriteRecord rewrites the record at path through edit, as ceiling-check
+// encodes it.
+func rewriteRecord(t *testing.T, path string, edit func(*probe.ReleaseRecord)) {
+	t.Helper()
+	rec := readRecord(t, path)
+	edit(rec)
+	b, err := probe.Encode(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // soloFile is the configuration at cfgPath with no other host, saved as
 // name.
 func soloFile(t *testing.T, cfgPath, name string) string {
