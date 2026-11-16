@@ -577,6 +577,10 @@ func TestNewConfigs(t *testing.T) {
 		{"group without the route", RouteConfig{Route: "azure-S", ConfigSHA256: sum, HostGroup: []string{"azure-R"}}, `route "azure-S": host group [azure-R] must name the route`},
 		{"host twice", RouteConfig{Route: "azure-S", ConfigSHA256: sum, HostGroup: []string{"azure-S", "azure-R", "azure-S"}}, "host group [azure-R azure-S azure-S]"},
 		{"route twice", RouteConfig{Route: "gemini-S", ConfigSHA256: sum, HostGroup: []string{"gemini-S"}}, `route "gemini-S" has two configurations`},
+		{"binding rate unnamed", RouteConfig{Route: "azure-S", ConfigSHA256: sum, HostGroup: []string{"azure-S"}, BindingRPS: 2.429}, `route "azure-S": binding_rps 2.429 with no binding_limit`},
+		{"binding rate unrounded", RouteConfig{Route: "azure-S", ConfigSHA256: sum, HostGroup: []string{"azure-S"}, BindingRPS: 2.429285, BindingLimit: config.LimitTPM, BindingWindowS: 60}, "binding_rps 2.429285 is not a positive rate rounded down to 0.001"},
+		{"binding limit without a rate", RouteConfig{Route: "azure-S", ConfigSHA256: sum, HostGroup: []string{"azure-S"}, BindingLimit: config.LimitTPM}, "binding_rps 0 is not a positive rate"},
+		{"binding window negative", RouteConfig{Route: "azure-S", ConfigSHA256: sum, HostGroup: []string{"azure-S"}, BindingRPS: 2.429, BindingLimit: config.LimitTPM, BindingWindowS: -60}, "binding_window_s -60: want 0 or more seconds"},
 	} {
 		bad := target()
 		bad.Configs = append(slices.Clone(in.Configs), c.cfg)

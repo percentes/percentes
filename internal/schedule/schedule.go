@@ -387,6 +387,14 @@ func routeConfigs(routes []string, cs []RouteConfig) ([]RouteConfig, error) {
 		if c.ConfigHMACSHA256 != "" && !isSHA256(c.ConfigHMACSHA256) {
 			return nil, fmt.Errorf("schedule: route %q: config_hmac_sha256 %q is not a lowercase hex HMAC-SHA256", c.Route, c.ConfigHMACSHA256)
 		}
+		switch {
+		case (c.BindingRPS != 0 || c.BindingWindowS != 0) && c.BindingLimit == "":
+			return nil, fmt.Errorf("schedule: route %q: binding_rps %g with no binding_limit", c.Route, c.BindingRPS)
+		case c.BindingLimit != "" && !(c.BindingRPS > 0 && config.RoundDownRPS(c.BindingRPS) == c.BindingRPS):
+			return nil, fmt.Errorf("schedule: route %q: binding_rps %g is not a positive rate rounded down to 0.001", c.Route, c.BindingRPS)
+		case !(c.BindingWindowS >= 0):
+			return nil, fmt.Errorf("schedule: route %q: binding_window_s %g: want 0 or more seconds", c.Route, c.BindingWindowS)
+		}
 		c.HostGroup = slices.Clone(c.HostGroup)
 		slices.Sort(c.HostGroup)
 		if !slices.Contains(c.HostGroup, c.Route) || len(slices.Compact(slices.Clone(c.HostGroup))) != len(c.HostGroup) {
