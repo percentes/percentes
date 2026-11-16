@@ -1009,238 +1009,40 @@ No report or campaign applies the §7 Holm step-down to secondary comparisons; `
 
 ## Glossary
 
-- **AC**: an acceptance criterion of §8; AC1 to AC7 certify the instrument
-  against the mock.
-- **Attempts file**: `attempts.jsonl`, one record per scheduled request of
-  a hosted run (SPEC-HOSTED §9).
-- **Balance check**: the comparison, at a release cell's start, of the
-  amount the balance command printed with the cell's reservation; a cell
-  starts only where the check is sufficient, or unavailable under the
-  route's `balance_unavailable` ruling; any other result blocks it before
-  admission.
-- **Balance record**: `balance-start.json` and `balance-end.json`, the
-  output of the operator's account balance or quota command at a release
-  cell's start and end; the start record carries the balance check.
-- **Binding limit**: the recorded limit whose test a ladder step failed
-  first, named where the step is excluded.
-- **Black-hole**: the §1 variant that partitions the victim's node for a
-  pinned 120 s with a pre-armed expiry.
-- **Case slot**: the JSON string `"{{case}}"` that a literal body carries
-  once; the client replaces it with the request's user text and changes
-  nothing else.
-- **Ceiling check**: the ten-request check of a release route at a
-  ceiling, and the choice of 512 or 1,024 tokens from the records of a
-  model's hosts (SPEC-HOSTED HA3 point 7).
-- **Ceiling rule**: the admission of each ladder step at half of every
-  recorded rate, token, concurrency, daily and spend-window limit, with
-  cover tests for the caps and the unpublished-limit records
-  (SPEC-HOSTED HA3 point 6).
-- **Cell**: one run of a route's ladder in one UTC slot on one day type;
-  a route's frame holds twelve.
-- **Censored**: no terminal event by the client timeout, the pinned 30 s
-  or the release profile's 90 s hard timeout. The request is a censored
-  observation on the incidence curve and stays out of the latency
-  histograms; an error is a competing event instead (§3).
-- **Clean delete**: the §1 variant that deletes the victim pod with grace
-  period 0.
-- **Confidential limit**: a recorded limit marked `confidential`, whose
-  value only the account console shows under terms that keep it
-  confidential; the value stays in the configuration as loaded and the
-  retained store. The published configuration, the ceiling rule's
-  verdict, a route stop and the ceiling-check records name the limit by
-  its dimension, source and keyed hash; the refresh records list it by
-  its dimension, marked confidential (SPEC-HOSTED §9).
-- **Completeness check**: `evidence.CheckRelease`, run by
-  `percentes --check-release`: every file a hosted run's manifest names
-  must exist with the hash and size it records, or with the keyed hash
-  a keyed reference records.
-- **Coordinated omission**: the under-sampling of slow periods by a load
-  generator that waits for responses before sending more.
-- **Deadline**: under the release profile, 30 s from intended dispatch; a
-  completion after it is late and stays completed.
-- **DEFF**: the design effect, the factor by which clustering across cells
-  shrinks a pooled step's effective sample size (SPEC-HOSTED HA3 point
-  13).
-- **Drain**: the 90 s after a ladder step's measured window in which
-  nothing is dispatched; the step's verdict is taken at its end.
-- **Drift split**: the division of a route's frame into parts at a
-  change of account tier, limits or model documentation between cells,
-  each part pooled apart (SPEC-HOSTED §4).
-- **e2e**: end-to-end latency, completion time minus t_i.
-- **Evidence pack**: the tar archive file a route's notice carries,
-  written by `percentes-release pack`: the route's page files and cell
-  manifests with `inventory.json`, which names each by SHA-256
-  (SPEC-HOSTED HA3 point 14).
-- **Expected model**: the identifier each response's reported model is
-  compared with: `target.reported_model.name` where recorded, otherwise
-  `target.model_name`; a cell with any other is labelled `model_mismatch`
-  (SPEC-HOSTED §2). A ceiling-check record carries it as
-  `expected_model`.
-- **Fire anchor**: the earlier of T_inject and the recorded actual fire
-  time; the baseline window ends 30 s before it, and times to recovery are
-  measured from it (§3).
-- **Frame**: a release route's twelve cells; an incomplete frame
-  publishes its cells labelled, with no pooled figure (SPEC-HOSTED §4,
-  HA3 point 9).
-- **Frame store**: `frames.jsonl`, the timed raw reads of every response
-  body of a hosted run, kept outside the source tree and retained
-  unpublished (SPEC-HOSTED §9).
-- **G1 to G7**: the §10 run-validity gates.
-- **Gap histogram**: a release step's gaps between successive content
-  events over its completions, in 24 bins with lower edges from 1
-  microsecond to 50 s, the last open above 50 s;
-  the per-request gaps are in no published file.
-- **Goodput**: the fraction of a window's scheduled requests that complete
-  within the §4 SLO: TTFT ≤ 1 s and e2e ≤ 14 s, without error.
-- **Guard window**: from 30 s before the fire anchor to T_inject, longer
-  than 30 s when the fault fires early; reported in full and left out of
-  every baseline quantity (§3).
-- **Hard timeout**: under the release profile, 90 s from actual dispatch,
-  after which a request with no terminal event is censored.
-- **HdrHistogram**: the high-dynamic-range histogram library every latency
-  is recorded in, under one pinned configuration.
-- **Heal anchor**: the observed partition expiry, else fire anchor + 120 s
-  (§5).
-- **Host group**: every route of a release that serves one model, the
-  route and its `release.other_hosts`; the ceiling check is decided
-  across the group, less any host whose records carry a reported-model
-  fault, and `run` needs every host's records. The schedule freezes each
-  route's host group with its configuration.
-- **Hosted target**: a managed provider endpoint the project does not
-  operate (`target.hosted`, §6); a hosted run is measured under
-  SPEC-HOSTED.md.
-- **Index table**: a release's one table across routes, a row per route
-  and step with counts only, alphabetical by provider (SPEC-HOSTED HA3
-  point 12).
-- **ITL**: inter-token latency, the name the report gives the gaps between
-  content events where the §10 check shows one token per event; [Token
-  counts and the ITL label](#token-counts-and-the-itl-label) gives the
-  label each case gets.
-- **Keyed hash**: an HMAC-SHA256 under the release key; a release
-  publishes one for each field [The release key](#the-release-key)
-  lists, and a plain SHA-256 elsewhere.
-- **kind**: Kubernetes in Docker, the local cluster of Phase 0.
-- **Ladder**: a release cell's five steps of offered load at 0.25, 0.5,
-  1, 2 and 4 requests per second, each a 480 s window followed by a drain,
-  after a 60 s warm-up (SPEC-HOSTED HA3 point 5).
-- **lambda, lambda_r, lambda_max**: the load generator's total offered
-  arrival rate, the per-replica rate frozen at 0.65 lambda_max, and the
-  measured single-replica capacity (§1, §10).
-- **Leading window**: a detector window [t, t + R) whose value is assigned
-  to its start t.
-- **Ledger**: the admission ledger, the hash-chained JSONL file in which
-  every inference request to a hosted route is reserved before it is sent
-  and settled afterwards, under the caps on its first line. A release's
-  schedule freezes the SHA-256 of that line; a ceiling check names it in
-  its record, and a route's process refuses a file whose first line has
-  another hash, at its start and at each cell.
-- **Manifest**: `manifest.json`, the hashes and records of one hosted run
-  (SPEC-HOSTED §9).
-- **Node-loss-representative**: the label a black-hole run keeps when both
-  §1 runtime assertions (G3, G4) pass.
-- **Offset**: a route's pinned start inside every slot, a multiple of 10
-  minutes drawn from the master seed, so no two routes of a release share
-  one.
-- **Operator file**: the file naming the provider, account tier and client
-  host of a hosted run, and the documentation records read and hashed
-  before it.
-- **Outage**: under the process-kill variant, the kill to the first served
-  inference (replica-ready); the variant's primary endpoint (§7).
-- **p99**: the 99th percentile.
-- **Pages**: the index page and the route pages `percentes-release pages`
-  writes from the cells' records after the window.
-- **Partition-heal recovery**: under the black-hole variant, the first held
-  entry at or after the heal anchor, measured from the fire anchor; never
-  reported as node-loss recovery (§5).
-- **Pilot**: the descriptive comparison of two hosted endpoints on one
-  task over six paired sessions that SPEC-HOSTED amendment HA2 defines and
-  `cmd/percentes-pilot` runs.
-- **Pre-armed**: the injector knows its fire and expiry times before it
-  fires, so nothing depends on reaching the victim afterwards (§1).
-- **Probe**: the pre-run request from the client host that records a
-  hosted endpoint's response shape and gates the start (SPEC-HOSTED §5).
-- **Publication page**: `publication.md` and `publication.json` under
-  `--pages`, built by `percentes-release publish-check` from the
-  publication record: the notice and window dates, the responses as the
-  consent rule allows, the corrections log and the earlier disclosures
-  (SPEC-HOSTED §9).
-- **Publication record**: the file `percentes-release publish-check`
-  reads, apart from the cell manifests, holding each route's notice,
-  responses, consent, permission and replication pack, the earlier
-  disclosures and the pre-release copies (SPEC-HOSTED HA3 point 14).
-- **Refresh command**: the operator's command, run at each release
-  cell's start and once more after the route's last cell, that rewrites
-  the files of the operator file's limits and eligibility records with
-  the pages as they stand and prints the limit values it read
-  (SPEC-HOSTED §4).
-- **Retention**: `target.retention`, the route's reading of its
-  provider's terms on keeping model output, and whether the frame store
-  keeps each 200 body (`protocol_period`) or only its byte count
-  (`none`).
-- **Process kill**: the §1 variant that sends SIGKILL from the host to the
-  vLLM API server process of one container, which the runtime's restart
-  policy starts again in place.
-- **Rehearsal**: the acceptance run of a release, `percentes-release
-  rehearse`: one cell of each of six mock routes on the client host,
-  concurrently at their offsets up the whole ladder; it is separate from
-  the §8 acceptance criteria.
-- **Release**: a set of route characterizations under SPEC-HOSTED
-  amendment HA3, published together on one dated page with the index
-  table.
-- **Release key**: 32 random bytes `percentes-release key create`
-  writes once to a file only its owner can read; the key of every keyed
-  hash a release publishes, kept with the API keys outside every
-  published file.
-- **Replay**: rendering a release cell's report pair again from its
-  manifest, attempts file and configuration, and comparing it byte for
-  byte with the pair the manifest names.
-- **Report pair**: the JSON and text files a binary writes: `report.json`
-  and `report.txt` from `run.Artifacts` or from a hosted run's records,
-  `campaign.json` and `campaign.txt` from `campaign.Report`, and
-  `calibration.json` and `calibration.txt` from `calibrate.Output`.
-- **Retained header**: a recorded response header `target.retained_headers`
-  names, whose values stay in the frame store while the published record
-  carries `[retained]`.
-- **Route**: one provider, one model identifier, one endpoint and one
-  account tier; one release configuration file and one process.
-- **Route stop**: a cause that ends a route's process with the cell
-  retained and labelled: a ledger refusal, a documented billing refusal,
-  a clock offset above 60 s, limits read at a cell's start that no
-  longer admit the route's steps, a probe 401 or 403 the route's
-  previous probed cell also saw, or an operator abort (SPEC-HOSTED HA3
-  point 16).
-- **Run-valid**: every applicable run-failing gate passed and was
-  observed, and the fault-source and injection-timing checks passed.
-- **Send skew**: actual dispatch time minus t_i (§2).
-- **Shape S**: the release request shape: a frozen system text and a user
-  text of the unique prefix `cs-<seed>-<i>` (six-digit index), a space and
-  a synthetic ticket, under a 1,200-token input bound and a 512- or
-  1,024-token ceiling (SPEC-HOSTED HA3 point 7).
-- **Shaped mock**: the mock built with `mock.NewShaped`, which answers in
-  a hosted provider's stream form for the tests of the hosted code.
-- **SSE**: server-sent events, the streaming format of the
-  OpenAI-compatible API.
-- **Step**: one rung of the ladder; a request's step is recorded, and
-  every release figure is per step.
-- **Survivor cohort**: fault-window requests served by the one baseline
-  replica besides the victim (§3).
-- **t_i**: request i's intended dispatch time, fixed before the run.
-- **T_inject**: the configured fault instant.
-- **TTFT**: time to first token, first content event minus t_i.
-- **TTR**: time to recovery, the held entry's start minus the fire anchor,
-  per baseline (§5).
-- **Two baselines**: the two-replica pre-fault level and the single-replica
-  equilibrium level, each with its own TTR (§5).
-- **Unpublished limit**: a dimension the provider documents without a
-  published or shown value, recorded with the operator's dated ruling in
-  `target.unpublished_limits`; each caps the route at 0.5 requests per
-  second in the ceiling rule (SPEC-HOSTED HA3 point 6).
-- **Unsent**: a scheduled request of an attempted step that a stop left
-  undispatched; its own line in the per-step tables, outside the three
-  outcome states, and a censored observation at the horizon on the
-  curve.
-- **vLLM**: the open-source inference server the experiment targets.
-- **Window-close record**: `window-close.json`, a release route's limits
-  and model documentation read once more after its last cell and
-  compared with its last counted cell; the route page names any change
-  it found (SPEC-HOSTED §4).
+| Term | Meaning | In the code |
+|---|---|---|
+| AC | an acceptance criterion of §8 | `internal/ac` |
+| Account group | the routes of a release that share one provider account or deployment, and so its limits | `release.account_group` |
+| Attempt | a cell's first scheduled run (attempt 1) or its re-run (attempt 2), each with its own date and seed | `schedule.Attempt`, `MaxAttempts` |
+| Binding rate, binding limit | the highest rate every term of the binding-rate rule (part of the ceiling rule) admits, and the limit that sets it | `admission.Solve`; `admission.CeilingRule` tests each step at it; `binding_rps`, `binding_limit` |
+| Byte cap | the length each Shape S ticket is cut at; a cap is spent once a ceiling check that ran at it reported a prompt above the input bound, and `run` refuses a `--byte-cap` above a spent cap | `probe.Spent` |
+| Canary | a stream served at fixed times by a mock inside the client process, read beside the load by the load's own reader | `loadgen.StartCanary` |
+| Case slot | the JSON string `"{{case}}"` a literal body carries once | `PilotCaseSlot` |
+| Ceiling check | the ten-request check that chooses a host group's output ceiling | `probe.RunRelease`, `probe.ChooseCeilingAt` |
+| Cell | one run of a route's ladder at one of the six slot hours on a weekday or a weekend date, plus the route's offset; a route has twelve | `runCell`, `evidence.Cell` |
+| Confidential limit | a limit marked `confidential`, whose value is retained | `Limit.Marking` is `config.MarkingConfidential`; `Target.Confidential` reports a route with one |
+| Deadline, hard timeout | release: 30 s from t_i splits in-time from late; 90 s from dispatch censors | `PinnedReleaseDeadlineS`, `PinnedReleaseHardTimeoutS` |
+| Deciding record | among a host's records at one ceiling that were not stopped or superseded, the one that decides its check there: the only one, or the second where the first was refused | `probe.Decisive` |
+| Drift split | a sampling frame divided at a change of tier, limits or model documentation | `report.DocsOf` |
+| Expected model | `target.reported_model.name` where recorded, else `target.model_name` | `Target.ExpectedModel` |
+| Fire anchor | whichever comes first of T_inject and the recorded fire | `collect.FireAnchorNs` |
+| Frame store | the retained reads of each response body with their times, `frames.jsonl` under `--frames` | `evidence.WriteRunFrames` |
+| Frozen line | the last ledger line the schedule read, by its count `ledger_lines` | `frozenEntries` |
+| Goodput | the fraction of scheduled requests meeting the §4 objective | `collect.Collect` |
+| Host group | the routes of a release serving one model with one shape | `release.other_hosts` |
+| Ladder | a cell's warm-up and its five steps, each a measured window and a drain | `loadgen.BuildLadder` |
+| lambda_max, lambda_r | measured single-replica capacity; the per-replica rate at 0.65 of it | `calibrate.Calibrate` |
+| Quiet interval | the shortest wait after a refused check ends before it may be repeated | `probe.RepeatQuiet` |
+| Release key | 32 random bytes keying every HMAC-SHA256 a release publishes | `internal/releasekey` |
+| Route | one provider, model identifier, endpoint, account tier and request shape | `target.name` |
+| Route stop | a cause that ends a route's process, held until acknowledged | `routeStop`, `route.holds` |
+| Sampling frame | a route's twelve cells | `internal/schedule` |
+| Shape R, Shape S | the release request shapes: a short fixed instruction, and a synthetic support ticket cut at the byte cap | `pilot.GenerateShapeR`, `pilot.GenerateShapeS` |
+| Step | one ladder rate, a fraction of the binding rate | `PinnedReleaseStepFractions` |
+| Superseded byte cap | a spent byte cap above the release's; a record at one decides nothing | `ceilingChoiceFor` |
+| T_inject | the configured fault instant, the warm-up plus `fault.t_inject_offset_s` after the epoch | `TInjectNs` |
+| t_i | request i's intended dispatch time | `Request.IntendedNs` |
+| TTR | time to recovery, the held entry's start minus the fire anchor | `detect.RunWith` |
+| Unsent | a request scheduled in an attempted step and never dispatched | `LineUnsent` |
+| Victim | the replica the fault targets | `--victim`, `survivorOf` |
+| Window-close record | a route's records read once more after its last cell | `evidence.NewWindowClose` |
