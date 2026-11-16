@@ -1,13 +1,24 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/percentes/percentes/internal/admission"
+	"github.com/percentes/percentes/internal/mock"
 	"github.com/percentes/percentes/internal/probe"
 )
 
@@ -57,6 +68,31 @@ func rewriteRecord(t *testing.T, path string, edit func(*probe.ReleaseRecord)) {
 	}
 }
 
+// refusingMock is a loopback mock route at its chat-completions URL whose
+// nth request, 1-based, is answered an ordinary 429 where refuse(n), with
+// the count of requests it received.
+func refusingMock(t *testing.T, refuse func(n int32) bool) (string, *atomic.Int32) {
+	t.Helper()
+	endpoint := startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."})
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: u.Scheme, Host: u.Host})
+	rp.FlushInterval = -1
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refuse(hits.Add(1)) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"error":{"type":"rate_limit_exceeded"}}`) //nolint:errcheck
+			return
+		}
+		rp.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + u.Path, &hits
+}
+
 // fastCeilingFixture is newCeilingFixture with a route cap and a token
 // limit that pace the check's requests about 0.25 s apart.
 func fastCeilingFixture(t *testing.T, endpoint, key string) *ceilingFixture {
@@ -74,6 +110,199 @@ func fastCeilingFixture(t *testing.T, endpoint, key string) *ceilingFixture {
 		t.Fatal(err)
 	}
 	return ceilingFixtureAt(t, path, key)
+}
+
+// A check with an ordinary 429 is refused, prints so, and is not
+// repeated before the quiet interval after its end; its one repeat
+// decides, and a third check is refused before any request. run reads
+// both records, and refuses either alone, a repeat sent inside the quiet
+// interval, and a record of a line that admits no check.
+func TestCeilingCheckRefusedRepeat(t *testing.T) {
+	endpoint, hits := refusingMock(t, func(n int32) bool { return n == 3 })
+	f := fastCeilingFixture(t, endpoint, testKey)
+	var code int
+	var err error
+	text := stdoutOf(t, func() { code, err = ceilingCheckCmd(context.Background(), f.args()) })
+	if err != nil || code != exitAdverse || !strings.Contains(text, "groq: REFUSED: a request was answered HTTP 429") {
+		t.Fatalf("ceiling-check: %d, %v:\n%s", code, err, text)
+	}
+	first := checkRecordsOf(t, f.out, "groq")
+	if len(first) != 1 {
+		t.Fatalf("records %v", first)
+	}
+	var refusedPath string
+	var refusedSeq int
+	for seq, p := range first {
+		refusedSeq, refusedPath = seq, p
+	}
+	if rec := readRecord(t, refusedPath); rec.Outcome() != probe.CheckRefused || rec.LedgerSeq == 0 || rec.LedgerSHA256 != ledgerOpenSHA256(t, f.ledger) {
+		t.Fatalf("outcome %s, line %d", rec.Outcome(), rec.LedgerSeq)
+	}
+	sent := hits.Load()
+	if code, err := ceilingCheckCmd(context.Background(), f.args()); err == nil || code != exitError || !strings.Contains(err.Error(), "may be repeated from") || hits.Load() != sent {
+		t.Fatalf("a repeat inside the quiet interval: %d, %v, %d requests", code, err, hits.Load()-sent)
+	}
+	rewriteRecord(t, refusedPath, func(r *probe.ReleaseRecord) { r.EndUTC = r.EndUTC.Add(-time.Hour) })
+	text = stdoutOf(t, func() { code, err = ceilingCheckCmd(context.Background(), f.args()) })
+	if err != nil || code != exitOK {
+		t.Fatalf("the repeat: %d, %v:\n%s", code, err, text)
+	}
+	both := checkRecordsOf(t, f.out, "groq")
+	var repeatPath string
+	for seq, p := range both {
+		if seq != refusedSeq {
+			repeatPath = p
+		}
+	}
+	if len(both) != 2 || repeatPath == "" {
+		t.Fatalf("records %v", both)
+	}
+	sent = hits.Load()
+	if code, err := ceilingCheckCmd(context.Background(), f.args()); err == nil || code != exitError || !strings.Contains(err.Error(), "decides (ran); it is not repeated") || hits.Load() != sent {
+		t.Fatalf("a third check: %d, %v", code, err)
+	}
+
+	cfgs, err := loadReleases([]string{f.cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := ledgerOpenSHA256(t, f.ledger)
+	hosts := byRoute(hostConfigs(t, cfgs[0]))
+	baseten := writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true, open))
+	entries, err := ledgerEntries(f.ledger, open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice, copies, _, err := ceilingChoice(cfgs[0], hosts, []string{refusedPath, repeatPath, baseten}, 2000, open, entries)
+	want := probe.CeilingChoice{Ceiling: 512, Reason: fmt.Sprintf("every host passed at 512; groq: the check refused at 512 (ledger line %d) was repeated", refusedSeq)}
+	if err != nil || !reflect.DeepEqual(choice, want) || len(copies) != 3 {
+		t.Fatalf("both records: %+v, %d copies, %v", choice, len(copies), err)
+	}
+	if _, _, _, err := ceilingChoice(cfgs[0], hosts, []string{repeatPath, baseten}, 2000, open, entries); err == nil ||
+		!strings.Contains(err.Error(), "admits a ceiling check of route groq and no ceiling-check record given names it") {
+		t.Fatalf("the repeat alone: %v", err)
+	}
+	if choice, _, _, err := ceilingChoice(cfgs[0], hosts, []string{refusedPath, baseten}, 2000, open, entries[:refusedSeq+1]); err != nil ||
+		!choice.Excluded || choice.Reason != "groq: ceiling check inconclusive, HTTP 429 at 512" {
+		t.Fatalf("the refused check alone, before the repeat: %+v, %v", choice, err)
+	}
+	if _, _, _, err := ceilingChoice(cfgs[0], hosts, []string{refusedPath, repeatPath, baseten}, 2000, open, entries[:refusedSeq+1]); err == nil ||
+		!strings.Contains(err.Error(), "admits no ceiling check of the route up to the line the schedule froze") {
+		t.Fatalf("a record after the frozen line: %v", err)
+	}
+	rewriteRecord(t, refusedPath, func(r *probe.ReleaseRecord) { r.EndUTC = r.EndUTC.Add(time.Hour) })
+	if _, _, _, err := ceilingChoice(cfgs[0], hosts, []string{refusedPath, repeatPath, baseten}, 2000, open, entries); err == nil ||
+		!strings.Contains(err.Error(), "the repeat waits") {
+		t.Fatalf("a repeat inside the quiet interval: %v", err)
+	}
+}
+
+// A check whose process ended before it wrote its record leaves its
+// admission unsettled: ceiling-check then refuses to send, --recover
+// refuses while another process holds the route, and then settles the
+// admission at its reservation and writes an interrupted record, after
+// which the check may be sent again and run reads both records.
+func TestCeilingCheckRecover(t *testing.T) {
+	endpoint, hits := refusingMock(t, func(int32) bool { return false })
+	f := fastCeilingFixture(t, endpoint, testKey)
+	cfgs, err := loadReleases([]string{f.cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := admission.Open(f.ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := l.AdmitCheck("groq", "groq", probe.CeilingRequests, admission.ReleaseProbeTokens(cfgs[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, err := ceilingCheckCmd(context.Background(), f.args()); err == nil || code != exitError || !strings.Contains(err.Error(), "--recover writes it") || hits.Load() != 0 {
+		t.Fatalf("with an unsettled check: %d, %v, %d requests", code, err, hits.Load())
+	}
+	owner, err := l.LockRoute("groq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, err := ceilingCheckCmd(context.Background(), append(f.args(), "--recover")); err == nil || code != exitError || !strings.Contains(err.Error(), "another process holds it") {
+		t.Fatalf("--recover while the route is held: %d, %v", code, err)
+	}
+	owner.Close()
+	var code int
+	text := stdoutOf(t, func() { code, err = ceilingCheckCmd(context.Background(), append(f.args(), "--recover")) })
+	if err != nil || code != exitOK || !strings.Contains(text, "settled at 10 requests sent") {
+		t.Fatalf("--recover: %d, %v:\n%s", code, err, text)
+	}
+	recs := checkRecordsOf(t, f.out, "groq")
+	rec := readRecord(t, recs[a.Seq])
+	if rec.Interrupted == "" || rec.Outcome() != probe.CheckStopped || rec.Sent() != 0 {
+		t.Fatalf("recovered record %+v", rec)
+	}
+	if sent, reserved := f.probeCharge(t); sent != 10 || reserved != 0 {
+		t.Fatalf("ledger: %d probe requests, %d reserved", sent, reserved)
+	}
+	if code, err := ceilingCheckCmd(context.Background(), append(f.args(), "--recover")); err == nil || code != exitError {
+		t.Fatalf("--recover with nothing unsettled: %d, %v", code, err)
+	}
+	if code, err := ceilingCheckCmd(context.Background(), f.args()); err != nil || code != exitOK {
+		t.Fatalf("the check after recovery: %d, %v", code, err)
+	}
+	recs = checkRecordsOf(t, f.out, "groq")
+	var files []string
+	for _, p := range recs {
+		files = append(files, p)
+	}
+	open := ledgerOpenSHA256(t, f.ledger)
+	entries, err := ledgerEntries(f.ledger, open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files = append(files, writeCeiling(t, hostCeiling(cfgs[0], 2000, "baseten", 512, true, open)))
+	if choice, _, _, err := ceilingChoice(cfgs[0], byRoute(hostConfigs(t, cfgs[0])), files, 2000, open, entries); err != nil || choice.Ceiling != 512 {
+		t.Fatalf("run: %+v, %v", choice, err)
+	}
+}
+
+// A ceiling check is not sent while another route's check on its account
+// group is unsettled (admission.Ledger.AdmitCheck).
+func TestCeilingCheckAccountGroup(t *testing.T) {
+	endpoint, hits := refusingMock(t, func(int32) bool { return false })
+	f := newCeilingFixture(t, endpoint, testKey)
+	other := routeConfigFile(t, "baseten", endpoint, "10")
+	b, err := os.ReadFile(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other = writeFile(t, t.TempDir(), "baseten.yaml", []byte(strings.Replace(string(b), "\n  account_group: baseten\n", "\n  account_group: groq\n", 1)))
+	f.ledger = filepath.Join(t.TempDir(), "ledger.jsonl")
+	if code, err := ledgerCmd([]string{"create", "--ledger", f.ledger, "--config", f.cfg, "--config", other}); err != nil || code != exitOK {
+		t.Fatalf("ledger create: %d, %v", code, err)
+	}
+	for _, p := range []string{f.cfg, other} {
+		if code, err := ledgerCmd([]string{"price", "--ledger", f.ledger, "--config", p, "--input", "0.15", "--output", "0.60",
+			"--source", "https://example.test/pricing", "--retrieved", "2026-10-06"}); err != nil || code != exitOK {
+			t.Fatalf("ledger price: %d, %v", code, err)
+		}
+	}
+	cfgs, err := loadReleases([]string{other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := admission.Open(f.ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := l.AdmitCheck("baseten", cfgs[0].Release.AccountGroup, probe.CeilingRequests, admission.ReleaseProbeTokens(cfgs[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, err := ceilingCheckCmd(context.Background(), f.args()); err == nil || code != exitError ||
+		!strings.Contains(err.Error(), "holds an unsettled ceiling check of route baseten on account group groq") || hits.Load() != 0 {
+		t.Fatalf("beside baseten's check: %d, %v, %d requests", code, err, hits.Load())
+	}
+	if err := l.Settle(a, admission.Counts{Probe: 10}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // soloFile is the configuration at cfgPath with no other host, saved as
