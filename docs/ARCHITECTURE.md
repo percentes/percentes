@@ -958,251 +958,144 @@ The transport's idle pool holds 2 × the top step's rate × the hard timeout, pl
 
 ### The per-step tables and the index
 
-A route page is one set of per-step tables. `report.NewStepTables`
-builds it from the ceiling rule's verdict and the route's cell records,
-so a replay of the records reproduces every figure. Per cell and step,
-every non-warm-up record falls on exactly one main line, and the table
-below lists what each step carries.
+`report.NewStepTables` builds a route page from the ceiling-rule verdict and the cell records (`internal/report/steps.go`); `publish-check` builds each page again from the same records, at its own `--cell-files` address, and refuses a page under `--pages` with other bytes, naming the page.
 
-| Part of a step | What it holds |
+| Part of a step | Content | Code |
+|---|---|---|
+| Main lines | `completed_in_time`, `completed_late`, `status_429`, `status_other`, `connect`, `reset`, `empty_stream`, `malformed_stream`, `censored`, `unsent`; each over scheduled with its 95 percent Wilson score interval (a binomial confidence interval) | `stepLines`, `stepTables`, `newRate` |
+| Billing line | `billing_refusal`, printed last and only where a response was one; it is not pooled and has no index column | `lines` |
+| Sub-lines | per status code, per in-band error type, stopped at the ceiling, unknown termination, per finish reason | `finishLabel` |
+| G2, canary | cell report only, from the manifest | `stepG2`, `stepCanary` |
+| Hosted-G6, throughput | in-time over scheduled against `PinnedBaselineGoodputMin` (0.99), and over the requests that were not `connect` or `reset` errors; completions per second over `release.ladder.step_s` | `cellTable`, `pool` (G6); `throughput` |
+| Incidence curve and quantiles | Wilson band; quantiles in the SPEC.md §3 form, refused beyond the hard timeout | `curve`, `incidence` |
+| Distributions | failure timing, TTFT, whole answer, by connection reuse, content events, tokens, prompt tokens, gap histogram | `signals`, `distribution`, `promptTokens` |
+| `status_429` records | 30 s bins and each refusal's rate-limit and `Retry-After` headers and documented meaning (`status_429`, `warmup_status_429`, `dispatch_to_write`) | `segment`, `refusalDoc` |
+
+| Route-page addition | Content | Code |
+|---|---|---|
+| Attribution | each `status_429` labelled at or below, above, or unresolved against each public limit's share from its account group's sends | `StepTables.Attribute`, `cellLimits`; history in `readHistory`, `reconcile` (`cmd/percentes-release/history.go`) |
+| Cells outside the sampling frame | their `status_429` records, in no pooled figure | `StepTables.AddOutside` |
+| Null reading | over a complete sampling frame, no `status_429` or 5xx (a status of 500 to 599) at the two top steps (0.90 and 1.00 of the binding rate), with Wilson upper bounds | `null`, `nullText` (`internal/report/null.go`) |
+| Pooled lines | twelve counted cells; Wilson interval on the pooled scheduled count divided by DEFF (design effect) | `pool`, `designEffect` |
+| Drift split | a change of tier, limits or model documentation between cells splits the sampling frame (`drift_parts`) | `DocsOf`, `drift` |
+| Mismatch and window close | one line per `model_mismatch` cell (`model_mismatch_cells`); the window-close comparison (`window_close`) | read in `readRouteCells`, compared by `report.CompareWindowClose` and set in `buildPages`, printed by `StepTables.Text` |
+| Cell archives | with `--cell-files`, each cell with a manifest and its archive's address, `<address>/<route>-<cell>.tar.gz`, `<cell>` being the cell's directory name `<label>-a<attempt>` (`cell_files`), printed on a `cell files:` line in the cell's section, or in a section of its own, `-- Cell <cell>, <outcome>, outside the frame --`, where no other section names the cell | read in `readRouteCells`, set in `buildPages` (`cellArchives`), printed by `StepTables.Text` |
+
+`report.NewIndex` builds one row per route and step, ordered by provider, route and step, with each main line's pooled count divided by the pooled scheduled count; a row of an incomplete or drift-split sampling frame carries no counts. It refuses a string carrying any of `IndexForbidden` (`rank`, `winner`, `best`, `worst`, `interval`, `sort key`, `p99`). Excluded routes, routes that ran no cell and routes with stops and no manifest are listed under their own headings (`Index.Exclude`, `Index.AddUnrun`, `Index.AddStopped`).
+
+`percentes-release pages` (`buildPages`) runs `evidence.CheckRelease` on every manifest, verifies each window-close record (`WindowClose.Verify`), checks the schedule's SHA-256 on every record (`readRouteCells`) and one ceiling choice per host group (`sameCeiling`), and writes `index.md`, `index.json`, `routes/<route>.txt` and `routes/<route>.json` only when every route reads. `excludedRoute` and `stoppedRoute` build the pages of routes with no manifest; `stoppedChecks` copies a stopped route's host-group ceiling-check records under `--out`.
+
+`pages` gives a route that ran no cell a page read from its ceiling-check records alone (`excludedRoute`). Where those records exclude nothing, the index lists the route as unrun, with the ceiling check's choice as the reason. `pages` takes the release's byte cap (`releaseByteCap`) as the smallest cap among the Shape S records that were not stopped, or among all of them where every one was stopped.
+
+`pages` exits 1 on each refusal below; on every row but the last it writes no page. Rows are in the order the checks run.
+
+| `pages` refuses when | Checked by |
 |---|---|
-| Main lines | `completed_in_time`, `completed_late`, `status_429`, `status_other`, `connect`, `reset`, `empty_stream`, `malformed_stream`, `censored` and `unsent`; each a count over the step's scheduled requests with its 95 percent binomial (Wilson score) interval, labelled as treating the requests as independent |
-| Sub-lines | one `status_other` line per status code; one `malformed_stream` line per in-band error type; two `completed` lines, for completions whose finish reason is the length value the instrument pins per adapter (`probe.LengthChatCompletions` "length", `probe.LengthMessages` "max_tokens"), printed as stopped at the ceiling, and for completions with no finish reason, printed as unknown termination; one `empty_stream` line per finish reason seen |
-| Annotations | `target.status_docs` and `target.error_docs` give the provider's documented meaning beside a status or in-band line; under the `status_429` line, the step's highest demand-to-limit fraction over the public limits held to half, whether demand is at most half of each confidential one, and the `Retry-After` record |
-| G2 | in a cell report only: the step's client-validity verdict from the manifest's `gates`, judged at the drain's end, printed as pass, FAIL, or not observed and so not passed, with the gate's detail |
-| Hosted-G6 | the in-time count over scheduled, and beside it the same count over the requests that were not connect or reset errors |
-| Throughput | completions per second: the completions, in time or late, of the step's scheduled requests over the configured step window (`release.ladder.step_s`, pinned at 480 s); the provider-reported completion tokens per second over the completions whose records carry the count, with how many those are; pooled over the cells' windows summed, with the range of the cells' completions per second |
-| Completion-incidence curve | a point at each distinct completion time with its pointwise Wilson band, printed at 1, 2, 5, 10 and 20 s, at the deadline and at the last completion |
-| Incidence quantiles | the median and the 90th, 95th and 99th percentiles of the curve, reported where the curve crosses them inside the 90 s hard timeout and refused in the SPEC.md §3 form otherwise |
-| Failure timing | per error class with events, the median and 90th percentile of the time from intended dispatch to the failure signal |
-| Latency | the TTFT and whole-answer distributions over completions: the median and 90th percentile, and the 95th and 99th percentiles with their SPEC.md §7 order-statistic intervals where the ranks fall inside the sample; the median and 90th percentile again, split by dialled and reused connections; the SPEC.md §3 caveat to read them with the curve where errors and censored requests exceed 5 percent of scheduled |
-| Completion length | per completion, the content events, the provider-reported completion tokens and the reasoning tokens: minimum, median, 90th percentile and maximum, or not verifiable where no completion carried the count; the content events of the step's errored requests and of its censored requests as their own distributions |
-| Prompt length | the provider-reported prompt tokens over the step's requests sent (a chat-completions `prompt_tokens`, or a Messages `input_tokens` plus its cache creation and cache read counts; a null or missing count is absent, an explicit 0 is a count), with how many of the requests carried it |
-| Inter-chunk gaps | the histogram of gaps between successive content events over the step's completions |
-| Naming lines | on a route page only: the route's `target.naming.lines`, printed verbatim under their heading |
+| a flag does not parse, or `--out`, `--frames`, `--pages`, `--schedule` or `--ledger` is missing | `pagesCmd` |
+| `--cell-files` is not an https URL with a host and no user, query or fragment, written as `url.URL.String` writes it, or ends in a slash | `checkCellFiles` |
+| no `--config` is given, or one does not load or is not under the `release` profile | `loadReleases` |
+| `--release-key` is missing where a route has a confidential limit, or names a file `releasekey.Read` refuses | `checkingKey`, `releasekey.Read` |
+| the schedule file does not read, or is not the schedule its own input derives | `loadSchedule`, `schedule.Load` |
+| a cell record does not read or decode, is still running, or names another route or cell than its directory; a route's cells ran under different schedule files | `readRouteCells` |
+| an interrupted cell with no end recorded has a `dispatch.json` or `attempts.jsonl` that does not read or decode, or a clock, status, balance or refresh record that exists and does not read | `cellEnd`, `recordsEnd` |
+| a cell with no `manifest.json` is neither missed, interrupted, nor stopped with an execution error | `readRouteCells` |
+| a cell manifest fails the completeness check ([its list](#replay-and-the-completeness-check)) | `evidence.CheckRelease` |
+| a manifest names another run or schedule SHA-256 than its cell record | `readRouteCells` |
+| a route's manifests carry different ceiling-rule verdicts, ceiling choices or probe records | `readRouteCells` |
+| a cell its record counts is not counted in its manifest, or one scheduled cell is counted twice | `readRouteCells` |
+| a cell's `attempts.jsonl` or `refresh.json` is not the file its manifest names, or does not decode | `readAttempts`, `readRefreshed` |
+| a `--config` route outside the schedule has no cell record under `--out` | `readRouteCells` |
+| a route's `window-close.json` does not read, or does not verify against the latest end of the route's cells | `evidence.ReadWindowClose`, `WindowClose.Verify` |
+| a route's cells ran under a schedule file other than `--schedule` | `buildPages` |
+| a route has cells under `--out` and no `--config` | `buildPages` |
+| two hosts of one host group send different shapes or ceilings, ran at different ceilings, or carry different ceiling choices or probe records in their manifests | `sameCeiling`, `sameShape` |
+| the ledger does not read, its chain does not check, its open line differs from the frozen one, or a line does not decode | `readLedger` |
+| the schedule freezes no ledger position, the ledger holds fewer lines than the frozen count, or its bytes through that line have another SHA-256 | `frozenEntries` |
+| a route of the schedule whose ceiling check the ledger admits up to the frozen line has no `--config` | `buildPages` |
+| a `--check-record` does not read or decode, was admitted in another ledger than the schedule froze, or is of a route outside the schedule | `checkRecords` |
+| a ceiling-check admission on the ledger after the frozen line names a route's account group or one of the group's routes | `lateChecks` |
+| a ceiling-check record a manifest carries, or a `--check-record` file, does not read | `releaseCheckPaths` |
+| one of those records is not the record `ceiling-check` writes | `releaseByteCap`, `readCheckRecord` |
+| a route with stops and no manifest has a ceiling-check admission of its host group, up to the frozen line, that no given record names | `unnamedChecks` |
+| a scheduled route with no cell has no given record of its host group | `excludedRoute`, `choiceFiles` |
+| for such a route, its host group's records meet a refusal `ceilingChoiceFor` makes in the `run` table. Among them are a byte cap above a spent cap, a host's record that was not stopped at a byte cap neither the release's nor superseded, and a repeat begun inside the quiet interval | `excludedRoute`, `ceilingChoiceFor`, `repeatQuiet` |
+| such a route's records exclude nothing, and the ledger admits a cell of the route after the frozen line | `excludedRoute` |
+| among the records the manifests carry and the `--check-record` files, a ceiling-check admission of a scheduled route up to the frozen line has no record, two records name one line, or a record names a line that admits no check of its route | `allChecks`, `checkAdmitted` |
+| no route has a page; two `--config` files name one route; a route's verdict and counted cells give no step tables (`report.NewStepTables`); an index field is empty, carries a table delimiter or a line break, or holds a string of `IndexForbidden` | `report.NewIndex`, `Index.Exclude`, `Index.AddUnrun`, `Index.AddStopped` |
+| a route with a stopped cell and no cell manifest has no record of its host group, or its host group's records meet one of those `ceilingChoiceFor` refusals or carry a model fault in the route's own records | `stoppedChecks`, `ceilingChoiceFor` |
+| for the account group's history, a cell's `probe.json` or `dispatch.json` does not decode, or a ceiling-check record names no request shape | `readHistory`, `cellSends`, `checkHistory` |
+| a cell outside the sampling frame, or the account group's history, does not fit the route's step tables | `StepTables.AddOutside`, `StepTables.Attribute` |
+| a page or a record copy does not write | `pagesCmd`, `replaceFile` |
 
-A complete frame of twelve counted cells pools each step over the cells
-that attempted it. A pooled line carries the count over the pooled
-denominator, the range of the cell rates, the cells with events, and a
-Wilson interval on the effective sample size N / DEFF, where DEFF is the
-larger of 1 and the cluster-robust variance over the independent one
-(HA3 point 13). Pooled latency takes the cells' completions as one
-sample, and where it prints an order-statistic interval the line
-"intervals assume independent requests" follows the distributions
-(`signalsText`). The drift rule (SPEC-HOSTED §4) then applies. Each
-counted cell's manifest records a documentation state as read at the
-cell's start, after its refresh command rewrote the limits and
-eligibility records: the account tier, and those records by URL and
-hash, the keyed hash on a route with a confidential limit
-(`report.DocsOf`).
-A change between consecutive cells in start order is named, with the
-entries removed and added. The frame then pools each side apart, as a
-`drift_parts` entry with its cells, dates and shared state, and carries
-no whole-frame pooled figure. A route page then prints one line per
-`model_mismatch` cell (`StepTables.ModelMismatches`,
-`model_mismatch_cells` in `routes/<route>.json`), outside the frame: the cell, the number of
-requests that reported another model, the expected identifier and every
-distinct reported identifier in request order, from the cell's manifest.
-A stopped cell whose responses also mismatched gets no line; its reasons
-and manifest carry the mismatch. A cell report prints no such line.
-After them the page prints the window-close record
-(`StepTables.WindowClose`): not recorded; recorded with no change since
-the last counted cell; or a change, named as first observed at the
-window-close record after the last counted cell, with no cell following
-it. A confidential limit prints as its dimension, `confidential`, its
-source and its `hmac-sha256` value, with the test's result, and an excluded step names it
-the same way.
+`percentes-release pack` writes a tar archive of a route's page files under `pages/`, its cell manifests under `out/` and, where the route has no cell manifest, the copies of ceiling-check records that `pages` made for it, with `inventory.json` naming each by SHA-256 (`evidence.BuildPack`). Entries have fixed mode, owner and time, so a rebuild from the same cells is identical. `pack` builds the route's pages at its `--cell-files` address and refuses the addresses `pages` refuses. It refuses a route with a page and no window-close record.
 
-`report.NewIndex` builds the index table of HA3 point 12 from each
-route's tables. It has one row per route and step, alphabetical by
-provider, then route, then step. A row carries the admission or the
-binding limit, the highest step any cell attempted, the ceiling, the
-cells that attempted the step out of the frame's twelve, the pooled
-scheduled count, one column per main line and a link to the route's
-page. Each main-line column holds the line's count summed over the cells
-that attempted the step, printed as that count, a slash, and the pooled
-scheduled count. Sub-lines, rates and intervals are left out; they are on
-the route's page. An incomplete frame prints the number of cells recorded
-in place of the counts. A frame the drift rule split prints the number of
-parts and refers to the route page. `NewIndex` refuses a provider, route,
-model or page string, and a rendered page, that carries `rank`, `winner`,
-`best`, `worst`, `interval`, `sort key` or `p99`. The cell report builds
-its one cell's table through the same code.
+`percentes-release publish-check` (`publishCheckCmd`) rebuilds the pages and packs and checks the publication record (SPEC-HOSTED §9, publication steps) with `Publication.Check` (`internal/evidence/publication.go`). Each route's entry in the record's `routes` holds its notice (`evidence.Notice`): the date sent, the recipient, the provider's account identifier, the evidence pack sent and the date the notice's window closes. An AWS (Amazon Web Services) route's entry also records the replication pack sent (`replication_pack`).
 
-`percentes-release pages --out DIR --frames DIR --config FILE ...
---schedule FILE --pages DIR [--release-key FILE]` writes the pages after
-the window. It reads every route's cell records under `--out`, with its
-window-close record where present, and runs the completeness check on
-every manifest against the route's configuration file as loaded, the
-frame store and the release key, which it requires where a route has a
-confidential limit (`checkingKey`). A window-close record must verify
-(`evidence.WindowClose.Verify`): the record and its refresh began after
-the latest end of any of the route's attempts (each `cell.json`'s
-`end_utc`; for an interrupted cell with none, the latest time its
-records carry: `start_utc`, the dispatch series to the end of each second
-it counts a request in, the clock, status, balance and refresh records
-(one that does not decode gives the time its file was last written) and
-each attempt's times from `epoch_utc`;
-for any other cell with none, its `start_utc`); the refresh exited 0
-and its published limits are the ones its output gives, read on a route
-with a confidential limit from the refresh record as run kept beside the
-copies; the copies in `window-close/<route>/<UTC time>/` under
-`--frames` match the record's plain or keyed hashes, the operator file's
-copy with the record's account tier; and the record's `records` list is
-the operator file copy's, in order, by kind, path and URL, with a record
-of each required kind. `--schedule` is the committed
-schedule file, which must load (`schedule.Load`). Every run record of a
-route must carry the same `schedule_sha256`, every manifest the one in
-its run record, and that value must be the SHA-256 of the `--schedule`
-file (`readRouteCells`, `buildPages`). Every manifest of a route must
-carry the same ceiling-rule verdict, checked against the configuration's limits
-(`admission.CheckPublished`), and the same ceiling choice and
-ceiling-check records. Two routes given to `pages`
-that name each other as hosts of one model must carry the same choice
-and records too (`sameCeiling`). A route whose cells hold only the run
-records (`cell.json`) of missed or interrupted attempts, with no
-manifest, reads with no verdict: it gets no page and no index row, and
-`pages` prints `<route>: no cell with a manifest.json, <n> with a run
-record only; no page`. Where either route of such a pair has
-no manifest, the two routes' ceilings must agree instead, each taken
-from its manifests' choice or, with none, from its configuration's
-`release.shape.ceiling_tokens` (`ranAt`). A route with no cell record
-at all is refused. One counted attempt per scheduled cell
-enters the route's page; labelled, missed and interrupted attempts are
-counted in the printed summary and left out, and a `model_mismatch` attempt's identifiers are read from
-its manifest for the page's mismatch lines. It then writes `index.md` and `index.json`, and per route
-`routes/<route>.txt` (the tables' text) and `routes/<route>.json`.
-Nothing is written unless every route reads, and a route with cells
-under `--out` and no `--config` is refused.
+`publish-check` exits 1 on a refusal before the record is checked, and 2 on a refusal of the record; the Exit column gives each row's code. `Publication.Check` names every problem it finds at once; the copy and page checks in the last four rows run only once it passes. A release whose ceiling checks excluded every route has no cell manifest, and `publish-check` passes it once its record, pages, packs and ceiling-check record copies check.
 
-`percentes-release pack --out DIR --frames DIR --config FILE ...
---schedule FILE --route NAME --pack FILE [--release-key FILE]` writes
-the route's evidence pack, the file its notice carries, to `--pack`.
-It builds the pages as `pages` does, with its refusals, and passes the
-route's page files, at `pages/routes/<route>.txt` and
-`pages/routes/<route>.json`, and its cell manifests, at
-`out/<route>/<cell>-a<attempt>/manifest.json`, to `evidence.BuildPack`.
-It refuses a route with a page and no window-close record, which the
-page prints once `run` writes it.
-The pack is a tar archive file holding those files and
-`inventory.json`, which names the route and each file by path and
-SHA-256 in path order. Entries are in name order, each a regular file
-with mode 0644, owner and group 0 and the Unix epoch as its
-modification time, so the same cells give the same bytes. A route with
-no page has no manifest, and its inventory names no file.
+| `publish-check` refuses when | Checked by | Exit |
+|---|---|---|
+| a flag does not parse, or `--out`, `--frames`, `--pages`, `--record`, `--schedule` or `--ledger` is missing | `publishCheckCmd` | 1 |
+| `--cell-files` is one `pages` refuses | `checkCellFiles` | 1 |
+| no `--config` is given, or one does not load or is not under the `release` profile | `loadReleases` | 1 |
+| `--release-key` is missing where a route has a confidential limit, or names a file `releasekey.Read` refuses | `checkingKey`, `releasekey.Read` | 1 |
+| the schedule file does not read, or is not the schedule its own input derives | `loadSchedule`, `schedule.Load` | 1 |
+| the record does not read, holds a field `evidence.Publication` does not define, or has data after the JSON object | `evidence.LoadPublication` | 1 |
+| the cells, the ledger or the `--check-record` files meet a refusal of the `pages` table above | `buildPages` | 1 |
+| a cell manifest under `--out` does not read | `releaseManifests` | 1 |
+| a window-close record under `--out` does not read | `releaseFiles` | 1 |
+| a route's evidence pack does not build | `routePacks` | 1 |
+| where a route has a confidential limit, one of its manifests, its window-close record or a refresh record as run kept under `--frames` does not read | `withheldValues`, `retainedReads`, `windowCloseReads` | 1 |
+| `manifests`, `window_closes` or `pages` names a file twice, names one the release does not hold, records another SHA-256, or leaves one out | `Publication.fileSet` | 2 |
+| a page the cells give at the `--cell-files` address is missing under `--pages`, does not read, or has other bytes; the page is named | `Publication.Check` | 2 |
+| a date in the record, `non_working_days` included, is not written YYYY-MM-DD | `Publication.Check` | 2 |
+| a `routes` entry is not a route of the release or is recorded twice; a route of the release is not in the record | `Publication.Check` | 2 |
+| a route whose cells give a page has no `<route>/window-close.json` under `--out` | `publishCheckCmd`, `Publication.Check` | 2 |
+| a route has no notice, or the notice's `recipient` or `account` is blank | `Publication.Check` | 2 |
+| the release has no evidence pack for the route, or the notice's pack is not the pack `percentes-release pack` builds from the cells | `routePacks`, `Publication.Check` | 2 |
+| a notice is dated before the UTC date of the route's latest cell start or of its window-close record, or a manifest or window-close record of the route under `--out` does not decode | `routeStarted`, `dayOf` | 2 |
+| a notice's window closes fewer than `NoticeWorkingDays` (4) working days after it, with weekends and `non_working_days` left out, or has not yet closed (the check runs before the end of its close date in UTC) | `workingDays` | 2 |
+| `responses` is absent (an empty list when none arrived), or a response was received before its notice | `Publication.Check` | 2 |
+| a verbatim response has no `text` or `consent` file, or its text is not UTF-8 (8-bit Unicode Transformation Format); any other response has no `corrections` (an empty list when none were made) | `Publication.Check` | 2 |
+| a correction is blank or runs over more than one line | `Publication.Check` | 2 |
+| a route under `target.naming.permission_required` has no `permission` | `Publication.Check` | 2 |
+| a route whose endpoint host ends in `.amazonaws.com` has no `replication_pack`. A replication pack has a blank recipient, does not hold `inventory.json` and every other file of the route's evidence pack with the same bytes, or is dated after its notice or before either UTC date a notice may not precede | `replicationRoute`, `evidence.PackCarries` | 2 |
+| `disclosures` is absent (an empty list when none were made); a disclosure's `provider` is blank or runs over more than one line, its `recipient` is blank, its `how` is neither `email` nor `form`, or its date is not before the first notice | `Publication.Check` | 2 |
+| `prerelease` is absent (an empty list when no copy was sent); a copy has blank `recipients` or no `copy` file, its `withheld` names a route outside the release, or it does not withhold every route that needs a replication pack | `Publication.Check` | 2 |
+| a file the record names is missing, has a path outside the record's directory or a `sha256` that is not lowercase hex, or has bytes of another SHA-256 | `Publication.file` | 2 |
+| a verbatim response's text, a correction or a disclosure's provider holds any notice's account or recipient, in any letter case, with white space and format characters (Unicode category Cf) ignored | `Publication.Check` | 2 |
+| one of those texts holds the value of a confidential limit, the configured one or the one the refresh command read, in a form `config.ValueForms` gives (`config.Carries`) | `Publication.Check`, `withheldValues` | 2 |
+| once the record passes, a copy of a ceiling-check record that `pages` made under `--out` is missing or differs; the first such copy is named | `copiedChecks` | 2 |
+| the publication page does not build: a verbatim response's text no longer has its recorded SHA-256 | `Publication.Page` | 1 |
+| with `--write-page`, `publication.md` or `publication.json` does not write; without it, one does not read for a cause other than its absence | `publishCheckCmd` | 1 |
+| without `--write-page`, `publication.md` or `publication.json` is missing under `--pages` or is not the page the record gives | `publishCheckCmd`, `Publication.Page` | 2 |
 
-`percentes-release publish-check --out DIR --frames DIR --config FILE
-... --schedule FILE --pages DIR --record FILE [--write-page]
-[--release-key FILE]`
-checks the release publication record (`evidence.Publication`,
-SPEC-HOSTED HA3 point 14):
-a strictly decoded JSON file apart from the cell manifests that names,
-by path and SHA-256, every cell manifest, every `<route>/window-close.json`
-under `--out` (`window_closes`) and every page, and holds per
-route its
-notice (date, recipient, account identifier, evidence pack and the date
-its window closes), its responses (a verbatim one with its text and
-consent files, any other with its corrections), its naming permission
-and its replication pack; every email and form that described the work
-to a provider before the notices; every pre-release copy with the
-routes it withheld; and the weekdays the notice windows do not count.
-The command rebuilds the pages and each route's evidence pack from the
-cells under the `--schedule` file, with the refusals of `pages`, takes each given route's
-duties, a route with no page among them, from its configuration (`naming.permission_required`; a
-replication pack where the endpoint host ends in `.amazonaws.com`) and
-refuses, exiting 2 with every problem named, unless the record matches
-the cells, the window-close records and the pages on disk, every route
-with a page has its window-close record, every route has its notice
-with at least four working days up to a window close that has passed,
-dated no earlier than the UTC day on which the route's last cell
-started or its window-close record was taken, its responses, and its
-permission and pack where due, each notice's pack equals, byte for byte,
-the pack `percentes-release pack` builds from the cells as they stand,
-each replication pack is dated no earlier than that same UTC day and no
-later than its notice and holds that pack's
-`inventory.json` and every file it names with the same bytes, and may
-hold other files (`evidence.PackCarries`), every disclosure
-predates the first notice, every pre-release copy withholds every
-replication-pack route, and every named file matches its hash. The
-check also refuses a verbatim response's text that is not UTF-8 (the
-Unicode text encoding), and a correction or a disclosure's provider that
-runs over more than one line. It refuses each of those texts that holds
-any notice's account identifier or recipient, in any letter case and
-with or without white space, or a confidential limit's value as a
-number of its own (`config.Carries`) in each form `config.ValueForms`
-gives: in decimal, also with trailing zeros and with its whole part
-grouped in threes, each with a fractional part also with a decimal
-comma, and in scientific notation. Both searches read the text without
-its Unicode format characters (category Cf, such as a zero-width space
-or a soft hyphen) and with each run of white space as one space. The
-values are each route's confidential limits as its configuration
-records them and as its refresh command read them at its cells and its
-window close, from the refresh records as run in the retained store
-(`withheldValues`). The refusal names the field, the route and the
-limit's dimension, and neither the identifier nor the value.
+With `--write-page` it writes `publication.md` and `publication.json` (`Publication.Page`). Neither holds a recipient or an account identifier.
 
-When the record is complete the command builds the publication page
-from it (`Publication.Page`): `publication.md` and `publication.json`,
-holding per route the notice date, the date its window closed and
-whether the record carries a naming permission; each response's date
-received with its corrections, and its text only where it is marked
-verbatim with its consent file; the corrections log, by route and
-response date; the providers told before the notices, with how and the
-date; and the fixed lines on naming, the accounts' ordinary paid status
-and the absence of provider funding (`evidence.PublicationStatements`).
-Recipients, account identifiers and the paths of the files the record
-keeps stay out of it. A verbatim text prints in a fenced block longer
-than any run of backticks in it, each CRLF (carriage return and line
-feed) or lone carriage return in it as a line feed. With `--write-page`
-the command writes both files under `--pages`; without it, it exits 2
-unless both are there with the bytes it built. The record does not
-name the publication page. It then prints the counts and the providers told before the
-notices, in date order. `pages` runs without a record and writes no
-publication page.
+| `publication.json` field (`PublicationPage`) | Content |
+|---|---|
+| `non_working_days` | the dates the record lists in `non_working_days`, which no notice window counted as working days; the notices paragraph of `publication.md` lists them, or prints `none` |
+| `routes` | per route, `notice_sent`, `window_closes` (the date the window closed) and `named_with_permission`, and each response's date and corrections, with its text where it publishes verbatim |
+| `corrections_log` | every correction, by route and the date of its response |
+| `told_before` | the providers that learned of the measurement ahead of the notices, with how and when |
+| `statements` | the fixed lines of `PublicationStatements` |
 
-### What publishes and what stays retained
+### What is published and what is retained
 
-Per cell, the manifest names every published file by hash: the
-configuration as published, `attempts.jsonl`, `refresh.json`, `probe.json`, `dispatch.json`, the
-ceiling probe copies, the clock, status and balance records, and the
-report pair; `manifest.json` itself publishes with them. `cell.json` is
-the runner's working record and the manifest does not name it; its
-outcome and reasons reach the published set through the manifest's
-`release` record, and its per-step gate verdicts through the manifest's
-`gates`. The frame store, with the operator file and its records copied
-beside it, stays under `--frames`, named in the manifest by hash and
-retained unpublished (SPEC-HOSTED §9); it also holds the values of the
-headers `target.retained_headers` names, which the published record
-replaces with `[retained]`; `probe.json` and the ceiling probe copies
-carry the same stand-in. The withheld values of `probe.json`, with the limits body
-where `target.probe.limits_retained` is set, are in `probe-retained.json`
-beside the cell's frames, and those of the ceiling check are in
-`ceiling-<UTC time>/<route>-<ceiling>/probe-retained.json` under
-`ceiling-check --frames`. The answer text of a release request is in the
-frame store and in no published file; under a route whose
-`target.retention.model_output` is `none`, the frame store keeps no 200
-body and counts its bytes in `dropped_bytes`, while non-200 bodies and
-the retained header values are kept either way. For a route with a
-confidential limit, the configuration as loaded (`config.yaml`) and the
-refresh record as run stay beside each cell's frames, and the
-window-close copies keep the refresh record as run. The published configuration, refresh records and
-limit snapshots carry no value, and such a route's refresh record gives
-`[retained]` for every limit's `unavailable` reason.
-Such a route's configuration loads only
-where it withholds every recorded header other than `Retry-After` and a
-request identifier, and the limits body where it reads a limits URL
-([The release profile](#the-release-profile)), so such a header or body
-that echoes the value stays in the retained store. On such a route the
-in-band error object of each request, in the attempts file and in the
-probe records, and each non-200 body and withheld limits body of the
-probe records publish only as a stand-in with the text's HMAC-SHA256
-under the release key; the text is in the frame store and in
-`probe-retained.json`, and the key is in neither. The manifest names
-such a route's frame store, operator file and operator records by
-HMAC-SHA256 under the release key, with no size. Per
-route, `window-close.json` publishes and its record copies stay under
-`--frames`. `percentes --check-release` refuses a cell whose named files
-are missing or differ from their recorded hashes.
+The last column of [the evidence files table](#hosted-runs-and-the-evidence-files) gives each file's status. The pages, the evidence pack, each `window-close.json` and these files a cell manifest names are published (SPEC-HOSTED §9), each cell's files as one compressed archive, `<route>-<cell>.tar.gz`, attached to a GitHub release of this repository and named on its route's page:
+
+| Manifest field | File |
+|---|---|
+| `config` | the hash and size of `Config.Published`, the file `public-config` writes to its `--out`, under the name of the `--config` file the route ran with |
+| `clock` | `clock.json` |
+| `status_start`, `status_end` | `status-start.json`, `status-end.json` |
+| `balance_start`, `balance_end` | `balance-start.json`, `balance-end.json` |
+| `artifacts` | `attempts.jsonl`, `refresh.json`, `probe.json`, `dispatch.json`, `report.json`, `report.txt` |
+| `release.probes` | the `ceiling-probe-<route>-<ceiling>-<ledger line>.json` copies |
+
+The manifest also names files that stay retained. `frames` names the frame store. `operator` and `records` name the operator file and its records, whose copies `Operator.WriteCopies` writes beside the frames as `operator.json` and `records/`. Where the route has a confidential limit, these three carry `hmac_sha256` and no `bytes`. `ledger` gives the admission ledger's hash, size and line count; no release command writes the ledger into the published set.
+
+The manifest names the source diff of a modified build by hash in `source.diff`, which publishes with the manifest, and `percentes --check-release` checks the diff's copy among the record copies beside the frames, which are retained (SPEC-HOSTED §9). `cell.json` is a working record the manifest does not name; its outcome reaches the published set through the manifest's `release` record.
 
 ### The end-to-end test
 
