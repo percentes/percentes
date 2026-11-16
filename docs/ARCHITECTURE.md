@@ -1,19 +1,10 @@
 # Percentes architecture
 
-Percentes is a measurement instrument. It drives open-loop load at a large
-language model (LLM) inference service while one replica is
-lost, and reports what the loss cost and how recovery unfolded. It also
-drives managed provider endpoints under the hosted protocol,
-[SPEC-HOSTED.md](../SPEC-HOSTED.md), and keeps the evidence those runs
-publish. This page describes how the code implements
-[SPEC.md](../SPEC.md), which is authoritative, and the hosted protocol
-that is subordinate to it. A § number refers to a SPEC.md section unless
-it is prefixed SPEC-HOSTED.
+Percentes drives open-loop load (each request sent at its scheduled time whether or not earlier ones have answered) at large language model (LLM) inference services and records what the client observes. It runs the replica-loss experiment of [SPEC.md](../SPEC.md), which is authoritative, and the managed-endpoint protocol of [SPEC-HOSTED.md](../SPEC-HOSTED.md), which is subordinate to it. A § number refers to SPEC.md unless it is prefixed SPEC-HOSTED.
 
-A worked example follows one request from its schedule to its line in
-the report: [one release request](#following-one-release-request).
+Phase 0 runs against the mock and needs no GPU (graphics processing unit); Phase 1 runs against vLLM, the open-source inference server whose version §6 pins, and SPEC.md's status line records which Phase 1 runs are done. Under SPEC-HOSTED, a route is one provider, model identifier, endpoint, account tier and request shape, and a cell is one run of the route's ladder, the stepped series of request rates of SPEC-HOSTED §3.
 
-- [Overview](#overview)
+- [Binaries](#binaries)
 - [A run on the clock](#a-run-on-the-clock)
 - [One request](#one-request)
 - [Anatomy of a run](#anatomy-of-a-run)
@@ -28,103 +19,19 @@ the report: [one release request](#following-one-release-request).
 - [Changing things safely](#changing-things-safely)
 - [Glossary](#glossary)
 
-## Overview
+## Binaries
 
-The instrument measures one replica loss, or one hosted endpoint under
-open-loop load, enforces four rules in every run, and ships as seven
-binaries. Read this section first; every later section assumes it.
+Packages are each binary's `internal/` imports from `go list`, less `internal/config`.
 
-### What is measured
-
-§1 poses one question in three parts: when one replica of vLLM, the
-open-source inference server the experiment targets, is lost under
-sustained load, how many in-flight and queued requests fail or time out,
-how the surviving replica degrades where there is one, and how long
-recovery takes, split into measured segments.
-
-Phase 0 builds the instrument and certifies it against a mock inference
-server on a local kind (Kubernetes in Docker) cluster. Passing the
-acceptance criteria (AC, §8) says nothing about behaviour on a real
-graphics processing unit (GPU). Phase 1 runs the same harness against vLLM
-on GPU nodes. One calibration has run against a standalone container.
-The process-kill variant runs a new standalone container under the same
-engine, model and GPU pins; its runs, and the two-replica Kubernetes
-calibration and characterization runs, are pending.
-
-§1 defines three fault variants. A clean delete removes the victim pod with
-grace period 0. A black-hole fault partitions the victim's node for a
-pinned 120 s and expires on its own; its recovery is partition heal, and a
-run that passes the §1 runtime assertions carries the
-node-loss-representative label. In Phase 0 the mock's fault modes stand in
-for these two ([Fault modes](#fault-modes)). A process kill sends SIGKILL
-(signal 9, which a process cannot catch) from the host to the vLLM
-application programming interface (API) server process of one standalone
-container, and the container runtime's restart policy starts the same
-container again; with one replica there is no survivor and no Service.
-
-The instrument also drives a managed provider endpoint (`target.hosted`).
-A hosted run sits outside the §1 experiment: §6 lists what changes for it,
-[Gates](#gates-and-where-each-bites) shows the two gates it carries, and
-[Hosted runs](#hosted-runs-and-the-evidence-files) describes the pre-run
-probe, the admission ledger, the evidence files every hosted run writes,
-and the pilot of SPEC-HOSTED's drafted hosted amendment 2 (HA2) that
-`cmd/percentes-pilot` runs. [The release runner](#the-release-runner)
-describes the public descriptive release of hosted amendment 3 (HA3),
-written into SPEC-HOSTED's body, that `cmd/percentes-release` runs:
-one route per process and twelve cells per route, with the ceiling
-rule, the per-step tables and the index. A route is one provider, model,
-endpoint and account tier, and a cell is one run of a route's ladder,
-five steps of offered load.
-
-### Design rules the code enforces
-
-Four rules hold in every run. A reader who knows them can predict most
-of the code's refusals. The README's third rule, the run-invalidating
-client checks, is gate G2 in
-[Gates and where each bites](#gates-and-where-each-bites).
-
-- **Open loop.** Every request's intended dispatch time t_i is fixed before
-  the run, and the generator never waits for a response before sending the
-  next request. A generator that waited would send less while the service
-  is slow and under-sample the slow period; that bias is called coordinated
-  omission (§2). Latency is measured from t_i.
-- **Three outcome states.** Every dispatched request ends completed,
-  errored or censored (§3). Scheduled requests left unsent are reported
-  separately. A request with no terminal event by the configured hard
-  timeout is censored: the pinned 30 s on the experiment, acceptance and
-  pilot profiles, measured from actual dispatch. The release profile uses
-  a 90 s hard timeout, measured from actual dispatch; its 30 s deadline,
-  measured from intended dispatch, divides completed requests into
-  in-time and late. Only completions enter the latency histograms, error
-  and censored rates are reported per window, and the completion curve
-  is the Aalen-Johansen cumulative incidence, the estimated share of
-  scheduled requests completed by each time t after t_i. Errors are
-  competing events on that curve.
-- **Pinned numbers.** The configuration values SPEC pins are checked at
-  load, and a configuration with a weakened value does not load
-  (`internal/config`). The calibration rates lambda_max, the measured
-  single-replica capacity, and lambda_r, the per-replica rate frozen at
-  0.65 lambda_max, are recorded in the configuration's `calibration` block
-  once §10 has run.
-- **Missing measurements.** Of the §10 run-validity gates, G5 reports not
-  applicable until its fingerprint capture is wired, and G7 when no metrics
-  endpoints are configured. A recovery segment or an equilibrium estimate
-  with no evidence is reported N/A (not applicable) with its reason.
-
-### The binaries
-
-The table lists each command, what it writes and how it exits. The
-hosted and release commands have their own sections below.
-
-| Binary | What it does | Output | Exit codes |
+| Binary | What it does | Packages it drives | Exit codes |
 |---|---|---|---|
-| `cmd/percentes` | one self-hosted run; it refuses a hosted target, which runs under `cmd/percentes-pilot` or `cmd/percentes-release`; `--replay DIR` and `--check-release DIR` act on a finished release cell ([Replay and the completeness check](#replay-and-the-completeness-check)) | `report.json`, `report.txt` and `attempts.jsonl` | 0 valid, or the replayed pair matches byte for byte, or the release check passed; 2 a gate invalidated the run; 1 error, a refused hosted target, a replayed pair that differs, or a refused release |
-| `cmd/percentes-campaign` | N runs of one fault variant against a self-hosted target, gates per run, §7 aggregation; it refuses a hosted target, as `cmd/percentes` does; `--dry-kill` makes one process kill with no load | `run-N.json` and `run-N.txt` as each run ends; `campaign.json`, `campaign.txt`, partial after an error or a halt; under process kill `run-N-server.log`, `run-N-fingerprint-before.txt` and `run-N-fingerprint-after.txt`; `dry-kill.json` and `dry-kill-server.log` from `--dry-kill` | 0 every run valid, 2 at least one invalid run or a halted campaign, 1 error or a refused hosted target |
-| `cmd/percentes-calibrate` | the §10 capacity calibration and the §5 single-replica reference; `--check` validates a configuration and lists its placeholders | `calibration.json`, `calibration.txt` | 0 valid, 2 calibration invalid, 1 error |
-| `cmd/percentes-pilot` | the SPEC-HOSTED HA2 pilot: `ledger` (`create`, `price`, `hosting`, `show`), `probe`, `dev`, `session` and `check-cpu` | the ledger file; `probe-<UTC time>/<target>/probe.json`, where UTC is Coordinated Universal Time; `dev-1/` and `dev-2/` with `config.yaml`, `dev.json` and the targets' `attempts.jsonl` files; `<session>/session.json` and, per target, `<session>/<target>/` with the evidence files; the frame store under `--frames` | 0 done, every window client-valid, every probe unblocked and every endpoint through the development gate; 2 a window client-invalid or not started, a probe blocked, the second window late, or an endpoint failing the gate; 1 error or refusal |
-| `cmd/percentes-release` | a release (SPEC-HOSTED HA3): before the window, `key create`, `key sum`, `ledger create`, `ledger price`, `ceiling-check`, `schedule` and `public-config`; `run` for one route's cells over the committed window; after the window, `dispatch`, `pages`, `pack` and `publish-check`; `rehearse`, the acceptance run against six mock routes ([The rehearsal](#the-rehearsal)); `check-cpu` ([The release runner](#the-release-runner)) | the release key file, from `key create`; the committed schedule file; the release ledger; `ceiling-<UTC time>/<route>-<ceiling>/probe.json` from `ceiling-check`, with `probe-retained.json` under its `--frames` where the route withholds probe values; per cell attempt, `<route>/<cell>-a<attempt>/`: `cell.json`, `clock.json`, `status-start.json`, `refresh.json`, `balance-start.json`, `probe.json`, `attempts.jsonl`, `dispatch.json`, the ceiling probe copies, `status-end.json`, `balance-end.json`, `manifest.json`, `report.json` and `report.txt`; the frame store under `--frames`, with the cell's `probe-retained.json` beside its frames, and for a route with a confidential limit `config.yaml` and the refresh record as run; after the route's last cell, `<route>/window-close.json`, with its record copies under `--frames` in `window-close/<route>/<UTC time>/`; from `public-config`, the configuration as published; `dispatch-aggregate.json` at the output root, from `dispatch`; `index.md`, `index.json`, `routes/<route>.txt` and `routes/<route>.json` under `--pages`, from `pages`; a route's evidence pack at `--pack`, from `pack`; `publication.md` and `publication.json` under `--pages`, from `publish-check --write-page`; from `rehearse`, under its `--out`: `inputs/`, each mock route's cell directory as above, and `rehearsal.json` | `run`: 0 every cell counts; 2 a cell does not count; 3 the route stopped (a ledger refusal, a documented billing refusal, a clock offset above the bound, limits read at a cell's start that no longer admit the route's steps, a probe 401 or 403 that the route's previous probed cell also saw, or an operator abort). `ceiling-check`: 0 the ceiling and input-bound checks passed and `run` accepts the model identifiers the record reports; 2 the check failed or was blocked, or the record reports a model identifier on which `run` refuses the route. `rehearse`: 0 the rehearsal is green; 2 it is not. `publish-check`: 0 the publication record is complete and the publication page under `--pages` is the one it gives; 2 either is not. Every command: 1 error or refusal |
-| `cmd/mockserver` | the mock inference server in its Phase 0 form; the shaped hosted-provider form is built in Go only ([the mock's shaped form](#the-mocks-shaped-form)) | | |
-| `cmd/naivesweep` | a reconnaissance sweep of an OpenAI-compatible endpoint, outside the instrument: closed loop, no client-validity gates, no ledger admission | | |
+| `cmd/percentes` | One self-hosted run: `report.json`, `report.txt`, `attempts.jsonl`. Refuses a hosted target, and through `run.CheckConfig` a pilot configuration or a literal `target.body`. `--replay DIR` re-renders the report pair of the release cell whose directory is DIR; `--check-release DIR` runs the completeness check on that directory | `run`, `loadgen`, `serverstats`, `validity`, `evidence`, `report`, `releasekey` | 0 run valid, replay identical or check passed; 2 a run-failing gate; 1 error, a refused target, a replay that differs or a refused check |
+| `cmd/percentes-campaign` | N runs (`run.repetitions`) of one fault variant, gates per run, §7 aggregation into `campaign.json` and `campaign.txt`; `--dry-kill` makes one process kill with no load | `campaign`, `run`, `orchestrator`, `collect`, `detect`, `vllmlog`, `serverstats`, `validity`, `loadgen`, `redact`, `report` | 0 every run valid; 2 an invalid run or a halt (`--halt-after-invalid-run`, on by default for process kill); 1 error |
+| `cmd/percentes-calibrate` | The §10 capacity calibration and the §5 reference step, rewriting `calibration.json` and `calibration.txt` after every step; `--check` validates a configuration and lists its placeholders | `calibrate`, `serverstats`, `redact`, `report` | 0 valid; 2 completed with no lambda_max (the measured single-replica capacity); 1 error |
+| `cmd/percentes-pilot` | The descriptive pilot of hosted amendment 2 (HA2, a draft amendment in `SPEC-HOSTED-AMENDMENT-DRAFT.md`): `ledger` (`create`, `price`, `hosting`, `show`), `probe`, `dev`, `session`, `check-cpu` | `admission`, `probe`, `pilot`, `score`, `evidence`, `loadgen`, `collect`, `run`, `validity` | 0 done; 2 a client-invalid window or one that did not start, a probe blocked, the second window late, the development gate failed, or `check-cpu` found host CPU (central processing unit) unmeasured; 1 error |
+| `cmd/percentes-release` | One release route per process, and the commands before and after its window ([The release runner](#the-release-runner)) | `admission`, `schedule`, `probe`, `pilot`, `evidence`, `report`, `releasekey`, `loadgen`, `mock`, `redact` | per subcommand, in [its table](#the-release-runner) |
+| `cmd/mockserver` | The Phase 0 mock inference server from a run configuration's `mock` section; `--addr-file` writes the bound address | `mock` | 0 stopped by SIGINT or SIGTERM (the interrupt and termination signals); 1 error |
+| `cmd/naivesweep` | A closed-loop sweep (each of a fixed number of workers sends its next request once its last one has answered) of an OpenAI-compatible endpoint, configured by `SWEEP_ENDPOINT`, `SWEEP_API_KEY` and `SWEEP_MODEL`; outside the instrument, with no client-validity gate and no ledger admission | `sse`, `redact` | 0 every request has a verdict; 1 configuration missing or invalid |
 
 ## A run on the clock
 
