@@ -311,6 +311,21 @@ func TestScheduleExcludedRoutes(t *testing.T) {
 	}
 }
 
+// An exclusion cites the rule that excludes the route.
+func TestExclusionCitesRule(t *testing.T) {
+	for _, c := range []struct{ shape, reason, want string }{
+		{config.ShapeS, "baseten failed at 1,024", "SPEC-HOSTED HA3 point 7"},
+		{config.ShapeS, "gemini: the input bound failed at 512 at byte cap 2,800: 10 of 10 requests reported, 3 above 1,200 tokens", "SPEC-HOSTED HA3 point 7 and HA4, byte caps"},
+		{config.ShapeS, "groq: ceiling check inconclusive, HTTP 429 at 512", "SPEC-HOSTED HA3 point 7 and HA4, refused checks"},
+		{config.ShapeR, "azure-R failed at 16; azure-R failed at 256", "SPEC-HOSTED HA4, Shape R"},
+		{config.ShapeR, "anthropic-R: ceiling check inconclusive, stream cut at 16", "SPEC-HOSTED HA4, Shape R and refused checks"},
+	} {
+		if got := exclusionRule(c.shape, c.reason); got != c.want {
+			t.Errorf("Shape %s, %q: %q, want %q", c.shape, c.reason, got, c.want)
+		}
+	}
+}
+
 // A check whose context ended before admission admits and sends nothing,
 // and --recover with no unsettled check names the route's newest check
 // and what its record reads.

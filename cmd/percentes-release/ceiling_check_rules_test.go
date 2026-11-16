@@ -675,6 +675,18 @@ func TestModelFaultRouteExcluded(t *testing.T) {
 	}
 }
 
+// A page prints ceilings as words, with a comma in each thousand.
+func TestPageCeilingWords(t *testing.T) {
+	for _, c := range []struct {
+		in   []int
+		want string
+	}{{[]int{16}, "16"}, {[]int{512, 1024}, "512 and 1,024"}, {[]int{16, 256, 1234567}, "16, 256 and 1,234,567"}, {nil, ""}} {
+		if got := ceilingWords(c.in); got != c.want {
+			t.Errorf("%v: %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // schedule refuses a route whose host group's records choose a ceiling
 // other than its configuration's, give no deciding record, or are
 // missing, and takes records that exclude the group.
