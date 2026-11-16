@@ -157,7 +157,7 @@ func startMock(t *testing.T, sh mock.Shape) string {
 // them in the ledger, and writes a record run accepts as the route's
 // check at its ceiling.
 func TestCeilingCheckCmd(t *testing.T) {
-	f := newCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), testKey)
+	f := fastCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."}), testKey)
 	code, err := ceilingCheckCmd(context.Background(), f.args())
 	if err != nil || code != exitOK {
 		t.Fatalf("ceiling-check: %d, %v", code, err)
@@ -698,7 +698,7 @@ func TestCeilingCheckLimitsBody(t *testing.T) {
 // one, with no target.reported_model recorded, is written and exits
 // adverse with the refusal run gives its record.
 func TestCeilingCheckReportedModel(t *testing.T) {
-	f := newCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice.", Model: "openai/gpt-oss-120b-v2"}), testKey)
+	f := fastCeilingFixture(t, startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice.", Model: "openai/gpt-oss-120b-v2"}), testKey)
 	var code int
 	var err error
 	out := stdoutOf(t, func() { code, err = ceilingCheckCmd(context.Background(), f.args()) })

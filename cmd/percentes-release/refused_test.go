@@ -57,6 +57,25 @@ func rewriteRecord(t *testing.T, path string, edit func(*probe.ReleaseRecord)) {
 	}
 }
 
+// fastCeilingFixture is newCeilingFixture with a route cap and a token
+// limit that pace the check's requests about 0.25 s apart.
+func fastCeilingFixture(t *testing.T, endpoint, key string) *ceilingFixture {
+	t.Helper()
+	path := routeConfigFile(t, "groq", endpoint, "100")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const tpm = "\n      value: 250000\n"
+	if strings.Count(string(b), tpm) != 1 {
+		t.Fatalf("configuration: %q not found once", tpm)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(b), tpm, "\n      value: 2500000\n", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return ceilingFixtureAt(t, path, key)
+}
+
 // soloFile is the configuration at cfgPath with no other host, saved as
 // name.
 func soloFile(t *testing.T, cfgPath, name string) string {
