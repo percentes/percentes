@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -95,6 +96,68 @@ func TestCeilingCheckBillingStopWithheld(t *testing.T) {
 	r.Start.Reason = "probe request returned 429"
 	if err := r.Verify(&cfg.Target, length, bound); err == nil {
 		t.Fatal("a withheld 429 verifies as blocked under a reason that is not the billing rule's")
+	}
+}
+
+// A check whose context ends before its ten requests are answered is
+// interrupted: stopped, with the requests it sent, and it verifies.
+func TestCeilingCheckInterrupted(t *testing.T) {
+	noSpacing(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var hits atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 3 {
+			io.Copy(io.Discard, r.Body) //nolint:errcheck
+			cancel()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
+		sseHandler(answerFrame, stopFrame, doneFrame)(w, r)
+	}))
+	t.Cleanup(s.Close)
+	cfg := releaseConfig(t, s.URL)
+	rec, err := RunRelease(ctx, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, LowestStepRPS: testStepRPS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Interrupted == "" || rec.Outcome() != CheckStopped || len(rec.Requests) != 3 || rec.Start.Blocked {
+		t.Fatalf("interrupted %q, outcome %s, %d requests, start %+v", rec.Interrupted, rec.Outcome(), len(rec.Requests), rec.Start)
+	}
+	if err := rec.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+		t.Fatal(err)
+	}
+	rec.Interrupted = ""
+	if err := rec.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens); err == nil {
+		t.Fatal("three requests verify in a record neither blocked nor interrupted")
+	}
+}
+
+// The record of a check whose process ended holds no request, is
+// stopped and verifies; CheckReleaseInput refuses what RunRelease
+// refuses before any request.
+func TestInterruptedRecord(t *testing.T) {
+	cfg := releaseConfig(t, "https://127.0.0.1:1/v1/chat/completions")
+	at := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	rec, err := InterruptedRecord(ReleaseInput{Config: cfg, ByteCap: byteCap}, at, "the process ended")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Outcome() != CheckStopped || rec.Sent() != 0 || !rec.StartUTC.Equal(at) || rec.Ceiling.Ceiling != cfg.Release.Shape.CeilingTokens {
+		t.Fatalf("%+v", rec)
+	}
+	if err := rec.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InterruptedRecord(ReleaseInput{Config: cfg, ByteCap: byteCap}, at, ""); err == nil {
+		t.Fatal("an interrupted record with no reason")
+	}
+	t.Setenv(cfg.Target.APIKeyEnv, "")
+	if err := CheckReleaseInput(ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, LowestStepRPS: 1}); err == nil || !strings.Contains(err.Error(), "is empty") {
+		t.Fatalf("empty key: %v", err)
 	}
 }
 

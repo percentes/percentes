@@ -94,6 +94,40 @@ func TestStreamFaultsRefuseOrFailCheck(t *testing.T) {
 	}
 }
 
+// The last request of an interrupted check whose stream the cancellation
+// cut does not refuse it unless it carried a refusing in-band error; one
+// a provider error cut, and an earlier cut stream, still refuse it.
+func TestInterruptedCutStreamRefusal(t *testing.T) {
+	sent := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
+	cutReq := func(i int, readErr string, inBand int) CheckRequest {
+		return CheckRequest{Index: i, Exchange: Exchange{Status: http.StatusOK, DispatchUTC: sent, ConnAcquiredNs: 1},
+			Shape: &Shape{ReadError: readErr}, InBandStatus: inBand}
+	}
+	ok := CheckRequest{Index: 0, Exchange: Exchange{Status: http.StatusOK, DispatchUTC: sent, ConnAcquiredNs: 1}, Shape: &Shape{Done: true}}
+	const reason = "the check's context ended after 2 of 10 requests: operator abort"
+	for _, c := range []struct {
+		name    string
+		reqs    []CheckRequest
+		outcome string
+		by      string
+	}{
+		{"cancelled last", []CheckRequest{ok, cutReq(1, "cancelled", 0)}, CheckStopped, ""},
+		{"cancelled last after an in-band 529", []CheckRequest{ok, cutReq(1, "cancelled", 529)}, CheckRefused, "HTTP 529 in-band"},
+		{"provider-cut last", []CheckRequest{ok, cutReq(1, "connection closed", 0)}, CheckRefused, RefusedStreamCut},
+		{"cut earlier", []CheckRequest{cutReq(0, "cancelled", 0), ok}, CheckRefused, RefusedStreamCut},
+	} {
+		r := &ReleaseRecord{Interrupted: reason, Requests: c.reqs}
+		if r.Outcome() != c.outcome || r.RefusedBy() != c.by {
+			t.Errorf("%s: outcome %s, refused by %q; want %s, %q", c.name, r.Outcome(), r.RefusedBy(), c.outcome, c.by)
+		}
+	}
+	undecodable := &ReleaseRecord{Requests: []CheckRequest{cutReq(0, "connection closed", 0)}}
+	undecodable.Requests[0].Shape.Undecodable = 1
+	if undecodable.RefusedBy() != "" {
+		t.Fatalf("a cut stream with an undecodable event: refused by %q", undecodable.RefusedBy())
+	}
+}
+
 // A Shape R host group refused twice at 16 on a cut stream is excluded as
 // inconclusive with the stream-cut label; a Shape S host that left its
 // input bound unreported names it in the reason; reasons print numbers

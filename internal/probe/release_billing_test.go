@@ -1,16 +1,20 @@
 package probe
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/loadgen"
 )
 
 // faultAt answers the nth request, 1-based, with fault and every other
@@ -212,6 +216,75 @@ func TestVerifyRederivesBlockedReason(t *testing.T) {
 				t.Errorf("withheld %t, reason %q: Verify %v", withheld, reason, err)
 			}
 		}
+	}
+}
+
+// Verify refuses an interrupted record that holds all ten requests and
+// whose last one did not end on an error; the records an interruption
+// writes verify: the context ended during request 3 or before any
+// request, and a plain --recover's record of no request.
+func TestVerifyRefusesInterruptedWholeRecord(t *testing.T) {
+	noSpacing(t)
+	cfg := releaseConfig(t, faultAt(t, 0, sseHandler(answerFrame, stopFrame, doneFrame), nil)+"/v1/chat/completions")
+	verify := func(r *ReleaseRecord) error {
+		return r.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens)
+	}
+	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
+	if rec.Outcome() != CheckRan || verify(rec) != nil {
+		t.Fatalf("whole check: outcome %s, Verify %v", rec.Outcome(), verify(rec))
+	}
+	r := *rec
+	r.Interrupted = "the check's context ended after 10 of 10 requests: operator abort"
+	if err := verify(&r); err == nil || err.Error() != "the record is interrupted after all 10 requests and the interruption did not cut its last one" {
+		t.Errorf("interrupted added to a whole record: Verify %v", err)
+	}
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if hits.Add(1) == 3 {
+			io.Copy(io.Discard, req.Body) //nolint:errcheck
+			cancel(loadgen.ErrOperatorAbort)
+			select {
+			case <-req.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
+		sseHandler(answerFrame, stopFrame, doneFrame)(w, req)
+	}))
+	defer srv.Close()
+	cfg.Target.EndpointURL = srv.URL + "/v1/chat/completions"
+	in := ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, LowestStepRPS: testStepRPS}
+	during, err := RunRelease(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if during.Outcome() != CheckStopped || len(during.Requests) != 3 || verify(during) != nil {
+		t.Errorf("aborted during request 3: outcome %s, %d requests, Verify %v", during.Outcome(), len(during.Requests), verify(during))
+	}
+	recovered, err := InterruptedRecord(in, rec.StartUTC, "the process ended")
+	if err != nil || verify(recovered) != nil {
+		t.Errorf("recovered record: %v, Verify %v", err, verify(recovered))
+	}
+}
+
+// The interrupted text counts the requests sent: an abort before the
+// first request reached a connection reads after 0 of 10.
+func TestInterruptedTextCountsRequestsSent(t *testing.T) {
+	noSpacing(t)
+	cfg := releaseConfig(t, faultAt(t, 0, sseHandler(answerFrame, stopFrame, doneFrame), nil)+"/v1/chat/completions")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(loadgen.ErrOperatorAbort)
+	rec, err := RunRelease(ctx, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap, LowestStepRPS: testStepRPS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("the check's context ended after 0 of %d requests: operator abort", CeilingRequests); rec.Interrupted != want || rec.Sent() != 0 || rec.Ceiling.Sent != 0 || len(rec.Requests) != 1 {
+		t.Errorf("interrupted %q, %d sent, ceiling sent %d, %d requests", rec.Interrupted, rec.Sent(), rec.Ceiling.Sent, len(rec.Requests))
+	}
+	if err := rec.Verify(&cfg.Target, LengthValue(cfg.Target.Adapter), cfg.Release.Shape.InputBoundTokens); err != nil {
+		t.Errorf("Verify: %v", err)
 	}
 }
 
