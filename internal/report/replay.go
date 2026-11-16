@@ -41,6 +41,10 @@ func FromRun(dir string, cfgRaw []byte) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	return fromManifest(dir, cfgRaw, m)
+}
+
+func fromManifest(dir string, cfgRaw []byte, m *evidence.Manifest) ([]byte, string, error) {
 	cfg, err := config.Parse(cfgRaw)
 	if err != nil {
 		return nil, "", fmt.Errorf("report: %w", err)
@@ -131,14 +135,16 @@ func FromRun(dir string, cfgRaw []byte) ([]byte, string, error) {
 	return generate(art, &gates, commitText(m.Source.Revision, m.Source.Modified))
 }
 
-// WriteHostedPair writes m to dir, renders the report pair from dir with
-// FromRun, writes it there as JSONFile and TextFile, and rewrites m naming
-// both. m must already name the attempts file in dir.
+// WriteHostedPair renders the report pair from m as FromRun would read it
+// back, writes it to dir as JSONFile and TextFile, and then writes m naming
+// both, so a failed or interrupted write leaves no manifest. m must already
+// name the attempts file in dir.
 func WriteHostedPair(dir string, cfgRaw []byte, m *evidence.Manifest) (jsonPath, txtPath, text string, err error) {
-	if _, err := evidence.WriteManifest(dir, m); err != nil {
+	read, err := evidence.RoundTripManifest(m)
+	if err != nil {
 		return "", "", "", err
 	}
-	raw, text, err := FromRun(dir, cfgRaw)
+	raw, text, err := fromManifest(dir, cfgRaw, read)
 	if err != nil {
 		return "", "", "", err
 	}

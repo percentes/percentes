@@ -130,6 +130,20 @@ func ReadManifest(path string) (*Manifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("evidence: %w", err)
 	}
+	return decodeManifest(b)
+}
+
+// RoundTripManifest returns m as WriteManifest then ReadManifest would give
+// it back, without touching the disk.
+func RoundTripManifest(m *Manifest) (*Manifest, error) {
+	b, err := encodeJSON(ManifestFile, m)
+	if err != nil {
+		return nil, err
+	}
+	return decodeManifest(b)
+}
+
+func decodeManifest(b []byte) (*Manifest, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	var m Manifest
@@ -511,21 +525,29 @@ func WriteManifest(dir string, m *Manifest) (string, error) {
 // writeJSON writes v, indented, to name in dir and returns the file's
 // path.
 func writeJSON(dir, name string, v any) (string, error) {
-	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(v); err != nil {
-		return "", fmt.Errorf("evidence: %s: %w", name, err)
+	b, err := encodeJSON(name, v)
+	if err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("evidence: %w", err)
 	}
 	path := filepath.Join(dir, name)
-	if err := ReplaceFile(path, b.Bytes()); err != nil {
+	if err := ReplaceFile(path, b); err != nil {
 		return "", fmt.Errorf("evidence: %w", err)
 	}
 	return path, nil
+}
+
+func encodeJSON(name string, v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return nil, fmt.Errorf("evidence: %s: %w", name, err)
+	}
+	return b.Bytes(), nil
 }
 
 // ReplaceFile writes b to path through a temporary file in the same
