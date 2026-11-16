@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -455,4 +456,29 @@ func noReleaseKey(t *testing.T, dirs ...string) {
 	if files == 0 {
 		t.Fatal("no file to check for the release key")
 	}
+}
+
+// stderrOf runs f and returns what it wrote to standard error.
+func stderrOf(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		r.Close()
+		done <- string(b)
+	}()
+	func() {
+		defer func() {
+			os.Stderr = old
+			w.Close()
+		}()
+		f()
+	}()
+	return <-done
 }

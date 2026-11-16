@@ -1,12 +1,66 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/percentes/percentes/internal/admission"
 	"github.com/percentes/percentes/internal/probe"
 )
+
+// checkRecordsOf are the ceiling-check records of route under out by their
+// admission's ledger line.
+func checkRecordsOf(t *testing.T, out, route string) map[int]string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(out, "ceiling-*", "*", probe.File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := map[int]string{}
+	for _, p := range paths {
+		rec := readRecord(t, p)
+		if rec.Route == route {
+			m[rec.LedgerSeq] = p
+		}
+	}
+	return m
+}
+
+func readRecord(t *testing.T, path string) *probe.ReleaseRecord {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec probe.ReleaseRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatal(err)
+	}
+	return &rec
+}
+
+// soloFile is the configuration at cfgPath with no other host, saved as
+// name.
+func soloFile(t *testing.T, cfgPath, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	i := strings.Index(s, "\n  other_hosts:")
+	if i < 0 {
+		t.Fatal("configuration: no other_hosts")
+	}
+	rest := s[i+1:]
+	for k := 0; k < 3; k++ {
+		rest = rest[strings.Index(rest, "\n")+1:]
+	}
+	return writeFile(t, t.TempDir(), name, []byte(s[:i+1]+rest))
+}
 
 // Every ceiling-check admission of a route given has exactly one record
 // naming its line, and a record names only a check of its route; pages

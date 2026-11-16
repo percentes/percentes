@@ -1,16 +1,26 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/percentes/percentes/internal/config"
+	"github.com/percentes/percentes/internal/mock"
 	"github.com/percentes/percentes/internal/probe"
 )
 
@@ -65,6 +75,115 @@ func passingChecks(t *testing.T, ledger string, paths ...string) []string {
 		args = append(args, "--ceiling-probe", writeCeiling(t, hostCeiling(c, byteCap, c.Target.Name, c.Release.Shape.CeilingTokens, true, open)))
 	}
 	return args
+}
+
+// quickSolo is the release reference as route name at endpoint with no
+// other host, whose route cap and limits pace its ceiling check's
+// requests about 40 ms apart, its limits' retained copy in the returned
+// directory (snapshotted).
+func quickSolo(t *testing.T, name, endpoint string) (string, string) {
+	t.Helper()
+	path := routeConfigFile(t, name, endpoint, "600")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, r := range [][2]string{{"\n      value: 250000\n", "\n      value: 250000000\n"}, {"\n      value: 1000\n", "\n      value: 100000\n"}} {
+		if strings.Count(s, r[0]) != 1 {
+			t.Fatalf("configuration: %q not found once", r[0])
+		}
+		s = strings.Replace(s, r[0], r[1], 1)
+	}
+	if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path = soloFile(t, path, name+".yaml")
+	return path, snapshotted(t, path)
+}
+
+// faultMock is a loopback mock route at its chat-completions URL whose
+// nth request, 1-based, fault answers where it returns true, and whose
+// usage reports prompt prompt tokens while prompt is above 0, with the
+// count of requests it received.
+func faultMock(t *testing.T, fault func(n int32, w http.ResponseWriter) bool, prompt *atomic.Int32) (string, *atomic.Int32) {
+	t.Helper()
+	endpoint := startMock(t, mock.Shape{Key: testKey, Answer: "The customer was billed twice."})
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: u.Scheme, Host: u.Host})
+	rp.FlushInterval = -1
+	reported := regexp.MustCompile(`"prompt_tokens":\s*\d+`)
+	rp.ModifyResponse = func(r *http.Response) error {
+		n := prompt.Load()
+		if n <= 0 {
+			return nil
+		}
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			return err
+		}
+		r.Body.Close()
+		b = reported.ReplaceAll(b, []byte(fmt.Sprintf(`"prompt_tokens":%d`, n)))
+		r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(b)), int64(len(b))
+		r.Header.Del("Content-Length")
+		return nil
+	}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fault != nil && fault(hits.Add(1), w) {
+			return
+		}
+		if fault == nil {
+			hits.Add(1)
+		}
+		rp.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + u.Path, &hits
+}
+
+// checker sends ceiling checks of the configurations it is given on
+// ledger, writing under out, and returns the exit code, output and error.
+type checker struct {
+	t                           *testing.T
+	ledger, env, out, snapshots string
+}
+
+func newChecker(t *testing.T, ledger, snapshots string) *checker {
+	t.Helper()
+	return &checker{t: t, ledger: ledger, env: writeFile(t, t.TempDir(), "groq.env", []byte("GROQ_API_KEY="+testKey+"\n")), out: t.TempDir(), snapshots: snapshots}
+}
+
+func (c *checker) args(cfg string, byteCap int) []string {
+	return []string{"--config", cfg, "--env", c.env, "--ledger", c.ledger, "--out", c.out, "--byte-cap", fmt.Sprint(byteCap), "--snapshots", c.snapshots}
+}
+
+func (c *checker) check(ctx context.Context, cfg string, byteCap int, extra ...string) (int, string, error) {
+	c.t.Helper()
+	var code int
+	var err error
+	text := stdoutOf(c.t, func() { code, err = ceilingCheckCmd(ctx, append(c.args(cfg, byteCap), extra...)) })
+	return code, text, err
+}
+
+// records are the records under the checker's out by route, in ledger
+// order.
+func (c *checker) records(route string) []string {
+	c.t.Helper()
+	m := checkRecordsOf(c.t, c.out, route)
+	var seqs []int
+	for s := range m {
+		seqs = append(seqs, s)
+	}
+	slices.Sort(seqs)
+	var out []string
+	for _, s := range seqs {
+		out = append(out, m[s])
+	}
+	return out
 }
 
 // repeatCheck refuses a check at a spent byte cap or above it, and lets
