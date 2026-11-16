@@ -47,6 +47,39 @@ func trustingTransport(t *testing.T, srv *httptest.Server) *http.Transport {
 	return tr
 }
 
+// A run's transport verifies the target's certificate against the root
+// pool its hooks carry, in place of the system roots, and still speaks
+// HTTP/1.1; without the pool every request fails at the handshake.
+func TestRunRootCAs(t *testing.T) {
+	srv := h2Server(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	for _, roots := range []*x509.CertPool{pool, nil} {
+		cfg := &config.Config{Target: config.Target{BaseURL: srv.URL, Hosted: true}}
+		cfg.Load.RateRPS = 10
+		cfg.Load.ArrivalProcess = "deterministic"
+		cfg.Load.Connections = 2
+		cfg.Load.MaxTokens = 8
+		cfg.Run.Phases = config.Phases{BaselineS: 0.3}
+		res, err := Run(context.Background(), cfg, &Hooks{RootCAs: roots})
+		if res == nil || len(res.Requests) == 0 {
+			t.Fatalf("roots %v: no requests: %v", roots != nil, err)
+		}
+		for i := range res.Requests {
+			r := &res.Requests[i]
+			switch {
+			case roots != nil && (r.Outcome != OutcomeCompleted || r.Proto != "HTTP/1.1"):
+				t.Errorf("with the pool: request %d %v/%q over %q", r.Index, r.Outcome, r.ErrClass, r.Proto)
+			case roots == nil && (r.Outcome != OutcomeErrored || r.Proto != ""):
+				t.Errorf("without the pool: request %d %v over %q, want an error before any response", r.Index, r.Outcome, r.Proto)
+			}
+		}
+		if roots != nil && err != nil {
+			t.Errorf("with the pool: %v", err)
+		}
+	}
+}
+
 // The run transport speaks HTTP/1.1 to a TLS server that offers h2.
 func TestTransportPinsHTTP11OverTLS(t *testing.T) {
 	srv := h2Server(t)
