@@ -442,3 +442,43 @@ func TestReleaseDeadlineAndHardTimeout(t *testing.T) {
 		t.Fatalf("release hard timeout 1 s: %v after %v", r.Outcome, took)
 	}
 }
+
+// A warm-up request left unsent counts in the first step's verdict: the
+// ladder ends at step 1's drain and step 2 is never sent.
+func TestWarmupUnsentEndsLadderAtStep1(t *testing.T) {
+	t.Parallel()
+	var hits atomic.Int64
+	srv := statusByHit(t, &hits, func(int64) int { return http.StatusOK })
+	var mu sync.Mutex
+	var unsent []int
+	gates := func(_ *config.Config, requests []Request, _ []cpuSample, _, _ float64, _, _ int64) GateReport {
+		n := 0
+		for i := range requests {
+			if requests[i].DispatchNs == 0 || requests[i].WriteDenied {
+				n++
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		unsent = append(unsent, n)
+		return GateReport{Pass: n == 0, Undispatched: n}
+	}
+	hooks := &Hooks{OnEpoch: func(time.Time) { time.Sleep(80 * time.Millisecond) }}
+	res, err := run(context.Background(), ladderRunCfg(srv.URL, 2, 4), hooks, gates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lr := res.Ladder
+	if r := res.Requests[0]; !r.Warmup || r.DispatchNs != 0 {
+		t.Fatalf("request 0: %+v", r)
+	}
+	if lr.End != LadderEndClientValidity || lr.EndStep != 1 || lr.Steps[0].Gates.Pass || lr.Steps[1].Attempted {
+		t.Fatalf("ladder %+v", lr)
+	}
+	if n := hits.Load(); n != 5 {
+		t.Fatalf("server saw %d requests, want 5", n)
+	}
+	if !slices.Equal(unsent, []int{1, 1}) || res.Gates.Pass {
+		t.Fatalf("unsent per verdict %v, run gate %+v", unsent, res.Gates)
+	}
+}

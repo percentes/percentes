@@ -25,10 +25,12 @@ import (
 )
 
 // execute runs one scheduled request to its terminal state, and reports
-// false, leaving it unsent, once the run has stopped. The client
-// timeout (clientTimeout) runs from actual dispatch (a real client
-// timeout); latency re-basing to intended time happens at read-out, and
-// the send-skew gate bounds the difference.
+// false, leaving it unsent, once the run has stopped, or under the
+// release profile when it is more than the pinned send-skew maximum
+// past its intended time. The client timeout (clientTimeout) runs from
+// actual dispatch (a real client timeout); latency re-basing to intended
+// time happens at read-out, and the send-skew gate bounds the
+// difference.
 func (g *gen) execute(r *Request) bool {
 	g.stopMu.RLock()
 	select {
@@ -36,7 +38,12 @@ func (g *gen) execute(r *Request) bool {
 		g.stopMu.RUnlock()
 		return false
 	default:
-		r.DispatchNs = g.now()
+		now := g.now()
+		if g.cfg.Profile == config.ProfileRelease && now-r.IntendedNs > int64(config.PinnedSendSkewMaxMs)*int64(time.Millisecond) {
+			g.stopMu.RUnlock()
+			return false
+		}
+		r.DispatchNs = now
 	}
 	g.stopMu.RUnlock()
 	g.trip.start(r.DispatchNs, r.Step)
