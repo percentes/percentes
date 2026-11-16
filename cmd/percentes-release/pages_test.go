@@ -685,4 +685,68 @@ func TestPagesMissedHost(t *testing.T) {
 	if code, err := publishCheckCmd(append(args, "--record", record)); code != exitError || err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("publish-check: exit %d: %v, want %q", code, err, want)
 	}
+	args[9] = shapeRFile(t, basetenCfg, true)
+	const shapes = "pages: routes groq and baseten, hosts of one host group, send Shape S at ceilings [512 1024] and Shape R at [16 256]"
+	if code, err := pagesCmd(args); code != exitError || err == nil || !strings.Contains(err.Error(), shapes) {
+		t.Fatalf("another shape: exit %d: %v, want %q", code, err, shapes)
+	}
+	if _, err := os.Stat(other); !os.IsNotExist(err) {
+		t.Errorf("pages written on a refusal: %v", err)
+	}
+}
+
+// A status_429 of a cell outside the frame whose ladder started with
+// complete records is labelled on the route page in its own section,
+// and enters no pooled figure.
+func TestOutsideFrameRefusalsLabelled(t *testing.T) {
+	e := newEndpoint(t, func(n int64) (int, string) {
+		if n == 3 {
+			return http.StatusTooManyRequests, "{}"
+		}
+		return http.StatusOK, ""
+	})
+	release, sched := oneRelease(t, e.url(), "groq", "baseten")
+	r, cfg := pagesRoute(t, "groq", e.url(), "", "", release)
+	shortLadder(r)
+	r.cfg.ClientValidity.SendSkewMaxMs = 0
+	rec := runCellOK(t, r, r.runs[0])
+	if rec.Outcome != outcomeInvalid {
+		t.Fatalf("wanted a client-invalid cell: %s %v", rec.Outcome, rec.Reasons)
+	}
+	if _, refusals := cellSent(t, r.cellDir(r.runs[0])); refusals != 1 {
+		t.Fatalf("recorded %d refusals", refusals)
+	}
+	p := t.TempDir()
+	code, err := pagesCmd([]string{"--out", r.out, "--ledger", r.ledgerPath, "--frames", r.framesRoot, "--config", cfg, "--schedule", sched, "--pages", p})
+	if code != exitOK || err != nil {
+		t.Fatalf("pages: %d %v", code, err)
+	}
+	files := readPages(t, p)
+	page := string(files["routes/groq.txt"])
+	head := fmt.Sprintf("-- Cell %s, %s, outside the frame: its status_429 responses, in no pooled figure --", cellLabel(r.runs[0]), outcomeInvalid)
+	if !strings.Contains(page, "no pooled figures") || !strings.Contains(page, head) || !strings.Contains(page, "HTTP 429") ||
+		!strings.Contains(page, "as read at the cell's start") {
+		t.Fatalf("route page:\n%s", page)
+	}
+	var st report.StepTables
+	if err := json.Unmarshal(files["routes/groq.json"], &st); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, c := range st.Outside {
+		if c.Warmup != nil {
+			n += len(c.Warmup.Refusals)
+		}
+		for _, s := range c.Steps {
+			for _, ref := range s.Refusals.Refusals {
+				if ref.Label == "" {
+					t.Errorf("refusal %d unlabelled", ref.Index)
+				}
+				n++
+			}
+		}
+	}
+	if n != 1 || len(st.Cells) != 0 || st.Pooled != nil {
+		t.Fatalf("outside refusals %d, counted cells %d, pooled %v", n, len(st.Cells), st.Pooled)
+	}
 }

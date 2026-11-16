@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -440,5 +443,163 @@ func TestPagesAttribution(t *testing.T) {
 	}
 	if !strings.Contains(page, ": comparison unresolved; the history may lack sends of route groq from ") {
 		t.Errorf("page:\n%s", page)
+	}
+}
+
+// A ceiling check with three reached requests and one that reached no
+// connection, settled at Sent(), reconciles with no gap and no unwritten send.
+func TestHistoryCheckUnreachedRequest(t *testing.T) {
+	t0 := time.Date(2026, 11, 13, 20, 0, 0, 0, time.UTC)
+	rec := probe.ReleaseRecord{Route: "gemini-S", Shape: config.ShapeS}
+	for i := 0; i < 3; i++ {
+		d := t0.Add(time.Duration(i) * 6 * time.Second)
+		rec.Requests = append(rec.Requests, probe.CheckRequest{Index: i, Exchange: probe.Exchange{DispatchUTC: d, ConnAcquiredNs: 1e6, WroteRequestNs: 2e6, Status: 200, DoneNs: 1e9}})
+	}
+	rec.Requests = append(rec.Requests, probe.CheckRequest{Index: 3, Exchange: probe.Exchange{DispatchUTC: t0.Add(18 * time.Second), Error: "dial tcp: connection refused", DoneNs: 2e6}})
+	if rec.Sent() != 3 {
+		t.Fatalf("Sent() %d, want 3", rec.Sent())
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "check.json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := &report.History{}
+	if err := checkHistory(h, p, "check.json", []string{"gemini-S"}, 90); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Sends) != 3 {
+		t.Errorf("%d sends, want 3", len(h.Sends))
+	}
+	for _, s := range h.Sends {
+		if s.WroteUTC == nil {
+			t.Errorf("unwritten send dispatched %s", s.DispatchUTC)
+		}
+	}
+	entries := []admission.Entry{
+		{Seq: 1, Kind: admission.KindAdmit, Time: t0.Add(-time.Second), Route: "gemini-S", Purpose: admission.PurposeProbe, Reserve: 10},
+		{Seq: 2, Kind: admission.KindSettle, Time: t0.Add(time.Minute), Route: "gemini-S", Admit: 1, Sent: &admission.Counts{Probe: rec.Sent()}},
+	}
+	reconcile(h, entries, []string{"gemini-S"}, nil)
+	if len(h.Gaps) != 0 {
+		t.Errorf("gaps %+v", h.Gaps)
+	}
+}
+
+const probeUsageStream = "data: {\"model\":\"openai/gpt-oss-120b\",\"choices\":[{\"delta\":{\"content\":\"Two \"}}]}\n\n" +
+	"data: {\"model\":\"openai/gpt-oss-120b\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+	"data: {\"model\":\"openai/gpt-oss-120b\",\"choices\":[],\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":2,\"total_tokens\":42}}\n\n" +
+	"data: [DONE]\n\n"
+
+// historyProbeSend is the cell probe's send in the account-group history
+// of r's out directory.
+func historyProbeSend(t *testing.T, r *route) report.Send {
+	t.Helper()
+	h, err := readHistory(r.out, r.cfg.Target.Name, []string{r.cfg.Target.Name}, []*config.Config{r.cfg}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range h.Sends {
+		if s.Kind == report.SendProbe && s.Index == 0 {
+			return s
+		}
+	}
+	t.Fatal("no probe send in the history")
+	return report.Send{}
+}
+
+// A cell probe's reported counts reach probe.json and the account-group
+// history, and the first refusal line counts only the refused request at
+// the input bound. A probe.json carrying a saturated count gives
+// math.MaxInt, and one without the counts leaves the probe at the bound.
+func TestHistoryProbeReportedPrompt(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body) //nolint:errcheck
+		if n := hits.Add(1); n > 2 && n%10 == 0 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"error":{"type":"rate_limit_error","message":"slow down"}}`) //nolint:errcheck
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, probeUsageStream) //nolint:errcheck
+	}))
+	defer srv.Close()
+	url := srv.URL + "/openai/v1/chat/completions"
+	release, sched := oneRelease(t, url, "groq", "baseten")
+	groq, groqCfg := pagesRoute(t, "groq", url, "", "", release)
+	shortLadder(groq)
+	groq.cfg.Release.Ladder = config.Ladder{StepFractions: []float64{2, 4, 8, 16, 32}, WarmupS: 0.5, StepS: 1, DrainS: 0.25}
+	rec := runCellOK(t, groq, groq.runs[0])
+	counted := rec.Outcome == outcomeCounted
+	if !counted && !clientGateOnly(rec) {
+		t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
+	}
+	probePath := filepath.Join(groq.cellDir(groq.runs[0]), probe.File)
+	b, err := os.ReadFile(probePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pr probe.Record
+	if err := json.Unmarshal(b, &pr); err != nil {
+		t.Fatal(err)
+	}
+	if pr.PromptTokens == nil || *pr.PromptTokens != 40 || pr.OutputTokens == nil || *pr.OutputTokens != 2 {
+		t.Fatalf("probe.json counts %v %v, want 40 and 2", pr.PromptTokens, pr.OutputTokens)
+	}
+	if s := historyProbeSend(t, groq); s.PromptTokens == nil || *s.PromptTokens != 40 {
+		t.Errorf("history probe prompt %v, want 40", s.PromptTokens)
+	}
+
+	if counted {
+		pages := t.TempDir()
+		args := []string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", groqCfg, "--schedule", sched, "--pages", pages}
+		var code int
+		stdoutOf(t, func() { code, err = pagesCmd(args) })
+		if code != exitOK || err != nil {
+			t.Fatalf("pages: exit %d: %v", code, err)
+		}
+		page := string(readPages(t, pages)["routes/groq.txt"])
+		first := ""
+		for _, line := range strings.Split(page, "\n") {
+			if strings.Contains(line, "tokens_per_minute over 60 s") && strings.Contains(line, "at the input bound") {
+				first = line
+				break
+			}
+		}
+		if !strings.Contains(first, "(1 at the input bound, no usable prompt count reported)") {
+			t.Errorf("first refusal's token window counts the probe at the bound:\n%s\n%s", first, page)
+		}
+	} else {
+		t.Logf("outcome %s (%q); refusal lines not checked", rec.Outcome, rec.Reasons)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["prompt_tokens"] = json.RawMessage("9223372036854775807")
+	write := func() {
+		t.Helper()
+		nb, err := json.Marshal(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(probePath, nb, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	if s := historyProbeSend(t, groq); s.PromptTokens == nil || *s.PromptTokens != math.MaxInt {
+		t.Errorf("saturated probe prompt %v, want math.MaxInt", s.PromptTokens)
+	}
+	delete(raw, "prompt_tokens")
+	delete(raw, "output_tokens")
+	write()
+	if s := historyProbeSend(t, groq); s.PromptTokens != nil {
+		t.Errorf("probe.json without counts: prompt %d, want none", *s.PromptTokens)
 	}
 }
