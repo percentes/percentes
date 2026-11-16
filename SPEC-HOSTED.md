@@ -103,6 +103,8 @@ Corrections (2026-10-20, pre-data), aligning §1 to §9 with the instrument. §2
 
 HA4 (2026-11-16, pre-data): limits release. A second request shape, Shape R, with its own ceiling check; routes and host groups per request shape; ladders as fractions of each route's binding rate, taken over every evaluation window the provider documents, with paced arrivals, 240 s steps and an exact count rule; daily limits per provider reset day as a reservation; offsets 40 minutes apart with a deadline on the ladder's epoch; each status_429 published with its account group's window counts and one of three labels, against the limits read at its cell's start; limits counted at generation tested over their window plus the hard timeout; a write limit per evaluation window and no send more than 50 ms late; a cell with no clock-offset reading blocked before admission; one repeat of a ceiling check refused on a 429, a 5xx, no response, a documented in-band refusal, a cut stream or one that ended early, a record of every check admitted, a spent byte cap whose Shape S checks are set aside when the release runs below it, and a page for each excluded route and each route that ran no cell or has a stopped cell and no cell manifest; limits and model documentation records re-read at a cell's start that hold the lines the refresh command reads for the route's tier and model, the page's text retained beside them; a declared null reading.
 
+Corrections (2026-11-16, pre-data), aligning §9 with the instrument. §9: a modified build's source diff publishes by its hash, and its copy is retained.
+
 The first table is a reading guide to HA3's sixteen points, whose text is in Appendix A, and names the section each point's rule now lives in. Where a point names a sentence it replaces, that sentence is v0.1's, listed in the table of superseded values below.
 
 | Point | In plain words | Replaces or adds | Now in |
@@ -406,7 +408,7 @@ A cell publishes only with every per-cell artifact below, and a release publishe
 
 | Artifact | Contents | Published |
 |---|---|---|
-| Instrument commit | the revision that produced the run, and the source diff of a modified build | yes |
+| Instrument commit | the revision that produced the run, and for a modified build its source diff by hash | yes; the source diff's copy is retained |
 | Configuration | the file as published: verbatim, with each confidential limit's value replaced by the quoted string `"[retained]"` | yes; the file as loaded is retained |
 | Per-request record, `attempts.jsonl` | one JSON object per scheduled request: times, outcome, class, status, allowed headers, counts, the release fields | yes |
 | Probe, clock, status, refresh and balance records | the cell's probe record; the clock-offset record; the endpoint status and balance records at the cell's start and end, and the refresh record at its start, with the limits it read and the SHA-256 hash of the text it extracted from each page it read (§2, documentation snapshots); for a route with a confidential limit, the refresh command's output, every limit's unavailable reason and that limit's value are withheld, as are the probe's non-200 bodies and in-band error text | yes; the withheld refresh record and probe texts are retained |
