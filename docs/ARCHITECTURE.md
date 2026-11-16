@@ -883,175 +883,78 @@ With `--record` it refuses, in this order, a record that does not read or decode
 
 ### A cell, in order
 
-`runCell` (`cmd/percentes-release/cell.go`) writes `cell.json` as
-running and starts the cell's live dispatch series, then writes the
-clock record and the start status, runs the refresh command
-(`--refresh-cmd`, run like the status command with no shell) and writes
-its record, reads the limits the command printed and the operator file
-and its records again, reads the ledger once, and runs the balance command
-(`--balance-cmd`) and writes its record with the check of the printed
-amount against the cell's reservation, the probe request plus every
-scheduled request at the price in that read. The refresh command prints one JSON object,
-`{"limits": [...]}`, with one entry per `target.limits` entry in its
-order: the dimension, and a positive `value` or an `unavailable` reason
-(`evidence.ReadRefreshedLimits`). A clock offset above 60 s stops the
-route. `limitsStop` (`close.go`) applies the ceiling rule again with the
-values read in place of the recorded ones, a limit read as unavailable
-keeping its recorded value, to the ladder as the route started. It takes
-from the same ledger read, bound to the open line the schedule froze,
-the route's newest recorded price, the price line
-with the latest retrieval date (`routePrice`), so a price recorded during
-the window is tested against the spend limits. Where the rule no longer
-admits a step the route runs at the price the schedule froze, the route
-stops before admission, the reason naming the lowest such step, the
-price's retrieval date and the binding limit.
-The cell is blocked before admission, with no ledger line and no
-request, when the refresh command failed, timed out or printed past the
-limit, the operator file no longer loads or covers the build or holds a
-confidential limit's value, a limits
-or eligibility file was not rewritten after the command started, or the
-limits it printed do not parse; and when the balance check does not let
-it start: the command failed or printed anything but one JSON object
-holding `amount_usd` or `unavailable`, the amount is below the
-reservation, or the balance is unavailable and the configuration carries
-no `target.balance_unavailable` ruling. The manifest of a cell blocked
-for its records carries the records read when the route started. On a
-route with a confidential limit, the error of a cell blocked for its
-records, which can quote the operator file or the refresh output, is
-kept beside the cell's frames and its reason says only that; a missed or
-interrupted cell whose operator records fail when it is labelled is
-treated the same way (`operatorFault`). The
-ladder is cut at the top admitted step and the cell's seed set, and one
-user text per scheduled request comes from Shape S. The ledger admits
-one plus the scheduled count; a refusal stops the route. The admission
-(`Ledger.AdmitAt`) names the route's price revision in the cell's ledger
-read, the line number of the route's last price line
-(`State.PriceRevision`). Where the route has a later price line, the
-ledger writes nothing and returns `PriceChanged`; the cell then reads the
-ledger again and repeats the limits test and the balance command, whose
-second record replaces the first, and asks for admission once more. The
-ledger is not locked while the balance command runs. A second
-`PriceChanged` blocks the cell. Other routes' price and admission lines
-leave the revision unchanged. One probe
-request is sent: a documented billing refusal stops the route, matched
-on a route with a confidential limit against the withheld body, and a
-start-gate status blocks the cell, unless it is a 401 or 403 that the
-route's previous cell to send a probe also saw, on its probe or inside
-its ladder, which stops the route as independent evidence of a
-credential or account fault (`authFault`). After a pause of one mean
-arrival interval at the lowest step's rate (4 s at 0.25 requests per
-second), counted from the probe request's send, the ladder runs with the
-loopback canary, and each request's terminal state is checked for a
-documented billing refusal (the route stops) or an `EMFILE` error (the
-cell is client-invalid); the ladder's 401 and 403 counts go into the
-cell record. The outcome is then decided, and every finished cell is
-retained.
+`route.loop` (`cmd/percentes-release/route.go`) runs once the start checks pass:
 
-| Outcome | Meaning | Files |
-|---|---|---|
-| `counted` | the ladder ran to the top admitted step's drain, or the backoff rule ended it; G2 passed at every attempted step, no tripwire fired, no `EMFILE`, the clock unflagged, the canary started, no response over another protocol and none reporting a model other than the expected one; the cell enters the route's frame | the full set, with a manifest whose cell record carries the label |
-| `client_invalid` | `EMFILE`, a failed G2 at a step, a fired tripwire, a response over another protocol, a flagged clock, or a canary that did not start; re-run within the bound | the full set, labelled |
-| `model_mismatch` | a response reported a model other than the expected one; re-run within the bound. A route stop labels the cell `stopped` instead; a cell that is also client-invalid keeps this label, with both reasons | the full set, labelled, with the expected and every reported identifier in the manifest; a line on the route's page |
-| `blocked` | the refresh fault, the balance check, a route price recorded during the repeated start checks or the probe's status blocked the start | the files reached, an empty attempts file and frame store, and a labelled manifest and report pair |
-| `stopped` | a route stop before or during the ladder; the process exits 3 | as blocked, with whatever the ladder sent |
-| `interrupted` | the process ended or failed during the cell | `cell.json` and the files reached at the time; when the process next reads the route's records, `labelCell` writes the empty attempts file, reads any start record the cell did not write (a clock record that does not decode counts as not written), and adds the labelled manifest and report pair |
-| `missed` | the start was more than 15 minutes past when the process reached it | `cell.json`, then the labelled manifest and report pair from `labelCell`, with no end records and no concurrent runs |
+1. Take the route's lock on the ledger (`Ledger.LockRoute`).
+2. Read the cell records (`route.state`), recovering the label of a cell left running; exit 3 while a hold has no acknowledgement file (`route.holds`).
+3. Label each unlabelled cell, writing its labelled manifest and report pair from what its directory holds (`labelCell`).
+4. Record as `missed`, with no command run, a run whose start passed more than `StartTolerance` (15 minutes) ago.
+5. Wait for the next run's start; an operator abort in the wait writes an abort marker and exits 3.
+6. Run the cell (`runCell`), then go back to step 2. After the last run, write the window-close record and exit (`route.windowClose`, `route.finish`).
 
-Each file a cell writes in its directory goes to a temporary file there
-that is synced and renamed into place (`evidence.ReplaceFile`), so a
-crash leaves the old file or the new one. A restarted process resumes
-from the cell records, marking one left running as interrupted, and
-labels each missed or interrupted cell before the next run. Every cell
-record carries the SHA-256 of the schedule file the cell ran under
-(`schedule_sha256`). A schedule written again from the
-same inputs at a later ledger position is another file with another
-hash: `run` refuses to start while the route's directory holds a record
-written under another schedule file, and the running process stops with
-exit 1 when it reads one before its next cell. Each attempt 1 that did
-not count is re-run on its cell's attempt 2 date, in attempt 1 order,
-while the route has fewer than two re-runs and the window holds that
-date.
+`runCell` (`cmd/percentes-release/cell.go`):
 
-Once no run is left, the process writes the route's window-close record
-(`windowClose`, `close.go`), unless `<route>/window-close.json` exists
-under `--out`: it runs the refresh command once more, reads the operator
-file and its records as at a cell's start, compares them with the last
-counted cell by scheduled start (`report.CompareWindowClose`), keeps the
-copies under `--frames` in `window-close/<route>/<UTC time>/` and prints
-whether anything changed. A refresh fault writes no record and ends the
-process with exit 1, so its next run tries again. On a route with a
-confidential limit the fault's text can quote the operator file or the
-refresh output, so it goes to `operator-error.txt` in the attempt's
-`window-close/<route>/<UTC time>/` directory under `--frames`, readable by
-its owner only, and the error the process prints names that directory in
-place of the text.
+1. Write `cell.json` as running; start the live dispatch series (`startLiveSeries`).
+2. Read and write the clock record (`evidence.ReadClock`) and the start status.
+3. Run `--refresh-cmd`, a route's `refresh-<route>` wrapper, which a release's freeze commit adds under `deploy/release/`; parse its limits (`evidence.ReadRefreshedLimits`); read the operator file again (`cellOperator`); write `refresh.json`.
+4. Read the ledger bound to its frozen open line (`readLedger`). Unless the operator or refresh records failed, test the frozen step rates against the limits read (`limitsStop`, `cmd/percentes-release/close.go`), which also returns each window's write allowance (`admission.WindowAllowances`). A limit the command reports `unavailable` is tested at its recorded value.
+5. Compute the reservation (`State.ReservationUSD`), run `--balance-cmd` and write `balance-start.json` with its check (`evidence.CheckBalance`).
+6. Decide, taking the first of these that holds:
+   1. a clock offset above 60 s stops the route;
+   2. failing limits stop the route;
+   3. SIGTERM interrupts the cell;
+   4. an operator abort stops the cell (`stopped before admission: operator abort`);
+   5. an operator or refresh fault blocks the cell;
+   6. the balance check blocks the cell;
+   7. a clock with no reading blocks the cell.
+7. Admit one probe plus every scheduled request (`Ledger.AdmitAt`) at the route's price revision (`State.PriceRevision`). A `PriceChanged` repeats steps 4 to 6 once; a second blocks the cell. A cap refusal stops the route.
+8. Send one probe (`probe.Run`). A documented billing refusal stops the route (`probeBilling`); a start-gate status blocks the cell, unless `authFault` finds a 401 or 403 the previous probed cell also saw, which stops the route. Where the cell then skips the ladder, a probe above the input bound or the ceiling stops the route (`pricingBreach`).
+9. Wait one arrival interval at the first step's rate (`waitUntil`). A start more than `StartTolerance` late, or an epoch past `Hooks.LatestEpoch` (`ErrLateEpoch`), labels the cell missed (`probeSentNote`).
+10. Run the ladder through `loadgen.Run` with the canary. `Hooks.OnDone` stops the route on a documented billing refusal (`billingRefusal`) and ends the ladder on client exhaustion (`clientExhausted`).
+11. Count 401 and 403 responses (`countAuth`); a prompt above the input bound or output above the ceiling stops the route (`pricingBreach`).
+12. Decide the outcome (`cellOutcome`) and retain the evidence (`retain`, `cellEvidence`): end status and balance, manifest, report pair.
+
+The refresh command (`pct-refresh.py`, which a release's freeze commit adds under `deploy/release/`) prints one JSON object, `{"limits": [...]}`, with one entry per `target.limits` entry in its order; the balance command prints `{"amount_usd": "<decimal>"}`, with `<decimal>` the balance in US dollars as a decimal number, or `{"unavailable": "<reason>"}`, with `<reason>` its text. Each command runs for at most 30 s (`statusTimeout`; `clockTimeout` for the clock-sync command).
+
+| Outcome | Meaning |
+|---|---|
+| `counted` | the ladder reached the top step's drain or the backoff rule; G2 passed over the ladder and at every attempted step, no tripwire, no exhaustion, clock unflagged, canary started, HTTP/1.1 (Hypertext Transfer Protocol 1.1) only, no model mismatch; enters the sampling frame |
+| `client_invalid` | exhaustion, a failed G2, a tripwire, another protocol, a flagged clock, a run error, or no canary |
+| `model_mismatch` | a response reported another model |
+| `blocked` | a refresh, balance, clock-reading, repeated-price or probe-status block before the ladder |
+| `stopped` | a route stop, or an operator abort before the outcome was decided; `run` exits 3 |
+| `interrupted` | the process ended, SIGTERM came, or an execution error ended the cell before the outcome was decided; the next start labels it (`labelCell`) |
+| `missed` | the start or the ladder epoch was more than 15 minutes late |
+
+The labels are `CellCounted` to `CellInterrupted` in `internal/evidence/cell.go`. Every outcome but `counted` takes the re-run: each attempt 1 that did not count is re-run on its attempt 2 date while the route has fewer than two re-runs. The cell's JSON records go through `evidence.ReplaceFile`, so a crash leaves the old file or the new one.
+
+While a stopped cell, an abort marker (`<route>/abort-<UTC time>.json`) or a stop marker (`<route>/stop-<label>-a<attempt>.json`) has no acknowledgement file under `--ack-dir`, every start exits 3 (`route.holds`, `cmd/percentes-release/hold.go`). `<label>` is the cell label, such as weekday-04, and `<attempt>` is 1 or 2. The acknowledgement file is `resume-<route>-<id>` (`route.ackFile`): `<id>` is `<label>-a<attempt>` for a stopped cell, and the marker's name without `.json` for a marker.
+
+After the last run, `route.windowClose` runs the refresh command once more, compares the records with the last counted cell (`report.CompareWindowClose`) and writes `<route>/window-close.json`; `route.finish` then exits 0 or 4.
 
 ### The ladder
 
-`loadgen.BuildLadder` places the warm-up at the first step's rate from the
-epoch, then per step a measured window at its rate and a drain in which
-nothing is scheduled; Poisson arrivals restart at each window from one
-generator seeded by the cell's seed, and each request carries its step
-and whether it was warm-up. At each drain's end, once every request of
-the step is terminal, the step's verdict is taken: the status_429 count
-over the step's scheduled requests, the G2 gate over the step's window
-with its own garbage-collection snapshots, and whether a tripwire fired.
-The ladder ends at the first failed G2 (`client_validity`), fired
-tripwire (`tripwire`) or status_429 fraction above 0.5 (`backoff`); later
-steps are recorded as not attempted and their requests are never sent.
-The tripwires are per step: sends beyond the step's scheduled count, and
-requests in flight above two times the step's rate times the hard
-timeout. A completion whose whole answer arrived more than 30 s after
-intended dispatch is late; the hard timeout of 90 s from actual dispatch
-censors. A stop of the run (a documented billing refusal or `EMFILE`
-through the completion hook, SIGINT or SIGTERM) leaves every request not
-yet dispatched unsent: the pacer spawns no worker after the stop, a
-worker in its final wait returns without sending, and a dispatch is
-stamped only while the run is open, so every sent request has its
-dispatch at or before the stop time; requests already sent drain under
-their own timeout.
+`loadgen.BuildLadder` places the warm-up at the first step's rate, then per step a measured window and a drain with nothing scheduled. The warm-up and each measured window take their counts from the count rule under [Before the first cell](#before-the-first-cell), and request i of a segment, counted from 0, goes out i/r seconds after the segment starts. `gen.runLadder` takes each step's verdict at its drain's end (`stepEnd`); later steps are recorded as not attempted. A stop leaves every undispatched request unsent.
+
+Each release connection is an `observedConn` (`instrumentWrites`). A write holds a permit of `newWriteWindows` from its first byte to its last and counts in each window, whose width is the window's length plus `writeMarginNs` (50 ms).
+
+A write that some window does not admit waits for a permit for at most `writePermitWaitNs` (`PinnedSendSkewMaxMs`, 50 ms) from its first attempt (`tryReserve`). It is refused at once where the next permit would come after that bound, and on waking where it woke after the bound, with a permit free or not.
+
+The transport's idle pool holds 2 × the top step's rate × the hard timeout, plus `load.connections` (`Config.ReleaseConnectionProvision`).
 
 ### The cell's files and report
 
-Each cell attempt's directory holds `cell.json` (the run, the offset, the
-schedule file's SHA-256, the outcome and reasons, the admitted steps,
-the open-file limit, the probe status, the ladder's 401 and 403 counts,
-the ladder record with each step's verdict, the tripwires, the canary
-summary per attempted step, the concurrent runs and the requests sent),
-the clock, status and balance records, `probe.json`, `attempts.jsonl` with the release fields (`shape`,
-`ceiling_tokens`, `step`, `warmup`, `in_time`, `late` and
-`reasoning_tokens`) and no answer text, `dispatch.json` (the cell's own
-dispatches per UTC second, rewritten every second while the cell runs
-and final when it ends), the ceiling probe copies, and `manifest.json`.
-The manifest's `release` record carries the run, the offset, the
-schedule file's SHA-256 (`schedule_sha256`), the concurrent runs of
-other routes, the host's aggregate dispatch series
-over the cell (`dispatch_aggregate`: the cell's own series, then each
-concurrent run's, summed per UTC second, with the peak second and how
-far each source was read), the inter-chunk gap histograms per step
-(`inter_chunk_gaps`, 24 bins with lower edges from 1 microsecond to
-50 s on a 1-2-5 series, the last open above 50 s), the loopback
-canary's summary per attempted step (`canary`, as `cell.json` has it),
-the ceiling rule's verdict, the ceiling in force and the choice that
-set it, the
-ceiling-check records by hash, the account's creation date, the requests
-the ledger settled before the window, and the label; its `gates` field
-carries G2 and hosted G6 per attempted step, and G2 over the whole
-ladder where no stop interrupted it. The report pair is the cell report
-(`report.CellReport`): the label, whether the cell enters the frame, and
-the cell's per-step tables with each step's G2 result from the
-manifest's `gates` (`report.stepG2`, which refuses results that miss an
-attempted step, name a step twice or name an excluded step) and the
-canary line after each G2 line (`report.stepCanary`, which refuses a
-number of summaries other than the number of per-step G2 results; a
-manifest without `canary` prints none), rendered from the manifest,
-the attempts file and the configuration, so
-`percentes --replay` reproduces it byte for byte and
-`percentes --check-release` accepts a labelled cell as a record outside
-the frame. `percentes-release dispatch --out
-   DIR` sums every cell's `dispatch.json` into `dispatch-aggregate.json`,
-   the host's dispatches per UTC second with the peak second, as a second
-   record beside the per-cell aggregates.
+| File in `<route>/<label>-a<attempt>/` | Content |
+|---|---|
+| `cell.json` | the runner's working record (`cellRecord`, `cmd/percentes-release/route.go`): run, offset, `schedule_sha256`, outcome, reasons, rates, probe status, `auth_statuses`, ladder, tripwires, canary, concurrent runs, requests sent |
+| `clock.json`, `status-start.json`, `refresh.json`, `balance-start.json`, `probe.json`, `status-end.json`, `balance-end.json` | the cell's records |
+| `attempts.jsonl` | the release fields listed under the evidence files |
+| `dispatch.json` | the cell's dispatches per UTC second, rewritten every second (`newDispatchSeries`, `liveSeries`) |
+| `ceiling-probe-<route>-<ceiling>-<ledger line>.json` | one copy per ceiling-check record of the host group and, for Shape S, of each other route's record that spent a byte cap; `<ceiling>` is the record's ceiling and `<ledger line>` its admission's line |
+| `manifest.json` | with the `release` record (`evidence.Cell`): `schedule_sha256`, `ladder_started`, `records_complete`, `billing_refusals`, `dispatch_aggregate` (`hostDispatch`), `inter_chunk_gaps` (`evidence.StepGaps`, 24 bins with lower edges `GapEdgesUs`), `canary`, `admission`, `ceiling_choice`; and `gates`: G2 over the ladder unless a stop cut it, then G2 and Hosted-G6 per attempted step (`releaseGates`) |
+| `report.json`, `report.txt` | the cell report (`CellReport`), rendered from the manifest, the attempts file and the configuration |
+
+`percentes-release dispatch` sums every `dispatch.json` into `dispatch-aggregate.json`.
 
 ### The per-step tables and the index
 
