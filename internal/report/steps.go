@@ -334,7 +334,10 @@ type PooledRefusals struct {
 // complete (AddOutside), and OutsideIncomplete counts those whose ladder
 // started with records incomplete, whose responses take no label; the
 // pages set both, and neither enters a pooled figure, the null reading
-// or the index.
+// or the index. CellFiles are the archives of the route's cells with a
+// manifest, in cell order, which the pages set: each cell's section
+// names its archive, and a cell no other section names gets a section of
+// its own.
 type StepTables struct {
 	Route             string           `json:"route"`
 	Naming            []string         `json:"naming,omitempty"`
@@ -360,6 +363,15 @@ type StepTables struct {
 	BillingStops      []BillingStop    `json:"billing_stops,omitempty"`
 	Outside           []OutsideCell    `json:"outside_frame,omitempty"`
 	OutsideIncomplete int              `json:"outside_frame_records_incomplete,omitempty"`
+	CellFiles         []CellFile       `json:"cell_files,omitempty"`
+}
+
+// CellFile is the archive that holds the published files of a cell with a
+// manifest: the cell, its outcome and the archive's address.
+type CellFile struct {
+	Cell    string `json:"cell"`
+	Outcome string `json:"outcome"`
+	Archive string `json:"archive"`
 }
 
 // OutsideCell is a cell outside the route's frame: its label, its
@@ -946,6 +958,15 @@ func (t *StepTables) text(frame bool) string {
 		}
 		return fmt.Sprintf("; %d documented as %q (%s, retrieved %s)", status, doc.Meaning, doc.Source, doc.Retrieved)
 	}
+	archives := map[string]string{}
+	for _, f := range t.CellFiles {
+		archives[f.Cell] = f.Archive
+	}
+	files := func(cell string) {
+		if a, ok := archives[cell]; ok {
+			w("cell files: %s", a)
+		}
+	}
 
 	w("== Per-step tables: route %s, ceiling %d tokens, deadline %d s ==", t.Route, t.CeilingTokens, t.DeadlineS)
 	w("Request shape %s; binding rate %g requests per second (rps), binding limit %s; paced arrivals.", t.Shape, t.BindingRPS, t.bindingText())
@@ -983,6 +1004,7 @@ func (t *StepTables) text(frame bool) string {
 	w("")
 	for _, c := range t.Cells {
 		w("-- Cell %s: 95 percent Wilson intervals, treating the step's requests as independent --", c.Cell)
+		files(c.Cell)
 		if c.Warmup != nil {
 			w("warm-up: %d status_429", c.Warmup.Count)
 			refusalsText(w, c.Warmup, "warm-up")
@@ -1031,12 +1053,30 @@ func (t *StepTables) text(frame bool) string {
 	}
 	for _, c := range t.Outside {
 		w("-- Cell %s, %s, outside the frame: its status_429 responses, in no pooled figure --", c.Cell, c.Outcome)
+		files(c.Cell)
 		refusalsText(w, c.Warmup, "warm-up")
 		for _, s := range c.Steps {
 			w("  step %d status_429: %d", s.Step, s.Refusals.Count)
 			refusalsText(w, s.Refusals, "step")
 		}
 		w("")
+	}
+	named := map[string]bool{}
+	for _, c := range t.Cells {
+		named[c.Cell] = true
+	}
+	for _, c := range t.Outside {
+		named[c.Cell] = true
+	}
+	for _, m := range t.ModelMismatches {
+		named[m.Cell] = true
+	}
+	for _, f := range t.CellFiles {
+		if !named[f.Cell] {
+			w("-- Cell %s, %s, outside the frame --", f.Cell, f.Outcome)
+			files(f.Cell)
+			w("")
+		}
 	}
 	if n := t.OutsideIncomplete; n > 0 {
 		w("-- %d cells outside the frame started their ladder and lack complete records; their status_429 responses take no label --", n)
@@ -1063,6 +1103,7 @@ func (t *StepTables) text(frame bool) string {
 	for _, m := range t.ModelMismatches {
 		w("-- Cell %s, model_mismatch, outside the frame (SPEC-HOSTED §2): %d requests reported a model other than the expected %q; reported %q --",
 			m.Cell, m.Requests, m.Expected, m.Reported)
+		files(m.Cell)
 		w("")
 	}
 	switch c := t.WindowClose; {

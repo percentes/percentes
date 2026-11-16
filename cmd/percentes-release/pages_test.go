@@ -556,6 +556,45 @@ func TestPagesCmdRefusals(t *testing.T) {
 	}
 }
 
+// pages, pack and publish-check refuse a --cell-files address that is not
+// an https URL, or that ends in a slash, before they read or write a
+// file.
+func TestCellFilesAddressRefused(t *testing.T) {
+	dir := t.TempDir()
+	at := func(name string) string { return filepath.Join(dir, name) }
+	release := []string{"--out", at("out"), "--frames", at("frames"), "--config", at("groq.yaml"), "--schedule", at("schedule.json"), "--ledger", at("ledger.jsonl")}
+	commands := []struct {
+		name string
+		run  func([]string) (int, error)
+		args []string
+	}{
+		{"pages", pagesCmd, append(release[:len(release):len(release)], "--pages", at("pages"))},
+		{"pack", packCmd, append(release[:len(release):len(release)], "--route", "groq", "--pack", at("groq.tar"))},
+		{"publish-check", publishCheckCmd, append(release[:len(release):len(release)], "--pages", at("pages"), "--record", at("record.json"), "--write-page")},
+	}
+	for _, c := range []struct{ address, want string }{
+		{"http://github.com/percentes/percentes/releases/download/limits-run-1", "is not an https URL"},
+		{"github.com/percentes/percentes/releases/download/limits-run-1", "is not an https URL"},
+		{"https:///percentes/releases/download/limits-run-1", "is not an https URL"},
+		{"https://:443/percentes/releases/download/limits-run-1", "is not an https URL"},
+		{"https://github.com/percentes/percentes/releases/download/limits-run-1?x=1", "is not an https URL"},
+		{"https://github.com/percentes/percentes/releases/download/limits-run-1#x", "is not an https URL"},
+		{"https://user@github.com/percentes/percentes/releases/download/limits-run-1", "is not an https URL"},
+		{"https://github.com/percentes/percentes/releases/download/limits run 1", "is not an https URL"},
+		{"https://github.com/percentes/percentes/releases/download/limits-run-1/", "ends in a slash"},
+	} {
+		for _, cmd := range commands {
+			code, err := cmd.run(append(cmd.args[:len(cmd.args):len(cmd.args)], "--cell-files", c.address))
+			if want := fmt.Sprintf("%s: --cell-files %q %s", cmd.name, c.address, c.want); code != exitError || err == nil || err.Error() != want {
+				t.Errorf("%s %q: exit %d: %v, want %q", cmd.name, c.address, code, err, want)
+			}
+		}
+	}
+	if ents, err := os.ReadDir(dir); err != nil || len(ents) != 0 {
+		t.Errorf("wrote %v: %v", ents, err)
+	}
+}
+
 // The hosts of one host group page when their manifests carry one ceiling
 // choice and one set of probe records, and are refused, writing nothing,
 // when a host's process read another set of probe records or its

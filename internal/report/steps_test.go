@@ -766,3 +766,53 @@ func TestBillingRefusalLine(t *testing.T) {
 		t.Error("an ordinary 429 marked a billing refusal")
 	}
 }
+
+// Each cell section of a route page names the archive of its cell where
+// CellFiles carries one: a counted cell, a cell outside the frame and a
+// model_mismatch cell under their headings, and a cell no other section
+// names in a section of its own. A cell CellFiles does not carry, and
+// every cell of a page with no CellFiles, names none.
+func TestStepTablesCellFilesLines(t *testing.T) {
+	cfg, v := stepsConfig(t)
+	const base = "https://example.test/download/run-1/groq-"
+	cells := []CellRecords{cellOf("weekday-00-a1", outcome{1, LineInTime, 0, 10}), cellOf("weekday-01-a1", outcome{1, LineInTime, 0, 10})}
+	st, err := NewStepTables(cfg, v, cells)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := cellOf("weekday-02-a1", outcome{1, loadgen.ErrStatus429, 0, 2})
+	outside.Outcome = evidence.CellInvalid
+	if err := st.AddOutside(cfg, v, outside); err != nil {
+		t.Fatal(err)
+	}
+	st.ModelMismatches = []ModelMismatch{{Cell: "weekday-03-a1", Expected: "a", Reported: []string{"b"}, Requests: 1}}
+	without := st.Text()
+	if strings.Contains(without, "cell files:") {
+		t.Fatalf("a page with no CellFiles names an archive:\n%s", without)
+	}
+	for _, c := range []struct{ cell, outcome string }{{"weekday-00-a1", evidence.CellCounted}, {"weekday-02-a1", evidence.CellInvalid},
+		{"weekday-03-a1", evidence.CellModelMismatch}, {"weekday-04-a1", evidence.CellBlocked}} {
+		st.CellFiles = append(st.CellFiles, CellFile{Cell: c.cell, Outcome: c.outcome, Archive: base + c.cell + ".tar.gz"})
+	}
+	text := st.Text()
+	for _, want := range []string{
+		"-- Cell weekday-00-a1: 95 percent Wilson intervals, treating the step's requests as independent --\ncell files: " + base + "weekday-00-a1.tar.gz\n",
+		"-- Cell weekday-02-a1, client_invalid, outside the frame: its status_429 responses, in no pooled figure --\ncell files: " + base + "weekday-02-a1.tar.gz\n",
+		"\"a\"; reported [\"b\"] --\ncell files: " + base + "weekday-03-a1.tar.gz\n\n",
+		"-- Cell weekday-04-a1, blocked, outside the frame --\ncell files: " + base + "weekday-04-a1.tar.gz\n\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("page lacks %q:\n%s", want, text)
+		}
+	}
+	if n := strings.Count(text, "cell files: "); n != 4 || strings.Contains(text, "weekday-01-a1.tar.gz") {
+		t.Errorf("%d archive lines; weekday-01-a1, with no CellFile, named:\n%s", n, text)
+	}
+	rest := strings.Replace(text, "-- Cell weekday-04-a1, blocked, outside the frame --\ncell files: "+base+"weekday-04-a1.tar.gz\n\n", "", 1)
+	for _, c := range []string{"00", "02", "03"} {
+		rest = strings.Replace(rest, "cell files: "+base+"weekday-"+c+"-a1.tar.gz\n", "", 1)
+	}
+	if rest != without {
+		t.Errorf("the archive lines change the rest of the page:\n%s", text)
+	}
+}

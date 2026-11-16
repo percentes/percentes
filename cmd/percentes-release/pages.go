@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -65,6 +66,9 @@ type routeRecords struct {
 	labelled, unrecorded int
 	outsideIncomplete    int
 	stops                []*cellRecord
+	// files are the attempts with a manifest, in cell order, with their
+	// run records' outcomes.
+	files []report.CellFile
 }
 
 // pagesCmd writes the release's index page and each route's page from
@@ -80,7 +84,8 @@ type routeRecords struct {
 // attempt with no manifest. A scheduled route with no cell gets a page
 // and an index line stating its exclusion by the ceiling check, or that
 // it ran no cell, and its host group's ceiling-check records are copied
-// under --out (buildPages).
+// under --out (buildPages). With --cell-files, a route page names the
+// archive of each cell with a manifest at that address (cellArchives).
 func pagesCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("pages", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -93,6 +98,7 @@ func pagesCmd(args []string) (int, error) {
 	ledgerPath := fs.String("ledger", "", "the release admission ledger the schedule froze, as the routes left it (required)")
 	var checkPaths listFlag
 	fs.Var(&checkPaths, "check-record", checkRecordUsage)
+	cellFiles := fs.String("cell-files", "", cellFilesUsage)
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
@@ -100,6 +106,9 @@ func pagesCmd(args []string) (int, error) {
 		if v == "" {
 			return exitError, fmt.Errorf("pages: %s is required", name)
 		}
+	}
+	if err := checkCellFiles("pages", *cellFiles); err != nil {
+		return exitError, err
 	}
 	cfgs, err := loadReleases(cfgPaths)
 	if err != nil {
@@ -113,7 +122,7 @@ func pagesCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, fmt.Errorf("pages: %w", err)
 	}
-	rp, err := buildPages(*out, *framesRoot, sched, sum, *ledgerPath, checkPaths, cfgs, key, "")
+	rp, err := buildPages(*out, *framesRoot, sched, sum, *ledgerPath, checkPaths, cfgs, key, *cellFiles)
 	if err != nil {
 		return exitError, err
 	}
@@ -169,6 +178,41 @@ type releasePages struct {
 // checkRecordUsage is the --check-record flag's usage line.
 const checkRecordUsage = "a ceiling-check record sent on the ledger the schedule froze that no cell carries, such as an excluded route's (repeatable)"
 
+// cellFilesUsage is the --cell-files flag's usage line.
+const cellFilesUsage = "the https address the cell archives are downloaded from, with no trailing slash; each route page names each cell's archive as <address>/<route>-<cell>.tar.gz"
+
+// checkCellFiles refuses cmd's --cell-files value v unless it is "" or an
+// https URL with a host, no user, query or fragment, in the form
+// url.URL.String gives it, that does not end in a slash.
+func checkCellFiles(cmd, v string) error {
+	if v == "" {
+		return nil
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" || u.String() != v {
+		return fmt.Errorf("%s: --cell-files %q is not an https URL", cmd, v)
+	}
+	if strings.HasSuffix(v, "/") {
+		return fmt.Errorf("%s: --cell-files %q ends in a slash", cmd, v)
+	}
+	return nil
+}
+
+// cellArchives are files, the cells of route with a manifest, each with
+// its archive's address, <base>/<route>-<cell>.tar.gz; none where base
+// is "".
+func cellArchives(base, route string, files []report.CellFile) []report.CellFile {
+	if base == "" {
+		return nil
+	}
+	out := make([]report.CellFile, len(files))
+	for i, f := range files {
+		f.Archive = fmt.Sprintf("%s/%s-%s.tar.gz", base, route, f.Cell)
+		out[i] = f
+	}
+	return out
+}
+
 // buildPages builds the index page and each route's page from the cells
 // of cfgs' routes under out, run under sched, the schedule file of
 // SHA-256 sum, each route page's status_429 responses labelled from its
@@ -194,8 +238,9 @@ const checkRecordUsage = "a ceiling-check record sent on the ledger the schedule
 // prints. The records the manifests carry and those at checkPaths must
 // hold one record of every ceiling-check admission on the ledger up to
 // the line sched froze (checkAdmitted), and no ceiling check may be
-// admitted on a route's account group after it (lateChecks).
-// cellFiles is unused until route pages name cell archives.
+// admitted on a route's account group after it (lateChecks). A route
+// page names each cell's archive at the address cellFiles, and none
+// where it is "" (cellArchives).
 func buildPages(out, framesRoot string, sched *schedule.Schedule, sum, ledgerPath string, checkPaths []string, cfgs []*config.Config, key *releasekey.Key, cellFiles string) (*releasePages, error) {
 	given := map[string]bool{}
 	for _, cfg := range cfgs {
@@ -357,6 +402,7 @@ func buildPages(out, framesRoot string, sched *schedule.Schedule, sum, ledgerPat
 			}
 		}
 		st.ModelMismatches = rp.recs[i].mismatches
+		st.CellFiles = cellArchives(cellFiles, r.Config.Target.Name, rp.recs[i].files)
 		page := &pagedRoute{StepTables: st, Stops: stoppedCells(rp.recs[i].stops)}
 		rp.files[r.Page] = []byte(page.text())
 		if rp.files[path.Join(routesDir, r.Config.Target.Name+".json")], err = marshalPage(page); err != nil {
@@ -427,8 +473,9 @@ func marshalPage(v any) ([]byte, error) {
 // outside the frame whose ladder started and whose records are complete
 // is read the same way for its status_429 labels. Each model_mismatch
 // attempt's expected and reported model ids are kept for the route's
-// page. The route's window-close record is read where it has one and
-// must verify against the latest end of any of the route's attempts
+// page, as is each attempt with a manifest, for its archive. The route's
+// window-close record is read where it has one and must verify against
+// the latest end of any of the route's attempts
 // (evidence.WindowClose.Verify). A route with no cell record is refused.
 func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.Key) (*routeRecords, error) {
 	name := cfg.Target.Name
@@ -498,6 +545,7 @@ func readRouteCells(out, framesRoot string, cfg *config.Config, key *releasekey.
 		case !reflect.DeepEqual(rr.ceiling, m.Release.Ceiling) || !slices.Equal(rr.probes, m.Release.Probes):
 			return nil, fmt.Errorf("pages: %s: the ceiling choice or its probe records differ from the route's other cells'", dir)
 		}
+		rr.files = append(rr.files, report.CellFile{Cell: cellLabel(rec.Run), Outcome: rec.Outcome})
 		if n := m.Release.BillingRefusals; n > 0 {
 			rr.billing = append(rr.billing, billingStop(&rec, n))
 		}

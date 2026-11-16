@@ -21,10 +21,11 @@ const (
 
 // packCmd writes a route's evidence pack, the file its notice carries
 // (SPEC-HOSTED HA3 point 14): the route's page files and cell manifests,
-// built from the cells under --out as pages builds them, with
-// inventory.json naming each by SHA-256 (evidence.BuildPack). The same
-// cells give the same bytes. A route with a page needs its window-close
-// record, which its page prints.
+// built from the cells under --out as pages builds them at the
+// --cell-files address given, with inventory.json naming each by
+// SHA-256 (evidence.BuildPack). The same cells give the same bytes. A
+// route with a cell manifest needs its window-close record, which its
+// page prints.
 func packCmd(args []string) (int, error) {
 	fs := flag.NewFlagSet("pack", flag.ContinueOnError)
 	out := fs.String("out", "", "the release output directory the route processes write under (required)")
@@ -38,6 +39,7 @@ func packCmd(args []string) (int, error) {
 	ledgerPath := fs.String("ledger", "", "the release admission ledger the schedule froze, as the routes left it (required)")
 	var checkPaths listFlag
 	fs.Var(&checkPaths, "check-record", checkRecordUsage)
+	cellFiles := fs.String("cell-files", "", cellFilesUsage)
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
@@ -45,6 +47,9 @@ func packCmd(args []string) (int, error) {
 		if f[1] == "" {
 			return exitError, fmt.Errorf("pack: %s is required", f[0])
 		}
+	}
+	if err := checkCellFiles("pack", *cellFiles); err != nil {
+		return exitError, err
 	}
 	cfgs, err := loadReleases(cfgPaths)
 	if err != nil {
@@ -58,7 +63,7 @@ func packCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, fmt.Errorf("pack: %w", err)
 	}
-	rp, err := buildPages(*out, *framesRoot, sched, schedSum, *ledgerPath, checkPaths, cfgs, key, "")
+	rp, err := buildPages(*out, *framesRoot, sched, schedSum, *ledgerPath, checkPaths, cfgs, key, *cellFiles)
 	if err != nil {
 		return exitError, err
 	}

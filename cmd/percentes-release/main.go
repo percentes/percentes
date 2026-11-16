@@ -78,14 +78,14 @@
 //	percentes-release dispatch --out DIR
 //	percentes-release pages --out DIR --frames DIR --config FILE ...
 //	    --schedule FILE --ledger FILE [--check-record FILE ...] --pages DIR
-//	    [--release-key FILE]
+//	    [--release-key FILE] [--cell-files URL]
 //	percentes-release pack --out DIR --frames DIR --config FILE ...
 //	    --schedule FILE --ledger FILE [--check-record FILE ...] --route NAME
-//	    --pack FILE [--release-key FILE]
+//	    --pack FILE [--release-key FILE] [--cell-files URL]
 //	percentes-release publish-check --out DIR --frames DIR
 //	    --config FILE ... --schedule FILE --ledger FILE
 //	    [--check-record FILE ...] --pages DIR --record FILE [--write-page]
-//	    [--release-key FILE]
+//	    [--release-key FILE] [--cell-files URL]
 //	percentes-release rehearse --out DIR --frames DIR --clock-sync CMD
 //	    --byte-cap N [--anthropic-rpm N] [--scale N] [--master-seed SEED]
 //	    [--source-diff FILE]

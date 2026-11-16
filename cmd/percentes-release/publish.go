@@ -27,8 +27,9 @@ var publishNow = time.Now
 
 // publishCheckCmd checks the release publication record (SPEC-HOSTED HA3
 // point 14) against the cell manifests and the window-close records under
-// --out, the pages the cells generate under the schedule file given,
-// which must be the pages under --pages, and the files the record names.
+// --out, the pages the cells generate under the schedule file given, with
+// the --cell-files address given, which must be the pages under --pages,
+// and the files the record names.
 // A route with a cell manifest needs its window-close record, and a
 // route with none, excluded or stopped, needs none. Each notice's pack
 // must be the route's pack as pack builds it from the same cells, and a
@@ -58,6 +59,7 @@ func publishCheckCmd(args []string) (int, error) {
 	ledgerPath := fs.String("ledger", "", "the release admission ledger the schedule froze, as the routes left it (required)")
 	var checkPaths listFlag
 	fs.Var(&checkPaths, "check-record", checkRecordUsage)
+	cellFiles := fs.String("cell-files", "", cellFilesUsage)
 	if err := fs.Parse(args); err != nil {
 		return exitError, err
 	}
@@ -65,6 +67,9 @@ func publishCheckCmd(args []string) (int, error) {
 		if f[1] == "" {
 			return exitError, fmt.Errorf("publish-check: %s is required", f[0])
 		}
+	}
+	if err := checkCellFiles("publish-check", *cellFiles); err != nil {
+		return exitError, err
 	}
 	cfgs, err := loadReleases(cfgPaths)
 	if err != nil {
@@ -82,7 +87,7 @@ func publishCheckCmd(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	rp, err := buildPages(*out, *framesRoot, sched, sum, *ledgerPath, checkPaths, cfgs, key, "")
+	rp, err := buildPages(*out, *framesRoot, sched, sum, *ledgerPath, checkPaths, cfgs, key, *cellFiles)
 	if err != nil {
 		return exitError, err
 	}

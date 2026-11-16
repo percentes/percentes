@@ -137,29 +137,12 @@ func publication(t *testing.T, out, pages string, packs map[string][]byte, edit 
 	return writeFile(t, dir, "publication.json", b)
 }
 
-// publish-check refuses a complete record while the publication page
-// under --pages is missing, writes it with --write-page, holding the
-// notice and window-close dates and the earlier disclosure and no
-// recipient or account identifier, then passes and prints the providers
-// told before the notices, and refuses the page edited or a record with
-// a response the page lacks; pack writes groq's page files and manifests with
-// their inventory, the same bytes twice, and refuses an unknown route
-// and groq before its window-close record; pages runs with no record and
-// no window-close record; and the check
-// refuses, exiting 2, a paged route with no window-close record, a
-// record that lacks the naming permission the configuration requires,
-// misses responses, holds the notice's account in a correction, has an
-// open window, misses a later cell's manifest
-// or window-close record, carries a notice pack other than the one pack
-// builds (other text, or a pack built before a later cell), a notice
-// dated before the later cell started and its window-close record was
-// taken, or a page or window-close record edited after the record named
-// it. It exits 1 on a
-// window-close record of a refresh that failed, with an edited retained
-// copy, or taken before the route's last cell ended, and with no record,
-// an absent one, no schedule, or a schedule other than the one the cells
-// ran under.
-func TestPublishCheck(t *testing.T) {
+// blockedGroq is route groq, whose naming needs permission, at an
+// endpoint that answers 404, so each cell is blocked, with its
+// configuration's path and its fixture; publish-check's clock is after
+// publication's notice window.
+func blockedGroq(t *testing.T) (*route, string, *fixture) {
+	t.Helper()
 	e := newEndpoint(t, func(int64) (int, string) { return http.StatusNotFound, "" })
 	path := routeConfigFile(t, "groq", e.url(), "10")
 	b, err := os.ReadFile(path)
@@ -184,6 +167,34 @@ func TestPublishCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	shortLadder(groq)
+	return groq, cfgPath, f
+}
+
+// publish-check refuses a complete record while the publication page
+// under --pages is missing, writes it with --write-page, holding the
+// notice and window-close dates and the earlier disclosure and no
+// recipient or account identifier, then passes and prints the providers
+// told before the notices, and refuses the page edited or a record with
+// a response the page lacks; pack writes groq's page files and manifests with
+// their inventory, the same bytes twice, and refuses an unknown route
+// and groq before its window-close record; pages runs with no record and
+// no window-close record; and the check
+// refuses, exiting 2, a paged route with no window-close record, a
+// record that lacks the naming permission the configuration requires,
+// misses responses, holds the notice's account in a correction, has an
+// open window, misses a later cell's manifest
+// or window-close record, carries a notice pack other than the one pack
+// builds (other text, or a pack built before a later cell), a notice
+// dated before the later cell started and its window-close record was
+// taken, or a page or window-close record edited after the record named
+// it. It exits 1 on a
+// window-close record of a refresh that failed, with an edited retained
+// copy, or taken before the route's last cell ended, and with no record,
+// an absent one, no schedule, or a schedule other than the one the cells
+// ran under.
+func TestPublishCheck(t *testing.T) {
+	groq, cfgPath, f := blockedGroq(t)
+	var err error
 	for _, run := range groq.runs[:2] {
 		if rec := runCellOK(t, groq, run); rec.Outcome != outcomeBlocked {
 			t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
@@ -503,6 +514,85 @@ func TestPublishCheck(t *testing.T) {
 			t.Errorf("%q: exit %d: %v, want %q", c.args, code, err, c.want)
 		}
 	}
+}
+
+// publish-check rebuilds the route pages at its own --cell-files address:
+// it passes pages and a pack built at that address, and refuses, exiting
+// 2 and naming each route page, pages built at another address, or at
+// none, and pages built at an address when it is given none.
+func TestPublishCheckRefusesPagesOfOtherCellFiles(t *testing.T) {
+	groq, cfgPath, f := blockedGroq(t)
+	for _, run := range groq.runs[:2] {
+		if rec := runCellOK(t, groq, run); rec.Outcome != outcomeBlocked {
+			t.Fatalf("outcome %s %q", rec.Outcome, rec.Reasons)
+		}
+	}
+	st, err := groq.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutOf(t, func() {
+		if err := groq.windowClose(context.Background(), st); err != nil {
+			t.Error(err)
+		}
+	})
+	const (
+		address = "https://github.com/percentes/percentes/releases/download/limits-run-1"
+		other   = "https://github.com/percentes/percentes/releases/download/limits-run-2"
+	)
+	pages := t.TempDir()
+	release := []string{"--out", groq.out, "--ledger", groq.ledgerPath, "--frames", groq.framesRoot, "--config", cfgPath, "--schedule", f.in.schedulePath}
+	at := func(address string) []string {
+		if address == "" {
+			return release
+		}
+		return append(release[:len(release):len(release)], "--cell-files", address)
+	}
+	built := func(address string) string {
+		t.Helper()
+		if code, err := pagesCmd(append(at(address), "--pages", pages)); code != exitOK || err != nil {
+			t.Fatalf("pages at %q: exit %d: %v", address, code, err)
+		}
+		return publication(t, groq.out, pages, map[string][]byte{"groq": packOf(t, at(address), "groq")}, nil)
+	}
+	check := func(record, address string) (int, string) {
+		t.Helper()
+		var code int
+		var err error
+		text := stdoutOf(t, func() {
+			code, err = publishCheckCmd(append(at(address), "--pages", pages, "--record", record, "--write-page"))
+		})
+		if err != nil {
+			t.Fatalf("exit %d: %v", code, err)
+		}
+		return code, text
+	}
+	record := built(address)
+	page, err := os.ReadFile(filepath.Join(pages, "routes", "groq.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line := "cell files: " + address + "/groq-" + cellLabel(groq.runs[0]) + ".tar.gz\n"; !strings.Contains(string(page), line) {
+		t.Fatalf("groq page lacks %q:\n%s", line, page)
+	}
+	if code, text := check(record, address); code != exitOK {
+		t.Fatalf("pages at the address checked: exit %d:\n%s", code, text)
+	}
+	refused := func(name, record, address string) {
+		t.Helper()
+		code, text := check(record, address)
+		if code != exitAdverse || !strings.HasPrefix(text, "NOT READY to publish: ") {
+			t.Errorf("%s: exit %d:\n%s", name, code, text)
+		}
+		for _, p := range []string{"routes/groq.txt", "routes/groq.json"} {
+			if want := "pages: " + p + " under " + pages + " is not the page the cells generate"; !strings.Contains(text, want) {
+				t.Errorf("%s: lacks %q:\n%s", name, want, text)
+			}
+		}
+	}
+	refused("another address", record, other)
+	refused("no address", record, "")
+	refused("pages with no address", built(""), address)
 }
 
 // On a route with a confidential limit, publish-check refuses, exiting 2

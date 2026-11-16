@@ -257,3 +257,30 @@ func TestRoutePageStatesStoppedAttempts(t *testing.T) {
 		t.Fatalf("groq page JSON %+v", p)
 	}
 }
+
+// With --cell-files, a route page names the archive of a cell with a
+// manifest, in its text and its JSON, and none for a stopped cell with no
+// manifest.
+func TestRoutePageNamesArchiveOfCellWithManifest(t *testing.T) {
+	groq, release := missedAndStopped(t)
+	const address = "https://github.com/percentes/percentes/releases/download/limits-run-1"
+	pages := t.TempDir()
+	if code, err := pagesCmd(append(release, "--pages", pages, "--cell-files", address)); code != exitOK || err != nil {
+		t.Fatalf("exit %d: %v", code, err)
+	}
+	files := readPages(t, pages)
+	page := string(files["routes/groq.txt"])
+	missed, stopped := cellLabel(groq.runs[0]), cellLabel(groq.runs[1])
+	archive := address + "/groq-" + missed + ".tar.gz"
+	if want := "-- Cell " + missed + ", missed, outside the frame --\ncell files: " + archive + "\n\n"; !strings.Contains(page, want) ||
+		strings.Count(page, "cell files: ") != 1 || strings.Contains(page, "groq-"+stopped+".tar.gz") {
+		t.Fatalf("groq page lacks %q or names another archive:\n%s", want, page)
+	}
+	var st report.StepTables
+	if err := json.Unmarshal(files["routes/groq.json"], &st); err != nil {
+		t.Fatal(err)
+	}
+	if want := []report.CellFile{{Cell: missed, Outcome: outcomeMissed, Archive: archive}}; !slices.Equal(st.CellFiles, want) {
+		t.Fatalf("groq page JSON cell_files %+v, want %+v", st.CellFiles, want)
+	}
+}
