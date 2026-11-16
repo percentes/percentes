@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -672,6 +674,24 @@ func TestModelFaultRouteExcluded(t *testing.T) {
 	}
 	if reasons, err := scheduleChoices(cfgs, []string{path}, nil, "open"); err != nil || reasons["groq"] != "not characterized (SPEC-HOSTED §2): "+fault {
 		t.Fatalf("schedule: %v, %v", reasons, err)
+	}
+}
+
+// operatorContext ends with an operator abort on SIGHUP, as a dropped
+// SSH session sends.
+func TestOperatorContextHangup(t *testing.T) {
+	ctx, stop := operatorContext(errTerminated)
+	defer stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("SIGHUP did not end the context")
+	}
+	if !errors.Is(context.Cause(ctx), loadgen.ErrOperatorAbort) {
+		t.Fatalf("cause %v", context.Cause(ctx))
 	}
 }
 
