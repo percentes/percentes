@@ -2,7 +2,7 @@
 
 Percentes drives open-loop load (each request sent at its scheduled time whether or not earlier ones have answered) at large language model (LLM) inference services and records what the client observes. It runs the replica-loss experiment of [SPEC.md](../SPEC.md), which is authoritative, and the managed-endpoint protocol of [SPEC-HOSTED.md](../SPEC-HOSTED.md), which is subordinate to it. A § number refers to SPEC.md unless it is prefixed SPEC-HOSTED.
 
-Phase 0 runs against the mock and needs no GPU (graphics processing unit); Phase 1 runs against vLLM, the open-source inference server whose version §6 pins, and SPEC.md's status line records which Phase 1 runs are done. Under SPEC-HOSTED, a route is one provider, model identifier, endpoint, account tier and request shape, and a cell is one run of the route's ladder, the stepped series of request rates of SPEC-HOSTED §3.
+Phase 0 runs against the mock and needs no GPU; Phase 1 runs against vLLM, the open-source inference server whose version §6 pins, and the Status table at the head of SPEC.md records which Phase 1 runs are done. Under SPEC-HOSTED, a route is one provider, model identifier, endpoint, account tier and request shape, and a cell is one run of the route's ladder, the stepped series of request rates of SPEC-HOSTED §3.
 
 - [Binaries](#binaries)
 - [Package map](#package-map)
@@ -325,7 +325,7 @@ The pilot's caps are `PilotCaps`: `PilotRouteRequestCap` (1,024), `PilotTotalReq
 
 ### The pilot
 
-`cmd/percentes-pilot` runs the pilot profile, whose constants are in `internal/config/config.go` and enforced in `internal/config/pilot.go`: two targets (`PinnedPilotTargets`), one request every 10 s (`PinnedPilotRateRPS`), a 60 s warm-up, a 1,200 s window, a 4,096-token ceiling and the 30 s timeout.
+`cmd/percentes-pilot` runs the pilot profile, whose constants are in `internal/config/config.go` and enforced in `internal/config/pilot.go`: two targets (`PinnedPilotTargets`), one request every 10 s (`PinnedPilotRateRPS`), a 60 s warm-up, a 1,200 s window, a 4,096-token ceiling and the 30 s timeout. `make percentes-pilot` builds the command as `bin/percentes-pilot`, and `go doc ./cmd/percentes-pilot` lists its subcommands and exit codes.
 
 | Part | Code |
 |---|---|
@@ -337,7 +337,7 @@ The pilot's caps are `PilotCaps`: `PilotRouteRequestCap` (1,024), `PilotTotalReq
 
 ### Replay and the completeness check
 
-In the commands below, DIR is a cell's directory, FILE after `--config` the configuration as loaded, OUT an output directory other than DIR, whose report pair is overwritten, ROOT the `--frames` root and KEY the release key file.
+In the commands below, DIR is a cell's directory, FILE after `--config` the configuration as loaded (on a route with no confidential limit, the same bytes as the configuration as published), OUT an output directory other than DIR, whose report pair is overwritten, ROOT the `--frames` root and KEY the release key file.
 
 | Command | Calls | Checks |
 |---|---|---|
@@ -892,18 +892,35 @@ A broken bound is a problem of its step's cell, and the rehearsal is not green. 
 
 ### One release request, end to end
 
+The steps below follow one request of a release from the schedule to its line in the published tables; the list after them names the functions on the same path.
+
+1. **Schedule.** The committed schedule gives the route a cell (a date and a UTC slot) and the route's offset inside the slot. The ladder's step rates fix the request's step and its intended send time, and the cell's seed enters its user text. For example, a 40-minute offset puts a route's 08:00 UTC cell due at 08:40 UTC. Its ladder starts after the start checks and the probe, no more than 15 minutes after that time, and lasts 28.5 minutes where it runs all five steps. At a binding rate of 2.429 requests per second the 0.25 step runs at 0.607 requests per second (0.60725 rounded down) and schedules 145 requests in its 240 s (145.68 rounded down), and the 1.0 step schedules 582.
+2. **Admission.** At the cell's start, after the clock and status records, the refresh command rewrites the recorded limits and model documentation and the balance command reads the account's balance. A cell is blocked here where the clock record holds no offset reading, its records were not rewritten, its balance is below its reservation, the balance command fails or prints anything but its one JSON object, or the balance is unavailable and the route records no `balance_unavailable` ruling. A route stops here where its limits as read, at its newest recorded price, no longer admit one of its step rates under the ceiling rule. [A cell, in order](#a-cell-in-order) lists these checks in the order `runCell` decides them.
+
+   The ledger then reserves one probe request plus every scheduled request of the cell against the route's and the release's liability caps; a refusal stops the route before any request is sent. Where a price was recorded for the route after the limits and the balance were checked, the ledger reserves nothing and the cell repeats both checks at the new price; a second such price blocks the cell.
+
+   The request's step rate is the step's fraction of the route's binding rate, rounded down to 0.001 requests per second. The schedule froze the binding rate before the window.
+3. **Body.** The request's user text is the prefix `cs-<seed>-<index>` (six-digit index), a space and a synthetic support ticket, or for Shape R a frozen one-line instruction. It replaces the one slot in the route's frozen body; every other byte is sent as configured, and the key travels in the one header the configuration names.
+4. **Send.** The client sends at the intended time and records the send, the time its connection was acquired and the time the socket accepted its request's last byte, its write time. A request whose worker reaches it more than 50 ms late is not sent. A write beyond the route's write limit for an evaluation window waits up to 50 ms for the window to admit it and is otherwise refused. Either fails G2 at the step. The 90 s hard timeout runs from the send.
+5. **Stream.** The first content event stamps the time to first token. `data: [DONE]` ends a chat-completions stream and `message_stop` a Messages stream. A whole answer arriving more than 30 s after the intended time is late and stays completed.
+6. **Record.** Every scheduled request of the ladder is one line of the cell's `attempts.jsonl`, sent or not, with its step and outcome, the status, finish reason and token counts of any response, and no answer text. Only a completion carries `in_time` or `late`, and a request never sent has an empty `outcome`. A cell interrupted after its ladder started has an empty file, and its manifest records `records_complete` false.
+7. **Cell report.** The request is one count on one line of its step in the cell's `report.json`: `completed_in_time` or `completed_late`, an error class, `censored`, or `unsent` for a request of an attempted step that was never sent. A response the route's configuration documents as a billing refusal counts on the step's `billing_refusal` line in place of its error class, and stops the route. Each line's count is over the step's scheduled requests, with a 95 percent binomial (Wilson score) interval. A step the cell's ladder ended before is reported as not attempted, with no counts; its requests stay in `attempts.jsonl` with an empty `outcome`. A completed request also raises the step's completion curve at its completion time and counts toward the step's throughput, the completions per second over the step's 240 s window.
+8. **Pages.** Where the route has twelve counted cells, its page pools that line over the cells that attempted the step. Where a change of tier, limits or model documentation between cells splits the frame, the page pools each part separately. A route with fewer counted cells has its cells' figures and no pooled figure. The index has one row per route and step and one column per main outcome line, each the line's pooled count over the pooled scheduled count; a row of an incomplete or split frame carries no counts. The index is ordered alphabetically by provider, route and step, and carries counts with no outcome rate, interval or ranking. The `billing_refusal` line is not pooled and has no index column.
+
+The same path in the code:
+
 1. The schedule file gives the cell its date, slot and offset; `loadgen.BuildLadder` fixes the request's step and t_i; the attempt seed is the `<seed>` of its prefix `cs-<seed>-<index>`.
 2. `runCell` admits the cell after its start checks; `gen.requestBody` puts the prefix and shape text in the frozen body's case slot.
 3. `gen.execute` sends at t_i unless 50 ms late; the first byte takes a write permit; `liveSeries` counts the send.
-4. The outcome (`in_time`, `late`, censored at 90 s, or an error class) is recorded in `attempts.jsonl` without the answer.
-5. The cell report counts it on its step's line and towards Hosted-G6; `pages` pools the line into `routes/<route>.txt`, and the index prints the pooled count.
+4. The outcome (completed with `in_time` or `late`, censored at 90 s, an error class, or none where the request was never sent) is recorded in `attempts.jsonl` without the answer.
+5. The cell report counts it on its step's line (`lineOf`) and towards Hosted-G6. Over twelve counted cells `pages` pools the line into `routes/<route>.txt` (`pool`), and the index prints the pooled count unless a drift split divides the frame.
 
 ## Tracing a published number back to raw records
 
 1. Find the line on `routes/<route>.txt` or in `routes/<route>.json`, or the row in `index.json`; each names its route, step and line.
-2. Read the cells that contributed: the route's `<route>/<label>-a<attempt>/manifest.json` files whose `release` record has the outcome `counted`. The route's evidence pack holds these manifests under `out/` and its page files under `pages/`. The pack holds no `attempts.jsonl`, report pair or configuration, so steps 3 to 5 read the cell's archive, `<route>-<cell>.tar.gz`, which holds the files the cell's directory under `--out` holds, and the route's configuration.
-3. Re-render one cell's report pair with `percentes --replay DIR --config FILE --out OUT`; it exits 1 unless the pair matches the manifest byte for byte. Where the route has a confidential limit, the configuration as published does not load, and only the retained `config.yaml` beside the cell's frames replays the cell.
-4. Check the cell's files with `percentes --check-release DIR --config FILE --frames ROOT`, which confirms the recorded hash of each file [its list](#replay-and-the-completeness-check) names. It reads the retained frame store, so only the operator can run it; a route with a confidential limit also needs `--release-key`.
+2. Read the cells that contributed: the route's `<route>/<label>-a<attempt>/manifest.json` files whose `release` record has the outcome `counted`. The route's evidence pack holds these manifests under `out/` and its page files under `pages/`. The pack holds no `attempts.jsonl`, report pair or configuration, so steps 3 to 5 read the cell's archive, `<route>-<cell>.tar.gz`, which holds the files the cell's directory under `--out` holds, and the route's configuration. A reader checks an evidence pack by comparing the `sha256sum` of each file its `inventory.json` lists, which is every file but the inventory, with the hash recorded there.
+3. Re-render one cell's report pair with `percentes --replay DIR --config FILE --out OUT`; it exits 1 unless the pair matches the manifest byte for byte. `make bins` builds the command as `bin/percentes`, and [Replay and the completeness check](#replay-and-the-completeness-check) defines DIR, FILE and OUT. Where the route has a confidential limit, the configuration as published does not load, and only the retained `config.yaml` beside the cell's frames replays the cell.
+4. Check the cell's files with `percentes --check-release DIR --config FILE --frames ROOT`, which confirms the recorded hash of each file [its list](#replay-and-the-completeness-check) names. It reads the retained frame store, so only the operator can run it; a route with a confidential limit also needs `--release-key`. The `percentes-release` commands `pages`, `pack` and `publish-check` read the frame store too, with the schedule and the admission ledger, so only the operator can run them.
 5. In that cell's `attempts.jsonl`, leave out records with `warmup` true and take the step's records. The cell has a figure for the step only where it attempted the step, that is where the step or a later one dispatched a request. Each record falls on one line (`lineOf`):
    - `outcome` empty (`""`): `unsent`;
    - `outcome` `censored`: `censored`;
@@ -911,7 +928,7 @@ A broken bound is a problem of its step's cell, and the rehearsal is not green. 
    - `outcome` `completed`: `completed_in_time` where `in_time` is true, `completed_late` where `late` is true.
 
    The line's count over the step's records is the cell's figure.
-6. For the route page's pooled figure, sum the step's line counts and its scheduled counts over the counted cells of the sampling frame that attempted the step with requests scheduled, or over one part where a drift split divides it (`pool`, `drift`).
+6. A route page has pooled figures only where the sampling frame holds twelve counted cells. For a pooled figure, take the counted cells that attempted the step with requests scheduled, over the whole frame or over one part where a drift split divides it (`pool`, `drift`), and keep each cell's line count and scheduled count as a pair. The sums of the pairs give the pooled count over the pooled scheduled count. The pooled interval needs each pair: the design effect in the formula of SPEC-HOSTED §8 comes from the spread of the cells' counts (`designEffect`).
 7. For a record's timings, read its frames in the frame store (`frames.jsonl` under `--frames`, named in the manifest's `frames`), each read with its time from the run epoch; the frame store is retained, so this step is the operator's.
 8. For a self-hosted run, find the field in the tables below; each row names the function that computes the field. A `*` in a field path stands for any key or index.
 
@@ -965,7 +982,32 @@ A broken bound is a problem of its step's cell, and the rehearsal is not green. 
 | A release rule | `internal/admission`, `internal/probe`, `internal/evidence`, `internal/report`, `cmd/percentes-release` | `make test-unit`; `percentes-release rehearse` |
 | A published field | the encoder and `report.FromRun` | `percentes --replay`; `evidence.CheckRelease` |
 
-`make test` runs `test-unit`, `test-ac`, `kind-smoke`, `reproduce`, `campaign-e2e` and `process-kill-e2e`; continuous integration (`.github/workflows/ci.yml`) runs the same stages in its `unit`, `ac` and `kind` jobs and lint in `lint`, each job's `actions/setup-go` step pinning Go 1.21.6 (`go-version`), the toolchain the `Makefile` selects through `GOTOOLCHAIN`. `make hooks` sets `core.hooksPath` to `hooks`: `pre-commit` runs gofmt (the Go source formatter), build and lint, `commit-msg` checks the subject line, and `pre-push` runs the race unit suite.
+### Running the test stages
+
+`make test-unit` runs the unit suite alone and `make test` every stage. This part lists the stages, the git hooks, the host ports the stages bind and what changes on macOS.
+
+`make test` runs `test-unit`, `test-ac`, `kind-smoke`, `reproduce`, `campaign-e2e` and `process-kill-e2e`; continuous integration (`.github/workflows/ci.yml`) runs the same stages in its `unit`, `ac` and `kind` jobs and lint in `lint`, each job's `actions/setup-go` step pinning Go 1.21.6 (`go-version`), the toolchain the `Makefile` selects through `GOTOOLCHAIN`.
+
+`make hooks`, run once per clone, sets `core.hooksPath` to `hooks`. `pre-commit` runs gofmt (the Go source formatter), build and golangci-lint, or `go vet` where the linter is absent. `commit-msg` requires a subject line of 55 characters or fewer in lowercase conventional style, with no body. `pre-push` runs the race unit suite with a 30-minute test timeout.
+
+`pre-commit`, `pre-push` and the `Makefile` select Go 1.21.6, the toolchain the pinned linter can read, unless `GOTOOLCHAIN` is already set.
+
+Before its timing-coupled tests, `test-ac` qualifies the host with a probe of timer wake lateness and garbage-collection pauses, described under [Gates](#gates). On a host that fails the probe those tests skip and `make test-ac` fails; `PERCENTES_AC_ALLOW_SKIPS=1` accepts the skips.
+
+The last four stages build a Docker image. `kind-smoke`, `reproduce` and `campaign-e2e` drive a kind cluster. `process-kill-e2e` runs the mock in a local Docker container and kills the container's init process. The stages bind these host ports:
+
+| Host port | Bound by | Override |
+|---|---|---|
+| 18000 | the kind cluster, as the mapping to the mock Service's NodePort 30800 | none; fixed in `deploy/kind/kind-config.yaml` |
+| 18080 | `kind-smoke` | `SVC_PORT` |
+| 18081 | `kind-smoke` | `POD_PORT` |
+| 18081 | `reproduce` | `ADMIN_PORT` |
+| 18082 | `campaign-e2e` | `ADMIN_PORT` |
+| 18100 | `process-kill-e2e` | `PK_PORT` |
+
+`reproduce` runs `percentes`, and `campaign-e2e` and `process-kill-e2e` run `percentes-campaign`. Each of the three writes its command's reports and a log of the command's output under `results/`.
+
+Each of those three stages builds its command with `CGO_ENABLED=0`; the build table under [Gates](#gates) lists which builds measure host CPU. On macOS a build without cgo reads no host CPU samples, so G2 (client validity) fails on the unmeasured CPU and every run in those stages is invalid. The command that ran it exits 2 and the stage itself passes. `percentes` prints a line starting `RUN INVALID (run-failing gate):` and `percentes-campaign` prints a line starting `CAMPAIGN NOTE: at least one run is invalid`.
 
 ## Glossary
 
