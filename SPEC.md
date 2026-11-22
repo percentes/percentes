@@ -1,6 +1,55 @@
 # v0.2 Harness Spec: Replica-Loss Resilience Characterization for Kubernetes LLM Inference
-### Project: Percentes. This document is the authoritative specification for the Percentes harness.
-### Status: Phase 0 implemented, mock-only with no graphics processing unit (GPU); §8 acceptance suite passed against this text on 15 September 2026. Phase 1: the §10 calibration procedure ran on one NVIDIA L40 on 16 September 2026 against a standalone container; the process-kill variant (amended 2026-10-02) runs a new standalone container under the same §6 engine, model and GPU pins; its runs, and the two-replica Kubernetes calibration and characterization runs, are pending.
+
+This document is the authoritative specification for the Percentes harness. A provider's managed endpoint is measured under [SPEC-HOSTED.md](SPEC-HOSTED.md). The version history of this document is in [§0](#0-scope-and-versions).
+
+## Read this first
+
+This part is informative; the normative text starts at [§0](#0-scope-and-versions).
+
+**The measurement:** one vLLM serving replica is lost while the service is under sustained load. vLLM is an open-source inference server for large language models (LLMs). The harness records how every scheduled request ended: completed, errored, or censored. A censored request had neither completed nor failed explicitly by the 30 s client timeout or, on an aborted run, by run end ([§3](#3-metrics-and-the-censoring-treatment-normative)). The harness also records how the surviving replica degrades, where there is one, and how long recovery takes, split into measured segments. [§1](#1-the-experiment) states the question in full.
+
+**Results so far:** the published runs used one vLLM replica in a standalone container. The two-replica experiment on Kubernetes has not run. [Status](#status) lists the work and its dates.
+
+**The fault variants:** a replica is lost in one of three ways, each defined in [§1](#1-the-experiment).
+
+| Variant | What is done | Topology |
+|---|---|---|
+| Clean delete | the replica's pod is deleted with a grace period of zero | two replicas on Kubernetes |
+| Black-hole | the replica's node is cut off from the network for 120 s; all traffic to and from it is dropped | two replicas on Kubernetes |
+| Process kill | the vLLM server process receives SIGKILL, a signal it cannot catch, and its container restarts in place | one replica in a standalone container |
+
+The black-hole variant represents node loss during the fault window. A run carries the node-loss-representative label when both runtime assertions in [§1](#1-the-experiment) hold: client-observed silence on the cut-off replica's in-flight requests, and staleness of the routed path (gates G3 and G4 in [§10](#10-phase-1-real-gpu-and-run-validity-gates)). A run in which either assertion fails or goes unobserved stays valid and is reported as clean-variant-equivalent. Recovery under this variant is the partition expiring and the same pod returning, reported as partition-heal recovery ([§5](#5-recovery-two-baselines-hysteresis-measured-decomposition)).
+
+**Pre-registration:** every gate, tolerance, and detector parameter carries a number fixed before data collection ([§0](#0-scope-and-versions)).
+
+### Status
+
+Phase 0 builds the instrument and tests it against a mock inference server, with no GPU. Phase 1 runs the same harness against vLLM on GPU hardware ([§10](#10-phase-1-real-gpu-and-run-validity-gates)).
+
+| Work | State |
+|---|---|
+| Phase 0, the instrument against the mock | implemented; the [§8](#8-acceptance-criteria-phase-0-against-the-mock-numbers-pinned) acceptance suite passed on 15 September 2026 and again [in CI on 16 November 2026](https://github.com/percentes/percentes/actions/runs/43935064489) |
+| Phase 1, the [§10](#10-phase-1-real-gpu-and-run-validity-gates) calibration procedure | ran on 16 September 2026 on one NVIDIA L40, against a standalone container ([write-up](https://percentes.ai/writing/2026/calibrating-one-l40-configuration/)) |
+| Phase 1, process-kill runs | five runs on 2 October 2026 on one NVIDIA L40, all valid, in a standalone container created for this variant, under the [§6](#6-configuration-control-enforced-verified-pinned) engine, model and GPU pins of the 16 September 2026 calibration ([write-up](https://percentes.ai/writing/2026/i-sigkilled-vllm-on-an-l40-under-load-it-served-again-after-42-seconds/)) |
+| Phase 1 on Kubernetes: the [§10](#10-phase-1-real-gpu-and-run-validity-gates) calibration in that environment, which measures one replica addressed directly, and the two-replica characterization runs | pending |
+
+[§0](#0-scope-and-versions) and [§8](#8-acceptance-criteria-phase-0-against-the-mock-numbers-pinned) state the limits of what a pass against the mock shows.
+
+### Section map
+
+| Section | Read it for |
+|---|---|
+| [§1](#1-the-experiment) | the question, the topology, the load profile and the fault variants |
+| [§2](#2-harness-components) | what each harness component must do, and the client checks that fail a run |
+| [§3](#3-metrics-and-the-censoring-treatment-normative) | the three request outcomes, the six error classes, the completion-incidence curve and the measurement windows |
+| [§4](#4-slo-pre-registered) | the service-level objective (SLO) that decides whether one request counts as good |
+| [§5](#5-recovery-two-baselines-hysteresis-measured-decomposition) | how recovery is detected and how its time is split into measured segments |
+| [§6](#6-configuration-control-enforced-verified-pinned) | the pinned configuration, and which rules carry over to a hosted target |
+| [§7](#7-statistics-single-stack-study) | which measures are pre-registered as primary (§7 calls each a primary endpoint), the process-kill claims and how five runs are summarized |
+| [§8](#8-acceptance-criteria-phase-0-against-the-mock-numbers-pinned), [§9](#9-build-order-phase-0-zero-gpu-each-module-gated-on-its-acs) | the acceptance tests against the mock, the build order and how the work is verified |
+| [§10](#10-phase-1-real-gpu-and-run-validity-gates) | the capacity calibration and the run-validity gates G1 to G7 |
+| [§11](#11-deferred-cross-stack-comparison-a-future-major-revision) | the deferred comparison against a second serving stack |
+| [Appendix](#appendix-conditional-headline-template) | the wording of the headline result, fixed before any data exists |
 
 ## 0. Scope and versions
 
