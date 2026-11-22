@@ -95,10 +95,10 @@ retained copy.
 A keyed hash here is an HMAC-SHA256 (a hash-based message authentication
 code built on SHA-256, the 256-bit Secure Hash Algorithm) under the
 release key: 32 random bytes that `percentes-release key create` writes
-once, at the freeze, to a file only its owner can read. Nobody without
-the key can check a guess against a keyed hash. Keep the key file
-private, as the API keys are: copy it to the client host, and leave it
-out of the repository.
+once, before the release's first ceiling check, to a file only its owner
+can read. Nobody without the key can check a guess against a keyed hash.
+Keep the key file private, as the API keys are: copy it to the client
+host, and leave it out of the repository.
 
 Never write a confidential limit's value, in any format, into a
 configuration comment, the operator file, a note, a URL or a file name.
