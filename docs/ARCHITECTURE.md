@@ -12,6 +12,7 @@ Phase 0 runs against the mock and needs no GPU (graphics processing unit); Phase
 - [Gates](#gates)
 - [Server-side sampling and the receive path](#server-side-sampling-and-the-receive-path)
 - [Fault modes](#fault-modes)
+- [Not implemented](#not-implemented)
 - [Hosted runs and the evidence files](#hosted-runs-and-the-evidence-files)
 - [The release runner](#the-release-runner)
 - [Tracing a published number back to raw records](#tracing-a-published-number-back-to-raw-records)
@@ -263,6 +264,18 @@ The first five are scheduled in `mock.fault_schedule` or armed through `/admin/f
 4. After the run, check the restart count advanced by exactly one, read the `die` and `start` events, the server log (`vllmlog.Parse`, `vllmlog.Apply`) and the after fingerprint; `collect.SplitAtFire` separates requests indeterminate at the fire, and the `outage` window is collected. Any failed check or read makes the run invalid.
 
 Commands run over SSH on `--ssh-target`, or locally when it is empty; a local kill runs through `sudo` or, with `--kill-via docker-helper`, a privileged helper container (Docker on macOS). `deploy/process-kill-e2e.sh` (`make process-kill-e2e`) kills the mock container once with `--dry-kill` and again in a two-run campaign.
+
+## Not implemented
+
+Not implemented for real vLLM:
+
+- replica attribution from the §1 layer-7 proxy (a proxy that routes each HTTP request to a replica); `loadgen` reads the serving replica only from the mock's `X-Percentes-Replica` header;
+- the node-partition injector;
+- producers for the G4 and G5 observations (`validity.Observations`);
+- a backlog-drain measurement;
+- the Kubernetes API and log boundaries of the decomposition under clean delete, which `NewDecomposition` reports N/A. Under process kill, `cmd/percentes-campaign` fills container start and the log rows, and the reschedule boundary is N/A under §5. Under black hole, §5 makes these boundaries N/A.
+
+No report or campaign applies the §7 Holm step-down to secondary comparisons; `stats.holm` is unexported and called only from its tests.
 
 ## Hosted runs and the evidence files
 
@@ -953,16 +966,6 @@ A broken bound is a problem of its step's cell, and the rehearsal is not green. 
 | A published field | the encoder and `report.FromRun` | `percentes --replay`; `evidence.CheckRelease` |
 
 `make test` runs `test-unit`, `test-ac`, `kind-smoke`, `reproduce`, `campaign-e2e` and `process-kill-e2e`; continuous integration (`.github/workflows/ci.yml`) runs the same stages in its `unit`, `ac` and `kind` jobs and lint in `lint`, each job's `actions/setup-go` step pinning Go 1.21.6 (`go-version`), the toolchain the `Makefile` selects through `GOTOOLCHAIN`. `make hooks` sets `core.hooksPath` to `hooks`: `pre-commit` runs gofmt (the Go source formatter), build and lint, `commit-msg` checks the subject line, and `pre-push` runs the race unit suite.
-
-Not implemented for real vLLM:
-
-- replica attribution from the §1 layer-7 proxy (a proxy that routes each HTTP request to a replica); `loadgen` reads the serving replica only from the mock's `X-Percentes-Replica` header;
-- the node-partition injector;
-- producers for the G4 and G5 observations (`validity.Observations`);
-- a backlog-drain measurement;
-- the Kubernetes API and log boundaries of the decomposition.
-
-No report or campaign applies the §7 Holm step-down to secondary comparisons; `stats.holm` is unexported and called only from its tests.
 
 ## Glossary
 
