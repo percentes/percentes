@@ -7,87 +7,97 @@ inference services. It sends requests on a schedule fixed in advance,
 records what happened to every one of them, and reports the result with
 the evidence a reader needs to recompute it. It serves two measurements:
 
-- **A self-hosted service under failure.** [SPEC.md](SPEC.md) §1 asks
-  what a replica loss costs a Kubernetes-served vLLM (an open-source LLM
-  serving engine) deployment: the requests the loss kills or strands, the
+- **A self-hosted service losing a replica.** This measurement is for
+  an engineer who runs vLLM (an open-source LLM serving engine) on
+  Kubernetes and wants to know what one lost replica does to live
+  traffic. It reports the requests the loss kills or strands, the
   degradation the surviving replica takes on, and how long recovery
-  takes, split into measured sub-phases.
-- **A provider's hosted application programming interface (API) under
-  load.** [SPEC-HOSTED.md](SPEC-HOSTED.md) measures a managed endpoint
-  from one client host through one ordinary paid account: how many
-  scheduled requests complete in time, how many fail and how, at five
-  offered-load steps, each sending its requests at equal intervals and
-  each a fraction up to 1.0 of the route's binding rate: the highest
-  rate at which the nominal demand (the requests, and their tokens and
-  spend at the worst case per request) stays within every rate, token,
-  concurrency and rolling spend limit in each evaluation window the
-  provider documents, and every daily limit over each of the provider's
-  reset days, and every cap recorded for the account
-  ([Measuring a hosted endpoint](#measuring-a-hosted-endpoint)).
+  takes, split into measured sub-phases. The rules are in
+  [SPEC.md](SPEC.md).
+- **A provider's hosted API under load.** This measurement is for an
+  engineer who buys LLM API capacity and sets retries, fallbacks and
+  timeouts from how the provider fails. Percentes sends five steps of
+  load from one client host through one ordinary paid account. At each
+  step it counts the scheduled requests that completed in time,
+  completed late, errored (by error class), timed out at the client or
+  were left unsent. The top step runs at the binding rate, which
+  is fixed in advance from the limits and caps recorded for the account,
+  with each request's tokens and cost taken at the worst case. The rules
+  are in [SPEC-HOSTED.md](SPEC-HOSTED.md), which opens with
+  [a plain summary](SPEC-HOSTED.md#read-this-first).
 
-You need the first if you run an inference service and want to know
-what one lost replica does to live traffic. You need the second if you
-buy LLM API capacity and set retries, fallbacks and timeouts from how
-the provider fails.
+## Status
 
-Three rules shape every measurement:
+**Self-hosted.** Two results are published, each from a single vLLM
+replica on one NVIDIA L40 GPU with no Kubernetes: a
+[calibration](https://percentes.ai/writing/2026/calibrating-one-l40-configuration/)
+on 16 September 2026 and a
+[process-kill campaign](https://percentes.ai/writing/2026/i-sigkilled-vllm-on-an-l40-under-load-it-served-again-after-42-seconds/)
+of five runs on 2 October 2026. The replica-loss experiment, with two
+replicas on Kubernetes, has not yet run.
+
+**Hosted.** No hosted result has been published.
+
+**Self-hosted phases.**
+[Not implemented](docs/ARCHITECTURE.md#not-implemented) lists what the
+code does not yet do against real vLLM.
+
+- **Phase 0, against a mock.** The instrument is built and certified
+  against a mock OpenAI-compatible server-sent events (SSE) server. The
+  acceptance-criteria (AC) suite of SPEC.md §8 passed in
+  [CI on 16 November 2026](https://github.com/percentes/percentes/actions/runs/43935064489):
+  AC1 to AC6 against the mock as a local process, and AC7 against two
+  mock replicas on a kind cluster. A pass certifies the measurement
+  machinery only.
+- **Phase 1, real vLLM on GPU hardware.** Phase 1 uses the same harness
+  and gates as Phase 0. The calibration ran the SPEC.md §10 procedure
+  against a standalone container. In the process-kill variant
+  (SPEC.md §1) a single replica's server process is killed and its
+  container restarts in place; all five runs were valid. The calibration
+  inside the experiment's Kubernetes environment and the two-replica
+  characterization runs are pending.
+
+**Hosted amendments.** Hosted amendments 1 and 3 to
+[SPEC-HOSTED.md](SPEC-HOSTED.md) were adopted on 19 October 2026 and
+hosted amendment 4 on 16 November 2026, each before any provider data
+was collected under that document. Hosted amendment 2 is a draft and is
+not adopted.
+
+## How it measures
 
 - **Open loop.** Every request's send time is fixed before the run, and
   the generator never waits for an answer before the next send. If it
   waited for slow answers, it would send fewer requests exactly while
   the service is slow and under-count that period, an error known as
-  coordinated omission. Every latency is measured from the request's
-  *intended* send time.
+  coordinated omission. Time to first token and time to completion are
+  measured from the request's *intended* send time.
 - **Three-state outcomes.** Every dispatched request ends in exactly one
   of completed, errored or censored (observed to the client timeout with
-  no terminal event: the pinned 30 s, or the hosted release's 90 s hard
-  timeout). A scheduled request left unsent, by a stop or, under the
-  release profile, for being more than 50 ms late, is reported on its
-  own line. Only completions enter latency histograms. Failure rates are
-  reported as figures in their own right.
-
-  The completion curve gives, for each time t after the intended send,
-  the share of all scheduled requests completed by t, estimated with the
-  Aalen-Johansen cumulative incidence estimator. Errors are competing
-  terminal events on the curve. A timeout is censored at the moment it
-  timed out, and under the release profile a scheduled request left
-  unsent is censored at the curve's horizon, the end of the observed
-  time (SPEC §3, SPEC-HOSTED §5).
-  - A latency quantile the completion curve never reaches inside the
-    horizon is refused and is never extrapolated. Add the share of
-    scheduled requests completed when the curve ends to the share still
-    without an ending (censored). Where that sum reaches the quantile,
-    the report prints the quantile as greater than the horizon. Where it
-    does not, the errored requests alone hold the curve below the
-    quantile, and the report prints it as unattainable.
+  no terminal event). Only completions enter latency histograms, and
+  failure rates are reported as separate figures. The completion curve
+  gives, for each time after the intended send, the share of all
+  scheduled requests completed by then. A latency quantile the curve
+  never reaches is refused and is never extrapolated ([SPEC.md](SPEC.md)
+  §3).
 - **Run-invalidating self-checks.** The client must show it was not the
-  bottleneck: send-skew, undispatched-request, central processing unit
-  (CPU) and garbage-collection (GC) pause gates, all pinned and
-  run-failing. These are the client gates; the full run-validity set is
-  SPEC §10. A self-hosted run that fails these checks exits invalid. A
-  release cell that fails them retains its evidence with a
-  client-invalid label and does not count toward frame completeness
-  (the twelve counted cells a route needs before it pools).
+  bottleneck: pinned gates on send lateness, unsent requests, CPU use
+  and garbage-collection pauses ([SPEC.md](SPEC.md) §2; §10 lists the
+  full run-validity set). A self-hosted run that fails one exits
+  invalid. A hosted cell (one run of the five load steps) that fails one
+  keeps its evidence and does not count toward the twelve cells
+  described under [The hosted measurement](#the-hosted-measurement).
 
-| Document | What it is | Read it when |
-|---|---|---|
-| [SPEC.md](SPEC.md) | the authoritative, pre-registered specification of the replica-loss experiment: every gate, tolerance and detector parameter carries a pinned number, enforced when a configuration loads, so a configuration that weakens one refuses to load | you want to know what a self-hosted run measures, or why a configuration refused to load |
-| [CHANGELOG.md](CHANGELOG.md) | every change to those rules since first publication, dated | you want to know what changed and when |
-| [SPEC-HOSTED.md](SPEC-HOSTED.md) | the hosted protocol SPEC.md §6 requires before any provider data is collected; its body carries the adopted amendments, its amendment log and Appendix A record them, and it opens with a plain summary for a first-time reader | you want to know what a hosted figure means |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how the code implements both documents: the packages, the commands, the evidence files, and one request followed from its schedule to its line in the report, with diagrams | you want to change the code or check a published number against it |
+## Documents
 
-## Scope
-
-Percentes is built in phases. Phase 0 builds and certifies the
-measurement instrument against a mock OpenAI-compatible server-sent
-events (SSE) server on a local kind cluster. Passing the
-acceptance-criteria (AC) suite certifies the measurement machinery only;
-real graphics processing unit (GPU) claims wait for Phase 1, which
-characterizes real vLLM on GPU hardware with the same harness and gates.
-Phase 1's SPEC §10 calibration procedure ran on 16 September 2026 on one
-NVIDIA L40 GPU against a standalone container; the calibration inside
-the experiment's Kubernetes environment and the characterization runs
-have not yet run.
+| Document | Read it when |
+|---|---|
+| [SPEC.md](SPEC.md) | you want the pre-registered rules of the replica-loss experiment, or to know why a configuration refused to load: every gate, tolerance and detector parameter is a pinned number, and a configuration that weakens one does not load |
+| [SPEC-HOSTED.md](SPEC-HOSTED.md) | you want to know what a hosted figure means; start at [Read this first](SPEC-HOSTED.md#read-this-first) |
+| [CHANGELOG.md](CHANGELOG.md) | you want every change to SPEC.md's rules since first publication, dated |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | you want to change the code or check a published number against it |
+| [docs/HOSTED-RELEASE.md](docs/HOSTED-RELEASE.md) | you run a hosted release |
+| [deploy/phase1/README.md](deploy/phase1/README.md) | you deploy vLLM on GPU hardware for a Phase 1 run |
+| [SPEC-HOSTED-AMENDMENT-DRAFT.md](SPEC-HOSTED-AMENDMENT-DRAFT.md) | you want hosted amendment 2, which specifies a privately reported pilot and is drafted and not adopted |
 
 ## Quickstart (no GPU required)
 
@@ -127,24 +137,6 @@ passes. In `reproduce`, `percentes` prints a line starting
 covers the git hooks, the Go toolchain the Makefile selects, the host
 ports each stage binds, the host probe the AC suite runs first and the
 line each command prints on macOS.
-
-## Layout
-
-```
-cmd/percentes            single-run harness command-line interface (CLI) for a self-hosted target; replay and the completeness check of a release cell
-cmd/percentes-campaign   N-run campaign runner for a self-hosted target (SPEC §5 repetition, §10 gates)
-cmd/percentes-calibrate  SPEC §10 capacity ramp and §5 single-replica reference
-cmd/percentes-pilot      the SPEC-HOSTED hosted amendment 2 (HA2) pilot: ledger, probe, dev, session, check-cpu
-cmd/percentes-release    a SPEC-HOSTED HA3 and HA4 (hosted amendments 3 and 4) release: key, schedule, ledger, ceiling-check, public-config, run, dispatch, pages, pack, publish-check, rehearse, check-cpu
-cmd/mockserver           fault-injectable mock inference server
-cmd/naivesweep           standalone reconnaissance probe, outside the instrument
-internal/                loadgen, collect, detect, orchestrator, validity, ...
-                         hosted: probe, admission, evidence, pilot, score, schedule, releasekey
-configs/                 pinned configurations; a *.reference.yaml per profile
-deploy/                  kind, mock and Phase 1 manifests; reproduce and capture scripts
-deploy/release/          added by a release's freeze commit: pct-refresh.py, which reads the provider pages, and the refresh-<route> wrappers that run it, one per provider (azure-R runs refresh-azure)
-docs/                    ARCHITECTURE.md and the draw.io diagrams under docs/diagrams/
-```
 
 <a id="measuring-a-hosted-endpoint"></a>
 
@@ -189,19 +181,16 @@ any format, into a configuration comment, the operator file (the file
 that names a run's provider, account tier, client host and record
 files), a note, a URL or a file name.
 
-## Sweeping an endpoint outside the instrument
+## Code layout
 
-`cmd/naivesweep` sweeps one OpenAI-compatible endpoint and reports what came
-back, including responses that returned 200 and carried nothing. It is
-reconnaissance, and nothing it prints is a published measurement. It
-admits nothing to a release's ledger, so a sweep on a paid account
-spends outside every release cap; keep it off release accounts during a
-collection window. Its configuration, its limits and what it redacts are
-in its own documentation:
-
-```
-go doc ./cmd/naivesweep
-```
+The seven commands under `cmd/` and the packages under `internal/` are
+listed in docs/ARCHITECTURE.md:
+[Binaries](docs/ARCHITECTURE.md#binaries) and
+[Package map](docs/ARCHITECTURE.md#package-map). One command,
+`cmd/naivesweep`, sweeps one OpenAI-compatible endpoint and reports what
+came back. It is reconnaissance outside the instrument, and nothing it
+prints is a published measurement; `go doc ./cmd/naivesweep` gives its
+configuration, its limits and what it redacts.
 
 ## License
 
