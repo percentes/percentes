@@ -91,60 +91,42 @@ have not yet run.
 
 ## Quickstart (no GPU required)
 
-This section gets the tree built and tested on one machine. Requires Go
-1.21 or newer, Docker, [kind](https://kind.sigs.k8s.io/), kubectl,
-python3 and curl. The Makefile and the git hooks select Go 1.21.6, which
-is the toolchain the pinned linter can read; set `GOTOOLCHAIN` yourself
-to override.
+Requires Go 1.21 or newer, Docker, [kind](https://kind.sigs.k8s.io/),
+kubectl, python3 and curl.
 
-```
-make hooks                    # once per clone: continuous-integration (CI) gates on commit and push
-make test-unit                # fast path: unit and integration tests only
-make reproduce                # AC7: one-command full harness run against the local cluster
-make test                     # the whole gate: unit + AC suite + kind smoke + reproduce + campaign end-to-end (e2e) + process-kill e2e
-make percentes-pilot          # bin/percentes-pilot, the hosted pilot command
-make percentes-release        # bin/percentes-release, the release runner for this host
-make percentes-release-linux  # a static linux/amd64 build of it for the client host
-```
-
-In that order: `make hooks` before your first commit, `make test-unit` to see
-the tree is sound, then the cluster targets. `make test` includes `make test-unit` and `make reproduce`.
-The two hosted binaries are needed only for the hosted measurement.
-
-`make hooks` points git at `hooks/`: gofmt, build and golangci-lint on
-commit (`go vet` when the linter is absent), and the race unit suite on
-push, with the 30-minute test timeout CI gives it, so a change fails
-locally before it fails CI. `hooks/commit-msg` requires a subject line
-of 55 characters or fewer in lowercase conventional style, with no
-body.
-
-The full gate's last four stages build a Docker image. Three of them
-drive a kind cluster; the process-kill stage runs the mock in a local
-Docker container on host port 18100, which `PK_PORT` overrides, and
-kills the container's init process. The AC suite measures this machine
-as well as the code: before its timing-coupled tests it qualifies the
-host with a probe (timer wake lateness and garbage-collection pauses,
-`internal/hostqual`).
-
-On a host that fails the probe those tests skip and `make test-ac`
-fails; `PERCENTES_AC_ALLOW_SKIPS=1` accepts the skips. When a
-timing-coupled assertion fails, the host is probed again: a host that
-lost qualification during the run skips the test, and one that kept it
-fails.
-
-The cluster stages bind host ports 18080 to 18082, which `SVC_PORT`,
-`POD_PORT` and `ADMIN_PORT` override, and host port 18000, the kind
-mapping to the mock Service's NodePort 30800, which is fixed in
-`deploy/kind/kind-config.yaml`. On macOS the stages that run the harness
-build it with `CGO_ENABLED=0`, which disables cgo (the Go mechanism for
-calling C code), and a macOS build without cgo reads no host CPU
-samples, so the host CPU gate reports unmeasured.
-
-Every run in those stages is then invalid, and the command that ran it
-exits 2 while the stage itself passes; `percentes` prints
-`RUN INVALID (run-failing gate)` and `percentes-campaign` prints
-`CAMPAIGN NOTE: at least one run is invalid`. Reports are written to
+`make reproduce` and `make test` act on the kind cluster named
+`percentes`; set `CLUSTER` to use another name. Both create the cluster
+if none of that name exists. If one exists and its control-plane node
+lacks the mapping from container port 30800 to host port 18000,
+`make reproduce` deletes that cluster and creates it again, whether run
+alone or as a stage of `make test`. Each stage that deploys to the
+cluster first deletes the cluster's `percentes` namespace, and each
+stage that runs the harness first deletes its previous output under
 `results/`.
+
+```
+make test-unit    # fast path: unit and integration tests only
+make reproduce    # one full harness run against mock replicas on kind
+make test         # the whole gate: every stage, including the two above
+```
+
+`make reproduce` deploys two mock replicas on the cluster and runs the
+harness against them once, with a fault injected on one replica. The
+run's report is `results/kind-e2e/report.txt`, with `report.json` beside
+it, and the stage checks the pair.
+
+The `reproduce`, `campaign-e2e` and `process-kill-e2e` stages write
+their reports under `results/` and build the command they run without
+cgo (the Go mechanism for calling C code). On macOS such a build reads
+no host CPU samples, so the host CPU gate reports unmeasured and every
+run in those stages is invalid. The command exits 2 and the stage itself
+passes. In `reproduce`, `percentes` prints a line starting
+`RUN INVALID (run-failing gate):`.
+
+[Running the test stages](docs/ARCHITECTURE.md#running-the-test-stages)
+covers the git hooks, the Go toolchain the Makefile selects, the host
+ports each stage binds, the host probe the AC suite runs first and the
+line each command prints on macOS.
 
 ## Layout
 
