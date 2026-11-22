@@ -1,68 +1,221 @@
 # Hosted Measurement Protocol: Managed Inference Endpoints
-### Project: Percentes. This document is the pre-registered protocol SPEC.md §6 requires before any hosted-provider data is collected.
-### Status: drafted 2026-08-19, revised 2026-09-26. Hosted amendments 1 and 3 (HA1 and HA3) adopted 2026-10-19 and hosted amendment 4 (HA4) adopted 2026-11-16, each later amendment modifying the earlier ones where they differ, and written into §1 to §9. HA1, HA3 and HA4 were each adopted before any provider data was collected under this document and before any release published.
+
+This document is part of Percentes. It is the pre-registered protocol [SPEC.md](SPEC.md) §6 requires before any hosted-provider data is collected.
+
+- **Status.** No release has published under this protocol as of 2026-11-22. [README.md](README.md) carries the current status.
+- **Versions.** This is v0.3. Version 0.1 was drafted on 2026-08-19 and revised through 2026-09-26. Hosted amendments 1 and 3 (HA1 and HA3) were adopted on 2026-10-19 and hosted amendment 4 (HA4) was adopted on 2026-11-16. Each was adopted before any provider data was collected under this document and before any release published.
+- **Amendments.** HA1, HA3 and HA4 are written into §1 to §9. A later amendment modifies an earlier one where they differ. Hosted amendment 2 (HA2) is a draft in [SPEC-HOSTED-AMENDMENT-DRAFT.md](SPEC-HOSTED-AMENDMENT-DRAFT.md) and is not adopted.
 
 ## Read this first
 
 This part is informative; the normative text starts at §0.
 
-**What is measured.** One large language model (LLM) behind one provider's hosted application programming interface (API), reached from one client machine through one ordinary paid account. The protocol calls that combination a route. For every request it sends to a route it records which of three states the request ended in: completed (split into within the 30 s deadline and late), errored (failed, with the failure classed), or still unanswered at 90 s, which the protocol calls censored. A scheduled request left unsent, by a stop or because it was more than 50 ms late, is counted on its own line. It also records how long each completion took to start and to finish.
+This protocol measures how one model on one provider's hosted API answers a fixed schedule of requests at five steps of load. Read this part to interpret a published route page; §1 to §9 hold the rules behind it. The self-hosted replica-loss experiment is specified in [SPEC.md](SPEC.md).
 
-**Against which providers.** This document carries no list of providers. A release's routes are the routes whose configuration files are frozen, with their recorded limits, before its collection window opens, and its dated page names each one.
+- **One route per measurement.** A route is one provider, one model identifier, one endpoint, one account tier and one request shape, reached from one client machine through one ordinary paid account. The request shape is Shape S or Shape R, set out under [What each request carries](#what-each-request-carries).
+- **Every scheduled request of an attempted step is counted.** A request that was sent ends completed, errored or censored. A completion is in time when the whole answer arrives within 30 s of the intended send time, and late otherwise. A sent request with no terminal event 90 s after its actual send is censored. A scheduled request that an attempted step left unsent is counted on its own line. Where the five steps end early, each step not reached is recorded as not attempted, with no outcome counts.
+- **Load follows the account's limits.** Five steps run at 0.25, 0.5, 0.75, 0.9 and 1.0 of the route's binding rate, which the account's recorded limits and caps set. [How the rates are set](#how-the-rates-are-set) gives the tests. The client never retries.
+- **Twelve cells per route.** A cell is one run of the five steps. The twelve cells cover six UTC start times, each once on a weekday and once on a weekend day. A route's page pools its cells only when twelve of them count.
+- **Fixed before any cell runs.** The schedule, each route's request body, its recorded limits and its rates are committed to this repository before the collection window opens. A confidential limit (a value only the account console shows, under terms that keep it confidential) is committed by its dimension, its source and the keyed hash of its retained snapshot, with the string `"[retained]"` in place of its value. The value stays in the operator's retained files, which are unpublished. [Fixed in advance](#fixed-in-advance) lists what the commit holds.
+- **Counts, with no ranking.** A route's page gives each outcome as a count with a 95 percent interval. The one table across routes carries counts only.
 
-Where a rule depends on one provider's own documentation, the rule names that provider (§1, §3 and §9); those names attach the rule and do not list a release's routes. A provider whose terms do not permit the planned traffic and the publication is not measured (§2, terms review); where its terms permit publication only with its written permission, its route enters only with that permission in hand.
+### Where each rule lives
 
-Each route must use one of two recognised streaming request shapes: the chat-completions shape, whose stream the instrument reads to its `data: [DONE]` frame, or the Anthropic Messages shape, whose stream ends at `message_stop`. A provider with another shape is measured only after a numbered amendment adds its shape.
+| You want to know | Read |
+|---|---|
+| what one measurement covers, and what a release may set side by side | [§1](#1-the-measurement) |
+| what is recorded about the model, the endpoint, the account, the provider's terms and the client machine, and the ceiling check (ten requests at one output token limit; the checks choose the limit the route's requests carry) | [§2](#2-endpoint-model-and-client-host) |
+| the ladder (the five load steps), the two request shapes (Shape S and Shape R), the ceiling rule (the tests against the account's limits that set the binding rate), and the balance check before each cell | [§3](#3-load-profile-pinned) |
+| the twelve cells: their slots (the six UTC start times), dates, each route's offset inside the slot, and re-runs | [§4](#4-temporal-sampling-frame) |
+| how a request is classed, and how a 429 status is labelled | [§5](#5-outcome-model-and-the-treatment-of-429) |
+| which settings the client applies, and which of the provider's cannot be verified | [§6](#6-pins-applied-and-not-verifiable) |
+| when a cell does not count because a step failed the client-validity gate (G2), and the fraction completed within the deadline, printed against 0.99 (hosted-G6) | [§7](#7-run-validity-and-the-reported-criterion) |
+| the tables, the intervals and the completion curve's bands on a page | [§8](#8-reporting) |
+| the files each cell publishes, and the steps before a release publishes | [§9](#9-required-artifacts-and-the-publication-rule) |
+| each amendment as adopted | [§0](#0-scope-subordination-and-amendment-log) and [Appendix A](#appendix-a-amendment-text-as-adopted) |
 
-**How.** The client sends requests on a schedule fixed in advance and never retries. That schedule is open loop: a slow answer never delays the next send.
+### What is measured
 
-One cell is one run of a route's ladder, 28.5 minutes: a 60 s warm-up, then five steps of offered load at 0.25, 0.5, 0.75, 0.9 and 1.0 of the route's binding rate (the next paragraph defines it), 240 s each, each step's requests sent at equal intervals, with a 90 s drain after every step in which nothing is sent, so every request of a step has ended before the next step starts. Twelve cells per route cover six Coordinated Universal Time (UTC) start times, each once on a weekday and once on a weekend day.
+The protocol measures one large language model (LLM) behind one provider's hosted API, reached from one client machine through one ordinary paid account. The unit it measures is a route: one provider, one model identifier, one endpoint, one account tier and one request shape.
 
-Before a route runs, three kinds of limit are recorded: every limit the provider publishes for the account, every value its console shows, and every limit the operator set.
+For every request it sends to a route, the protocol records which of three states the request ended in.
 
-A route's binding rate is the highest rate at which its nominal demand (the requests, tokens and spend a rate asks for, counted at the worst case per request) is at most each rate, token, concurrency and spend-window limit in every evaluation window the provider documents and each daily limit over each of the provider's reset days, and at which the monthly and liability caps cover the route's worst case over its twelve cells, two re-runs and 100 probe requests.
+| State | Meaning |
+|---|---|
+| completed | the whole answer arrived: in time within 30 s of the intended send time, late otherwise |
+| errored | failed, with the failure classed |
+| censored | no terminal event 90 s after the actual send |
 
-On a prepaid account that tops itself up automatically, the balance at which it tops up must be at least the worst-case cost of the route's costliest cell. That is the ceiling rule.
+Three cases are handled apart.
 
-A limit counted at generation, which the provider may count a request against until the request ends, is tested over its window plus 0.1 s plus the 90 s hard timeout, on the stated assumption that a provider stops counting a request once the client gives up on it at that timeout. A limit the provider documents without a published value caps the route at 0.5 requests per second or excludes it. The step rates are fractions of the binding rate, and the page names the limit that sets it, the binding limit.
+- A request of an attempted step that was left unsent, by a stop or because it was more than 50 ms late, is counted on the step's `unsent` line.
+- A response the route's configuration documents as a spend-limit or exhausted-balance refusal is counted on the step's `billing_refusal` line in place of its error class, and stops the route (§5).
+- The requests of a step the ladder never reached are never sent. The page records the step as not attempted, with no outcome counts, and the cell's `attempts.jsonl` holds one record for each scheduled request, theirs included.
 
-The request body is one fixed JSON (JavaScript Object Notation) document per route; the only part that changes per request is the user text: a unique prefix `cs-<seed>-<index>` (the index zero-padded to six digits), a space and a synthetic support ticket (Shape S, the protocol's request), or a frozen one-line instruction (Shape R, a short request that measures request-count limits).
+The protocol also records how long each completion took to start and to finish.
 
-Before the window, a ten-request check per route chooses the output ceiling for its host group (the routes that serve one model with one request shape): for Shape S 512 tokens or the 1,024-token fallback, for Shape R 16 tokens or, where the route declares it, the 256-token fallback.
+### How a route is loaded
 
-At each cell's start the route's limits and model documentation pages are read again; a cell whose records were not refreshed does not start, and a route stops where its frozen step rates fail the ceiling rule against the limits as read. At each cell's start the route's balance command also reads the account's balance; it blocks the cell when a readable balance is below the cell's reservation (its probe and scheduled requests at the ledger's price), when the command fails, or when the balance is unavailable and the route records no `balance_unavailable` ruling (§3).
+The client sends requests on a schedule fixed in advance and never retries. That schedule is open loop: a slow answer never delays the next send.
 
-**What publishes, and what does not.** Published per cell: the configuration file, one record per request (`attempts.jsonl`), the probe, clock, status, refresh and balance records, the dispatch series, the ceiling-check records of every route of the same host group and, for Shape S, each other route's record given to `run` that spent a byte cap, the report pair (the machine-readable report and its text rendering), and a manifest carrying the instrument commit and the SHA-256 (256-bit Secure Hash Algorithm) hash of every file, except that on a route with a confidential limit it names the frame store, the operator file and the operator records by their keyed hash (a hash under a secret key the operator keeps, §9); per route, its page and its window-close record (its limits and model documentation read once more after its last cell); per release, the index, and on the page the dates and outcomes the publication record holds.
+One cell is one run of a route's ladder, its five steps of rising load. With the warm-up and the drains, a cell that runs all five steps takes 28.5 minutes.
 
-The route page shows, per step and per cell, each outcome as a count over the step's scheduled requests with a 95 percent interval; each step pooled over the cells that attempted it; the completion curve with its bands; and the time to first token and whole-answer distributions. One index table across routes carries counts only, in alphabetical order, with no ranking.
+| Phase | Length | What is sent |
+|---|---|---|
+| Warm-up | 60 s | requests at the lowest step's rate, outside every step's measured window |
+| Five steps | 240 s each | offered load at 0.25, 0.5, 0.75, 0.9 and 1.0 of the route's binding rate, each step's requests at equal intervals |
+| Drain after every step | 90 s | nothing, so every request of a step has ended before the next step starts |
 
-Not published: the model's answers (kept 12 months, unpublished, where the route's recorded terms permit keeping them, and otherwise not kept at all), response header values a provider's terms keep confidential, the value of a limit that only the account console shows under terms that keep it confidential (its source and the keyed hash of its retained snapshot publish in its place; a limit taken from a public documentation page publishes in full), request identifiers where terms restrict them, and the legal name on the account, unless the operator's dated record publishes it.
+A step whose 429 responses (class status_429, §5) exceed half of its scheduled requests ends the ladder when its drain ends: the higher steps are not attempted, and the cell still counts. §5 lists everything that blocks a cell, ends a ladder or stops a route.
 
-The page carries no quality score and no price comparison, and it estimates no provider-wide reliability: it describes the dated runs it reports.
+Twelve cells per route cover six UTC start times, each once on a weekday and once on a weekend day.
 
-**Fixed in advance.** This document, with every amendment its log lists as adopted, is public in this repository before a release sends its first paid request, which is a ceiling-check request.
+### How the rates are set
 
-Before the collection window opens, the following are committed here: the master seed and the schedule it derives (each cell's date and slot, and each route's offset); each route's configuration file as published (§9), with its request body frozen by hash; the recorded limits with their hashes; the ceiling each host group runs at, with its check records; each route's binding rate, binding limit and five step rates; the refresh command under `deploy/release/` (`pct-refresh.py` and the `refresh-<route>` wrappers that run it, one for each provider it reads, the routes of one provider sharing its wrapper); and the acceptance run's `rehearsal.json` (§9).
+Before a route runs, three kinds of limit are recorded: every limit the provider publishes for the account, every value its console shows, and every limit the operator set. Each recorded limit is marked public or confidential: a confidential limit is one whose value only the account console shows, under terms that keep it confidential.
 
-Changing a date and slot after the window opens is a numbered amendment (§4), and a change in the recorded limits or model documentation lines inside the window (§2, documentation snapshots) splits the pooled figures and changes no binding rate or step rate, while limits that no longer admit a step rate the route runs stop the route (§4, drift). These are fixed before any cell runs, so no rate, step, date or ceiling is chosen after a cell's result is seen.
+A route's binding rate is the highest rate that passes every test below, other than a confidential limit's. Together the tests are the ceiling rule. Nominal demand is the requests, tokens and spend a rate asks for, counted at the worst case per request.
 
-**How to read a result.** A per-cell line on a route page prints as `count/scheduled rate [low, high]`: a count over the step's scheduled requests, the rate, and a 95 percent Wilson interval. The Wilson interval is the range of rates consistent with the count. A pooled line adds the range of cell rates, the cells with events, the design effect (DEFF) and the effective sample size its interval uses.
+- Nominal demand is at most each rate, token, concurrency and spend-window limit in every evaluation window the provider documents.
+- Nominal demand is at most each daily limit over each of the provider's reset days.
+- Each monthly cap, provider spend limit and per-route liability cap covers the worst case of every route recorded against it: each route's twelve cells, its two re-runs and a probe allowance of 100 requests. A probe is the one request sent before a cell's ladder (§5).
+- On a prepaid account that tops itself up automatically, the balance at which it tops up is at least the worst-case cost of the route's costliest cell.
 
-A rate pooled over several cells prints a wider interval when its events bunch in a few cells, because requests inside one cell share its hour and conditions. Example, twelve cells of 120 requests at one step: one event in each cell gives a DEFF of 1.00 and an interval of 0.48 to 1.45 percent; all twelve events in one cell give a DEFF of 12.10, an effective sample of 119 requests, and an interval of 0.15 to 4.60 percent.
+Three kinds of limit are tested differently.
 
-§8 gives the formula. The index sets two routes' counts side by side only at the same step; a step is a fraction of each route's own binding rate, so one step carries different rates on different routes, and the protocol makes no ranked claim between routes (§1).
+- A limit counted at generation, which the provider may count a request against until the request ends, is tested over its window plus 0.1 s plus the 90 s hard timeout. This rests on the stated assumption that a provider stops counting a request once the client gives up on it at that timeout.
+- A dimension the provider documents, with no value published and none shown in the console, caps the route at 0.5 requests per second or excludes it, by the operator's dated record before the freeze.
+- A confidential limit never sets the binding rate. It is tested at the binding rate, and a route whose confidential limit fails that test is excluded.
 
-SPEC.md §11 bars winner language until a comparison has a measured noise floor (how much the same measurement varies from run to run) and a pre-registered minimum detectable effect (the smallest difference the comparison is built to detect), and a release has neither. A test fails the build if the index carries any of the strings rank, winner, best, worst, interval, sort key or p99 (the 99th percentile).
+The binding rate is frozen rounded down to 0.001 requests per second, and each step's rate is its fraction of the binding rate, rounded down the same way. The limit or cap that sets the binding rate is the binding limit, and the route's page names it with its window.
 
-Each route prints its binding limit X, whose test (nominal demand at most X, or at most 0.5 requests per second for a limit the provider documents without a value) sets its binding rate; a step a route stop left unrun is marked with the limit that stopped it. Where a limit so named is confidential, the route page's line names its source and hash in place of its value, and the index row names the limit alone.
+The word ceiling has two uses in this document. The ceiling rule tests a route's rates against the account's limits. The output ceiling is the output token limit sent with every request, and the ceiling check, described next, chooses it.
 
-A zero count gives an upper bound: 0 events in 120 requests leave an upper bound of 3.10 percent. That bound treats the cell's requests as independent, and a bound over cells treats the cells as independent (§8). Two checks apply to every cell whose ladder runs. They carry the numbers of SPEC.md §10's run-validity gates, G1 to G7, of which only these two can be evaluated against a hosted endpoint.
+### What each request carries
 
-G2, the client-validity gate, withholds a cell when the client machine was the bottleneck: requests sent late (send skew, the time from intended to actual send, above 5 ms at the 99th percentile or above 50 ms for any request), a scheduled request never sent, a request write the client's own write limit refused (§3), central processing unit (CPU) use above 70 percent over any 5 s window, or a garbage-collection pause 99th percentile whose bucket in the Go runtime's pause histogram has an upper edge of 1 ms or more.
+The request body is one fixed JSON document per route. The only part that changes per request is the user text. Each route has one of two request shapes, and the shape fixes what the user text holds and the output ceiling.
 
-A withheld cell is re-run within the limits of §4 Re-runs. Hosted-G6 is the fraction of scheduled requests completed within the 30 s deadline, printed against a 0.99 line; it never withholds a cell.
+| Request shape | User text | Output ceiling |
+|---|---|---|
+| Shape S, the protocol's request | a unique prefix `cs-<seed>-<index>` (the index zero-padded to six digits), a space and a synthetic support ticket | 512 tokens, or the 1,024-token fallback |
+| Shape R, a short request that measures request-count limits | the same prefix, a space and a frozen one-line instruction | 16 tokens, or the 256-token fallback where the route declares it |
 
-**Terms used below.**
+Before the window, ceiling checks choose the output ceiling for each host group (the routes that serve one model with one request shape). A full ceiling check is ten requests from one route at one ceiling. A route can need more than one check, for example a second at the fallback ceiling or the one permitted repeat of a refused check. §2 and §3 give the pass tests and the exclusions.
+
+Separately from its request shape, each route's endpoint streams in one of two formats, which §1 calls streaming request shapes:
+
+- the chat-completions format, whose stream the instrument reads to its `data: [DONE]` frame;
+- the Anthropic Messages format, whose stream ends at `message_stop`.
+
+A provider with another streaming format is measured only after a numbered amendment adds it.
+
+### Which providers
+
+This document carries no list of providers. A release is a set of route measurements published together on one dated page (§1). Its routes are the routes whose configuration files are frozen, with their recorded limits, before its collection window opens, and its dated page names each one.
+
+Some rules name a provider (§1, §3 and §9) because they depend on that provider's own documentation. Those names do not list a release's routes.
+
+A provider whose terms do not permit the planned traffic and the publication is not measured (§2, terms review). Where its terms permit publication only with its written permission, its route enters only with that permission in hand.
+
+### At each cell's start
+
+The route's limits and model documentation pages are read again. A cell whose records were not refreshed does not start, and a route stops where its frozen step rates fail the ceiling rule against the limits as read.
+
+The route's balance command also reads the account's balance. It blocks the cell in three cases:
+
+- a readable balance is below the cell's reservation (its probe and scheduled requests at the ledger's price);
+- the command fails, or prints anything other than the one JSON object §3 defines;
+- the balance is unavailable and the route records no `balance_unavailable` ruling (§3).
+
+### How to read a result
+
+A per-cell line on a route page gives an outcome's name, its count over the step's scheduled requests, the rate as a percentage and a 95 percent Wilson interval in square brackets. The Wilson interval is the range of rates consistent with the count. A pooled line adds the range of cell rates, the cells with events, the design effect (DEFF) and the effective sample size its interval uses.
+
+**Pooled rates.** A rate pooled over several cells prints a wider interval when its events bunch in a few cells, because requests inside one cell share its hour and conditions. Example, twelve cells of 120 requests at one step:
+
+- one event in each cell gives a DEFF of 1.00 and an interval of 0.48 to 1.45 percent;
+- all twelve events in one cell give a DEFF of 12.10, an effective sample of 119 requests, and an interval of 0.15 to 4.60 percent.
+
+§8 gives the formula.
+
+**Zero counts.** A zero count gives an upper bound: 0 events in 120 requests leave an upper bound of 3.10 percent. That bound treats the cell's requests as independent, and a bound over cells treats the cells as independent (§8).
+
+**Two routes side by side.** The index sets two routes' counts side by side only at the same step. A step is a fraction of each route's own binding rate, so one step carries different rates on different routes. The index carries counts only, and the protocol makes no ranked claim between routes (§1). SPEC.md §11 bars winner language until a comparison has a measured noise floor (how much the same measurement varies from run to run) and a pre-registered minimum detectable effect (the smallest difference the comparison is built to detect), and a release has neither.
+
+**The binding limit on the page.** Each route's page names its binding rate and its binding limit, with the limit's window. A confidential limit that stops or excludes a route is named by its dimension, source and keyed hash, without its value (§3). §1 and §8 fix what the index carries for each route and step.
+
+### Two checks on every cell
+
+Two checks apply to every cell whose ladder runs. They carry the numbers of SPEC.md §10's run-validity gates, G1 to G7, of which only these two can be evaluated against a hosted endpoint.
+
+**G2.** The client-validity gate checks that the client machine was not the bottleneck. It is judged per step, when the step's drain ends, and any one of these fails the step:
+
+- requests sent late: send skew (the time from intended to actual send) above 5 ms at the 99th percentile, or above 50 ms for any request;
+- a scheduled request of the step never sent;
+- a request write the client's own write limit refused (§3);
+- CPU use above 70 percent over any 5 s window;
+- a garbage-collection pause 99th percentile whose bucket in the Go runtime's pause histogram has an upper edge of 1 ms or more;
+- a criterion the step could not measure.
+
+The first step's counts of unsent requests and refused writes include the warm-up's. A failed step ends the ladder. The cell does not count toward the route's twelve, and it is re-run within the limits of §4 Re-runs. The steps a ladder never reached fail nothing: a cell whose ladder ended on 429 responses still counts, as [How a route is loaded](#how-a-route-is-loaded) states.
+
+**Hosted-G6.** The fraction of scheduled requests completed within the 30 s deadline is printed against a 0.99 line. It never withholds a cell.
+
+### What publishes
+
+| Per | Published |
+|---|---|
+| cell | the configuration file; one record per request (`attempts.jsonl`); the probe, clock, status, refresh and balance records; the dispatch series; the ceiling-check records of every route of the same host group and, for Shape S, each other route's record given to `run` that spent a byte cap; the report pair (the machine-readable report and its text rendering); a manifest carrying the instrument commit and the SHA-256 hash of every file, except as the next paragraph states |
+| route | its page, and its window-close record (its limits and model documentation read once more after its last cell) |
+| release | the index and, on the page, the dates and outcomes the publication record holds |
+
+On a route with a confidential limit, the manifest names the frame store, the operator file and the operator records by their keyed hash (a hash under a secret key the operator keeps, §9).
+
+The route page shows:
+
+- per step and per cell, each outcome as a count over the step's scheduled requests with a 95 percent interval;
+- for a route with twelve counted cells, each step pooled over the cells that attempted it;
+- the completion curve with its bands;
+- the time to first token and whole-answer distributions.
+
+A route with fewer than twelve counted cells publishes them as labelled cells, with no pooled figure. Where a change in the recorded limits or model documentation between cells splits a complete frame, each part pools separately (§4, §8).
+
+One index table across routes carries counts only, in alphabetical order, with no ranking. Its counts are pooled over a route's whole frame, so the rows of a route with an incomplete or split frame carry none (§8).
+
+### What does not publish
+
+- The model's answers. They are kept 12 months, unpublished, where the route's recorded terms permit keeping them, and otherwise not kept at all.
+- Response header values a provider's terms keep confidential.
+- The value of a limit that only the account console shows under terms that keep it confidential. Its dimension, its source and the keyed hash of its retained snapshot publish in its place. A limit taken from a public documentation page publishes in full.
+- Request identifiers, where terms restrict them.
+- The legal name on the account, unless the operator's dated record publishes it.
+
+The page describes the dated runs it reports. It carries no quality score and no price comparison, and it estimates no provider-wide reliability.
+
+### Fixed in advance
+
+This document, with every amendment its log lists as adopted, is public in this repository before a release sends its first paid request, which is a ceiling-check request.
+
+Before the collection window opens, the following are committed here. The protocol calls that commit the freeze.
+
+- The master seed and the schedule it derives: each cell's date and slot, and each route's offset.
+- Each route's configuration file as published (§9), with its request body frozen by hash.
+- The recorded limits with their hashes, as the configuration as published carries them. A public limit is committed with its value. A confidential limit is committed by its dimension, its source and the keyed hash of its retained snapshot, with the string `"[retained]"` in place of its value.
+- The ceiling each host group runs at, with its check records. A check record carries a confidential limit's snapshot without its value.
+- Each route's binding rate, binding limit and five step rates.
+- The refresh command under `deploy/release/`: `pct-refresh.py` and the `refresh-<route>` wrappers that run it, one for each provider it reads, the routes of one provider sharing its wrapper.
+- The acceptance run's `rehearsal.json` (§9).
+
+On a route with a confidential limit, `percentes-release public-config` writes the configuration as published from the file as loaded, with each confidential value replaced. The value stays in the file as loaded and in the limit's retained snapshot, which §9 lists as retained and unpublished. The operator keeps the release key (the secret the keyed hashes are made under) out of this repository. The operating rule in [README.md](README.md) forbids writing such a value in any text, and §9's known limits name the places where the checks do not find one.
+
+Everything in the list is fixed before any cell runs, so no rate, step, date or ceiling is chosen after a cell's result is seen. After the window opens:
+
+- changing a date and slot is a numbered amendment (§4);
+- a change in the recorded limits or model documentation lines read at a cell's start (§2, documentation snapshots) splits the pooled figures from that cell on, and changes no binding rate or step rate;
+- a change first read after the route's last cell, in its window-close record, is named on the route's page and splits nothing (§4, drift);
+- limits that no longer admit a step rate the route runs stop the route (§4, drift).
+
+### Terms used below
 
 | Term | Meaning |
 |---|---|
@@ -70,11 +223,11 @@ A withheld cell is re-run within the limits of §4 Re-runs. Hosted-G6 is the fra
 | Host | a route serving a given model; a model offered by two providers has two hosts. The machine that sends the requests is the client host |
 | Host group | every route of a release that serves one model with one request shape; the ceiling check is decided across the group, less any host left out under §2 |
 | Account group | the routes recorded against one provider account or deployment; their sends are counted together for each status_429 (§5), and their liability caps sum to at most the group's recorded spend limit (§3) |
-| Cell | one run of a route's ladder in one UTC slot on one day type; for example, a route with a 40-minute offset runs its weekday 08:00 UTC cell from 08:40 to 09:08:30 UTC on its drawn weekday |
+| Cell | one run of a route's ladder in one UTC slot on one day type; for example, a 40-minute offset puts a route's weekday 08:00 UTC cell due at 08:40 UTC on its drawn weekday, and a ladder that starts then and runs all five steps ends at 09:08:30 UTC |
 | Step | one rung of the ladder: one offered load for 240 s at a fraction of the route's binding rate; for example, the 1.0 step of a route whose binding rate is 2.429 requests per second, 582 scheduled requests, then a 90 s drain |
 | Ladder | the five steps of one cell, climbed in ascending order: 0.25, 0.5, 0.75, 0.9 and 1.0 of the route's binding rate, with requests at equal intervals |
 | Drain | the 90 s after a step in which nothing is sent |
-| Warm-up | the first 60 s of a cell, at the lowest step's rate, discarded |
+| Warm-up | the first 60 s of a cell, at the lowest step's rate, outside every step's measured window |
 | Frame | a route's twelve cells, each of the six slots once on a weekday and once on a weekend day; its request count publishes per route with the binding rate |
 | Characterization | one route's measurement over its frame; it publishes as a characterization, with pooled figures, only with twelve counted cells inside one collection window |
 | Offset | a route's fixed start inside every slot, so two routes never start together |
@@ -99,7 +252,7 @@ A withheld cell is re-run within the limits of §4 Re-runs. Hosted-G6 is the fra
 | Expected identifier | the model identifier each response's reported one is compared with: the requested one, or the one the model documentation names with it as one build (§2) |
 | Admission ledger | the hash-chained file (each line carries the SHA-256 hash of every line before it) in which each request is reserved at its worst-case cost against the liability caps before it is sent, and settled after (§9) |
 | Liability cap | the most the operator lets a release commit to spend, in US dollars (USD), set per route and across all routes; the admission ledger reserves each request at the highest price recorded for the route at the request's token bounds before it is sent, and refuses a reservation that would pass either cap |
-| Freeze | the commit to this repository, before the collection window opens, of the schedule, each route's configuration with its body hash, the recorded limits, the ceiling each host group runs at, each route's binding rate with its binding limit and step rates, the refresh command under `deploy/release/` and the acceptance run's `rehearsal.json` |
+| Freeze | the commit to this repository, before the collection window opens, of the schedule, each route's configuration as published with its body hash, the recorded limits as that file carries them (a confidential limit without its value), the ceiling each host group runs at, each route's binding rate with its binding limit and step rates, the refresh command under `deploy/release/` and the acceptance run's `rehearsal.json` |
 | Operator | the person who runs a release; an operator's dated record is a decision written, with its date, into the route's configuration or its records |
 | G2 | the client-validity gate: the client machine was not the bottleneck |
 | Hosted-G6 | completion within the deadline over scheduled requests, against 0.99, reported only |
