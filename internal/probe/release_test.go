@@ -121,8 +121,15 @@ func noSpacing(t *testing.T) {
 
 func startShaped(t *testing.T, sh mock.Shape) string {
 	t.Helper()
+	return startShapedAfter(t, sh, 0)
+}
+
+// startShapedAfter is startShaped with the mock waiting ttftMs before its
+// first byte.
+func startShapedAfter(t *testing.T, sh mock.Shape, ttftMs float64) string {
+	t.Helper()
 	fixed := config.LatencyDist{Distribution: "fixed"}
-	s := mock.NewShaped(config.Mock{ListenAddr: "127.0.0.1:0", Seed: 1, TTFT: fixed, ITL: fixed}, sh)
+	s := mock.NewShaped(config.Mock{ListenAddr: "127.0.0.1:0", Seed: 1, TTFT: config.LatencyDist{Distribution: "fixed", FixedMs: ttftMs}, ITL: fixed}, sh)
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -383,10 +390,12 @@ func TestReleaseProbeOutputBound(t *testing.T) {
 
 // Each check request records when its connection was acquired and when
 // it was written, after dispatch and before the first response byte; a
-// request whose connection failed records neither.
+// request whose connection failed records neither. The mock waits 50 ms
+// before its first byte, since an instant local reply can arrive before the
+// writing goroutine takes the write time.
 func TestReleaseProbeWriteTimes(t *testing.T) {
 	noSpacing(t)
-	cfg := releaseConfig(t, "http://"+startShaped(t, mock.Shape{Answer: "Billed twice."})+"/v1/chat/completions")
+	cfg := releaseConfig(t, "http://"+startShapedAfter(t, mock.Shape{Answer: "Billed twice."}, 50)+"/v1/chat/completions")
 	rec := releaseProbe(t, ReleaseInput{Config: cfg, Texts: texts(0), ByteCap: byteCap})
 	for i, r := range rec.Requests {
 		if ex := r.Exchange; ex.ConnAcquiredNs <= 0 || ex.WroteRequestNs < ex.ConnAcquiredNs || ex.FirstByteNs < ex.WroteRequestNs {
